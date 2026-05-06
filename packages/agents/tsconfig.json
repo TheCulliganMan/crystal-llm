@@ -1,0 +1,38 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "outDir": "dist",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "paths": {
+      "@pokecrystal/agents": [
+        "packages/agents/src/index.ts"
+      ],
+      "@pokecrystal/agents/*": [
+        "packages/agents/src/*"
+      ],
+      "@pokecrystal/cli": [
+        "packages/cli/src/index.ts"
+      ],
+      "@pokecrystal/cli/*": [
+        "packages/cli/src/*"
+      ]
+    },
+    "types": [
+      "jest",
+      "node"
+    ]
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/**/* 2.ts",
+    "src/llm-client.ts",
+    "src/mcp-client.ts"
+  ]
+}

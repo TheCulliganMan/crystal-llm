@@ -1,0 +1,15 @@
+export declare const POKE_GLYPH = "#";
+export declare const POKEMON_WORD = "#MON";
+export declare const PKMN_GLYPH = "\uE100";
+export declare const PC_GLYPH = "\uE101";
+export declare const TM_GLYPH = "\uE102";
+export declare const TRAINER_GLYPH = "\uE103";
+export declare const ROCKET_GLYPH = "\uE104";
+export declare const PK_GLYPH = "\uE105";
+export declare const MN_GLYPH = "\uE106";
+export declare const DOT_GLYPH = "\uE107";
+export declare const PO_GLYPH = "\uE108";
+export declare const KE_GLYPH = "\uE109";
+export declare const LV_GLYPH = "\uE10A";
+export declare const ID_GLYPH = "\uE10B";
+export declare const SIX_DOTS_TEXT = "\u2026\u2026";

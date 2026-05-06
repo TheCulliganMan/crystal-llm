@@ -1,0 +1,1665 @@
+[
+  {
+    "species": "BULBASAUR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "IVYSAUR"
+      }
+    ]
+  },
+  {
+    "species": "IVYSAUR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 32,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "VENUSAUR"
+      }
+    ]
+  },
+  {
+    "species": "CHARMANDER",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "CHARMELEON"
+      }
+    ]
+  },
+  {
+    "species": "CHARMELEON",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 36,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "CHARIZARD"
+      }
+    ]
+  },
+  {
+    "species": "SQUIRTLE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "WARTORTLE"
+      }
+    ]
+  },
+  {
+    "species": "WARTORTLE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 36,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "BLASTOISE"
+      }
+    ]
+  },
+  {
+    "species": "CATERPIE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 7,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "METAPOD"
+      }
+    ]
+  },
+  {
+    "species": "METAPOD",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 10,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "BUTTERFREE"
+      }
+    ]
+  },
+  {
+    "species": "WEEDLE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 7,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "KAKUNA"
+      }
+    ]
+  },
+  {
+    "species": "KAKUNA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 10,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "BEEDRILL"
+      }
+    ]
+  },
+  {
+    "species": "PIDGEY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 18,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PIDGEOTTO"
+      }
+    ]
+  },
+  {
+    "species": "PIDGEOTTO",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 36,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PIDGEOT"
+      }
+    ]
+  },
+  {
+    "species": "RATTATA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "RATICATE"
+      }
+    ]
+  },
+  {
+    "species": "SPEAROW",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FEAROW"
+      }
+    ]
+  },
+  {
+    "species": "EKANS",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 22,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ARBOK"
+      }
+    ]
+  },
+  {
+    "species": "PIKACHU",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "THUNDERSTONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "RAICHU"
+      }
+    ]
+  },
+  {
+    "species": "SANDSHREW",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 22,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SANDSLASH"
+      }
+    ]
+  },
+  {
+    "species": "NIDORANF",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NIDORINA"
+      }
+    ]
+  },
+  {
+    "species": "NIDORINA",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "MOON_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NIDOQUEEN"
+      }
+    ]
+  },
+  {
+    "species": "NIDORANM",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NIDORINO"
+      }
+    ]
+  },
+  {
+    "species": "NIDORINO",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "MOON_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NIDOKING"
+      }
+    ]
+  },
+  {
+    "species": "CLEFAIRY",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "MOON_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "CLEFABLE"
+      }
+    ]
+  },
+  {
+    "species": "VULPIX",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "FIRE_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NINETALES"
+      }
+    ]
+  },
+  {
+    "species": "JIGGLYPUFF",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "MOON_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "WIGGLYTUFF"
+      }
+    ]
+  },
+  {
+    "species": "ZUBAT",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 22,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GOLBAT"
+      }
+    ]
+  },
+  {
+    "species": "GOLBAT",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "CROBAT"
+      }
+    ]
+  },
+  {
+    "species": "ODDISH",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 21,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GLOOM"
+      }
+    ]
+  },
+  {
+    "species": "GLOOM",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "LEAF_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "VILEPLUME"
+      },
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "SUN_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "BELLOSSOM"
+      }
+    ]
+  },
+  {
+    "species": "PARAS",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 24,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PARASECT"
+      }
+    ]
+  },
+  {
+    "species": "VENONAT",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 31,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "VENOMOTH"
+      }
+    ]
+  },
+  {
+    "species": "DIGLETT",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 26,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DUGTRIO"
+      }
+    ]
+  },
+  {
+    "species": "MEOWTH",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 28,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PERSIAN"
+      }
+    ]
+  },
+  {
+    "species": "PSYDUCK",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 33,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GOLDUCK"
+      }
+    ]
+  },
+  {
+    "species": "MANKEY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 28,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PRIMEAPE"
+      }
+    ]
+  },
+  {
+    "species": "GROWLITHE",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "FIRE_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ARCANINE"
+      }
+    ]
+  },
+  {
+    "species": "POLIWAG",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "POLIWHIRL"
+      }
+    ]
+  },
+  {
+    "species": "POLIWHIRL",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "WATER_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "POLIWRATH"
+      },
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "KINGS_ROCK",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "POLITOED"
+      }
+    ]
+  },
+  {
+    "species": "ABRA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "KADABRA"
+      }
+    ]
+  },
+  {
+    "species": "KADABRA",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "-1",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ALAKAZAM"
+      }
+    ]
+  },
+  {
+    "species": "MACHOP",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 28,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MACHOKE"
+      }
+    ]
+  },
+  {
+    "species": "MACHOKE",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "-1",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MACHAMP"
+      }
+    ]
+  },
+  {
+    "species": "BELLSPROUT",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 21,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "WEEPINBELL"
+      }
+    ]
+  },
+  {
+    "species": "WEEPINBELL",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "LEAF_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "VICTREEBEL"
+      }
+    ]
+  },
+  {
+    "species": "TENTACOOL",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "TENTACRUEL"
+      }
+    ]
+  },
+  {
+    "species": "GEODUDE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GRAVELER"
+      }
+    ]
+  },
+  {
+    "species": "GRAVELER",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "-1",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GOLEM"
+      }
+    ]
+  },
+  {
+    "species": "PONYTA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 40,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "RAPIDASH"
+      }
+    ]
+  },
+  {
+    "species": "SLOWPOKE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 37,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SLOWBRO"
+      },
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "KINGS_ROCK",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SLOWKING"
+      }
+    ]
+  },
+  {
+    "species": "MAGNEMITE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MAGNETON"
+      }
+    ]
+  },
+  {
+    "species": "DODUO",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 31,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DODRIO"
+      }
+    ]
+  },
+  {
+    "species": "SEEL",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 34,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DEWGONG"
+      }
+    ]
+  },
+  {
+    "species": "GRIMER",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 38,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MUK"
+      }
+    ]
+  },
+  {
+    "species": "SHELLDER",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "WATER_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "CLOYSTER"
+      }
+    ]
+  },
+  {
+    "species": "GASTLY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "HAUNTER"
+      }
+    ]
+  },
+  {
+    "species": "HAUNTER",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "-1",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GENGAR"
+      }
+    ]
+  },
+  {
+    "species": "ONIX",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "METAL_COAT",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "STEELIX"
+      }
+    ]
+  },
+  {
+    "species": "DROWZEE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 26,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "HYPNO"
+      }
+    ]
+  },
+  {
+    "species": "KRABBY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 28,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "KINGLER"
+      }
+    ]
+  },
+  {
+    "species": "VOLTORB",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ELECTRODE"
+      }
+    ]
+  },
+  {
+    "species": "EXEGGCUTE",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "LEAF_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "EXEGGUTOR"
+      }
+    ]
+  },
+  {
+    "species": "CUBONE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 28,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MAROWAK"
+      }
+    ]
+  },
+  {
+    "species": "KOFFING",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 35,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "WEEZING"
+      }
+    ]
+  },
+  {
+    "species": "RHYHORN",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 42,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "RHYDON"
+      }
+    ]
+  },
+  {
+    "species": "CHANSEY",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "BLISSEY"
+      }
+    ]
+  },
+  {
+    "species": "HORSEA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 32,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SEADRA"
+      }
+    ]
+  },
+  {
+    "species": "SEADRA",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "DRAGON_SCALE",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "KINGDRA"
+      }
+    ]
+  },
+  {
+    "species": "GOLDEEN",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 33,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SEAKING"
+      }
+    ]
+  },
+  {
+    "species": "STARYU",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "WATER_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "STARMIE"
+      }
+    ]
+  },
+  {
+    "species": "SCYTHER",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "METAL_COAT",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SCIZOR"
+      }
+    ]
+  },
+  {
+    "species": "MAGIKARP",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GYARADOS"
+      }
+    ]
+  },
+  {
+    "species": "EEVEE",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "THUNDERSTONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "JOLTEON"
+      },
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "WATER_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "VAPOREON"
+      },
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "FIRE_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FLAREON"
+      },
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_MORNDAY",
+        "stat_ratio": null,
+        "species": "ESPEON"
+      },
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_NITE",
+        "stat_ratio": null,
+        "species": "UMBREON"
+      }
+    ]
+  },
+  {
+    "species": "PORYGON",
+    "evolutions": [
+      {
+        "method": "TRADE",
+        "level": null,
+        "item": null,
+        "held_item": "UP_GRADE",
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PORYGON2"
+      }
+    ]
+  },
+  {
+    "species": "OMANYTE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 40,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "OMASTAR"
+      }
+    ]
+  },
+  {
+    "species": "KABUTO",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 40,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "KABUTOPS"
+      }
+    ]
+  },
+  {
+    "species": "DRATINI",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DRAGONAIR"
+      }
+    ]
+  },
+  {
+    "species": "DRAGONAIR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 55,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DRAGONITE"
+      }
+    ]
+  },
+  {
+    "species": "CHIKORITA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 16,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "BAYLEEF"
+      }
+    ]
+  },
+  {
+    "species": "BAYLEEF",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 32,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MEGANIUM"
+      }
+    ]
+  },
+  {
+    "species": "CYNDAQUIL",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 14,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "QUILAVA"
+      }
+    ]
+  },
+  {
+    "species": "QUILAVA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 36,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "TYPHLOSION"
+      }
+    ]
+  },
+  {
+    "species": "TOTODILE",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 18,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "CROCONAW"
+      }
+    ]
+  },
+  {
+    "species": "CROCONAW",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FERALIGATR"
+      }
+    ]
+  },
+  {
+    "species": "SENTRET",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 15,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FURRET"
+      }
+    ]
+  },
+  {
+    "species": "HOOTHOOT",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "NOCTOWL"
+      }
+    ]
+  },
+  {
+    "species": "LEDYBA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 18,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "LEDIAN"
+      }
+    ]
+  },
+  {
+    "species": "SPINARAK",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 22,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ARIADOS"
+      }
+    ]
+  },
+  {
+    "species": "CHINCHOU",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 27,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "LANTURN"
+      }
+    ]
+  },
+  {
+    "species": "PICHU",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "PIKACHU"
+      }
+    ]
+  },
+  {
+    "species": "CLEFFA",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "CLEFAIRY"
+      }
+    ]
+  },
+  {
+    "species": "IGGLYBUFF",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "JIGGLYPUFF"
+      }
+    ]
+  },
+  {
+    "species": "TOGEPI",
+    "evolutions": [
+      {
+        "method": "HAPPINESS",
+        "level": null,
+        "item": null,
+        "held_item": null,
+        "happiness": "TR_ANYTIME",
+        "stat_ratio": null,
+        "species": "TOGETIC"
+      }
+    ]
+  },
+  {
+    "species": "NATU",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "XATU"
+      }
+    ]
+  },
+  {
+    "species": "MAREEP",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 15,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FLAAFFY"
+      }
+    ]
+  },
+  {
+    "species": "FLAAFFY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "AMPHAROS"
+      }
+    ]
+  },
+  {
+    "species": "MARILL",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 18,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "AZUMARILL"
+      }
+    ]
+  },
+  {
+    "species": "HOPPIP",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 18,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SKIPLOOM"
+      }
+    ]
+  },
+  {
+    "species": "SKIPLOOM",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 27,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "JUMPLUFF"
+      }
+    ]
+  },
+  {
+    "species": "SUNKERN",
+    "evolutions": [
+      {
+        "method": "ITEM",
+        "level": null,
+        "item": "SUN_STONE",
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "SUNFLORA"
+      }
+    ]
+  },
+  {
+    "species": "WOOPER",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "QUAGSIRE"
+      }
+    ]
+  },
+  {
+    "species": "PINECO",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 31,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "FORRETRESS"
+      }
+    ]
+  },
+  {
+    "species": "SNUBBULL",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 23,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "GRANBULL"
+      }
+    ]
+  },
+  {
+    "species": "TEDDIURSA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "URSARING"
+      }
+    ]
+  },
+  {
+    "species": "SLUGMA",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 38,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MAGCARGO"
+      }
+    ]
+  },
+  {
+    "species": "SWINUB",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 33,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PILOSWINE"
+      }
+    ]
+  },
+  {
+    "species": "REMORAID",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "OCTILLERY"
+      }
+    ]
+  },
+  {
+    "species": "HOUNDOUR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 24,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "HOUNDOOM"
+      }
+    ]
+  },
+  {
+    "species": "PHANPY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 25,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "DONPHAN"
+      }
+    ]
+  },
+  {
+    "species": "TYROGUE",
+    "evolutions": [
+      {
+        "method": "STAT",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": "ATK_LT_DEF",
+        "species": "HITMONCHAN"
+      },
+      {
+        "method": "STAT",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": "ATK_GT_DEF",
+        "species": "HITMONLEE"
+      },
+      {
+        "method": "STAT",
+        "level": 20,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": "ATK_EQ_DEF",
+        "species": "HITMONTOP"
+      }
+    ]
+  },
+  {
+    "species": "SMOOCHUM",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "JYNX"
+      }
+    ]
+  },
+  {
+    "species": "ELEKID",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "ELECTABUZZ"
+      }
+    ]
+  },
+  {
+    "species": "MAGBY",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "MAGMAR"
+      }
+    ]
+  },
+  {
+    "species": "LARVITAR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 30,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "PUPITAR"
+      }
+    ]
+  },
+  {
+    "species": "PUPITAR",
+    "evolutions": [
+      {
+        "method": "LEVEL",
+        "level": 55,
+        "item": null,
+        "held_item": null,
+        "happiness": null,
+        "stat_ratio": null,
+        "species": "TYRANITAR"
+      }
+    ]
+  }
+]

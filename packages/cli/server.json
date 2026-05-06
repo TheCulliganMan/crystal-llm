@@ -1,0 +1,18 @@
+{
+  "name": "pokecrystal-cli",
+  "description": "Stdio MCP proxy and text UI for PokeCrystal's text interface.",
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@pokecrystal/cli",
+      "transport": {
+        "type": "stdio",
+        "command": "pokecrystal-cli",
+        "args": [
+          "mcp"
+        ]
+      }
+    }
+  ]
+}

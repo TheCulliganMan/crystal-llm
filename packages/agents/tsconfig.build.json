@@ -1,0 +1,36 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "baseUrl": "../..",
+    "paths": {
+      "@pokecrystal/cli": [
+        "packages/cli/dist/index.d.ts"
+      ],
+      "@pokecrystal/cli/*": [
+        "packages/cli/dist/*"
+      ],
+      "@pokecrystal/agents": [
+        "packages/agents/src/index.ts"
+      ],
+      "@pokecrystal/agents/*": [
+        "packages/agents/src/*"
+      ]
+    },
+    "rootDir": "src",
+    "sourceMap": false,
+    "declaration": true,
+    "incremental": false
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/**/*.test.ts",
+    "src/**/* 2.ts",
+    "src/llm-client.ts",
+    "src/mcp-client.ts"
+  ]
+}

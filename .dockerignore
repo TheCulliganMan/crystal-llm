@@ -1,0 +1,8 @@
+**/node_modules
+**/.next
+**/.git
+**/.DS_Store
+save_data
+memory_db
+*.log
+mgba

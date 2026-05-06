@@ -1,0 +1,195 @@
+# compiled objects
+*.o
+
+# local-only pret disassembly checkout and generated public mirror
+vendor/pokecrystal/
+pokecrystal_disassembly/
+apps/web/public/disassembly/*
+!apps/web/public/disassembly/README.md
+
+# compiled graphics
+vendor/pokecrystal/**/*.1bpp
+vendor/pokecrystal/**/**.2bpp
+vendor/pokecrystal/**/**.lz
+vendor/pokecrystal/**/**.gbcpal
+vendor/pokecrystal/**/**.dimensions
+vendor/pokecrystal/**/**.animated.tilemap
+vendor/pokecrystal/**/*.sgb.tilemap
+pokecrystal_disassembly/**/*.1bpp
+pokecrystal_disassembly/**/**.2bpp
+pokecrystal_disassembly/**/**.lz
+pokecrystal_disassembly/**/**.gbcpal
+pokecrystal_disassembly/**/**.dimensions
+pokecrystal_disassembly/**/**.animated.tilemap
+pokecrystal_disassembly/**/*.sgb.tilemap
+gfx/pokemon/*/bitmask.asm
+gfx/pokemon/*/frames.asm
+!gfx/pokemon/unown/bitmask.asm
+!gfx/pokemon/unown/frames.asm
+
+# compiled roms
+*.gbc
+*.gb
+*.patch
+
+# rgbds extras
+*.map
+*.sym
+
+# tool binaries
+*.exe
+
+# native extensions
+*.so
+*.dylib
+*.pyd
+
+# precompiled python
+*.pyc
+*$py.class
+
+# save game files
+*.sgm
+*.sav
+*.rtc
+*.sn*
+*.sa*
+*.sg1
+
+# Python build artifacts
+*.egg-info
+# Generated web runtime assets. Recreate with `npm run export:core`
+# and `npm run audio:bundle --workspace @pokecrystal/web`.
+apps/web/assets/
+apps/web/assets.manifest.json
+packages/core/assets.manifest.json
+packages/assets/dist/
+
+# Generated audio bundle
+apps/web/assets/audio/**/*.mp3
+apps/web/assets/audio/manifests/**/*.json
+.asm_to_wav_manifest.json
+.DS_Store
+pokecrystal_disassembly/gfx/*
+.coverage
+coverage/
+logs/models/pokecrystal_selfplay.zip
+logs/tensorboard/*
+logs/*
+training_configs.log
+save_data/
+logs/*
+
+# Model checkpoints and training logs
+artifacts/
+datasets/
+logs/
+logs/models/
+logs/tensorboard/
+training_data/
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# VS Code settings
+.vscode/*
+
+# TensorBoard event files
+**/tensorboard/*
+**/events.out.tfevents.*
+
+# Python environment
+.venv/
+.hf_cache/*
+repomix-output.xml
+*.nbc
+*.nbi
+savegame_autosave_script_**.json
+.langgraph_api/*
+.env
+.env.local
+.vercel/
+
+# Local MCP identity token (do not commit)
+.mcp_identity_token
+packages/cli/.tmp-first-gym-training/
+packages/cli/.tmp-first-gym-training/*
+packages/cli/.tmp-human-play/
+packages/cli/.tmp-human-play/*
+packages/cli/packages/cli/.tmp-play-training*/
+packages/cli/packages/cli/.tmp-play-training*/*
+
+# Node environment
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+yarn.lock
+.nodejs/
+*.tsbuildinfo
+**/dist/
+packages/agents/dist/
+packages/core/dist/
+packages/exporters/dist/
+packages/cli/dist/
+packages/cli/dist/* 2.js
+packages/cli/dist/* 2.ts
+
+# Rust build artifacts
+target/
+Cargo.lock
+**/*.rs.bk
+render_tests/credits_frames/*
+.node/
+supabase/.temp/
+.playwright-cli/*
+output/*
+og-audio/*
+apps/web/.playwright-cli/*
+**/.next/
+.playwright/cli.config.json
+apps/web/output/web-game/*
+apps/electron/dist/
+apps/electron/release/
+apps/electron/.webpack/
+apps/web/public/ffmpeg/ffmpeg-core.wasm
+apps/web/.next_stale*
+apps/web/output/*
+mcp-*
+apps/web/mcp-*
+.pokecrystal-agents/runs/*
+.pokecrystal-cli/runs/
+.pokecrystal-cli/runs/*
+.tmp-agent-memory/
+.tmp-agents-runner/
+.tmp-agents-runner-stuck/
+packages/agents/.tmp-*/
+packages/agents/.tmp-*/*
+packages/agents/.session-auth/
+packages/agents/.session-auth/*
+packages/agents/packages/agents/.tmp-*/
+packages/agents/packages/agents/.tmp-*/*
+.pokecrystal-agents/*
+pokecrystal-training-run/*
+.tmp-debug-runner/*
+bin/poke-code
+bin/pokecrystal-agents
+apps/batch*
+apps/web/.pokecrystal-agents/runs/*
+packages/core/output/
+tmp/
+packages/agents/.mastra/*
+apps/web/.next-electron/*
+apps/web/.next-dev-codex/*
+apps/web/.next-nodisasm/*
+apps/web/public/disassembly*
+packages/cli/.pokecrystal-cli/runs/*
+packages/cli/.tmp-play-training-*/
+packages/cli/.tmp-play-training-*/*
+apps/ELMS_LAB_RENDER_PROOF.txt
+docs/
+patch_test.sh
+pokecrystal-python.code-workspace
+packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db
+packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-shm
+packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-wal

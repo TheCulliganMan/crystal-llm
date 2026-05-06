@@ -1,0 +1,13 @@
+export const Z_INDEX_DEFAULT = 0;
+export const Z_INDEX_MART_WINDOW = 10;
+export const Z_INDEX_PC_WINDOW = 10;
+export const Z_INDEX_PC_BOX_WINDOW = 15;
+export const Z_INDEX_MENU = 10;
+export const Z_INDEX_MAP_SIGN = 50;
+export const Z_INDEX_POKEPIC = 50;
+export const Z_INDEX_DIALOGUE = 100;
+export const Z_INDEX_PROMPT = 110;
+export const Z_INDEX_TOWN_MAP = 150;
+export const Z_INDEX_FADE = 160;
+export const Z_INDEX_EGG_HATCH = 160;
+export const Z_INDEX_DEBUG = 200;

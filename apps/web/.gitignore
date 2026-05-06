@@ -1,0 +1,19 @@
+node_modules
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.next/
+.next-dev/
+.next-build/
+dist/
+.tsbuildinfo
+.generated/
+build.log
+test_output.log
+
+# Local design/brainstorm notes (not source-of-truth docs)
+notes/
+.vercel
+.env*.local

@@ -1,0 +1,57 @@
+services:
+  # Dev-only: Next dev (HMR). This repo does not use a production compose target.
+  pokecrystal-ts:
+    build:
+      context: .
+      dockerfile: Dockerfile.pokecrystal-ts.dev
+    ports:
+      - "3003:3000"
+    environment:
+      POKECRYSTAL_MCP_TRANSPORT: http
+      POKECRYSTAL_MCP_HOST: 0.0.0.0
+      POKECRYSTAL_MCP_PORT: 3000
+      POKECRYSTAL_MCP_PATH: /api/mcp
+      POKECRYSTAL_MCP_PLAYER_NAME: ${POKECRYSTAL_MCP_PLAYER_NAME:-AI}
+      POKECRYSTAL_SAVE_ROOT: /data
+    volumes:
+      - pokecrystal_saves:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    develop:
+      watch:
+        - action: sync
+          path: ./apps/web
+          target: /app/apps/web
+          ignore:
+            - node_modules/
+            - .next/
+            - output/
+        - action: sync
+          path: ./packages
+          target: /app/packages
+          ignore:
+            - node_modules/
+            - dist/
+        - action: rebuild
+          path: ./apps/web/package.json
+        - action: rebuild
+          path: ./packages/core/package.json
+        - action: rebuild
+          path: ./packages/assets/package.json
+        - action: rebuild
+          path: ./packages/exporters/package.json
+        - action: rebuild
+          path: ./package.json
+        - action: rebuild
+          path: ./Dockerfile.pokecrystal-ts.dev
+
+volumes:
+  pokecrystal_saves:

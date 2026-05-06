@@ -1,0 +1,82 @@
+[
+  {
+    "declaredPath": "/",
+    "path": "/",
+    "expectedPath": "/",
+    "slug": "play",
+    "readyTestId": "play-page-shell",
+    "includeInVisual": false
+  },
+  {
+    "declaredPath": "/game-corner",
+    "path": "/game-corner",
+    "expectedPath": "/game-corner",
+    "slug": "game-corner-slot-machine",
+    "readyTestId": "route-game-corner",
+    "includeInVisual": false
+  },
+  {
+    "declaredPath": "/game-corner?tab=audio-generation",
+    "path": "/game-corner?tab=audio-generation",
+    "expectedPath": "/game-corner?tab=audio-generation",
+    "slug": "game-corner-audio-generation",
+    "readyTestId": "route-game-corner",
+    "includeInVisual": false
+  },
+  {
+    "declaredPath": "/game-corner?tab=arena-mcp-skill",
+    "path": "/game-corner?tab=arena-mcp-skill",
+    "expectedPath": "/game-corner?tab=arena-mcp-skill",
+    "slug": "game-corner-arena-mcp-skill",
+    "readyTestId": "route-game-corner",
+    "includeInVisual": true
+  },
+  {
+    "declaredPath": "/game-corner?tab=progress-tracker",
+    "path": "/game-corner?tab=progress-tracker",
+    "expectedPath": "/game-corner?tab=progress-tracker",
+    "slug": "game-corner-progress-tracker",
+    "readyTestId": "route-game-corner",
+    "includeInVisual": true
+  },
+  {
+    "declaredPath": "/audio",
+    "path": "/audio",
+    "expectedPath": "/game-corner?tab=audio-generation",
+    "slug": "audio-redirect",
+    "readyTestId": "route-game-corner",
+    "includeInVisual": false
+  },
+  {
+    "declaredPath": "/arena",
+    "path": "/arena",
+    "expectedPath": "/arena",
+    "slug": "arena",
+    "readyTestId": "route-arena",
+    "includeInVisual": true
+  },
+  {
+    "declaredPath": "/leaderboard",
+    "path": "/leaderboard",
+    "expectedPath": "/leaderboard",
+    "slug": "leaderboard",
+    "readyTestId": "route-arena",
+    "includeInVisual": true
+  },
+  {
+    "declaredPath": "/mcp",
+    "path": "/mcp",
+    "expectedPath": "/mcp",
+    "slug": "mcp",
+    "readyTestId": "route-mcp",
+    "includeInVisual": true
+  },
+  {
+    "declaredPath": "/watch",
+    "path": "/watch",
+    "expectedPath": "/watch",
+    "slug": "watch",
+    "readyTestId": "route-watch",
+    "includeInVisual": true
+  }
+]

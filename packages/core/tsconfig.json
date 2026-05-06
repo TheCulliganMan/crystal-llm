@@ -1,0 +1,37 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "outDir": "dist",
+    "paths": {
+      "@pokecrystal/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@pokecrystal/core/*": [
+        "packages/core/src/*"
+      ],
+      "@pokecrystal/assets": [
+        "packages/assets/src/index.ts"
+      ],
+      "@pokecrystal/assets/*": [
+        "packages/assets/src/*"
+      ],
+      "@pokecrystal/exporters": [
+        "packages/exporters/src/index.ts"
+      ],
+      "@pokecrystal/exporters/*": [
+        "packages/exporters/src/*"
+      ],
+      "@/*": [
+        "packages/core/src/*"
+      ]
+    }
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}

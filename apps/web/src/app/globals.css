@@ -1,0 +1,908 @@
+@import "tailwindcss";
+@plugin "daisyui";
+/* DaisyUI 5 + Tailwind CSS v4 bootstrap entrypoint (plugin is configured here, not in tailwind.config*). */
+
+@layer base {
+  :root {
+    --color-surface: #0b1020;
+    --color-surface-alt: #101a2e;
+    --color-panel: #111a2f;
+    --color-panel-strong: #16233e;
+    --color-ink: #e7eef9;
+    --color-muted: #97a9c4;
+    --color-line: rgba(148, 163, 184, 0.22);
+    --color-accent: #36f0f6;
+    --color-accent-soft: rgba(54, 240, 246, 0.14);
+    --color-ember: #fbbf24;
+    --color-ember-soft: rgba(251, 191, 36, 0.15);
+    --color-danger: #ef4444;
+    --color-danger-soft: rgba(239, 68, 68, 0.16);
+    --color-bg-glow-1: rgba(54, 240, 246, 0.2);
+    --color-bg-glow-2: rgba(94, 234, 212, 0.18);
+    --color-bg-glow-3: rgba(251, 191, 36, 0.16);
+    --color-bg-grid: rgba(255, 255, 255, 0.04);
+    --color-panel-soft: rgba(17, 26, 47, 0.7);
+    --color-panel-ghost: rgba(17, 26, 47, 0.45);
+    --color-panel-border: rgba(148, 163, 184, 0.28);
+    --color-focus: rgba(54, 240, 246, 0.75);
+    --color-canvas-bg: #0b0f1a;
+    --theme-color-surface: var(--color-surface);
+    --theme-color-surface-alt: var(--color-surface-alt);
+    --theme-color-panel: var(--color-panel);
+    --theme-color-panel-strong: var(--color-panel-strong);
+    --theme-color-ink: var(--color-ink);
+    --theme-color-muted: var(--color-muted);
+    --theme-color-line: var(--color-line);
+    --theme-color-panel-soft: var(--color-panel-soft);
+    --theme-color-panel-ghost: var(--color-panel-ghost);
+    --theme-color-panel-border: var(--color-panel-border);
+    --theme-color-focus: var(--color-focus);
+    --theme-color-canvas-bg: var(--color-canvas-bg);
+    --theme-color-bg-glow-1: var(--color-bg-glow-1);
+    --theme-color-bg-glow-2: var(--color-bg-glow-2);
+    --theme-color-bg-glow-3: var(--color-bg-glow-3);
+    --theme-color-bg-grid: var(--color-bg-grid);
+    --brand-color-accent: #dd6b20;
+    --brand-color-accent-soft: rgba(221, 107, 32, 0.2);
+    --brand-color-ember: #ea580c;
+    --brand-color-ember-soft: rgba(234, 88, 12, 0.2);
+    --brand-color-focus: rgba(221, 107, 32, 0.55);
+    --brand-color-bg-glow-1: rgba(221, 107, 32, 0.2);
+    --brand-color-bg-glow-2: rgba(249, 115, 22, 0.18);
+    --brand-sprite-hover-filter: saturate(1.15) brightness(1.08);
+    --brand-sprite-speed: 1100ms;
+    --brand-sprite-sheet-height: 800%;
+    --brand-sprite-active-animation: brand-sprite-frames-8 var(--brand-sprite-speed) infinite;
+    --brand-sprite-url: url("/assets/gfx/pokemon/krabby/front.png");
+    --content-max-width: 94rem;
+    --nav-rail-width: 4.8rem;
+    --nav-top-height: 3.2rem;
+    --nav-mobile-height: 3.45rem;
+    --radius-xs: 6px;
+    --radius-sm: 8px;
+    --radius-md: 10px;
+    --radius-lg: 12px;
+    --radius-xl: 14px;
+    --radius-panel: var(--radius-lg);
+    --radius-pill: 999px;
+    --shadow-soft: 0 6px 14px rgba(3, 8, 24, 0.12);
+    --shadow-strong: 0 12px 24px rgba(3, 8, 24, 0.2);
+    --color-scheme: dark;
+
+    /* DaisyUI v5 token mapping */
+    --color-base-100: var(--color-surface);
+    --color-base-200: var(--color-surface-alt);
+    --color-base-300: var(--color-panel);
+    --color-base-content: var(--color-ink);
+    --color-primary: var(--color-accent);
+    --color-primary-content: var(--color-ink);
+    --color-secondary: var(--color-ember);
+    --color-secondary-content: var(--color-ink);
+    --color-accent-content: var(--color-ink);
+    --color-neutral: var(--color-panel-strong);
+    --color-neutral-content: var(--color-ink);
+    --color-info: var(--color-accent);
+    --color-info-content: var(--color-ink);
+    --color-success: var(--color-accent);
+    --color-success-content: var(--color-ink);
+    --color-warning: var(--color-ember);
+    --color-warning-content: var(--color-ink);
+    --color-error: var(--color-danger);
+    --color-error-content: var(--color-ink);
+
+    /* DaisyUI semantic token bridge (core primitives map to custom palette). */
+    --p: var(--color-primary);
+    --pc: var(--color-primary-content);
+    --s: var(--color-secondary);
+    --sc: var(--color-secondary-content);
+    --a: var(--color-accent);
+    --ac: var(--color-accent-content);
+    --n: var(--color-neutral);
+    --nc: var(--color-neutral-content);
+    --b1: var(--color-base-100);
+    --b2: var(--color-base-200);
+    --b3: var(--color-base-300);
+    --b4: var(--color-panel-strong);
+    --bc: var(--color-base-content);
+    --in: var(--color-info);
+    --su: var(--color-success);
+    --wa: var(--color-warning);
+    --er: var(--color-error);
+    --rounded-box: var(--radius-lg);
+    --rounded-btn: var(--radius-pill);
+    --rounded-badge: var(--radius-pill);
+    --btn-text-case: none;
+    --btn-focus-scale: 1;
+    --animation-btn: 0;
+    --animation-input: 0;
+    --tab-border: 1px;
+    --tab-border-color: var(--color-line);
+    --tab-bg: var(--color-panel-soft);
+    --tab-bg-hover: var(--color-surface);
+    --tab-bg-active: var(--color-panel);
+    --btn-bg: var(--color-primary);
+    --btn-fg: var(--color-base-content);
+    --btn-border: var(--color-primary);
+  }
+
+  :root[data-brand-theme="heracross"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/heracross/front.png");
+    --brand-sprite-sheet-height: 400%;
+    --brand-sprite-active-animation: brand-sprite-frames-4 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #2563eb;
+    --brand-color-accent-soft: rgba(37, 99, 235, 0.2);
+    --brand-color-ember: #0891b2;
+    --brand-color-ember-soft: rgba(8, 145, 178, 0.22);
+    --brand-color-focus: rgba(37, 99, 235, 0.52);
+    --brand-color-bg-glow-1: rgba(37, 99, 235, 0.2);
+    --brand-color-bg-glow-2: rgba(8, 145, 178, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(18deg) saturate(1.2) brightness(1.06);
+  }
+
+  :root[data-brand-theme="gligar"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/gligar/front.png");
+    --brand-sprite-sheet-height: 200%;
+    --brand-sprite-active-animation: brand-sprite-frames-2 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #7c3aed;
+    --brand-color-accent-soft: rgba(124, 58, 237, 0.22);
+    --brand-color-ember: #a855f7;
+    --brand-color-ember-soft: rgba(168, 85, 247, 0.2);
+    --brand-color-focus: rgba(124, 58, 237, 0.52);
+    --brand-color-bg-glow-1: rgba(124, 58, 237, 0.22);
+    --brand-color-bg-glow-2: rgba(168, 85, 247, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(10deg) saturate(1.2) brightness(1.05);
+  }
+
+  :root[data-brand-theme="scizor"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/scizor/front.png");
+    --brand-sprite-sheet-height: 700%;
+    --brand-sprite-active-animation: brand-sprite-frames-7 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #dc2626;
+    --brand-color-accent-soft: rgba(220, 38, 38, 0.22);
+    --brand-color-ember: #ea580c;
+    --brand-color-ember-soft: rgba(234, 88, 12, 0.2);
+    --brand-color-focus: rgba(220, 38, 38, 0.52);
+    --brand-color-bg-glow-1: rgba(220, 38, 38, 0.22);
+    --brand-color-bg-glow-2: rgba(234, 88, 12, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(-6deg) saturate(1.2) brightness(1.06);
+  }
+
+  :root[data-brand-theme="sneasel"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/sneasel/front.png");
+    --brand-sprite-sheet-height: 500%;
+    --brand-sprite-active-animation: brand-sprite-frames-5 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #0ea5a8;
+    --brand-color-accent-soft: rgba(14, 165, 168, 0.22);
+    --brand-color-ember: #0891b2;
+    --brand-color-ember-soft: rgba(8, 145, 178, 0.2);
+    --brand-color-focus: rgba(14, 165, 168, 0.52);
+    --brand-color-bg-glow-1: rgba(14, 165, 168, 0.22);
+    --brand-color-bg-glow-2: rgba(8, 145, 178, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(-14deg) saturate(1.22) brightness(1.06);
+  }
+
+  :root[data-brand-theme="teddiursa"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/teddiursa/front.png");
+    --brand-sprite-sheet-height: 500%;
+    --brand-sprite-active-animation: brand-sprite-frames-5 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #a16207;
+    --brand-color-accent-soft: rgba(161, 98, 7, 0.22);
+    --brand-color-ember: #b45309;
+    --brand-color-ember-soft: rgba(180, 83, 9, 0.2);
+    --brand-color-focus: rgba(161, 98, 7, 0.52);
+    --brand-color-bg-glow-1: rgba(161, 98, 7, 0.22);
+    --brand-color-bg-glow-2: rgba(180, 83, 9, 0.18);
+    --brand-sprite-hover-filter: saturate(1.16) brightness(1.07);
+  }
+
+  :root[data-brand-theme="ursaring"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/ursaring/front.png");
+    --brand-sprite-sheet-height: 600%;
+    --brand-sprite-active-animation: brand-sprite-frames-6 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #92400e;
+    --brand-color-accent-soft: rgba(146, 64, 14, 0.22);
+    --brand-color-ember: #a16207;
+    --brand-color-ember-soft: rgba(161, 98, 7, 0.2);
+    --brand-color-focus: rgba(146, 64, 14, 0.52);
+    --brand-color-bg-glow-1: rgba(146, 64, 14, 0.22);
+    --brand-color-bg-glow-2: rgba(161, 98, 7, 0.18);
+    --brand-sprite-hover-filter: saturate(1.12) brightness(1.07);
+  }
+
+  :root[data-brand-theme="totodile"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/totodile/front.png");
+    --brand-sprite-sheet-height: 400%;
+    --brand-sprite-active-animation: brand-sprite-frames-4 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #0284c7;
+    --brand-color-accent-soft: rgba(2, 132, 199, 0.22);
+    --brand-color-ember: #0ea5e9;
+    --brand-color-ember-soft: rgba(14, 165, 233, 0.2);
+    --brand-color-focus: rgba(2, 132, 199, 0.52);
+    --brand-color-bg-glow-1: rgba(2, 132, 199, 0.22);
+    --brand-color-bg-glow-2: rgba(14, 165, 233, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(8deg) saturate(1.18) brightness(1.06);
+  }
+
+  :root[data-brand-theme="croconaw"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/croconaw/front.png");
+    --brand-sprite-sheet-height: 500%;
+    --brand-sprite-active-animation: brand-sprite-frames-5 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #2563eb;
+    --brand-color-accent-soft: rgba(37, 99, 235, 0.22);
+    --brand-color-ember: #1d4ed8;
+    --brand-color-ember-soft: rgba(29, 78, 216, 0.2);
+    --brand-color-focus: rgba(37, 99, 235, 0.52);
+    --brand-color-bg-glow-1: rgba(37, 99, 235, 0.22);
+    --brand-color-bg-glow-2: rgba(29, 78, 216, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(12deg) saturate(1.16) brightness(1.06);
+  }
+
+  :root[data-brand-theme="feraligatr"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/feraligatr/front.png");
+    --brand-sprite-sheet-height: 500%;
+    --brand-sprite-active-animation: brand-sprite-frames-5 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #1d4ed8;
+    --brand-color-accent-soft: rgba(29, 78, 216, 0.22);
+    --brand-color-ember: #0f766e;
+    --brand-color-ember-soft: rgba(15, 118, 110, 0.2);
+    --brand-color-focus: rgba(29, 78, 216, 0.52);
+    --brand-color-bg-glow-1: rgba(29, 78, 216, 0.22);
+    --brand-color-bg-glow-2: rgba(15, 118, 110, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(15deg) saturate(1.15) brightness(1.05);
+  }
+
+  :root[data-brand-theme="pinsir"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/pinsir/front.png");
+    --brand-sprite-sheet-height: 500%;
+    --brand-sprite-active-animation: brand-sprite-frames-5 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #65a30d;
+    --brand-color-accent-soft: rgba(101, 163, 13, 0.22);
+    --brand-color-ember: #84cc16;
+    --brand-color-ember-soft: rgba(132, 204, 22, 0.2);
+    --brand-color-focus: rgba(101, 163, 13, 0.52);
+    --brand-color-bg-glow-1: rgba(101, 163, 13, 0.22);
+    --brand-color-bg-glow-2: rgba(132, 204, 22, 0.18);
+    --brand-sprite-hover-filter: hue-rotate(8deg) saturate(1.18) brightness(1.06);
+  }
+
+  :root[data-brand-theme="krabby"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/krabby/front.png");
+    --brand-sprite-sheet-height: 800%;
+    --brand-sprite-active-animation: brand-sprite-frames-8 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #dd6b20;
+    --brand-color-accent-soft: rgba(221, 107, 32, 0.2);
+    --brand-color-ember: #ea580c;
+    --brand-color-ember-soft: rgba(234, 88, 12, 0.2);
+    --brand-color-focus: rgba(221, 107, 32, 0.55);
+    --brand-color-bg-glow-1: rgba(221, 107, 32, 0.2);
+    --brand-color-bg-glow-2: rgba(249, 115, 22, 0.18);
+    --brand-sprite-hover-filter: saturate(1.15) brightness(1.08);
+  }
+
+  :root[data-brand-theme="kingler"] {
+    --brand-sprite-url: url("/assets/gfx/pokemon/kingler/front.png");
+    --brand-sprite-sheet-height: 400%;
+    --brand-sprite-active-animation: brand-sprite-frames-4 var(--brand-sprite-speed) infinite;
+    --brand-color-accent: #d97706;
+    --brand-color-accent-soft: rgba(217, 119, 6, 0.2);
+    --brand-color-ember: #ea580c;
+    --brand-color-ember-soft: rgba(234, 88, 12, 0.2);
+    --brand-color-focus: rgba(217, 119, 6, 0.52);
+    --brand-color-bg-glow-1: rgba(217, 119, 6, 0.2);
+    --brand-color-bg-glow-2: rgba(234, 88, 12, 0.18);
+    --brand-sprite-hover-filter: saturate(1.14) brightness(1.08);
+  }
+
+  :root[data-brand-theme="krabby"][data-theme="morning"] {
+    --brand-color-accent: #bb6528;
+    --brand-color-accent-soft: rgba(187, 101, 40, 0.2);
+    --brand-color-ember: #a55125;
+    --brand-color-ember-soft: rgba(165, 81, 37, 0.2);
+    --brand-color-focus: rgba(187, 101, 40, 0.55);
+    --brand-color-bg-glow-1: rgba(187, 101, 40, 0.24);
+    --brand-color-bg-glow-2: rgba(203, 125, 66, 0.2);
+  }
+
+  :root[data-brand-theme="krabby"][data-theme="day"] {
+    --brand-color-accent: #c46a2d;
+    --brand-color-accent-soft: rgba(196, 106, 45, 0.18);
+    --brand-color-ember: #ab5c2d;
+    --brand-color-ember-soft: rgba(171, 92, 45, 0.18);
+    --brand-color-focus: rgba(196, 106, 45, 0.5);
+    --brand-color-bg-glow-1: rgba(196, 106, 45, 0.2);
+    --brand-color-bg-glow-2: rgba(219, 133, 74, 0.16);
+  }
+
+  :root[data-brand-theme="krabby"][data-theme="night"] {
+    --brand-color-accent: #dd6b20;
+    --brand-color-accent-soft: rgba(221, 107, 32, 0.2);
+    --brand-color-ember: #ea580c;
+    --brand-color-ember-soft: rgba(234, 88, 12, 0.2);
+    --brand-color-focus: rgba(221, 107, 32, 0.55);
+    --brand-color-bg-glow-1: rgba(221, 107, 32, 0.2);
+    --brand-color-bg-glow-2: rgba(249, 115, 22, 0.18);
+  }
+
+  :root[data-theme="morning"] {
+    --color-scheme: light;
+    --theme-color-surface: #f6f1e6;
+    --theme-color-surface-alt: #efe6d6;
+    --theme-color-panel: #f3ead8;
+    --theme-color-panel-strong: #e8dcc7;
+    --theme-color-ink: #2b2a2a;
+    --theme-color-muted: #6c6a62;
+    --theme-color-line: rgba(60, 58, 52, 0.2);
+    --theme-color-panel-soft: rgba(243, 234, 216, 0.85);
+    --theme-color-panel-ghost: rgba(243, 234, 216, 0.55);
+    --theme-color-panel-border: rgba(60, 58, 52, 0.22);
+    --theme-color-focus: rgba(213, 139, 75, 0.65);
+    --theme-color-canvas-bg: #f9f5ec;
+    --theme-color-bg-glow-1: rgba(213, 139, 75, 0.25);
+    --theme-color-bg-glow-2: rgba(160, 122, 78, 0.18);
+    --theme-color-bg-glow-3: rgba(246, 219, 173, 0.45);
+    --theme-color-bg-grid: rgba(39, 33, 24, 0.08);
+    --color-surface: #f6f1e6;
+    --color-surface-alt: #efe6d6;
+    --color-panel: #f3ead8;
+    --color-panel-strong: #e8dcc7;
+    --color-ink: #2b2a2a;
+    --color-muted: #6c6a62;
+    --color-line: rgba(60, 58, 52, 0.2);
+    --color-accent: #d58b4b;
+    --color-accent-soft: rgba(213, 139, 75, 0.16);
+    --color-ember: #c17139;
+    --color-ember-soft: rgba(193, 113, 57, 0.18);
+    --color-danger: #b91c1c;
+    --color-danger-soft: rgba(185, 28, 28, 0.16);
+    --color-bg-glow-1: rgba(213, 139, 75, 0.25);
+    --color-bg-glow-2: rgba(160, 122, 78, 0.18);
+    --color-bg-glow-3: rgba(246, 219, 173, 0.45);
+    --color-bg-grid: rgba(39, 33, 24, 0.08);
+    --color-panel-soft: rgba(243, 234, 216, 0.85);
+    --color-panel-ghost: rgba(243, 234, 216, 0.55);
+    --color-panel-border: rgba(60, 58, 52, 0.22);
+    --color-focus: rgba(213, 139, 75, 0.65);
+    --color-canvas-bg: #f9f5ec;
+  }
+
+  :root[data-theme="day"] {
+    --color-scheme: light;
+    --theme-color-surface: #eaf1f7;
+    --theme-color-surface-alt: #dbe6f2;
+    --theme-color-panel: #e2ebf5;
+    --theme-color-panel-strong: #d3dfec;
+    --theme-color-ink: #1f2a38;
+    --theme-color-muted: #5a6a7a;
+    --theme-color-line: rgba(31, 42, 56, 0.18);
+    --theme-color-panel-soft: rgba(226, 235, 245, 0.88);
+    --theme-color-panel-ghost: rgba(226, 235, 245, 0.55);
+    --theme-color-panel-border: rgba(31, 42, 56, 0.2);
+    --theme-color-focus: rgba(43, 108, 176, 0.65);
+    --theme-color-canvas-bg: #f3f7fb;
+    --theme-color-bg-glow-1: rgba(43, 108, 176, 0.2);
+    --theme-color-bg-glow-2: rgba(72, 140, 194, 0.16);
+    --theme-color-bg-glow-3: rgba(197, 224, 246, 0.5);
+    --theme-color-bg-grid: rgba(31, 42, 56, 0.08);
+    --color-surface: #eaf1f7;
+    --color-surface-alt: #dbe6f2;
+    --color-panel: #e2ebf5;
+    --color-panel-strong: #d3dfec;
+    --color-ink: #1f2a38;
+    --color-muted: #5a6a7a;
+    --color-line: rgba(31, 42, 56, 0.18);
+    --color-accent: #2b6cb0;
+    --color-accent-soft: rgba(43, 108, 176, 0.16);
+    --color-ember: #2f855a;
+    --color-ember-soft: rgba(47, 133, 90, 0.16);
+    --color-danger: #c53030;
+    --color-danger-soft: rgba(197, 48, 48, 0.16);
+    --color-bg-glow-1: rgba(43, 108, 176, 0.2);
+    --color-bg-glow-2: rgba(72, 140, 194, 0.16);
+    --color-bg-glow-3: rgba(197, 224, 246, 0.5);
+    --color-bg-grid: rgba(31, 42, 56, 0.08);
+    --color-panel-soft: rgba(226, 235, 245, 0.88);
+    --color-panel-ghost: rgba(226, 235, 245, 0.55);
+    --color-panel-border: rgba(31, 42, 56, 0.2);
+    --color-focus: rgba(43, 108, 176, 0.65);
+    --color-canvas-bg: #f3f7fb;
+  }
+
+  :root[data-theme="night"] {
+    --color-scheme: dark;
+    --theme-color-surface: #0b1020;
+    --theme-color-surface-alt: #101a2e;
+    --theme-color-panel: #111a2f;
+    --theme-color-panel-strong: #16233e;
+    --theme-color-ink: #e7eef9;
+    --theme-color-muted: #97a9c4;
+    --theme-color-line: rgba(148, 163, 184, 0.22);
+    --theme-color-panel-soft: rgba(17, 26, 47, 0.7);
+    --theme-color-panel-ghost: rgba(17, 26, 47, 0.45);
+    --theme-color-panel-border: rgba(148, 163, 184, 0.28);
+    --theme-color-focus: rgba(54, 240, 246, 0.75);
+    --theme-color-canvas-bg: #0b0f1a;
+    --theme-color-bg-glow-1: rgba(54, 240, 246, 0.2);
+    --theme-color-bg-glow-2: rgba(94, 234, 212, 0.18);
+    --theme-color-bg-glow-3: rgba(251, 191, 36, 0.16);
+    --theme-color-bg-grid: rgba(255, 255, 255, 0.04);
+    --color-surface: #0b1020;
+    --color-surface-alt: #101a2e;
+    --color-panel: #111a2f;
+    --color-panel-strong: #16233e;
+    --color-ink: #e7eef9;
+    --color-muted: #97a9c4;
+    --color-line: rgba(148, 163, 184, 0.22);
+    --color-accent: #36f0f6;
+    --color-accent-soft: rgba(54, 240, 246, 0.14);
+    --color-ember: #fbbf24;
+    --color-ember-soft: rgba(251, 191, 36, 0.15);
+    --color-danger: #ef4444;
+    --color-danger-soft: rgba(239, 68, 68, 0.16);
+    --color-bg-glow-1: rgba(54, 240, 246, 0.2);
+    --color-bg-glow-2: rgba(94, 234, 212, 0.18);
+    --color-bg-glow-3: rgba(251, 191, 36, 0.16);
+    --color-bg-grid: rgba(255, 255, 255, 0.04);
+    --color-panel-soft: rgba(17, 26, 47, 0.7);
+    --color-panel-ghost: rgba(17, 26, 47, 0.45);
+    --color-panel-border: rgba(148, 163, 184, 0.28);
+    --color-focus: rgba(54, 240, 246, 0.75);
+    --color-canvas-bg: #0b0f1a;
+  }
+
+  :root[data-theme] {
+    --p: var(--color-accent);
+    --pc: var(--color-ink);
+    --s: var(--color-ember);
+    --sc: var(--color-ink);
+    --a: var(--color-accent);
+    --ac: var(--color-ink);
+    --n: var(--color-panel-strong);
+    --nc: var(--color-ink);
+    --b1: var(--color-surface);
+    --b2: var(--color-surface-alt);
+    --b3: var(--color-panel);
+    --b4: var(--color-panel-strong);
+    --bc: var(--color-ink);
+    --in: var(--color-accent);
+    --su: var(--color-accent);
+    --wa: var(--color-ember);
+    --er: var(--color-danger);
+    --tab-bg: color-mix(in oklab, var(--color-surface-alt) 88%, var(--color-accent) 12%);
+    --tab-bg-hover: color-mix(in oklab, var(--color-surface) 86%, var(--color-accent) 14%);
+    --tab-bg-active: color-mix(in oklab, var(--color-panel) 80%, var(--color-accent) 20%);
+  }
+
+  :root[data-brand-theme] {
+    --color-surface: color-mix(in oklab, var(--theme-color-surface) 86%, var(--brand-color-accent) 14%);
+    --color-surface-alt: color-mix(in oklab, var(--theme-color-surface-alt) 86%, var(--brand-color-accent) 14%);
+    --color-panel: color-mix(in oklab, var(--theme-color-panel) 86%, var(--brand-color-accent) 14%);
+    --color-panel-strong: color-mix(in oklab, var(--theme-color-panel-strong) 86%, var(--brand-color-accent) 14%);
+    --color-ink: var(--theme-color-ink);
+    --color-muted: color-mix(in oklab, var(--theme-color-muted) 90%, var(--brand-color-accent) 10%);
+    --color-line: color-mix(in oklab, var(--theme-color-line) 90%, var(--brand-color-accent) 10%);
+    --color-bg-glow-1: var(--brand-color-bg-glow-1);
+    --color-bg-glow-2: var(--brand-color-bg-glow-2);
+    --color-bg-glow-3: color-mix(in oklab, var(--theme-color-bg-glow-3) 66%, var(--brand-color-accent) 34%);
+    --color-bg-grid: color-mix(in oklab, var(--theme-color-bg-grid) 75%, var(--brand-color-accent) 25%);
+    --color-panel-soft: color-mix(in oklab, var(--theme-color-panel-soft) 94%, var(--brand-color-accent) 6%);
+    --color-panel-ghost: color-mix(in oklab, var(--theme-color-panel-ghost) 92%, var(--brand-color-accent) 8%);
+    --color-panel-border: color-mix(in oklab, var(--theme-color-panel-border) 88%, var(--brand-color-accent) 12%);
+    --color-canvas-bg: color-mix(in oklab, var(--theme-color-canvas-bg) 90%, var(--brand-color-accent) 10%);
+    --color-accent: var(--brand-color-accent);
+    --color-accent-soft: var(--brand-color-accent-soft);
+    --color-ember: var(--brand-color-ember);
+    --color-ember-soft: var(--brand-color-ember-soft);
+    --color-focus: var(--brand-color-focus);
+    --p: var(--color-accent);
+    --pc: var(--color-ink);
+    --s: var(--color-ember);
+    --sc: var(--color-ink);
+    --a: var(--color-accent);
+    --ac: var(--color-ink);
+    --n: color-mix(in oklab, var(--color-panel-strong) 86%, var(--color-accent) 14%);
+    --nc: var(--color-ink);
+    --b1: color-mix(in oklab, var(--color-surface) 88%, var(--color-accent) 12%);
+    --b2: color-mix(in oklab, var(--color-surface-alt) 84%, var(--color-accent) 16%);
+    --b3: color-mix(in oklab, var(--color-panel) 82%, var(--color-accent) 18%);
+    --b4: color-mix(in oklab, var(--color-panel-strong) 84%, var(--color-accent) 16%);
+    --bc: var(--color-ink);
+    --in: var(--color-accent);
+    --su: var(--color-accent);
+    --wa: var(--color-ember);
+    --er: var(--color-danger);
+    --tab-bg: color-mix(in oklab, var(--color-surface-alt) 88%, var(--color-accent) 12%);
+    --tab-bg-hover: color-mix(in oklab, var(--color-surface) 86%, var(--color-accent) 14%);
+    --tab-bg-active: color-mix(in oklab, var(--color-panel) 80%, var(--color-accent) 20%);
+  }
+
+  html,
+  body {
+    background-color: var(--color-surface);
+    color-scheme: var(--color-scheme);
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: var(--color-surface);
+    color-scheme: var(--color-scheme);
+    color: var(--color-ink);
+    font-family: var(--font-space-grotesk), sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    position: relative;
+    overflow-x: clip;
+    background-image:
+      radial-gradient(1180px 860px at -8% -16%, color-mix(in oklab, var(--color-bg-glow-1) 88%, transparent), transparent 62%),
+      radial-gradient(960px 720px at 108% 8%, color-mix(in oklab, var(--color-bg-glow-2) 90%, transparent), transparent 66%),
+      radial-gradient(820px 640px at 90% 105%, color-mix(in oklab, var(--color-bg-glow-3) 80%, transparent), transparent 70%),
+      linear-gradient(180deg, var(--color-surface) 0%, var(--color-surface) 100%),
+      linear-gradient(0deg, color-mix(in oklab, var(--color-bg-grid) 75%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in oklab, var(--color-bg-grid) 75%, transparent) 1px, transparent 1px);
+    background-size: auto, auto, auto, auto, 42px 42px, 42px 42px;
+  }
+
+  .kc-page-shell {
+    position: relative;
+    isolation: isolate;
+    min-height: 100vh;
+  }
+
+  .kc-page-shell::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(1120px 860px at 4% -18%, color-mix(in oklab, var(--color-bg-glow-1) 92%, transparent), transparent 64%),
+      radial-gradient(980px 740px at 102% 6%, color-mix(in oklab, var(--color-bg-glow-2) 92%, transparent), transparent 68%),
+      radial-gradient(840px 640px at 86% 104%, color-mix(in oklab, var(--color-bg-glow-3) 84%, transparent), transparent 72%),
+      linear-gradient(180deg, color-mix(in oklab, var(--color-surface) 96%, #000 4%) 0%, var(--color-surface) 100%);
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  .kc-brand-sprite {
+    --brand-sprite-size: 2rem;
+    width: var(--brand-sprite-size);
+    height: var(--brand-sprite-size);
+    background-image: var(--brand-sprite-url);
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-size: 100% var(--brand-sprite-sheet-height);
+    animation: var(--brand-sprite-active-animation);
+    animation-timing-function: steps(1, end);
+    filter: none;
+    image-rendering: pixelated;
+    border-radius: 0.75rem;
+    transition: filter 160ms ease;
+  }
+  @media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+    a:hover .kc-brand-sprite,
+    a:focus-visible .kc-brand-sprite,
+    button:hover .kc-brand-sprite,
+    button:focus-visible .kc-brand-sprite,
+    .kc-brand-sprite:hover {
+      filter: var(--brand-sprite-hover-filter);
+    }
+  }
+}
+
+@layer utilities {
+  .kc-surface-bar {
+    background-image:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--color-surface-alt) 93%, var(--color-accent) 7%) 0%,
+        color-mix(in oklab, var(--color-surface-alt) 89%, var(--color-accent) 11%) 100%
+      ),
+      linear-gradient(
+        115deg,
+        color-mix(in oklab, var(--color-accent-soft) 50%, transparent) 0%,
+        transparent 62%
+      );
+    background-color: var(--color-surface-alt);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-ink) 8%, transparent);
+  }
+
+  .kc-surface-card {
+    background-image:
+      linear-gradient(
+        165deg,
+        color-mix(in oklab, var(--color-panel) 92%, var(--color-accent) 8%) 0%,
+        color-mix(in oklab, var(--color-panel) 88%, var(--color-accent) 12%) 100%
+      ),
+      radial-gradient(
+        130% 120% at 100% 0%,
+        color-mix(in oklab, var(--color-accent-soft) 55%, transparent) 0%,
+        transparent 70%
+      );
+    background-color: var(--color-panel);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-ink) 10%, transparent);
+  }
+
+  .kc-arena-shell {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--color-panel-border);
+    background:
+      radial-gradient(circle at top right, color-mix(in oklab, var(--color-accent-soft) 55%, transparent) 0%, transparent 32%),
+      linear-gradient(180deg, color-mix(in oklab, var(--color-panel) 94%, var(--color-accent) 6%) 0%, color-mix(in oklab, var(--color-surface-alt) 96%, var(--color-accent) 4%) 100%);
+    box-shadow:
+      0 16px 32px rgba(15, 23, 42, 0.08),
+      inset 0 1px 0 color-mix(in oklab, var(--color-ink) 8%, transparent);
+  }
+
+  .kc-arena-shell > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .kc-arena-hero {
+    border: 1px solid var(--color-panel-border);
+    background:
+      linear-gradient(180deg, color-mix(in oklab, var(--color-panel-strong) 88%, var(--color-accent) 12%) 0%, color-mix(in oklab, var(--color-panel) 90%, var(--color-accent) 10%) 100%);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-ink) 8%, transparent);
+  }
+
+  .kc-arena-card {
+    border: 1px solid var(--color-panel-border);
+    background:
+      linear-gradient(180deg, color-mix(in oklab, var(--color-panel) 94%, var(--color-accent) 6%) 0%, color-mix(in oklab, var(--color-surface-alt) 96%, var(--color-accent) 4%) 100%);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-ink) 7%, transparent);
+  }
+
+  .kc-arena-muted {
+    color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
+  }
+
+  .kc-arena-kicker {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: color-mix(in oklab, var(--color-base-content) 56%, transparent);
+  }
+
+  .kc-arena-display {
+    font-family: inherit;
+    letter-spacing: -0.02em;
+    line-height: 1.02;
+  }
+
+  .kc-arena-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    border: 1px solid var(--color-panel-border);
+    background: color-mix(in oklab, var(--color-panel-strong) 86%, var(--color-accent) 14%);
+    padding: 0.45rem 0.75rem;
+    border-radius: 999px;
+    color: var(--color-base-content);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-ink) 7%, transparent);
+  }
+
+  .kc-arena-chip strong {
+    font-size: 0.94rem;
+    color: var(--color-base-content);
+  }
+
+  .kc-arena-stat-grid {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  }
+
+  .kc-arena-stat-card {
+    border-radius: 1rem;
+    border: 1px solid var(--color-panel-border);
+    background: color-mix(in oklab, var(--color-panel-strong) 86%, var(--color-accent) 14%);
+    padding: 0.85rem 0.95rem;
+  }
+
+  .kc-arena-stat-card span {
+    display: block;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: color-mix(in oklab, var(--color-base-content) 58%, transparent);
+  }
+
+  .kc-arena-stat-card strong {
+    display: block;
+    margin-top: 0.3rem;
+    font-size: 1.4rem;
+    line-height: 1;
+    color: var(--color-base-content);
+  }
+
+  .kc-arena-divider {
+    height: 1px;
+    border: 0;
+    background: linear-gradient(90deg, transparent, var(--color-panel-border), transparent);
+  }
+
+  .kc-arena-table :where(th) {
+    color: color-mix(in oklab, var(--color-base-content) 66%, transparent);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+
+  .kc-arena-table :where(td) {
+    color: color-mix(in oklab, var(--color-base-content) 82%, transparent);
+  }
+
+  .kc-arena-table :where(tr:last-child td, tr:last-child th) {
+    border-bottom-width: 0;
+  }
+
+  :where(.btn):not(.btn-outline):not(.btn-ghost):not(.btn-link):not(.btn-dash):not(:disabled):not(.btn-disabled) {
+    --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-primary)) 88%, #fff 12%);
+    --btn-fg: var(--color-primary-content);
+    --btn-border: color-mix(in oklab, var(--btn-color, var(--color-primary)) 62%, #000 38%);
+    --btn-noise: none;
+    background-image:
+      linear-gradient(145deg, color-mix(in oklab, var(--btn-bg) 88%, #fff 12%) 0%, color-mix(in oklab, var(--btn-bg) 72%, #000 28%) 100%),
+      var(--btn-noise, none);
+    background-color: var(--btn-bg);
+  }
+}
+
+@keyframes brand-sprite-frames-8 {
+  0% { background-position: 0 0; }
+  12.5% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  25% { background-position: 0 calc(-2 * var(--brand-sprite-size)); }
+  37.5% { background-position: 0 calc(-3 * var(--brand-sprite-size)); }
+  50% { background-position: 0 calc(-4 * var(--brand-sprite-size)); }
+  62.5% { background-position: 0 calc(-5 * var(--brand-sprite-size)); }
+  75% { background-position: 0 calc(-6 * var(--brand-sprite-size)); }
+  87.5% { background-position: 0 calc(-7 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@keyframes brand-sprite-frames-6 {
+  0% { background-position: 0 0; }
+  16.6667% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  33.3333% { background-position: 0 calc(-2 * var(--brand-sprite-size)); }
+  50% { background-position: 0 calc(-3 * var(--brand-sprite-size)); }
+  66.6667% { background-position: 0 calc(-4 * var(--brand-sprite-size)); }
+  83.3333% { background-position: 0 calc(-5 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@keyframes brand-sprite-frames-7 {
+  0% { background-position: 0 0; }
+  14.2857% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  28.5714% { background-position: 0 calc(-2 * var(--brand-sprite-size)); }
+  42.8571% { background-position: 0 calc(-3 * var(--brand-sprite-size)); }
+  57.1429% { background-position: 0 calc(-4 * var(--brand-sprite-size)); }
+  71.4286% { background-position: 0 calc(-5 * var(--brand-sprite-size)); }
+  85.7143% { background-position: 0 calc(-6 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@keyframes brand-sprite-frames-5 {
+  0% { background-position: 0 0; }
+  20% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  40% { background-position: 0 calc(-2 * var(--brand-sprite-size)); }
+  60% { background-position: 0 calc(-3 * var(--brand-sprite-size)); }
+  80% { background-position: 0 calc(-4 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@keyframes brand-sprite-frames-4 {
+  0% { background-position: 0 0; }
+  25% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  50% { background-position: 0 calc(-2 * var(--brand-sprite-size)); }
+  75% { background-position: 0 calc(-3 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@keyframes brand-sprite-frames-2 {
+  0% { background-position: 0 0; }
+  50% { background-position: 0 calc(-1 * var(--brand-sprite-size)); }
+  100% { background-position: 0 0; }
+}
+
+@layer components {
+  .playui-shell {
+    background:
+      radial-gradient(circle at 18% 10%, color-mix(in oklab, var(--color-accent) 20%, transparent) 0%, transparent 42%),
+      radial-gradient(circle at 80% 100%, color-mix(in oklab, var(--color-ember) 18%, transparent) 0%, transparent 45%),
+      linear-gradient(155deg, #d8ddd8 0%, #b8bebd 38%, #9da4a3 60%, #aeb5b4 100%);
+    border: 1px solid color-mix(in oklab, #657272 55%, white 45%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      inset 0 -2px 6px rgba(36, 44, 43, 0.35),
+      0 14px 40px rgba(2, 6, 23, 0.4);
+  }
+
+  .playui-shell[data-fullscreen="true"] {
+    background: none;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .playui-bezel {
+    border-radius: 1.8rem;
+    padding: clamp(0.75rem, 1.2vw, 1.3rem);
+    background:
+      linear-gradient(165deg, #4a5258 0%, #252b32 52%, #181d24 100%);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow:
+      inset 0 2px 2px rgba(255, 255, 255, 0.15),
+      inset 0 -12px 16px rgba(0, 0, 0, 0.35);
+  }
+
+  .playui-screen-frame {
+    position: relative;
+    border-radius: 1rem;
+    padding: clamp(0.35rem, 0.8vw, 0.7rem);
+    background:
+      linear-gradient(180deg, rgba(107, 122, 123, 0.6) 0%, rgba(46, 58, 59, 0.7) 100%);
+    border: 1px solid rgba(210, 220, 220, 0.38);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.36);
+  }
+
+  .playui-screen-frame::after {
+    content: "DOT MATRIX WITH STEREO SOUND";
+    position: absolute;
+    top: -0.95rem;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: clamp(0.48rem, 1.1vw, 0.63rem);
+    letter-spacing: 0.18em;
+    color: rgba(224, 231, 232, 0.92);
+    text-transform: uppercase;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .playui-screen-canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    filter: saturate(1.04) contrast(1.05);
+  }
+
+  @media (max-width: 767px) {
+    .playui-shell {
+      border-radius: 1.35rem;
+    }
+
+    .playui-bezel {
+      border-radius: 1.1rem;
+      padding: 0.52rem;
+    }
+
+    .playui-screen-frame {
+      border-radius: 0.75rem;
+      padding: 0.3rem;
+    }
+
+    .playui-screen-frame::after {
+      top: -0.75rem;
+      font-size: 0.42rem;
+      letter-spacing: 0.12em;
+    }
+  }
+}

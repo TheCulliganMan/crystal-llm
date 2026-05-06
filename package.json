@@ -1,0 +1,81 @@
+{
+  "name": "pokecrystal-typescript-monorepo",
+  "version": "1.0.0",
+  "description": "ASM-faithful Pokemon Crystal recreation in TypeScript",
+  "private": true,
+  "license": "ISC",
+  "packageManager": "npm@11.3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/pokecrystal-python.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/pokecrystal-python/issues"
+  },
+  "homepage": "https://github.com/OWNER/pokecrystal-python#readme",
+  "workspaces": [
+    "apps/web",
+    "apps/electron",
+    "packages/agents",
+    "packages/cli",
+    "packages/core",
+    "packages/assets",
+    "packages/exporters"
+  ],
+  "scripts": {
+    "build": "npm run typecheck && npm run build:cli && npm run build:web",
+    "build:packages": "npm run build --workspace @pokecrystal/core && npm run build --workspace @pokecrystal/assets && npm run build --workspace @pokecrystal/exporters && npm run build --workspace @pokecrystal/cli && npm run build --workspace @pokecrystal/agents",
+    "build:cli": "npm run build --workspace @pokecrystal/cli && npm run build --workspace @pokecrystal/agents",
+    "build:web": "npm run build --workspace @pokecrystal/web",
+    "build:agents": "npm run build --workspace @pokecrystal/agents",
+    "vercel-build": "npm run build:web",
+    "start": "npm run start --workspace @pokecrystal/web",
+    "electron:dev": "npm run dev --workspace @pokecrystal/electron",
+    "electron:build": "npm run build --workspace @pokecrystal/electron",
+    "electron:package": "npm run package --workspace @pokecrystal/electron",
+    "electron:smoke": "npm run smoke --workspace @pokecrystal/electron",
+    "test": "npm run test --workspace @pokecrystal/core -- --runInBand && npm run test --workspace @pokecrystal/assets && npm run test --workspace @pokecrystal/exporters && npm run test --workspace @pokecrystal/cli -- --runInBand && npm run test --workspace @pokecrystal/web -- --runInBand",
+    "test:agents": "npm run test --workspace @pokecrystal/agents",
+    "test:cli": "npm run test --workspace @pokecrystal/cli",
+    "test:smoke": "npm run test --workspace @pokecrystal/web -- src/app/game-corner/page.test.tsx src/app/page.test.tsx",
+    "test:core": "npm run test --workspace @pokecrystal/core",
+    "test:assets": "npm run test --workspace @pokecrystal/assets",
+    "test:exporters": "npm run test --workspace @pokecrystal/exporters",
+    "test:web": "npm run test --workspace @pokecrystal/web",
+    "pack:dry-run": "npm pack --dry-run --workspace @pokecrystal/core && npm pack --dry-run --workspace @pokecrystal/assets && npm pack --dry-run --workspace @pokecrystal/exporters && npm pack --dry-run --workspace @pokecrystal/cli && npm pack --dry-run --workspace @pokecrystal/agents",
+    "release:check": "CI=1 npm run build:packages && CI=1 npm run test:core && CI=1 npm run test:assets && CI=1 npm run test:exporters && CI=1 npm run test:cli -- --runInBand --ci && CI=1 npm run test:agents -- --ci && npm run pack:dry-run",
+    "typecheck": "npm run lint:types --workspace @pokecrystal/core && npm run lint:types --workspace @pokecrystal/assets && npm run lint:types --workspace @pokecrystal/exporters && npm run lint:types --workspace @pokecrystal/cli && npm run lint:types --workspace @pokecrystal/web",
+    "export:core": "npm run export:core --workspace @pokecrystal/exporters",
+    "dev": "npm run dev --workspace @pokecrystal/web",
+    "save:testrun-team": "node scripts/optimize-save-team.js --session-id testrun --kill-running",
+    "play:recorded": "npm run build --workspace @pokecrystal/cli && node apps/web/scripts/run-with-bundled-node.js packages/cli/dist/bin/pokecrystal-cli.js play-recorded",
+    "agent:run": "npm run run --workspace @pokecrystal/agents --",
+    "lint": "npm run lint:eslint --workspace @pokecrystal/web",
+    "lint:types": "npm run typecheck",
+    "release:prep": "npm run lint && npm run typecheck && npm run release:check"
+  },
+  "engines": {
+    "node": "24.x",
+    "npm": ">=10.5.0"
+  },
+  "overrides": {
+    "@jest/reporters": {
+      "glob": "13.0.6"
+    },
+    "babel-plugin-istanbul": {
+      "test-exclude": "8.0.0"
+    },
+    "jest-config": {
+      "glob": "13.0.6"
+    },
+    "jest-environment-jsdom": {
+      "jsdom": "29.0.1"
+    },
+    "jest-runtime": {
+      "glob": "13.0.6"
+    },
+    "test-exclude": {
+      "glob": "13.0.6"
+    }
+  }
+}

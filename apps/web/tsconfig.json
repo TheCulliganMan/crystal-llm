@@ -1,0 +1,78 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "outDir": "dist",
+    "baseUrl": "../..",
+    "paths": {
+      "@/core/*": [
+        "packages/core/src/core/*"
+      ],
+      "@/engine/*": [
+        "packages/core/src/engine/*"
+      ],
+      "@/ui/*": [
+        "packages/core/src/ui/*"
+      ],
+      "@/backend/*": [
+        "packages/core/src/backend/*"
+      ],
+      "@/input/*": [
+        "packages/core/src/input/*"
+      ],
+      "@/types/*": [
+        "packages/core/src/types/*"
+      ],
+      "@/content/*": [
+        "packages/assets/src/content/*"
+      ],
+      "@/data/*": [
+        "packages/assets/src/data/*"
+      ],
+      "@pokecrystal/core": [
+        "apps/web/.generated/types/packages/core/core/src/index.d.ts"
+      ],
+      "@pokecrystal/core/*": [
+        "apps/web/.generated/types/packages/core/core/src/*"
+      ],
+      "@pokecrystal/assets": [
+        "apps/web/.generated/types/packages/assets/assets/src/content/index.d.ts"
+      ],
+      "@pokecrystal/assets/*": [
+        "apps/web/.generated/types/packages/assets/assets/src/*"
+      ],
+      "@pokecrystal/exporters": [
+        "apps/web/.generated/types/packages/exporters/exporters/src/index.d.ts"
+      ],
+      "@pokecrystal/exporters/*": [
+        "apps/web/.generated/types/packages/exporters/exporters/src/*"
+      ],
+      "@/*": [
+        "apps/web/src/*"
+      ]
+    },
+    "typeRoots": [
+      "../../node_modules/@types"
+    ],
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
+  },
+  "include": [
+    "next-env.d.ts",
+    "src",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    ".next/dev/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    ".next",
+    "node_modules",
+    "dist"
+  ]
+}

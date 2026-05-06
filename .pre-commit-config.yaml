@@ -1,0 +1,28 @@
+repos:
+  - repo: local
+    hooks:
+      - id: pyrefly
+        name: pyrefly
+        entry: uv run pyrefly check src/pokecrystal
+        language: system
+        pass_filenames: false
+        files: ^src/pokecrystal/
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --manifest-path src/pokecrystal-rust/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^src/pokecrystal-rust/
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.14.2
+    hooks:
+      # Run the linter.
+      - id: ruff-check
+        args: [ --fix ]
+        files: ^src/
+        exclude: ^src/pokecrystal-ai/
+      # Run the formatter.
+      - id: ruff-format
+        files: ^src/
+        exclude: ^src/pokecrystal-ai/

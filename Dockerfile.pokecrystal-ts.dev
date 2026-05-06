@@ -1,0 +1,21 @@
+# Dev Dockerfile for the TypeScript/Next.js workspace app (`apps/web`)
+# Runs `next dev` (HMR) instead of a production build.
+
+FROM node:24-alpine
+WORKDIR /app
+
+# Install workspace deps (cached unless package.json changes)
+COPY package.json ./
+COPY package-lock.json ./
+COPY tsconfig.base.json ./
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/core/package.json ./packages/core/package.json
+COPY packages/assets/package.json ./packages/assets/package.json
+COPY packages/exporters/package.json ./packages/exporters/package.json
+RUN npm install --workspaces --include-workspace-root --no-audit --no-fund
+
+# Copy sources for initial container build (compose develop/watch may sync over it)
+COPY . .
+
+EXPOSE 3000
+CMD ["npm","run","dev","--workspace","@pokecrystal/web","--","--hostname","0.0.0.0","--port","3000"]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": false
+  },
+  "functions": {
+    "src/app/api/audio/[...path]/route.ts": {
+      "includeFiles": "{assets/audio/**}"
+    },
+    "src/app/api/**/*.ts": {
+      "includeFiles": "{assets/data/**,assets/gfx/**}"
+    }
+  }
+}

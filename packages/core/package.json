@@ -1,0 +1,55 @@
+{
+  "name": "@pokecrystal/core",
+  "version": "1.0.0",
+  "description": "ASM-faithful PokeCrystal TypeScript core runtime",
+  "license": "ISC",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "packageManager": "npm@11.3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/pokecrystal-python.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/pokecrystal-python/issues"
+  },
+  "homepage": "https://github.com/OWNER/pokecrystal-python#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./*": "./dist/*"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": "24.x",
+    "npm": ">=10.5.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/typescript/bin/tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "typecheck": "npm run lint:types",
+    "lint:types": "node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/typescript/bin/tsc -p tsconfig.build.json --noEmit",
+    "test": "node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/jest/bin/jest.js --config jest.config.js"
+  },
+  "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "@pokecrystal/assets": "^1.0.0",
+    "@tonejs/midi": "^2.0.28",
+    "fraction.js": "^5.3.4",
+    "pngjs": "^7.0.0",
+    "simple-peer": "^9.11.1",
+    "zod": "^4.2.1",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@types/simple-peer": "^9.11.9"
+  }
+}
