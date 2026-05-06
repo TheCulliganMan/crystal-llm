@@ -8,6 +8,7 @@ import {
   type RunnerInput,
   type Status,
   type TaskmasterBatch,
+  type Observation,
 } from "./types.js";
 import {
   buildPlayerDelegationPrompt,
@@ -131,6 +132,35 @@ const formatDirectBatchStatus = (status: Status): string =>
     status.canMove === false ? `blocked=${status.blockedReason ?? "unknown"}` : null,
     status.flowNextGoal ? `goal=${status.flowNextGoal}` : null,
   ].filter(Boolean).join(" ");
+
+const summarizeDirectAction = (action: LocalPlayerAction): string => {
+  if (action.action === "press") {
+    return `press:${normalizeButton(action.parameters?.button) ?? "invalid"}`;
+  }
+  if (action.action === "move") {
+    return `move:${normalizeDirection(action.parameters?.direction) ?? "invalid"}:${action.parameters?.steps ?? 1}`;
+  }
+  if (action.action === "type_text") {
+    const text = action.parameters?.text ?? "";
+    return `type_text:${text.slice(0, 16)}`;
+  }
+  return "unknown";
+};
+
+const compactDirectResult = (result: string): string =>
+  result
+    .split("\n").join(" ")
+    .split("  ").join(" ")
+    .slice(0, 220);
+
+export function shouldContinueDirectPlayerBatch(params: {
+  actionIndex: number;
+  maxActions: number;
+  beforeStatus: Status;
+  afterStatus: Status;
+}): boolean {
+  return params.actionIndex + 1 < params.maxActions;
+}
 
 export function didRecentEventsAdvance(before: string, after: string): boolean {
   const beforePayload = parseRecentEventsPayload(before);
@@ -269,7 +299,10 @@ const normalizeButton = (value: unknown): "A" | "B" | "Start" | "Select" | "Up" 
   return null;
 };
 
-const normalizeDirection = (value: unknown): "up" | "down" | "left" | "right" | null => {
+type Direction = "up" | "down" | "left" | "right";
+type DirectObservationImage = NonNullable<Observation["image"]>;
+
+const normalizeDirection = (value: unknown): Direction | null => {
   if (typeof value !== "string") {
     return null;
   }
@@ -278,6 +311,35 @@ const normalizeDirection = (value: unknown): "up" | "down" | "left" | "right" | 
     ? normalized
     : null;
 };
+
+const modelIdIncludesAny = (model: string, candidates: string[]): boolean => {
+  const normalized = normalizeAgentModel(model).toLowerCase();
+  return candidates.some(candidate => normalized.includes(candidate));
+};
+
+export const supportsDirectPlayerImageInput = (model: string): boolean => {
+  const normalized = normalizeAgentModel(model);
+  if (normalized.startsWith("azure-openai/") || normalized.startsWith("openai-direct/")) {
+    return modelIdIncludesAny(normalized, [
+      "gpt-5",
+      "gpt-4.1",
+      "gpt-4o",
+      "o3",
+      "o4",
+      "computer-use",
+    ]);
+  }
+  if (normalized.startsWith("google/") || normalized.startsWith("gemini/")) {
+    return modelIdIncludesAny(normalized, ["gemini"]);
+  }
+  if (normalized.startsWith("anthropic/")) {
+    return modelIdIncludesAny(normalized, ["claude-3", "claude-sonnet", "claude-opus", "claude-haiku"]);
+  }
+  return false;
+};
+
+const imageDataUrl = (image: DirectObservationImage): string =>
+  `data:${image.mimeType};base64,${image.data}`;
 
 function extractFirstJsonObject(text: string): Record<string, unknown> | null {
   for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
@@ -366,7 +428,7 @@ export function buildLocalOllamaActionRequest(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
-  rejectedActionNote?: string;
+  image?: DirectObservationImage;
 }): LocalOllamaChatRequest {
   return {
     model: params.model,
@@ -415,16 +477,22 @@ export function buildLocalOllamaActionRequest(params: {
           "On text-entry screens, prefer {\"action\":\"type_text\",\"parameters\":{\"text\":\"ABCD\",\"clear\":true,\"submit\":true},\"reason\":\"...\"}.",
           "If the live surface, mode, map, or observation says name_entry or text entry, use type_text for a complete valid entry instead of pressing Start or cursor-walking letters.",
           "Do not wait for user input during text entry; choose a short valid in-game text value and submit it in the same type_text action.",
-          "If recent events show an action failed, was menu_locked, or changed false, do not repeat that action; choose a different valid action.",
+          "When a menu or prompt is open, make a concrete choice that keeps the adventure moving; confirm useful selected choices instead of backing out.",
+          "When the story offers a required choice among creatures, items, or options, choose one valid option and confirm it so play can continue.",
+          "Use recent events as feedback, not as hard bans. If a useful action was marked no_change or busy during dialogue or a transition, re-check the live prompt before changing strategy.",
+          "For dialogue and story prompts, pressing A is usually the correct way to advance or confirm; do not switch to B just because a previous A expanded into a dialogue macro or looked repeated.",
+          "Use B only when the visible UI says Back/Cancel/No is the desired story choice.",
           "In overworld play, use map_info and HOTSPOTS to choose route transitions, doors, warps, exits, NPCs, and item balls that advance the current flow.",
+          "After required dialogue or setup prompts close and movement is available, advance the main-story flow through visible route transitions, doors, warps, exits, NPCs, or item balls instead of repeating optional interactions.",
           "When hotspot text gives directional deltas, choose a move that reduces the largest useful delta toward the chosen gameplay target.",
+          "When a warp or door note says to stand at a tile and move in a direction, first move across visible floor toward that stand tile, then use the listed move direction to enter.",
           "When map_info gives player coords and visible warp or door coords, compare x and y numerically; if x differs, move left or right toward that x before using up or down to enter.",
           "For movement, route through visible floor tiles. Do not try to walk onto utility, sign, bookshelf, PC, NPC, wall, or object tokens; move around them unless interacting with that object is the chosen story action.",
           "Enter warps and doors with movement in their indicated direction; do not press A on a warp or door tile.",
           "Utility and object hotspots are not story route targets unless the current flow goal, local focus, forced prompt, or recent NPC/object clue explicitly elevates that same hotspot.",
           "Avoid optional furniture, signs, and repeated local objects when a route transition or stronger story target is visible.",
           "After the same NPC or object dialogue closes repeatedly without changing map, party, or flow, leave that interaction lane and route to visible transitions.",
-          "After a failed or blocked move, the same direction is forbidden for the next action unless the player coords changed after that failure.",
+          "After a failed or blocked move, inspect coords, facing, and visible floor before deciding whether to try a different movement route.",
         ].join(" "),
       },
       {
@@ -435,7 +503,6 @@ export function buildLocalOllamaActionRequest(params: {
           `Map info: ${sanitizeLocalPromptMapInfo(params.mapInfo, params.status, params.recentEvents).slice(0, 1600)}`,
           `Observation: ${sanitizeLocalPromptObservation(params.observation, params.status, params.recentEvents).slice(0, 1600)}`,
           `Recent events: ${params.recentEvents.slice(0, 800)}`,
-          params.rejectedActionNote ? `Rejected candidates forbidden for this live state: ${params.rejectedActionNote}` : null,
           "Choose the next useful valid Pokemon Crystal action now.",
         ].filter(Boolean).join("\n"),
       },
@@ -577,10 +644,36 @@ export function sanitizeLocalPromptMapInfo(mapInfo: string, status: Status, rece
       }
       return true;
     });
-    return JSON.stringify({ ...parsed, hotspots });
+    return sanitizeAgentWaitText(JSON.stringify({ ...parsed, hotspots }));
   } catch {
-    return mapInfo;
+    return sanitizeAgentWaitText(mapInfo);
   }
+}
+
+function sanitizeAgentWaitText(text: string): string {
+  return text
+    .split("WAIT: applying choice").join("applying choice")
+    .split("WAIT:").join("")
+    .split("WAIT").join("");
+}
+
+function sanitizeAgentWaitValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    return sanitizeAgentWaitText(value);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map(item => sanitizeAgentWaitValue(item))
+      .filter(item => typeof item !== "string" || item.trim().length > 0);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    sanitized[key] = sanitizeAgentWaitValue(item);
+  }
+  return sanitized;
 }
 
 export function sanitizeLocalPromptObservation(observation: string, status: Status, recentEvents?: string): string {
@@ -628,7 +721,7 @@ export function sanitizeLocalPromptObservation(observation: string, status: Stat
     kept.push(line);
   }
 
-  return kept.join("\n");
+  return sanitizeAgentWaitText(kept.join("\n"));
 }
 
 export function sanitizeLocalPromptStatus(status: Status, recentEvents?: string): Status {
@@ -660,7 +753,7 @@ export function sanitizeLocalPromptStatus(status: Status, recentEvents?: string)
     !shouldDropTarget(status.localFocus?.target) &&
     !shouldDropTarget(status.currentHotspot)
   ) {
-    return status;
+    return sanitizeAgentWaitValue(status) as Status;
   }
 
   const sanitized: Status = { ...status };
@@ -674,109 +767,7 @@ export function sanitizeLocalPromptStatus(status: Status, recentEvents?: string)
   if (sanitized.currentHotspot && shouldDropTarget(sanitized.currentHotspot)) {
     delete sanitized.currentHotspot;
   }
-  return sanitized;
-}
-
-function actionFailureKey(action: LocalPlayerAction): string | null {
-  if (action.action === "move") {
-    const direction = normalizeDirection(action.parameters?.direction);
-    return direction ? `move:${direction}` : null;
-  }
-  if (action.action === "press") {
-    const button = normalizeButton(action.parameters?.button);
-    return button ? `press:${button.toLowerCase()}` : null;
-  }
-  return null;
-}
-
-export function isLocalActionRejectedByRecentFailure(params: {
-  action: LocalPlayerAction;
-  status: Status;
-  recentEvents: string;
-}): boolean {
-  return Boolean(localActionRejectionReason(params));
-}
-
-function localActionRejectionReason(params: {
-  action: LocalPlayerAction;
-  status: Status;
-  recentEvents: string;
-}): string | null {
-  const liveStateRejection = localActionLiveStateRejectionReason(params.action, params.status, params.recentEvents);
-  if (liveStateRejection) {
-    return liveStateRejection;
-  }
-
-  const key = actionFailureKey(params.action);
-  if (!key) {
-    return null;
-  }
-
-  let parsed: { events?: unknown };
-  try {
-    parsed = JSON.parse(params.recentEvents) as { events?: unknown };
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed.events)) {
-    return null;
-  }
-
-  for (const event of parsed.events.slice().reverse()) {
-    if (!event || typeof event !== "object" || Array.isArray(event)) {
-      continue;
-    }
-    const record = event as Record<string, unknown>;
-    const eventAction = typeof record.action === "string" ? record.action : "";
-    if (!eventAction.startsWith(key)) {
-      continue;
-    }
-    const changed = record.changed;
-    const reason = typeof record.reason === "string" ? record.reason : "";
-    const coords = Array.isArray(record.coords) ? record.coords : null;
-    const sameCoords =
-      !params.status.coords ||
-      !coords ||
-      (coords[0] === params.status.coords[0] && coords[1] === params.status.coords[1]);
-    if (sameCoords && (reason === "blocked" || (changed === false && (reason === "menu" || reason === "no_change")))) {
-      return `${key} already failed from this live state with reason ${reason}.`;
-    }
-  }
-  return null;
-}
-
-function localActionLiveStateRejectionReason(action: LocalPlayerAction, status: Status, recentEvents?: string): string | null {
-  if (action.action === "press" && normalizeButton(action.parameters?.button) === "A") {
-    const target = status.currentHotspot ?? status.interactionSetup?.hotspot;
-    if (target?.token === "D" || target?.hotspotType === "warp" || target?.hotspotType === "door") {
-      return "Warp and door hotspots are entered by movement, not by pressing A.";
-    }
-    if (
-      status.interactionTarget?.token === "N" &&
-      hasRepeatedDialogueAtCurrentCoords(status, recentEvents)
-    ) {
-      return "That NPC dialogue has repeated from this live state; leave the interaction lane and choose movement toward a route transition.";
-    }
-  }
-  if (action.action !== "move") {
-    return null;
-  }
-  const direction = normalizeDirection(action.parameters?.direction);
-  const facing = normalizeDirection(status.facing);
-  const target = status.interactionTarget;
-  const targetType = target?.hotspotType ?? target?.kind;
-  const targetToken = target?.token;
-  if (
-    direction &&
-    facing &&
-    direction === facing &&
-    target &&
-    targetToken !== "D" &&
-    (targetType === "utility" || targetType === "sign" || target.kind === "bg_event")
-  ) {
-    return "That move would walk into the current non-route interaction target instead of routing through a floor tile.";
-  }
-  return null;
+  return sanitizeAgentWaitValue(sanitized) as Status;
 }
 
 async function completeLocalOllamaAction(params: {
@@ -787,54 +778,35 @@ async function completeLocalOllamaAction(params: {
   recentEvents: string;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const model = normalizeAgentModel(params.input.playerModel).slice("ollama/".length);
-  let rejectedActionNote: string | undefined;
-  const rejectedActions: string[] = [];
-  let lastText = "";
-
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const response = await fetch(`${getDefaultOllamaApiBaseUrl()}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        Authorization: `Bearer ${process.env.OLLAMA_API_KEY?.trim() || "dummy"}`,
-      },
-      body: JSON.stringify(buildLocalOllamaActionRequest({
-        model,
-        input: params.input,
-        status: params.status,
-        observation: params.observation,
-        mapInfo: params.mapInfo,
-        recentEvents: params.recentEvents,
-        rejectedActionNote,
-      })),
-    });
-    const payload = await response.json() as {
-      choices?: Array<{ text?: unknown; message?: { content?: unknown } }>;
-      error?: { message?: unknown };
-    };
-    if (!response.ok) {
-      throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `Ollama completion failed: ${response.status}`);
-    }
-    const choice = payload.choices?.[0];
-    const text = typeof choice?.message?.content === "string"
-      ? choice.message.content
-      : typeof choice?.text === "string"
-        ? choice.text
-        : "";
-    lastText = text;
-    const action = parseLocalPlayerAction(text);
-    if (!action) {
-      return { action: null, text };
-    }
-    const rejectionReason = localActionRejectionReason({ action, status: params.status, recentEvents: params.recentEvents });
-    if (!rejectionReason) {
-      return { action, text };
-    }
-    rejectedActions.push(`${text.slice(0, 140)} -> ${rejectionReason}`);
-    rejectedActionNote = `${rejectedActions.join(" | ")}. Choose a different concrete gameplay action.`;
+  const response = await fetch(`${getDefaultOllamaApiBaseUrl()}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${process.env.OLLAMA_API_KEY?.trim() || "dummy"}`,
+    },
+    body: JSON.stringify(buildLocalOllamaActionRequest({
+      model,
+      input: params.input,
+      status: params.status,
+      observation: params.observation,
+      mapInfo: params.mapInfo,
+      recentEvents: params.recentEvents,
+    })),
+  });
+  const payload = await response.json() as {
+    choices?: Array<{ text?: unknown; message?: { content?: unknown } }>;
+    error?: { message?: unknown };
+  };
+  if (!response.ok) {
+    throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `Ollama completion failed: ${response.status}`);
   }
-
-  return { action: null, text: lastText };
+  const choice = payload.choices?.[0];
+  const text = typeof choice?.message?.content === "string"
+    ? choice.message.content
+    : typeof choice?.text === "string"
+      ? choice.text
+      : "";
+  return { action: parseLocalPlayerAction(text), text };
 }
 
 function buildResponsesActionSchema(params: Parameters<typeof buildLocalOllamaActionRequest>[0]): {
@@ -875,9 +847,21 @@ function buildResponsesActionSchema(params: Parameters<typeof buildLocalOllamaAc
 export function buildOpenAIDirectActionRequest(params: Parameters<typeof buildLocalOllamaActionRequest>[0]): unknown {
   const localRequest = buildLocalOllamaActionRequest(params);
   const actionSchema = buildResponsesActionSchema(params);
+  const input = params.image
+    ? [
+        localRequest.messages[0],
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: localRequest.messages[1].content },
+            { type: "input_image", image_url: imageDataUrl(params.image) },
+          ],
+        },
+      ]
+    : localRequest.messages;
   return {
     model: params.model,
-    input: localRequest.messages,
+    input,
     max_output_tokens: localRequest.max_tokens,
     text: {
       format: {
@@ -893,9 +877,21 @@ export function buildOpenAIDirectActionRequest(params: Parameters<typeof buildLo
 export function buildAzureOpenAIActionRequest(params: Parameters<typeof buildLocalOllamaActionRequest>[0]): unknown {
   const localRequest = buildLocalOllamaActionRequest(params);
   const actionSchema = buildResponsesActionSchema(params);
+  const input = params.image
+    ? [
+        localRequest.messages[0],
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: localRequest.messages[1].content },
+            { type: "input_image", image_url: imageDataUrl(params.image) },
+          ],
+        },
+      ]
+    : localRequest.messages;
   return {
     model: params.model,
-    input: localRequest.messages,
+    input,
     max_output_tokens: localRequest.max_tokens,
     text: {
       format: {
@@ -910,6 +906,22 @@ export function buildAzureOpenAIActionRequest(params: Parameters<typeof buildLoc
 
 export function buildAnthropicActionRequest(params: Parameters<typeof buildLocalOllamaActionRequest>[0]): unknown {
   const localRequest = buildLocalOllamaActionRequest(params);
+  const userContent = params.image
+    ? [
+        {
+          type: "text",
+          text: localRequest.messages[1].content,
+        },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: params.image.mimeType,
+            data: params.image.data,
+          },
+        },
+      ]
+    : localRequest.messages[1].content;
   return {
     model: params.model,
     max_tokens: localRequest.max_tokens,
@@ -929,7 +941,7 @@ export function buildAnthropicActionRequest(params: Parameters<typeof buildLocal
     messages: [
       {
         role: "user",
-        content: localRequest.messages[1].content,
+        content: userContent,
       },
     ],
   };
@@ -937,15 +949,24 @@ export function buildAnthropicActionRequest(params: Parameters<typeof buildLocal
 
 export function buildGoogleActionRequest(params: Parameters<typeof buildLocalOllamaActionRequest>[0]): unknown {
   const localRequest = buildLocalOllamaActionRequest(params);
+  const parts: Array<Record<string, unknown>> = [
+    {
+      text: `${localRequest.messages[0].content}\n\n${localRequest.messages[1].content}`,
+    },
+  ];
+  if (params.image) {
+    parts.push({
+      inline_data: {
+        mime_type: params.image.mimeType,
+        data: params.image.data,
+      },
+    });
+  }
   return {
     contents: [
       {
         role: "user",
-        parts: [
-          {
-            text: `${localRequest.messages[0].content}\n\n${localRequest.messages[1].content}`,
-          },
-        ],
+        parts,
       },
     ],
     generationConfig: {
@@ -1025,11 +1046,9 @@ async function completeOpenAIDirectAction(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
+  image?: DirectObservationImage;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const model = normalizeAgentModel(params.input.playerModel).slice("openai-direct/".length);
-  let rejectedActionNote: string | undefined;
-  const rejectedActions: string[] = [];
-  let lastText = "";
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const response = await fetch(`${getDefaultOpenAIBaseUrl()}/responses`, {
@@ -1045,7 +1064,7 @@ async function completeOpenAIDirectAction(params: {
         observation: params.observation,
         mapInfo: params.mapInfo,
         recentEvents: params.recentEvents,
-        rejectedActionNote,
+        image: params.image,
       })),
     });
     const payload = await response.json() as { error?: { message?: unknown } };
@@ -1053,20 +1072,14 @@ async function completeOpenAIDirectAction(params: {
       throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `OpenAI response failed: ${response.status}`);
     }
     const text = extractAzureOpenAIResponseText(payload);
-    lastText = text;
     const action = parseLocalPlayerAction(text);
     if (!action) {
       return { action: null, text };
     }
-    const rejectionReason = localActionRejectionReason({ action, status: params.status, recentEvents: params.recentEvents });
-    if (!rejectionReason) {
-      return { action, text };
-    }
-    rejectedActions.push(`${text.slice(0, 140)} -> ${rejectionReason}`);
-    rejectedActionNote = `${rejectedActions.join(" | ")}. Choose a different concrete gameplay action.`;
+    return { action, text };
   }
 
-  return { action: null, text: lastText };
+  return { action: null, text: "" };
 }
 
 async function completeAzureOpenAIAction(params: {
@@ -1075,11 +1088,9 @@ async function completeAzureOpenAIAction(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
+  image?: DirectObservationImage;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const model = normalizeAgentModel(params.input.playerModel).slice("azure-openai/".length);
-  let rejectedActionNote: string | undefined;
-  const rejectedActions: string[] = [];
-  let lastText = "";
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const response = await fetch(
@@ -1097,7 +1108,7 @@ async function completeAzureOpenAIAction(params: {
           observation: params.observation,
           mapInfo: params.mapInfo,
           recentEvents: params.recentEvents,
-          rejectedActionNote,
+          image: params.image,
         })),
       },
     );
@@ -1106,20 +1117,14 @@ async function completeAzureOpenAIAction(params: {
       throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `Azure OpenAI response failed: ${response.status}`);
     }
     const text = extractAzureOpenAIResponseText(payload);
-    lastText = text;
     const action = parseLocalPlayerAction(text);
     if (!action) {
       return { action: null, text };
     }
-    const rejectionReason = localActionRejectionReason({ action, status: params.status, recentEvents: params.recentEvents });
-    if (!rejectionReason) {
-      return { action, text };
-    }
-    rejectedActions.push(`${text.slice(0, 140)} -> ${rejectionReason}`);
-    rejectedActionNote = `${rejectedActions.join(" | ")}. Choose a different concrete gameplay action.`;
+    return { action, text };
   }
 
-  return { action: null, text: lastText };
+  return { action: null, text: "" };
 }
 
 async function completeAnthropicAction(params: {
@@ -1128,11 +1133,9 @@ async function completeAnthropicAction(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
+  image?: DirectObservationImage;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const model = normalizeAgentModel(params.input.playerModel).slice("anthropic/".length);
-  let rejectedActionNote: string | undefined;
-  const rejectedActions: string[] = [];
-  let lastText = "";
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const response = await fetch(`${getDefaultAnthropicBaseUrl()}/v1/messages`, {
@@ -1149,7 +1152,7 @@ async function completeAnthropicAction(params: {
         observation: params.observation,
         mapInfo: params.mapInfo,
         recentEvents: params.recentEvents,
-        rejectedActionNote,
+        image: params.image,
       })),
     });
     const payload = await response.json() as { error?: { message?: unknown } };
@@ -1157,20 +1160,14 @@ async function completeAnthropicAction(params: {
       throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `Anthropic message failed: ${response.status}`);
     }
     const text = extractAnthropicActionText(payload);
-    lastText = text;
     const action = parseLocalPlayerAction(text);
     if (!action) {
       return { action: null, text };
     }
-    const rejectionReason = localActionRejectionReason({ action, status: params.status, recentEvents: params.recentEvents });
-    if (!rejectionReason) {
-      return { action, text };
-    }
-    rejectedActions.push(`${text.slice(0, 140)} -> ${rejectionReason}`);
-    rejectedActionNote = `${rejectedActions.join(" | ")}. Choose a different concrete gameplay action.`;
+    return { action, text };
   }
 
-  return { action: null, text: lastText };
+  return { action: null, text: "" };
 }
 
 async function completeGoogleAction(params: {
@@ -1179,14 +1176,12 @@ async function completeGoogleAction(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
+  image?: DirectObservationImage;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const normalized = normalizeAgentModel(params.input.playerModel);
   const model = normalized.startsWith("gemini/")
     ? normalized.slice("gemini/".length)
     : normalized.slice("google/".length);
-  let rejectedActionNote: string | undefined;
-  const rejectedActions: string[] = [];
-  let lastText = "";
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const response = await fetch(`${getDefaultGoogleApiBaseUrl()}/models/${encodeURIComponent(model)}:generateContent`, {
@@ -1202,7 +1197,7 @@ async function completeGoogleAction(params: {
         observation: params.observation,
         mapInfo: params.mapInfo,
         recentEvents: params.recentEvents,
-        rejectedActionNote,
+        image: params.image,
       })),
     });
     const payload = await response.json() as { error?: { message?: unknown } };
@@ -1210,20 +1205,14 @@ async function completeGoogleAction(params: {
       throw new Error(typeof payload.error?.message === "string" ? payload.error.message : `Google Gemini generation failed: ${response.status}`);
     }
     const text = extractGoogleResponseText(payload);
-    lastText = text;
     const action = parseLocalPlayerAction(text);
     if (!action) {
       return { action: null, text };
     }
-    const rejectionReason = localActionRejectionReason({ action, status: params.status, recentEvents: params.recentEvents });
-    if (!rejectionReason) {
-      return { action, text };
-    }
-    rejectedActions.push(`${text.slice(0, 140)} -> ${rejectionReason}`);
-    rejectedActionNote = `${rejectedActions.join(" | ")}. Choose a different concrete gameplay action.`;
+    return { action, text };
   }
 
-  return { action: null, text: lastText };
+  return { action: null, text: "" };
 }
 
 async function completeDirectPlayerAction(params: {
@@ -1232,19 +1221,21 @@ async function completeDirectPlayerAction(params: {
   observation: string;
   mapInfo: string;
   recentEvents: string;
+  image?: DirectObservationImage;
 }): Promise<{ action: LocalPlayerAction | null; text: string }> {
   const model = normalizeAgentModel(params.input.playerModel);
+  const image = supportsDirectPlayerImageInput(model) ? params.image : undefined;
   if (model.startsWith("azure-openai/")) {
-    return completeAzureOpenAIAction(params);
+    return completeAzureOpenAIAction({ ...params, image });
   }
   if (model.startsWith("openai-direct/")) {
-    return completeOpenAIDirectAction(params);
+    return completeOpenAIDirectAction({ ...params, image });
   }
   if (model.startsWith("anthropic/")) {
-    return completeAnthropicAction(params);
+    return completeAnthropicAction({ ...params, image });
   }
   if (model.startsWith("google/") || model.startsWith("gemini/")) {
-    return completeGoogleAction(params);
+    return completeGoogleAction({ ...params, image });
   }
   return completeLocalOllamaAction(params);
 }
@@ -1256,9 +1247,21 @@ async function runLocalOllamaPlayerBatch(params: {
 }): Promise<string> {
   const maxActions = Math.max(1, Math.min(params.input.playerMaxSteps, 6));
   const summaries: string[] = [];
+  emitAgentStreamStatus(
+    `direct player batch start model=${normalizeAgentModel(params.input.playerModel)} max_actions=${maxActions} before=${formatDirectBatchStatus(params.beforeStatus)}`,
+    "player",
+  );
   for (let index = 0; index < maxActions; index += 1) {
+    const model = normalizeAgentModel(params.input.playerModel);
+    const includeImage = supportsDirectPlayerImageInput(model);
     const status = await params.session.status();
-    const observation = await params.session.observe();
+    const observation = await params.session.observe({ includeImage, imageScale: 2 });
+    if (includeImage) {
+      emitAgentStreamStatus(
+        `direct player image input ${observation.image ? `attached ${observation.image.mimeType} bytes=${observation.image.data.length}` : "requested missing"}`,
+        "player",
+      );
+    }
     const mapInfo = await params.session.mapInfo();
     const recentEvents = await params.session.recentEvents();
     const { action, text } = await completeDirectPlayerAction({
@@ -1267,37 +1270,50 @@ async function runLocalOllamaPlayerBatch(params: {
       observation: observation.summaryText,
       mapInfo,
       recentEvents,
+      image: observation.image,
     });
     emitAgentStreamStatus(`direct player model text: ${text.trim().slice(0, 240)}`, "player");
     if (!action) {
-      summaries.push(`No parseable action from direct player model: ${text.trim().slice(0, 160)}`);
+      const summary = `No parseable action from direct player model: ${text.trim().slice(0, 160)}`;
+      emitAgentStreamStatus(`direct player action ${index + 1}/${maxActions}: ${summary}`, "player");
+      summaries.push(summary);
       break;
     }
     const reason = action.reason || "Local model selected the next live gameplay action.";
     let result = "";
+    let actionSummary = summarizeDirectAction(action);
     if (action.action === "press") {
       const button = normalizeButton(action.parameters?.button);
       if (!button) {
-        summaries.push(`Skipped invalid press button from direct player model: ${JSON.stringify(action.parameters)}`);
+        const summary = `Skipped invalid press button from direct player model: ${JSON.stringify(action.parameters)}`;
+        emitAgentStreamStatus(`direct player action ${index + 1}/${maxActions}: ${summary}`, "player");
+        summaries.push(summary);
         break;
       }
+      actionSummary = `press:${button}`;
       result = await params.session.press(button);
       summaries.push(`press:${button} - ${reason} => ${result.slice(0, 160)}`);
     } else if (action.action === "move") {
       const direction = normalizeDirection(action.parameters?.direction);
       if (!direction) {
-        summaries.push(`Skipped invalid move direction from direct player model: ${JSON.stringify(action.parameters)}`);
+        const summary = `Skipped invalid move direction from direct player model: ${JSON.stringify(action.parameters)}`;
+        emitAgentStreamStatus(`direct player action ${index + 1}/${maxActions}: ${summary}`, "player");
+        summaries.push(summary);
         break;
       }
       const steps = Math.max(1, Math.min(Math.trunc(action.parameters?.steps ?? 1), 6));
+      actionSummary = `move:${direction}:${steps}`;
       result = await params.session.move(direction, steps);
       summaries.push(`move:${direction}:${steps} - ${reason} => ${result.slice(0, 160)}`);
     } else if (action.action === "type_text") {
       const textInput = action.parameters?.text?.trim();
       if (!textInput) {
-        summaries.push(`Skipped invalid type_text input from direct player model: ${JSON.stringify(action.parameters)}`);
+        const summary = `Skipped invalid type_text input from direct player model: ${JSON.stringify(action.parameters)}`;
+        emitAgentStreamStatus(`direct player action ${index + 1}/${maxActions}: ${summary}`, "player");
+        summaries.push(summary);
         break;
       }
+      actionSummary = `type_text:${textInput.slice(0, 16)}`;
       result = await params.session.typeText(textInput.slice(0, 32), {
         clear: action.parameters?.clear,
         submit: action.parameters?.submit,
@@ -1305,7 +1321,17 @@ async function runLocalOllamaPlayerBatch(params: {
       summaries.push(`type_text:${textInput.slice(0, 32)} - ${reason} => ${result.slice(0, 160)}`);
     }
     const afterStatus = await params.session.status();
-    if (formatDirectBatchStatus(afterStatus) !== formatDirectBatchStatus(status)) {
+    emitAgentStreamStatus(
+      [
+        `direct player action ${index + 1}/${maxActions}: ${actionSummary}`,
+        `reason=${reason.slice(0, 160)}`,
+        `before=${formatDirectBatchStatus(status)}`,
+        `after=${formatDirectBatchStatus(afterStatus)}`,
+        `result=${compactDirectResult(result)}`,
+      ].join(" | "),
+      "player",
+    );
+    if (!shouldContinueDirectPlayerBatch({ actionIndex: index, maxActions, beforeStatus: status, afterStatus })) {
       break;
     }
   }

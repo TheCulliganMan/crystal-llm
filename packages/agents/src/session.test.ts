@@ -55,6 +55,7 @@ describe("session helpers", () => {
     const observation = parseObservation({
       content: [
         { type: "text", text: "OVERWORLD\nPos: (3,3)" },
+        { type: "image", data: "pngbase64", mimeType: "image/png" },
         {
           type: "text",
           text: '{"flow_state":{"sum":"Next goal","done":0,"total":22,"next":"Starter","target":"Beat Mt. Silver"},"view":{"focus":"overworld"}}',
@@ -64,6 +65,7 @@ describe("session helpers", () => {
 
     expect(observation.summaryText).toContain("OVERWORLD");
     expect(observation.snapshot?.flow_state?.next).toBe("Starter");
+    expect(observation.image).toEqual({ data: "pngbase64", mimeType: "image/png" });
   });
 
   it("separates visible action reasons from MCP tool arguments", () => {

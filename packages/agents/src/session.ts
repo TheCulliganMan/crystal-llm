@@ -25,7 +25,8 @@ import {
 } from "./stream-events.js";
 
 type McpTextPart = { type: "text"; text: string };
-type McpToolResult = { content?: McpTextPart[] };
+type McpImagePart = { type: "image"; data: string; mimeType?: string; mime_type?: string };
+type McpToolResult = { content?: Array<McpTextPart | McpImagePart> };
 type KrabbyClawToolset = Record<string, Tool<any, any, any, any>>;
 type KrabbyClawNamespacedTools = Record<string, Tool<any, any, any, any>>;
 type DirectMcpClient = {
@@ -207,6 +208,21 @@ export function extractTextParts(result: McpToolResult): string[] {
     .map(part => part.text);
 }
 
+export function extractFirstImagePart(result: McpToolResult): { data: string; mimeType: string } | undefined {
+  const image = (result.content ?? []).find((part): part is McpImagePart =>
+    Boolean(part?.type === "image" && typeof part.data === "string" && part.data.length > 0),
+  );
+  if (!image) {
+    return undefined;
+  }
+  const mimeType = typeof image.mimeType === "string"
+    ? image.mimeType
+    : typeof image.mime_type === "string"
+      ? image.mime_type
+      : "image/png";
+  return { data: image.data, mimeType };
+}
+
 export function parseFirstJsonText<T>(result: McpToolResult, parser: (value: unknown) => T): T {
   const [firstText] = extractTextParts(result);
   if (!firstText) {
@@ -219,10 +235,12 @@ export function parseObservation(result: McpToolResult): Observation {
   const texts = extractTextParts(result);
   const snapshotText = texts.find(text => text.trim().startsWith("{"));
   const snapshot = snapshotText ? observationSchema.shape.snapshot.parse(JSON.parse(snapshotText)) : undefined;
+  const image = extractFirstImagePart(result);
 
   return observationSchema.parse({
     summaryText: texts[0] ?? "",
     snapshot,
+    image,
     rawTexts: texts,
   });
 }
@@ -532,8 +550,11 @@ export class KrabbyClawSession {
     return parseFirstJsonText(await this.executeTool("status", {}), value => statusSchema.parse(value));
   }
 
-  async observe(): Promise<Observation> {
-    return parseObservation(await this.executeTool("observe", {}));
+  async observe(options: { includeImage?: boolean; imageScale?: number } = {}): Promise<Observation> {
+    return parseObservation(await this.executeTool("observe", {
+      ...(options.includeImage ? { include_image: true } : {}),
+      ...(options.imageScale ? { image_scale: options.imageScale } : {}),
+    }));
   }
 
   async move(direction: "up" | "down" | "left" | "right", steps = 1): Promise<string> {

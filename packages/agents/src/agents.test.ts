@@ -7,13 +7,14 @@ import {
   consumeAgentStream,
   didRecentEventsAdvance,
   hasDirectPlayerBatchProgress,
-  isLocalActionRejectedByRecentFailure,
   isPlayerDelegationPrimitive,
   sanitizeLocalPromptMapInfo,
   sanitizeLocalPromptObservation,
   sanitizeLocalPromptStatus,
   shouldContinueTaskmasterIteration,
+  shouldContinueDirectPlayerBatch,
   shouldUseDirectPlayerBatch,
+  supportsDirectPlayerImageInput,
 } from "./agents";
 import type { Status } from "./types";
 
@@ -148,6 +149,40 @@ describe("taskmaster iteration control", () => {
     })).toBe(true);
   });
 
+  it("continues a direct player batch across normal status changes until max actions", () => {
+    const beforeStatus: Status = {
+      mode: "main_menu",
+      map: "MAIN MENU",
+      mapId: "main_menu",
+      badges: 0,
+      canMove: false,
+      partyCount: 0,
+      flowSummary: "Next goal: Starter",
+      flowNextGoal: "Starter",
+      flowCompletionTarget: "Beat Mt. Silver",
+    };
+    const afterStatus: Status = {
+      ...beforeStatus,
+      mode: "gender",
+      map: "GENDER",
+      mapId: "gender",
+    };
+
+    expect(shouldContinueDirectPlayerBatch({
+      actionIndex: 0,
+      maxActions: 6,
+      beforeStatus,
+      afterStatus,
+    })).toBe(true);
+
+    expect(shouldContinueDirectPlayerBatch({
+      actionIndex: 5,
+      maxActions: 6,
+      beforeStatus,
+      afterStatus,
+    })).toBe(false);
+  });
+
   it("does not treat text-only player output as gameplay progress", () => {
     const status: Status = {
       mode: "overworld",
@@ -216,7 +251,6 @@ describe("taskmaster iteration control", () => {
       recentEvents: JSON.stringify({
         events: [{ action: "move:up:2", changed: false, reason: "blocked" }],
       }),
-      rejectedActionNote: "move:right is invalid because that square is blocked.",
     });
 
     expect(request.response_format.type).toBe("json_schema");
@@ -226,12 +260,18 @@ describe("taskmaster iteration control", () => {
     expect(request.messages[0].content).toContain("After a failed or blocked move");
     expect(request.messages[0].content).toContain("Never wait");
     expect(request.messages[0].content).toContain("Do not wait for user input");
+    expect(request.messages[0].content).toContain("Use recent events as feedback, not as hard bans");
+    expect(request.messages[0].content).toContain("pressing A is usually the correct way to advance or confirm");
+    expect(request.messages[0].content).toContain("Use B only when the visible UI says Back/Cancel/No");
+    expect(request.messages[0].content).toContain("make a concrete choice that keeps the adventure moving");
+    expect(request.messages[0].content).toContain("choose one valid option and confirm it");
+    expect(request.messages[0].content).toContain("advance the main-story flow");
+    expect(request.messages[0].content).toContain("first move across visible floor toward that stand tile");
     expect(request.messages[0].content).toContain("route through visible floor tiles");
     expect(request.messages[0].content).toContain("Utility and object hotspots are not story route targets");
     expect(request.messages[1].content).toContain("Map info:");
     expect(request.messages[1].content).toContain("move:up:2");
-    expect(request.messages[1].content).toContain("Rejected candidates forbidden for this live state:");
-    expect(request.messages[1].content).toContain("move:right is invalid");
+    expect(request.messages[1].content).not.toContain("Rejected candidates forbidden");
     expect(request.messages[1].content.indexOf("Map info:")).toBeLessThan(
       request.messages[1].content.indexOf("Observation:"),
     );
@@ -269,7 +309,9 @@ describe("taskmaster iteration control", () => {
       observation: "MAIN MENU\nMENU\nNEW GAME",
       mapInfo: "{}",
       recentEvents: JSON.stringify({ events: [] }),
+      image: { data: "pngbase64", mimeType: "image/png" },
     }) as {
+      input: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: string }> }>;
       text: {
         format: {
           schema: {
@@ -289,6 +331,10 @@ describe("taskmaster iteration control", () => {
     expect(parameters.properties.button.type).toContain("null");
     expect(parameters.properties.button.enum).toContain(null);
     expect(parameters.properties.steps.type).toContain("null");
+    expect(request.input[1].content).toContainEqual({
+      type: "input_image",
+      image_url: "data:image/png;base64,pngbase64",
+    });
   });
 
   it("builds direct OpenAI Responses requests with strict structured output", () => {
@@ -410,113 +456,26 @@ describe("taskmaster iteration control", () => {
       observation: "MAIN MENU\nMENU\nNEW GAME",
       mapInfo: "{}",
       recentEvents: JSON.stringify({ events: [] }),
+      image: { data: "pngbase64", mimeType: "image/png" },
     }) as {
-      contents: Array<{ parts: Array<{ text: string }> }>;
+      contents: Array<{ parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> }>;
       generationConfig: { responseMimeType: string; responseJsonSchema: { properties: { action: { enum: string[] } } } };
     };
 
     expect(request.generationConfig.responseMimeType).toBe("application/json");
     expect(request.generationConfig.responseJsonSchema.properties.action.enum).toContain("press");
     expect(request.contents[0].parts[0].text).toContain("Never wait");
+    expect(request.contents[0].parts[1].inline_data).toEqual({
+      mime_type: "image/png",
+      data: "pngbase64",
+    });
   });
 
-  it("rejects a local action that exactly repeats a recent failed action from the same state", () => {
-    const status: Status = {
-      mode: "overworld",
-      map: "SomeMap",
-      mapId: "24:7",
-      coords: [3, 3],
-      facing: "up",
-      badges: 0,
-      canMove: true,
-      partyCount: 0,
-      flowSummary: "Next goal: Continue story",
-      flowNextGoal: "Continue story",
-      flowCompletionTarget: "Beat Mt. Silver",
-    };
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "move", parameters: { direction: "up", steps: 1 }, reason: "try again" },
-      status,
-      recentEvents: JSON.stringify({
-        events: [
-          { action: "move:up:1", coords: [3, 3], changed: false, reason: "blocked" },
-        ],
-      }),
-    })).toBe(true);
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "move", parameters: { direction: "right", steps: 1 }, reason: "different route" },
-      status,
-      recentEvents: JSON.stringify({
-        events: [
-          { action: "move:up:1", coords: [3, 3], changed: false, reason: "blocked" },
-        ],
-      }),
-    })).toBe(false);
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "move", parameters: { direction: "right", steps: 2 }, reason: "repeat blocked direction" },
-      status,
-      recentEvents: JSON.stringify({
-        events: [
-          { action: "move:right:3", coords: [3, 3], changed: true, reason: "blocked" },
-        ],
-      }),
-    })).toBe(true);
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "move", parameters: { direction: "right", steps: 2 }, reason: "walk into utility" },
-      status: {
-        ...status,
-        facing: "right",
-        interactionTarget: {
-          coords: [5, 3],
-          kind: "bg_event",
-          label: "Utility",
-          token: "P",
-          hotspotType: "utility",
-        },
-      },
-      recentEvents: JSON.stringify({ events: [] }),
-    })).toBe(true);
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "press", parameters: { button: "A" }, reason: "activate warp" },
-      status: {
-        ...status,
-        currentHotspot: {
-          coords: [3, 3],
-          label: "Warp",
-          token: "D",
-          hotspotType: "warp",
-        },
-      },
-      recentEvents: JSON.stringify({ events: [] }),
-    })).toBe(true);
-
-    expect(isLocalActionRejectedByRecentFailure({
-      action: { action: "press", parameters: { button: "A" }, reason: "repeat same NPC" },
-      status: {
-        ...status,
-        interactionTarget: {
-          coords: [3, 5],
-          kind: "npc",
-          label: "NPC",
-          token: "N",
-          hotspotType: "npc",
-        },
-        facing: "down",
-      },
-      recentEvents: JSON.stringify({
-        events: [
-          { action: "press:a:1", coords: [3, 3], summary: "text advance opened", changed: true },
-          { action: "execute_macro:advance_dialog:2/8", coords: [3, 3], summary: "text advance closed", changed: true },
-          { action: "press:a:1", coords: [3, 3], summary: "text advance opened", changed: true },
-          { action: "execute_macro:advance_dialog:2/8", coords: [3, 3], summary: "text advance closed", changed: true },
-        ],
-      }),
-    })).toBe(true);
+  it("detects direct player models that can receive image input", () => {
+    expect(supportsDirectPlayerImageInput("azure-openai/gpt-5.4-mini")).toBe(true);
+    expect(supportsDirectPlayerImageInput("openai-direct/gpt-4o-mini")).toBe(true);
+    expect(supportsDirectPlayerImageInput("google/gemini-2.5-flash")).toBe(true);
+    expect(supportsDirectPlayerImageInput("ollama/gemma-4-26b-a4b-it")).toBe(false);
   });
 
   it("does not frame non-elevated utility targets as the local prompt objective", () => {
@@ -629,6 +588,33 @@ describe("taskmaster iteration control", () => {
       "N NPC (3S)",
       "FLOW",
     ].join("\n"));
+  });
+
+  it("removes wait wording from local player prompt inputs", () => {
+    const status: Status = {
+      mode: "gender",
+      surface: {
+        kind: "gender",
+        title: "Gender",
+        controls: ["WAIT: applying choice", "A=Confirm"],
+        primaryText: "WAIT: applying choice",
+      },
+      map: "GENDER",
+      mapId: "gender",
+      badges: 0,
+      canMove: false,
+      partyCount: 0,
+      flowSummary: "Next goal: Continue story",
+      flowNextGoal: "Continue story",
+      flowCompletionTarget: "Beat Mt. Silver",
+    };
+
+    expect(JSON.stringify(sanitizeLocalPromptStatus(status))).not.toContain("WAIT");
+    expect(sanitizeLocalPromptObservation([
+      "GENDER",
+      "WAIT: applying choice",
+      "{\"info\":[\"WAIT: applying choice\"]}",
+    ].join("\n"), status)).not.toContain("WAIT");
   });
 
   it("does not frame a repeatedly exhausted NPC dialogue as the local prompt objective", () => {

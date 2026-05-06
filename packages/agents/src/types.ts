@@ -168,6 +168,12 @@ export const observeSnapshotSchema = z.object({
 export const observationSchema = z.object({
   summaryText: z.string(),
   snapshot: observeSnapshotSchema.optional(),
+  image: z
+    .object({
+      data: z.string().min(1),
+      mimeType: z.string().min(1),
+    })
+    .optional(),
   rawTexts: z.array(z.string()).min(1),
 });
 
