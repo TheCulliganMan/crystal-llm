@@ -199,7 +199,13 @@ async function loadMcpIdentityContext(): Promise<McpIdentityContextValue | null>
     return null;
   }
   try {
-    const module = await import('./mcp-identity-context.server');
+    const requireFn = (0, eval)('require') as NodeRequire | undefined;
+    if (typeof requireFn !== 'function') {
+      return null;
+    }
+    const module = requireFn('./mcp-identity-context.server') as {
+      getMcpIdentityContext: () => McpIdentityContextValue | null;
+    };
     return module.getMcpIdentityContext();
   } catch {
     return null;
