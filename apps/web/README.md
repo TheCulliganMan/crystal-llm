@@ -15,7 +15,7 @@ ASM-faithful Next.js and React app for the PokeCrystal runtime.
 - Optional `.env.local` for Next.js runtime configuration
 
 ## Commands
-- `npm run dev`: start the app with the development dist directory `.next-dev`.
+- `npm run dev`: start the app with Next.js' default development dist directory.
 - `npm run build`: prepare public assets, clean prior Next artifacts, and build into `.next-build` by default.
 - `npm run start`: start the production Next server.
 - `npm run lint`: run `lint:types` and `lint:eslint`.

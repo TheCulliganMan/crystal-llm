@@ -7,7 +7,7 @@
   "scripts": {
     "prebuild": "node scripts/run-with-bundled-node.js scripts/sync-workspace-runtime.js && node scripts/run-with-bundled-node.js scripts/emit-package-types.js && node scripts/run-with-bundled-node.js scripts/prepare-public.js",
     "predev": "node scripts/run-with-bundled-node.js scripts/sync-workspace-runtime.js && node scripts/run-with-bundled-node.js scripts/prepare-public.js",
-    "dev": "POKECRYSTAL_REQUIRE_SESSION_SECRET=false POKECRYSTAL_NEXT_DIST_DIR=.next-dev node scripts/run-with-bundled-node.js scripts/dev-with-logs.js",
+    "dev": "POKECRYSTAL_REQUIRE_SESSION_SECRET=false node scripts/run-with-bundled-node.js scripts/dev-with-logs.js",
     "build": "POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js scripts/clean-next-artifacts.js && POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js ../../node_modules/next/dist/bin/next build --webpack",
     "build:node": "npm run build",
     "audio:bundle": "node scripts/run-with-bundled-node.js scripts/generate-audio-bundle.js",
