@@ -110,8 +110,11 @@ describe("MCP stdio e2e", () => {
     const toolsListResponse = (await waitForMessage(messages, (message) => hasMessageId(message, 2) && "result" in message)) as {
       result: { tools?: Array<{ name: string; inputSchema?: unknown }> };
     } & JSONRPCMessage;
-    expect(toolsListResponse.result.tools?.map((tool: { name: string }) => tool.name)).toContain("register_identity");
-    expect(toolsListResponse.result.tools?.map((tool: { name: string }) => tool.name)).not.toContain("wait");
+    const toolNames = toolsListResponse.result.tools?.map((tool: { name: string }) => tool.name);
+    expect(toolNames).toContain("register_identity");
+    expect(toolNames).toContain("route_render");
+    expect(toolNames).not.toContain("wait");
+    expect(JSON.stringify(toolsListResponse.result.tools?.find((tool) => tool.name === "route_render")?.inputSchema)).not.toContain("map_name");
     expect(JSON.stringify(toolsListResponse.result.tools)).not.toContain("toon");
     expect(JSON.stringify(toolsListResponse.result.tools?.find((tool) => tool.name === "status")?.inputSchema)).toContain("json");
     expect(JSON.stringify(toolsListResponse.result.tools?.find((tool) => tool.name === "type_text")?.inputSchema)).toContain("clear");

@@ -7,6 +7,7 @@ export * from './overworld-map';
 export * from './overworld-object';
 export * from './overworld-npc-manager';
 export * from './overworld-rendering';
+export * from './route-render';
 export * from './overworld-script-queue';
 export * from './npc-movement';
 export * from './npc-autonomous-controller';

@@ -10,6 +10,7 @@ const KRABBYCLAW_PROGRESS_TRACKER_SKILL_DOWNLOAD_PATH = "/downloads/krabbyclaw-p
 const TOOL_ITEMS = [
   "observe: text snapshot without advancing the state",
   "map_info: current map, warps, and hotspot metadata",
+  "route_render: full live map schematic with optional tile PNG",
   "flow_state: spoiler-safe progression toward Mt. Silver",
   "move: directional movement for overworld and menus",
   "press: hardware-accurate A/B/Start/Select input",

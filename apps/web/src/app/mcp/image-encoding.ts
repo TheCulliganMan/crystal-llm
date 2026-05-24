@@ -99,27 +99,13 @@ const scaleRgba = (
   return { data: scaled, width: scaledWidth, height: scaledHeight };
 };
 
-export const encodeSurfaceToPng = (
-  surface: Surface,
-  options: PngOptions = {}
+const encodeRgbaToPng = (
+  rgbaData: Uint8Array,
+  width: number,
+  height: number,
+  scale: number
 ): { data: string; width: number; height: number } => {
-  const width = surface.get_width();
-  const height = surface.get_height();
-  if (width <= 0 || height <= 0) {
-    throw new Error(`Surface size must be positive, got ${width}x${height}.`);
-  }
-  const scale = normalizeScale(options.scale);
-  const expectedLength = width * height * 4;
-  const image = surface.getImageData();
-  const rgba = new Uint8Array(expectedLength);
-  const src = image?.data as ArrayLike<number> | undefined;
-  if (src) {
-    const limit = Math.min(expectedLength, src.length);
-    for (let i = 0; i < limit; i += 1) {
-      rgba[i] = src[i] ?? 0;
-    }
-  }
-  const scaled = scaleRgba(rgba, width, height, scale);
+  const scaled = scaleRgba(rgbaData, width, height, scale);
   const bytesPerRow = scaled.width * 4;
   const scanline = new Uint8Array((bytesPerRow + 1) * scaled.height);
   for (let y = 0; y < scaled.height; y += 1) {
@@ -150,4 +136,27 @@ export const encodeSurfaceToPng = (
     width: scaled.width,
     height: scaled.height,
   };
+};
+
+export const encodeSurfaceToPng = (
+  surface: Surface,
+  options: PngOptions = {}
+): { data: string; width: number; height: number } => {
+  const width = surface.get_width();
+  const height = surface.get_height();
+  if (width <= 0 || height <= 0) {
+    throw new Error(`Surface size must be positive, got ${width}x${height}.`);
+  }
+  const scale = normalizeScale(options.scale);
+  const expectedLength = width * height * 4;
+  const image = surface.getImageData();
+  const rgba = new Uint8Array(expectedLength);
+  const src = image?.data as ArrayLike<number> | undefined;
+  if (src) {
+    const limit = Math.min(expectedLength, src.length);
+    for (let i = 0; i < limit; i += 1) {
+      rgba[i] = src[i] ?? 0;
+    }
+  }
+  return encodeRgbaToPng(rgba, width, height, scale);
 };

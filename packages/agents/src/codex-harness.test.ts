@@ -156,6 +156,7 @@ describe("codex harness helpers", () => {
         additionalProperties: false,
       });
     }
+    expect(tools.some((entry: { spec: { name: string } }) => entry.spec.name === "route_render")).toBe(true);
     expect(tools.some((entry: { spec: { name: string } }) => entry.spec.name === "wait")).toBe(false);
   });
 

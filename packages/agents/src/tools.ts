@@ -7,6 +7,7 @@ export type PlayerToolOptions = {
 const compactPlayerToolNames = new Set([
   "observe",
   "map_info",
+  "route_render",
   "move",
   "press",
   "status",

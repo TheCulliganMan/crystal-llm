@@ -2,6 +2,7 @@ import { z, type ZodTypeAny } from "zod";
 import { MAX_ADVANCE_FRAMES, type McpToolHandler } from "./common";
 import { ObserveSchema, observeHandler } from "./observe";
 import { MapInfoSchema, mapInfoHandler } from "./map_info";
+import { RouteRenderSchema, routeRenderHandler } from "./route_render";
 import { FlowStateSchema, flowStateHandler } from "./flow_state";
 import {
   ExecuteMacroSchema,
@@ -41,8 +42,12 @@ const TrainingMetadataSchema = z.object({
   goal: z.string().trim().min(1).max(240).optional(),
 });
 
+const TrainingMetadataShape = TrainingMetadataSchema.shape;
+
 const withTrainingMetadata = (schema: ZodTypeAny): ZodTypeAny =>
-  schema.and(TrainingMetadataSchema);
+  schema instanceof z.ZodObject
+    ? schema.extend(TrainingMetadataShape)
+    : schema.and(TrainingMetadataSchema);
 
 const macroLimit = MAX_ADVANCE_FRAMES;
 
@@ -65,7 +70,7 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "observe",
     title: "Observe",
     description:
-      "Observe the current snapshot. Coordinates use screen/map convention x+ right, x- left, y+ down, y- up. Compact JSON includes dir plus warp guidance: ow.w[].stand is where to stand, ow.w[].move/go is the direction to enter.",
+      "Observe the current snapshot. Pass include_image=true to return an image/png content block of the current game view. Coordinates use screen/map convention x+ right, x- left, y+ down, y- up. Compact JSON includes dir plus warp guidance: ow.w[].stand is where to stand, ow.w[].move/go is the direction to enter.",
     inputSchema: withTrainingMetadata(ObserveSchema),
     handler: observeHandler,
   },
@@ -76,6 +81,14 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
       "Return structured current-map info, including player position, stable warps, and hotspot metadata for the current map. Use this when status is not enough for route planning.",
     inputSchema: withTrainingMetadata(MapInfoSchema),
     handler: mapInfoHandler,
+  },
+  {
+    name: "route_render",
+    title: "Route render",
+    description:
+      "Render the full current overworld route/city/interior as an agent-readable schematic. Returns JSON grid rows by default; pass include_image=true for an annotated image/png, or image_style=tiles for high-fidelity metatile art. Does not inspect arbitrary maps or choose routes.",
+    inputSchema: withTrainingMetadata(RouteRenderSchema),
+    handler: routeRenderHandler,
   },
   {
     name: "flow_state",

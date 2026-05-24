@@ -27,6 +27,13 @@ import { DomCanvasUI } from "@pokecrystal/core/ui/dom-canvas-ui";
 import { getMapEnvironment, mapConstantToName, Spawn } from "@pokecrystal/core/engine/world/maps";
 import { isPermissionPassable } from "@pokecrystal/core/engine/world/overworld/collision-rules";
 import {
+  buildRouteRenderSnapshot,
+  buildUnavailableRouteRenderSnapshot,
+  renderRouteRenderTileSurface,
+  type RouteRenderDetail,
+  type RouteRenderSnapshot,
+} from "@pokecrystal/core/engine/world/overworld/route-render";
+import {
   getMcpIdentityContext,
   runWithMcpIdentityContext,
 } from "@pokecrystal/core/core/mcp-identity-context.server";
@@ -427,8 +434,11 @@ export type McpRecentEventsSnapshot = {
   events: McpActionEvent[];
 };
 
+export type McpRouteRenderSnapshot = RouteRenderSnapshot;
+
 type SessionMapDataLoader = {
   map_events?: Map<string, { bg_events?: unknown[]; coord_events?: unknown[] }>;
+  get_script_event_flags?: (scriptName: string) => string[];
 };
 
 const resolveSessionMapDataLoader = (state: {
@@ -1771,8 +1781,99 @@ class McpGameSession {
     if (!this.lastSnapshot) {
       this.stepFrames(1);
     }
+    await this.waitForRenderableImageSurface();
     this.ensureFrameConsistentSnapshot("observe_image");
     return encodeSurfaceToPng(this.renderUi.screen, { scale: options.scale });
+  }
+
+  private async waitForRenderableImageSurface(): Promise<void> {
+    const game = this.getGame();
+    const drawableGame = game as unknown as { draw?: () => void };
+    const overworld = game.getOverworld?.() as
+      | {
+          tileset?: { ready?: Promise<unknown>; loaded?: boolean } | null;
+          map_surface?: unknown;
+          _composite_surface?: unknown;
+          current_map_name?: string;
+          load_map?: (mapName: string) => void;
+        }
+      | null
+      | undefined;
+    if (!overworld) {
+      drawableGame.draw?.();
+      return;
+    }
+
+    await this.waitForTilesetReady(overworld.tileset);
+    if (
+      overworld.tileset?.loaded &&
+      !overworld.map_surface &&
+      typeof overworld.load_map === "function"
+    ) {
+      const mapName =
+        typeof overworld.current_map_name === "string" && overworld.current_map_name.length > 0
+          ? overworld.current_map_name
+          : this.readBestMapName(game) ?? game.getMapName?.();
+      if (mapName) {
+        overworld.load_map(mapName);
+        await this.waitForTilesetReady(overworld.tileset);
+      }
+    }
+
+    await this.flushAsyncRenderWork();
+    drawableGame.draw?.();
+    if (!this.isImageSurfaceBlank() || overworld.map_surface || overworld._composite_surface) {
+      return;
+    }
+
+    this.stepFrames(1);
+    await this.flushAsyncRenderWork();
+    drawableGame.draw?.();
+  }
+
+  private async waitForTilesetReady(
+    tileset: {
+      ready?: Promise<unknown> | { then: (handler: () => void, reject?: (error: unknown) => void) => unknown };
+      loaded?: boolean;
+    } | null | undefined
+  ): Promise<void> {
+    if (!tileset?.ready || tileset.loaded) {
+      return;
+    }
+    await Promise.race([
+      Promise.resolve(tileset.ready).catch(() => undefined),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 3000);
+      }),
+    ]);
+  }
+
+  private async flushAsyncRenderWork(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+
+  private isImageSurfaceBlank(): boolean {
+    const data = this.renderUi.screen.getImageData().data;
+    if (data.length < 4) {
+      return true;
+    }
+    const firstR = data[0];
+    const firstG = data[1];
+    const firstB = data[2];
+    const firstA = data[3];
+    for (let i = 4; i < data.length; i += 4) {
+      if (
+        data[i] !== firstR ||
+        data[i + 1] !== firstG ||
+        data[i + 2] !== firstB ||
+        data[i + 3] !== firstA
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private ensureFrameConsistentSnapshot(operation: string): TextSnapshotPayload {
@@ -2840,6 +2941,98 @@ class McpGameSession {
       facing: facing === "unknown" ? undefined : facing,
       dataLoader: resolveSessionMapDataLoader(state),
       eventFlags: (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
+    });
+  }
+
+  async routeRender(options: { detail?: RouteRenderDetail } = {}): Promise<McpRouteRenderSnapshot> {
+    await this.ensureReady();
+    const status = await this.status();
+    const mapName = status.map ?? null;
+    const mapId = status.map_id ?? null;
+    if (status.mode !== "overworld") {
+      return buildUnavailableRouteRenderSnapshot(
+        `route_render is only available in overworld mode; current mode is ${status.mode}.`,
+        mapName,
+        mapId
+      );
+    }
+
+    const game = this.getGame();
+    const state = game.getGameState();
+    const overworld = game.getOverworld() as unknown as OverworldMapInfoSource & {
+      _map_events?: { coord_events?: Array<{ x: number; y: number; scene_id?: string; script_name?: string }> } | null;
+    };
+    const mapData = overworld.map;
+    const tileset = overworld.tileset;
+    if (!mapData || !tileset) {
+      return buildUnavailableRouteRenderSnapshot(
+        "route_render requires the live overworld map and tileset.",
+        mapName,
+        mapId
+      );
+    }
+    if (!Array.isArray(tileset.metatiles) || tileset.metatiles.length === 0) {
+      return buildUnavailableRouteRenderSnapshot(
+        "route_render requires loaded tileset metatiles.",
+        mapName,
+        mapId
+      );
+    }
+
+    const mapInfo = await this.mapInfo();
+    const player = mapInfo.player
+      ? {
+          coords: mapInfo.player.coords,
+          facing: mapInfo.player.facing,
+        }
+      : undefined;
+    return buildRouteRenderSnapshot({
+      map: mapInfo.map,
+      mapId: mapInfo.map_id,
+      coordStride: mapInfo.coord_stride,
+      player,
+      mapData,
+      tileset,
+      playerState: overworld.player_state ?? PlayerState.NORMAL,
+      warps: mapInfo.warps,
+      hotspots: mapInfo.hotspots,
+      mapEvents: overworld._map_events ?? null,
+      currentScene: typeof state.wram.scene_name === "string" ? state.wram.scene_name : null,
+      eventFlags: (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
+      dataLoader: resolveSessionMapDataLoader(state),
+      detail: options.detail ?? "compact",
+    });
+  }
+
+  async routeRenderImage(
+    snapshot: McpRouteRenderSnapshot,
+    options: { cellSize?: number } = {}
+  ): Promise<InstanceType<typeof gameEngine.Surface>> {
+    await this.ensureReady();
+    if (!snapshot.available) {
+      throw new Error(snapshot.reason ?? "route_render image is unavailable for the current session.");
+    }
+
+    const game = this.getGame();
+    const state = game.getGameState();
+    const overworld = game.getOverworld() as unknown as OverworldMapInfoSource;
+    const mapData = overworld.map;
+    const tileset = overworld.tileset;
+    if (!mapData || !tileset) {
+      throw new Error("route_render image requires the live overworld map and tileset.");
+    }
+    await this.waitForTilesetReady(tileset);
+    if (!Array.isArray(tileset.metatiles) || tileset.metatiles.length === 0 || tileset.loaded === false) {
+      throw new Error("route_render image requires loaded high-fidelity tileset data.");
+    }
+
+    return renderRouteRenderTileSurface({
+      snapshot,
+      mapData,
+      tileset,
+      vram: state.vram,
+    }, {
+      cellSize: options.cellSize,
     });
   }
 

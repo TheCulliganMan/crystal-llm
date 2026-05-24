@@ -5,6 +5,7 @@ describe("player tool selection", () => {
     const allTools = {
       observe: {},
       map_info: {},
+      route_render: {},
       flow_state: {},
       move: {},
       press: {},
@@ -20,6 +21,7 @@ describe("player tool selection", () => {
     await expect(createPlayerTools(session as never, { compact: true })).resolves.toEqual({
       observe: {},
       map_info: {},
+      route_render: {},
       move: {},
       press: {},
       status: {},
@@ -30,6 +32,7 @@ describe("player tool selection", () => {
     const session = {
       listPlayerTools: jest.fn().mockResolvedValue({
         krabbyclaw_observe: {},
+        krabbyclaw_route_render: {},
         krabbyclaw_move: {},
         krabbyclaw_recent_events: {},
       }),
@@ -37,6 +40,7 @@ describe("player tool selection", () => {
 
     await expect(createPlayerTools(session as never, { compact: true })).resolves.toEqual({
       krabbyclaw_observe: {},
+      krabbyclaw_route_render: {},
       krabbyclaw_move: {},
     });
   });

@@ -120,17 +120,20 @@ describe("session helpers", () => {
   it("accepts both namespaced and direct MCP gameplay tool names", () => {
     const status = { execute: jest.fn() };
     const move = { execute: jest.fn() };
+    const routeRender = { execute: jest.fn() };
     const registerIdentity = { execute: jest.fn() };
     const tools = {
       status,
       krabbyclaw_move: move,
+      route_render: routeRender,
       register_identity: registerIdentity,
     };
 
-    expect(Object.keys(mapMcpToolsToPlayerTools(tools as any)).sort()).toEqual(["krabbyclaw_move", "status"]);
+    expect(Object.keys(mapMcpToolsToPlayerTools(tools as any)).sort()).toEqual(["krabbyclaw_move", "route_render", "status"]);
     expect(mapMcpToolsToDirectPlayerTools(tools as any)).toEqual({
       status,
       move,
+      route_render: routeRender,
     });
   });
 

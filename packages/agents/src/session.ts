@@ -37,6 +37,7 @@ type DirectMcpClient = {
 const PLAYER_TOOL_NAMES = [
   "observe",
   "map_info",
+  "route_render",
   "flow_state",
   "move",
   "press",
@@ -494,6 +495,7 @@ export class KrabbyClawSession {
     return {
       observe: textTool("observe", "Observe the current game state and visible screen text.", emptySchema),
       map_info: textTool("map_info", "Get local map, hotspot, and routing information.", emptySchema),
+      route_render: textTool("route_render", "Get a full current-map navigation schematic when viewport evidence is insufficient.", emptySchema),
       flow_state: textTool("flow_state", "Get spoiler-safe story-flow progress and next goal.", emptySchema),
       move: textTool("move", "Send a d-pad input; in menus, name entry, and time entry this moves the cursor or adjusts the selected value.", directionSchema.merge(reasonSchema)),
       press: textTool("press", "Press a Game Boy button once; A selects/confirms, B cancels/deletes, and Start accepts END on name entry.", buttonSchema.merge(reasonSchema)),
@@ -578,6 +580,10 @@ export class KrabbyClawSession {
 
   async mapInfo(): Promise<string> {
     return this.executeTextTool("map_info", {});
+  }
+
+  async routeRender(): Promise<string> {
+    return this.executeTextTool("route_render", {});
   }
 
   async flowState(): Promise<string> {

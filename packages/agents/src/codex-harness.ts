@@ -1264,6 +1264,15 @@ export function buildCodexToolDefinitions(
     },
     {
       spec: {
+        name: "route_render",
+        description:
+          "Get a full current-map navigation schematic when the Game Boy viewport is too local for pathing.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      },
+      run: async () => await session.routeRender(),
+    },
+    {
+      spec: {
         name: "flow_state",
         description: "Get spoiler-safe next-goal guidance for the current story state.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },

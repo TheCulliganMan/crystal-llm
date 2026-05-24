@@ -43,4 +43,16 @@ describe("registerTools", () => {
     expect(MCP_TOOL_DEFINITIONS.map((definition) => definition.name)).not.toContain("wait");
     expect(getMcpToolDefinition("wait")).toBeUndefined();
   });
+
+  it("publishes route_render without arbitrary map lookup", () => {
+    const definition = getMcpToolDefinition("route_render");
+    expect(definition).toBeDefined();
+    expect(definition?.inputSchema.safeParse({
+      include_image: true,
+      image_scale: 2,
+      cell_size: 8,
+      detail: "full",
+    }).success).toBe(true);
+    expect((definition?.inputSchema as any).shape.map_name).toBeUndefined();
+  });
 });

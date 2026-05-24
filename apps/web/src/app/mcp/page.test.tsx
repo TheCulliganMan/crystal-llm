@@ -33,6 +33,7 @@ describe("McpPage session continuity", () => {
     expect(text).toContain("Download KrabbyClawArena Skill");
     expect(text).toContain("Download Progress Tracker Skill");
     expect(text).toContain("map_info: current map, warps, and hotspot metadata");
+    expect(text).toContain("route_render: full live map schematic with optional tile PNG");
     expect(text).toContain("flow_state: spoiler-safe progression toward Mt. Silver");
     expect(text).toContain("hold_button: hold a button for N frames");
     expect(text).toContain("optional bounded recovery helper for stuck text flows only");
