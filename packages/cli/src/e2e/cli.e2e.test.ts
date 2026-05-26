@@ -365,7 +365,7 @@ describe("pokecrystal-cli end to end", () => {
         env: process.env,
       }
     );
-    expect(skillOutput).toContain("# PokeCrystal CLI Skill");
+    expect(skillOutput).toContain("# Crystal LLM");
   });
 
   it("can drive the text UI in non-interactive test mode", async () => {

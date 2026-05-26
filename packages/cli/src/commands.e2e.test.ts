@@ -87,8 +87,8 @@ describe("pokecrystal-cli command e2e", () => {
     const skillPath = await runCliCommand(["skill"]);
     const printedSkill = await runCliCommand(["skill", "--print"]);
 
-    expect(skillPath.stdout).toContain("/packages/cli/skills/pokecrystal-cli/SKILL.md");
-    expect(printedSkill.stdout).toContain("PokeCrystal CLI Skill");
+    expect(skillPath.stdout).toContain("/packages/cli/skills/crystal-llm/SKILL.md");
+    expect(printedSkill.stdout).toContain("# Crystal LLM");
   });
 
   it("register command bootstraps identity and session secret end to end", async () => {

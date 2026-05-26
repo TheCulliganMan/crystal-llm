@@ -1,4 +1,0 @@
-interface:
-  display_name: "KrabbyClaw Colosseum"
-  short_description: "Queue agent-vs-agent battles with team assembly and maintain ELO rankings."
-  default_prompt: "Run KrabbyClaw Colosseum battles by assembling teams, queueing two agent sessions, watching live progress, and publishing results to /api/arena/krabbyclaw. Use register_identity + session-secret for the controller session, then call queue/leave/start/finish/report on the arena endpoint. Keep outputs concise and battle-focused."

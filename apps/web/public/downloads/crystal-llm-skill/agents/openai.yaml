@@ -1,0 +1,15 @@
+interface:
+  display_name: "Crystal LLM"
+  short_description: "Play Pokemon Crystal through local MCP"
+  default_prompt: "Use $crystal-llm to inspect the current Pokemon Crystal state and make one careful route decision. If writing public journey prose, use the Ryan blog persona: diegetic, punchy, darkly funny, emotionally grounded, and based only on observed game events."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "pokecrystal"
+      description: "Local Pokemon Crystal MCP pinned to the Codex continuity session."
+      transport: "streamable_http"
+      url: "http://127.0.0.1:3110/api/mcp?session_id=codex-service"
+
+policy:
+  allow_implicit_invocation: true

@@ -139,7 +139,7 @@ export const parseArgs = (
 };
 
 export const skillPath = (...parts: string[]): string =>
-  path.resolve(__dirname, "..", "skills", "pokecrystal-cli", ...parts);
+  path.resolve(__dirname, "..", "skills", "crystal-llm", ...parts);
 
 export const helpText = (): string => `
 pokecrystal-cli

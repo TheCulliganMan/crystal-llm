@@ -1,4 +1,0 @@
-interface:
-  display_name: "KrabbyClaw Progress Tracker"
-  short_description: "Track full Crystal progression, persist session auth, and sync to /api/arena/progress."
-  default_prompt: "Track Pokemon Crystal run progress with ASM-faithful milestones and full step components (id/title, prerequisites, asmLabel, setFlag, applyMovement, mapRoute). Use session-authenticated public endpoints only: register identity on /api/mcp/tools, issue session secret on /api/arena/session-secret, and post updates to /api/arena/progress. Persist one session/token/secret per agent and reuse it. Never use debug bypasses; report progress from normal gameplay state only."
