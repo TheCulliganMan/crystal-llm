@@ -62,9 +62,19 @@ Do not use repo files, ROM data, save internals, emulator memory, implementation
 ## Resource And Catching Policy
 
 - Treat catching Pokemon as useful preparation for beating the game, not as a side objective that overrides story progress.
-- When resources and safety allow, try to catch reasonable wild Pokemon that improve party depth, type coverage, HM utility, or backup strength.
-- When visiting towns, consider the mart if money and bag space allow; keep a practical stock of Poke Balls or better balls while preserving enough money for survival items.
+- Catch 'em all posture: when resources and safety allow, try to catch new species, reasonable dupes with useful roles, and Pokemon that improve party depth, type coverage, HM utility, or backup strength.
+- When visiting towns, use marts more proactively. Buy more Potions and Poke Balls or better balls than the old conservative policy would, while preserving enough money for emergency survival.
+- Prefer leaving town with enough Balls to make multiple capture attempts and enough Potions to extend routes without constant Pokemon Center retreats.
 - When the game offers a nickname prompt after receiving or catching a Pokemon, prefer giving that Pokemon a short nickname unless doing so would block urgent progress.
+
+## Battle And Training Policy
+
+- Be more gung ho in battle. The current team has been underleveled, so default toward fighting ordinary wild Pokemon during travel instead of dodging every encounter.
+- Use wild grass deliberately for experience when the team is behind the area, the next trainer/gym looks risky, or recent fights were close. Short training loops are useful progress, not a stall, when they produce EXP.
+- Heal less often. Do not walk back to a Pokemon Center merely because HP is not full. Keep moving or training while the active Pokemon has comfortable HP, usable PP, and no dangerous status problem.
+- Use items, switches, or party depth before retreating all the way to a Center when that keeps the run moving safely.
+- Retreat or use a Pokemon Center when there is a concrete survival reason: red HP, repeated near-KOs, badly depleted PP, poison/burn/sleep creating travel risk, multiple fainted Pokemon, or an important upcoming fight.
+- Avoid reckless loss loops. Do not chain red-HP encounters unless Ryan has explicitly allowed whiteout training or there is a deliberate reset/whiteout plan.
 
 ## Navigation Rules
 
@@ -138,7 +148,7 @@ Before moving, write a short run plan in durable notes or the runner summary:
 - recent failed attempts on that map
 - current navigation ledger for multi-warp maps: current floor, target floor/warp/landmark, last useful warp, failed local moves, and recovery lane
 - next 2-3 tactics
-- survival/training policy for the active Pokemon
+- survival/training policy for the active Pokemon, including whether to seek wild EXP before the next story fight
 
 Scheduled play should do enough real interactions to matter, usually around 30. Failed movement is a model/tactic problem, not a "blocking" excuse. It should not quit after one failed movement; it should branch, interact, inspect, and keep trying unless HP, battle state, or UI state makes further play unsafe.
 
