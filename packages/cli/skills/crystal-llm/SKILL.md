@@ -59,6 +59,20 @@ Use this loop for manual and autonomous play:
 
 Do not use repo files, ROM data, save internals, emulator memory, implementation coordinates, or generated map data to decide gameplay. For gameplay, use only live MCP outputs, real screenshots, visible text, recent in-game events, controller inputs, and Ryan's directions. File access is allowed for skill/runner/memory maintenance, not for in-game navigation.
 
+## Story Objective Completion
+
+Track objectives symbolically, not just by movement or partial fights. For every story subgoal, keep a small completion ledger in the run summary or durable notes:
+
+- `objective`: the actual story task in generic terms, such as clearing the current dungeon, unlocking the next gate, or opening the next major route.
+- `expectedCapstone`: the kind of confirmation that should happen when it is done, such as an NPC arriving, a rescued character, a reward, a forced scene, a guard moving, a warp opening, or the next blocker disappearing.
+- `currentEvidence`: dialogue, map transitions, defeated trainers, item/reward text, NPC position changes, and route blockers tested live.
+- `stillBlockedBy`: any visible NPC, trainer, locked door, cut tree, or unexplored branch that still prevents the next story objective.
+- `nextProofStep`: the next concrete live check that would prove completion or reveal the remaining task.
+
+Do not mark a story objective complete just because the character entered the area, beat one trainer, reached an early room, or returned to town. A story objective is complete only after a symbolic capstone or state change is verified. Examples of valid completion evidence include a relevant NPC arriving or talking after progress, hostile blockers leaving, a guard no longer blocking a gym or route, a reward/key item text, a badge/TM text, or a new warp/door becoming usable.
+
+When an NPC or the story gives a hint, treat it as the primary route clue. If a relevant NPC appears, moves, gives a speech, or reacts to progress, stop and update the ledger before pathing. If a gym/route remains blocked after a partial dungeon clear, infer that the dungeon/story task is not done and return to find the unvisited branch, remaining trainer, boss, item, or capstone event.
+
 ## Resource And Catching Policy
 
 - Treat catching Pokemon as useful preparation for beating the game, not as a side objective that overrides story progress.
@@ -80,6 +94,9 @@ Do not use repo files, ROM data, save internals, emulator memory, implementation
 
 - Treat Ryan's directions as route intent, not blind button macros.
 - Follow visible lanes and shelves. Destination direction may require moving away from the destination first.
+- Pathfind from the live map topology, not from remembered shapes. Use `observe --grid` and `route --no-image` to identify the actual connected floor, chokepoints, branch ends, trainer/NPC gates, item pockets, and warps on the current map. A previous map shape is not a template for the next map.
+- On dungeon/story maps, push the reachable topology hard: inspect each branch, challenge trainers/NPCs that occupy the route, collect reachable progress items when safe, and continue until the objective ledger has a capstone or a concrete survival reason to leave.
+- Warps are leads, not completion. Entering or finding a warp proves only that a branch exists; story completion still requires a capstone, blocker change, reward/key text, boss/trainer clear, or next-route access verified live.
 - Treat `d`, `l`, and `r` ledge glyphs as one-way terrain. Cross them only deliberately and only from the valid side.
 - Prefer reversible exploration. Keep a route back to the current lane.
 - On multi-floor or multi-warp maps, maintain a navigation ledger before moving: current map/coords, current objective, intended next warp/landmark, last useful warp used, local failed moves, and a recovery move if the next lane fails.
@@ -146,15 +163,24 @@ Before moving, write a short run plan in durable notes or the runner summary:
 - live map and current goal
 - current route memory for that map
 - recent failed attempts on that map
+- story completion ledger: objective, expected capstone, current evidence, remaining blocker, and next proof step
 - current navigation ledger for multi-warp maps: current floor, target floor/warp/landmark, last useful warp, failed local moves, and recovery lane
 - next 2-3 tactics
 - survival/training policy for the active Pokemon, including whether to seek wild EXP before the next story fight
 
-Scheduled play should do enough real interactions to matter, usually around 30. Failed movement is a model/tactic problem, not a "blocking" excuse. It should not quit after one failed movement; it should branch, interact, inspect, and keep trying unless HP, battle state, or UI state makes further play unsafe.
+Scheduled play should do enough real interactions to matter, usually around 30. Failed movement is a model/tactic problem, not a "blocking" excuse. It should not quit after one failed movement; it should branch, interact, inspect, and keep trying unless HP, battle state, or UI state makes further play unsafe. For story tasks, "enough interactions" means pursuing the capstone state change, not sampling the first quarter of the area and leaving.
 
 Codex gameplay automation must use the stock `poke` shortcut first (`status`, `observe`, `route`, `context`, `proof`, `move`, `press`, `clear`, `events`) and only use raw MCP calls for tools that wrapper does not expose. Do not route gameplay through `mcporter`.
 
 Do not convert failed behavior into future guidance. Never write direction-order churn, scout-looping, or repeated same-tile pushing as a best practice. Only infer a stall lesson after an actual movement action fails. Diagnostic-only status/observe/context/proof runs must not create stall guidance.
+
+## Action Posture
+
+Use a brash, aggressive dungeon-crawl posture in play decisions: move with purpose, challenge blockers, finish rooms, and prove the task through live state changes. Keep the same player identity and name; only the tactical tone changes.
+
+Do not be passive around trainers. If a trainer is reachable and belongs to the current objective path, challenge them unless survival state says doing so is reckless. Treat trainer clears as both progress and experience, not optional scenery.
+
+Battle inputs must be deliberate. Read the battle state, choose a useful move, switch, item, or ball on purpose, and avoid blind confirm-button loops. Default toward strong STAB or type-advantaged damage, use captures when a useful or new wild Pokemon is practical, and spend healing items before abandoning a dungeon when that keeps the push alive.
 
 ## Validation
 

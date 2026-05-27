@@ -17,7 +17,13 @@ Do not inspect ROM/source files, map/event files, save internals, emulator memor
 ## Navigation
 
 - Read the screen before pressing buttons.
+- Treat dialogue, NPC movement, rewards, and blocker changes as story-state evidence. Do not mash through text without preserving what it means.
 - Treat destination direction as intent, not immediate input.
+- Pathfind from the current live topology. Use the full observed map when the viewport is too small, then identify connected floor, chokepoints, branch ends, trainers/NPCs, item pockets, and warps for this map only.
+- Do not generalize a map shape from one area to another. A shape clue is local evidence, not a reusable route model.
+- In dungeons and story areas, keep pushing through reachable branches until the objective ledger has a real capstone or survival state forces a retreat. Do not stop after a partial room, first trainer, or convenient warp.
+- Warps are leads, not completion proof. Completion requires a story-state change, blocker change, reward/key text, boss/trainer clear, or verified access to the next objective.
+- Challenge reachable trainers that occupy or guard the current objective path unless HP, PP, status, or party state makes the fight reckless.
 - Use one-tile moves around ledges, fences, rocks, trees, NPCs, grass pockets, and branch points.
 - If the same movement fails twice, treat it as a bad model/tactic choice and branch.
 - Treat `d`, `l`, and `r` as one-way ledges, not generic floor.
@@ -27,6 +33,20 @@ Do not inspect ROM/source files, map/event files, save internals, emulator memor
 - In Cherrygrove, do not repeatedly push north after it fails. Use visible town context, move west through town toward the Route 30 approach, interact with NPCs when useful, and keep pursuing progress.
 - If a route is not visible in the current viewport, say that. Do not overclaim route impossibility.
 - Prefer roads/floors at low HP; use grass deliberately when training or when no route avoids it.
+
+## Subgoal Completion Tracking
+
+Use symbolic completion tracking for every story objective:
+
+- Define the objective in story terms, not just coordinates.
+- Name the expected capstone: an NPC arrival, story speech, reward, badge, item, boss defeat, guard moving, route opening, gym access, or changed dialogue.
+- Track current evidence from live text, recent events, screenshots, visible NPC locations, defeated trainers, and tested blockers.
+- Track what still blocks the next objective.
+- Choose the next proof step that would confirm completion or expose the remaining work.
+
+Do not mark a story subgoal complete because the player entered an area, beat one encounter, reached a partial room, or returned to town. If a gym, route, or story gate remains blocked afterward, that is evidence the prerequisite is unfinished. Return to the relevant story area, inspect unvisited lanes, talk to relevant NPCs, fight remaining trainers, and pursue the capstone.
+
+NPCs and story hints outrank generic navigation guesses. When a story character appears, moves, comments on the situation, gives a reward, or redirects the player, stop and update the subgoal ledger. The game is usually telling you what just changed and what still needs doing.
 
 ## Battles And Training
 
@@ -41,6 +61,8 @@ Catching Pokemon is useful main-story preparation when it is safe and resources 
 - Run, heal, or retreat when HP is genuinely unsafe, not merely imperfect.
 - If Ryan explicitly allows whiteouts for training, EXP preservation can make a reset acceptable.
 - Do not chain red-HP encounters without a deliberate heal/reset/whiteout decision.
+- In trainer and dungeon battles, do not blindly press confirm through turns. Read the battle state and choose a deliberate move, switch, item, or ball. Prefer strong STAB or type-advantaged attacks when they are available.
+- Use a more aggressive action tone without changing the player name or identity: push rooms to completion, fight route blockers, and spend items to keep the objective moving when safe.
 
 ## Memory Updates
 
