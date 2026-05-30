@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { callMcpTool } from './mcp_call.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || '/home/owner';
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const ROOT = process.env.POKECRYSTAL_REPO || '$POKECRYSTAL_REPO';
-const MCP_CALL = path.join(SCRIPT_DIR, 'mcp_call.mjs');
 const LEARNING_STATE =
   process.env.POKECRYSTAL_LEARNING_STATE ||
   path.join(CODEX_HOME, 'pokecrystal/poke_learning_state.json');
@@ -76,16 +75,8 @@ function truncate(value, max = 900) {
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
-function callMcp(tool, args = {}, saveImages = null) {
-  const argv = [MCP_CALL, tool];
-  if (args !== null) argv.push('--args', JSON.stringify(args));
-  if (saveImages) argv.push('--save-images', saveImages);
-  const stdout = execFileSync(process.execPath, argv, {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return JSON.parse(stdout);
+async function callMcp(tool, args = {}, saveImages = null) {
+  return callMcpTool(tool, args || {}, { repo: ROOT, saveImages });
 }
 
 function contentTexts(result) {
@@ -211,13 +202,13 @@ async function main() {
   const { cmd, args, flags } = opts;
 
   if (cmd === 'status') {
-    print(compactStatus(firstObject(callMcp('status'))));
+    print(compactStatus(firstObject(await callMcp('status'))));
     return;
   }
 
   if (cmd === 'observe') {
     const saveImages = flags['no-image'] ? null : (flags['save-images'] || DEFAULT_IMAGE_DIR);
-    const result = callMcp('observe', {
+    const result = await callMcp('observe', {
       include_image: !flags['no-image'],
       image_scale: 2,
       advance_frames: 1,
@@ -231,7 +222,7 @@ async function main() {
   if (cmd === 'route') {
     const includeImage = !flags['no-image'];
     const saveImages = includeImage ? (flags['save-images'] || path.join(DEFAULT_IMAGE_DIR, 'route-render')) : null;
-    const result = callMcp('route_render', {
+    const result = await callMcp('route_render', {
       include_image: includeImage,
       image_scale: numberFlag(flags, 'image-scale', 2),
       cell_size: numberFlag(flags, 'cell-size', 8),
@@ -246,8 +237,8 @@ async function main() {
   if (cmd === 'proof') {
     const label = String(args[0] || 'proof').replace(/[^a-zA-Z0-9._-]+/g, '-');
     const saveImages = path.join(DEFAULT_IMAGE_DIR, label);
-    const status = compactStatus(firstObject(callMcp('status')));
-    const observe = compactObserve(callMcp('observe', {
+    const status = compactStatus(firstObject(await callMcp('status')));
+    const observe = compactObserve(await callMcp('observe', {
       include_image: true,
       image_scale: 2,
       advance_frames: 1,
@@ -259,7 +250,7 @@ async function main() {
   }
 
   if (cmd === 'context') {
-    print(compactRouteContext(firstObject(callMcp('status'))));
+    print(compactRouteContext(firstObject(await callMcp('status'))));
     return;
   }
 
@@ -267,9 +258,9 @@ async function main() {
     const direction = args[0];
     if (!/^(up|down|left|right)$/i.test(direction || '')) throw new Error('move requires up|down|left|right');
     const steps = numberFlag(flags, 'steps', 1);
-    const before = compactStatus(firstObject(callMcp('status')));
-    const move = callMcp('move', { direction, steps, times: steps, count: steps, detail: 'compact', format: 'json' });
-    const after = compactStatus(firstObject(callMcp('status')));
+    const before = compactStatus(firstObject(await callMcp('status')));
+    const move = await callMcp('move', { direction, steps, times: steps, count: steps, detail: 'compact', format: 'json' });
+    const after = compactStatus(firstObject(await callMcp('status')));
     print({
       before,
       after,
@@ -283,32 +274,32 @@ async function main() {
     const button = args[0];
     if (!button) throw new Error('press requires a button');
     const times = numberFlag(flags, 'times', 1);
-    const before = compactStatus(firstObject(callMcp('status')));
+    const before = compactStatus(firstObject(await callMcp('status')));
     const outputs = [];
-    for (let i = 0; i < times; i += 1) outputs.push(callMcp('press', { button: String(button).toLowerCase(), times: 1, count: 1, detail: 'compact', format: 'json' }));
-    const after = compactStatus(firstObject(callMcp('status')));
+    for (let i = 0; i < times; i += 1) outputs.push(await callMcp('press', { button: String(button).toLowerCase(), times: 1, count: 1, detail: 'compact', format: 'json' }));
+    const after = compactStatus(firstObject(await callMcp('status')));
     print({ before, after, times, button, moved: JSON.stringify(before?.coords) !== JSON.stringify(after?.coords) || before?.map !== after?.map });
     return;
   }
 
   if (cmd === 'clear') {
     const max = numberFlag(flags, 'max', 20);
-    const before = compactStatus(firstObject(callMcp('status')));
-    const result = callMcp('execute_macro', { macro: 'advance_dialog', max_presses: max });
-    const after = compactStatus(firstObject(callMcp('status')));
+    const before = compactStatus(firstObject(await callMcp('status')));
+    const result = await callMcp('execute_macro', { macro: 'advance_dialog', max_presses: max });
+    const after = compactStatus(firstObject(await callMcp('status')));
     print({ before, after, max, output: contentTexts(result).map((text) => typeof text === 'string' ? truncate(text, 500) : text) });
     return;
   }
 
   if (cmd === 'events') {
     const limit = numberFlag(flags, 'limit', 8);
-    const result = callMcp('recent_events', { limit });
+    const result = await callMcp('recent_events', { limit });
     print({ events: firstObject(result) || contentTexts(result) });
     return;
   }
 
   if (cmd === 'tools') {
-    const result = callMcp('list-tools', null);
+    const result = await callMcp('list-tools', null);
     print({ tools: Array.isArray(result) ? result.map((tool) => tool.name) : result });
     return;
   }

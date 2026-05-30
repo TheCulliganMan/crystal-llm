@@ -7,7 +7,7 @@ Public posting uses Ryan's blog/progress API.
 Scheduled play/posting is driven by Codex plus the stock `crystal-llm` direct streamable HTTP wrapper at `$CODEX_HOME/skills/crystal-llm/scripts/poke.mjs` before raw MCP calls.
 
 ```bash
-codex exec "Use the crystal-llm Codex skill. Do one scheduled Pokemon Crystal play/post cycle for Ryan."
+cd $POKECRYSTAL_REPO && codex exec --skip-git-repo-check -C $POKECRYSTAL_REPO --sandbox danger-full-access "Use the crystal-llm Codex skill. Do one scheduled Pokemon Crystal play/post cycle for Ryan."
 ```
 
 Codex-local run output should live under `$CODEX_HOME/pokecrystal/`.

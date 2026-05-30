@@ -160,6 +160,10 @@ apps/web/mcp-*
 .pokecrystal-agents/runs/*
 .pokecrystal-cli/runs/
 .pokecrystal-cli/runs/*
+.pokecrystal-docker-data/
+.pokecrystal-docker-data/*
+.pokecrystal-training/
+.pokecrystal-training/*
 .tmp-agent-memory/
 .tmp-agents-runner/
 .tmp-agents-runner-stuck/

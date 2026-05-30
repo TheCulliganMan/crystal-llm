@@ -13,8 +13,10 @@ services:
       POKECRYSTAL_MCP_PATH: /api/mcp
       POKECRYSTAL_MCP_PLAYER_NAME: ${POKECRYSTAL_MCP_PLAYER_NAME:-AI}
       POKECRYSTAL_SAVE_ROOT: /data
+      POKECRYSTAL_WEB_TRAINING_DIR: /data/training/web/.pokecrystal-agents/runs/{sessionId}/training
+      POKECRYSTAL_CLI_TRAINING_DIR: /data/training/cli/default/training
     volumes:
-      - pokecrystal_saves:/data
+      - ./.pokecrystal-docker-data:/data
     healthcheck:
       test:
         [

@@ -20,7 +20,7 @@ Examples:
   mcp_call.mjs observe --args '{"include_image":true,"image_scale":2,"advance_frames":1,"detail":"compact","format":"json"}' --save-images /tmp/poke-images`);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     tool: null,
     args: {},
@@ -144,13 +144,14 @@ async function callToolOnce(opts) {
   }
 }
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const result = await withRetry(() => callToolOnce(opts));
+export async function callMcpTool(tool, args = {}, options = {}) {
+  const endpoint = options.endpoint || process.env.POKECRYSTAL_MCP_ENDPOINT || DEFAULT_ENDPOINT;
+  const repo = options.repo || process.env.POKECRYSTAL_REPO || DEFAULT_REPO;
+  const saveImages = options.saveImages || null;
+  const result = await withRetry(() => callToolOnce({ tool, args, endpoint, repo, saveImages }));
 
-  if (opts.tool === 'list-tools') {
-    console.log(JSON.stringify(result, null, 2));
-    return;
+  if (tool === 'list-tools') {
+    return result;
   }
 
   const imagePaths = [];
@@ -159,7 +160,7 @@ async function main() {
 
   for (const item of result.content || []) {
     if (item.type === 'image') {
-      if (opts.saveImages) imagePaths.push(writeImage(item, opts.saveImages, ++imageIndex));
+      if (saveImages) imagePaths.push(writeImage(item, saveImages, ++imageIndex));
       content.push({ type: 'image', mimeType: item.mimeType, savedPath: imagePaths.at(-1) || null });
     } else if (item.type === 'text') {
       content.push({ type: 'text', text: parseJsonMaybe(item.text) });
@@ -168,17 +169,29 @@ async function main() {
     }
   }
 
-  console.log(JSON.stringify({
-    endpoint: opts.endpoint,
-    tool: opts.tool,
-    args: opts.args,
+  return {
+    endpoint,
+    tool,
+    args,
     content,
     imagePaths,
     snapshot: result.snapshot || null,
-  }, null, 2));
+  };
 }
 
-main().catch((error) => {
-  console.error(error?.stack || String(error));
-  process.exit(1);
-});
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const result = await callMcpTool(opts.tool, opts.args, {
+    endpoint: opts.endpoint,
+    repo: opts.repo,
+    saveImages: opts.saveImages,
+  });
+  console.log(JSON.stringify(result, null, 2));
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error?.stack || String(error));
+    process.exit(1);
+  });
+}

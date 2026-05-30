@@ -2,14 +2,9 @@
 
 ## Service
 
-The service runs the Docker `pokecrystal-ts` service from `$POKECRYSTAL_REPO` on host port `3003`.
+The service is expected to already be running as Docker `pokecrystal-ts` on host port `3003`. Scheduled gameplay must not start, restart, rebuild, or inspect Docker; it should use `poke` and fail fast if the endpoint is unavailable.
 
-```bash
-cd $POKECRYSTAL_REPO
-docker compose up -d --build pokecrystal-ts
-```
-
-After restart, reuse `session_id=codex-service`; the session should load `$POKECRYSTAL_REPO/apps/web/mcp-codex-service-autosave.sav`.
+Reuse `session_id=codex-service`; the session should load `$POKECRYSTAL_REPO/apps/web/mcp-codex-service-autosave.sav`.
 
 ## Stock Compact Tools
 

@@ -17,12 +17,7 @@ Use the persistent local MCP session for Pokemon Crystal.
 
 ## Required Start
 
-1. Start or check the local web MCP server:
-
-```bash
-cd $POKECRYSTAL_REPO
-docker compose up -d --build pokecrystal-ts
-```
+1. The Docker MCP server is expected to already be running on `127.0.0.1:3003`. Do not start, restart, rebuild, or inspect Docker during scheduled gameplay. If `poke status` cannot reach the game, fail fast and report the harness outage.
 
 2. Use the stock compact tools first. They wrap direct HTTP, save screenshots, and return small JSON:
 
