@@ -1098,9 +1098,15 @@ export const moveHandler = async (
   });
 };
 
+const normalizedButtonValues = ["a", "b", "start", "select", "up", "down", "left", "right"] as const;
 const normalizedButtonSchema = z.preprocess(
-  (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
-  z.enum(["a", "b", "start", "select", "up", "down", "left", "right"])
+  (value) => (typeof value === "string" ? value.trim() : value),
+  z
+    .union([
+      ...normalizedButtonValues.map((button) => z.literal(button)),
+      ...normalizedButtonValues.map((button) => z.literal(button.toUpperCase())),
+    ])
+    .transform((button: string) => button.toLowerCase())
 );
 
 export const PressSchema = z.object({

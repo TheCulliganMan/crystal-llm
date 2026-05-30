@@ -285,7 +285,7 @@ async function main() {
     const times = numberFlag(flags, 'times', 1);
     const before = compactStatus(firstObject(callMcp('status')));
     const outputs = [];
-    for (let i = 0; i < times; i += 1) outputs.push(callMcp('press', { button }));
+    for (let i = 0; i < times; i += 1) outputs.push(callMcp('press', { button: String(button).toLowerCase(), times: 1, count: 1, detail: 'compact', format: 'json' }));
     const after = compactStatus(firstObject(callMcp('status')));
     print({ before, after, times, button, moved: JSON.stringify(before?.coords) !== JSON.stringify(after?.coords) || before?.map !== after?.map });
     return;

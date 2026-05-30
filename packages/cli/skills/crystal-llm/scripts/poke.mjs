@@ -284,10 +284,22 @@ async function main() {
     if (!button) throw new Error('press requires a button');
     const times = numberFlag(flags, 'times', 1);
     const before = compactStatus(firstObject(callMcp('status')));
-    const outputs = [];
-    for (let i = 0; i < times; i += 1) outputs.push(callMcp('press', { button }));
+    const output = callMcp('press', {
+      button: String(button).trim().toLowerCase(),
+      times,
+      count: times,
+      detail: 'compact',
+      format: 'json',
+    });
     const after = compactStatus(firstObject(callMcp('status')));
-    print({ before, after, times, button, moved: JSON.stringify(before?.coords) !== JSON.stringify(after?.coords) || before?.map !== after?.map });
+    print({
+      before,
+      after,
+      times,
+      button,
+      output: contentTexts(output).map((text) => (typeof text === 'string' ? truncate(text, 500) : text)),
+      moved: JSON.stringify(before?.coords) !== JSON.stringify(after?.coords) || before?.map !== after?.map,
+    });
     return;
   }
 
