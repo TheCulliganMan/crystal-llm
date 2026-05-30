@@ -256,6 +256,8 @@ describe("codex harness helpers", () => {
     expect(prompt).toContain("fictional framing");
     expect(prompt).toContain("concise operational reason");
     expect(prompt).toContain("prefer giving that Pokemon a short nickname");
+    expect(prompt).toContain("Treat catching Pokemon as useful main-story preparation");
+    expect(prompt).toContain("keep a practical stock of Poke Balls or better balls");
     expect(prompt).toContain("Live objective authority");
     expect(prompt).toContain("If live party/flow evidence shows the immediate goal text is stale");
     expect(prompt).toContain("Flow_state is the sequential backbone for beating the game");

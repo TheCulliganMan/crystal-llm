@@ -14,6 +14,18 @@ This is a self-contained npm workspace TypeScript monorepo. Core game logic live
 - `npm run test --workspace @pokecrystal/core`: run targeted core tests.
 - `npm run export:core`: regenerate runtime data through the TypeScript exporter.
 
+## Docker Server Commands
+
+- `docker compose up --build pokecrystal-ts`: build and start the Docker dev server in the foreground.
+- `docker compose up -d --build pokecrystal-ts`: build and start the Docker dev server in the background.
+- `docker compose stop pokecrystal-ts`: stop the server container without deleting saves.
+- `docker compose start pokecrystal-ts`: start the stopped server container again.
+- `docker compose down`: stop and remove the container/network while keeping the named save volume.
+- `docker compose down -v`: stop the stack and delete the `pokecrystal_saves` volume for a clean Docker save state.
+- `docker compose logs -f pokecrystal-ts`: follow server logs.
+
+The Docker service publishes the web/MCP server at `http://localhost:3003`.
+
 ## Coding Style & Naming Conventions
 
 Follow existing file-local formatting; do not reformat unrelated code. TypeScript is strict via `tsconfig.base.json`. Use typed public boundaries, `camelCase` variables/functions, `PascalCase` classes and React components, and kebab-case filenames such as `battle-logic.test.ts`. Prefer workspace imports like `@pokecrystal/core` across package boundaries.

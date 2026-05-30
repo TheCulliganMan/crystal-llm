@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const DEFAULT_REPO = '$POKECRYSTAL_REPO';
-const DEFAULT_ENDPOINT = 'http://127.0.0.1:3110/api/mcp?session_id=codex-service';
+const DEFAULT_ENDPOINT = 'http://127.0.0.1:3003/api/mcp?session_id=codex-service';
 const RETRYABLE_NEXT_MANIFEST_ERROR =
   /Unexpected end of JSON input|loadManifest|manifest|Internal Server Error|Error POSTing to endpoint/i;
 const RETRY_DELAYS_MS = [250, 750, 1500];

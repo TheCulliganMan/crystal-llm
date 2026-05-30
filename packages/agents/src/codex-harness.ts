@@ -1403,6 +1403,8 @@ export function buildCodexBatchPrompt(
     "- Every action tool call must provide a visible reason: for direct Codex tools include the required reason argument; for krabbyclaw MCP tools first write <think>your concise operational reason</think> before calling move, press, or hold_button.",
     "- The visible reason should explain the live evidence, intended gameplay action, and intended effect, not repeat the raw tool arguments; MCP already records the tool log.",
     "- When the game offers a nickname prompt after receiving or catching a Pokemon, prefer giving that Pokemon a short nickname unless doing so would block urgent progress.",
+    "- Treat catching Pokemon as useful main-story preparation when it is safe and resources allow it: try to catch reasonable wild Pokemon that add party depth, HM utility, or backup strength without derailing the current flow goal.",
+    "- When visiting towns, consider the mart if money and bag space allow; keep a practical stock of Poke Balls or better balls so future catch opportunities are usable, while still preserving enough money for survival items.",
     "- Use the provided MCP tools to observe state, choose actions, and advance the run.",
     "- Start from the newest visible tool state; if status and observe disagree, use the visible observe state and re-check status after acting.",
     "- Make concrete progress toward beating the game; do not choose no-input idling as an action.",

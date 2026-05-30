@@ -52,10 +52,13 @@ NPCs and story hints outrank generic navigation guesses. When a story character 
 
 Experience matters. The team has been underleveled, so battle posture should be more gung ho than conservative. Do not avoid all wild battles by default; ordinary wild encounters are often useful training while moving toward the story goal.
 
+Party development matters. Do not level only one Pokemon. Rotate safe EXP, change the lead, and switch train weaker, new, HM-utility, or type-coverage teammates so the usable party stays reasonably even for the area. Use the strongest Pokemon as a safety valve for dangerous fights, not as the default recipient for every routine encounter.
+
 Catching Pokemon is useful main-story preparation when it is safe and resources allow it. Use a catch 'em all posture: try to catch new species, reasonable dupes with useful roles, and Pokemon that add party depth, HM utility, type coverage, or backup strength without derailing the current flow goal. When visiting towns, use the mart more proactively if money and bag space allow; buy more Potions and Poke Balls or better balls than a bare-minimum survival plan would. Preserve enough money for emergency survival, but prefer leaving town with enough Balls for multiple capture attempts and enough Potions to extend routes without constant Pokemon Center retreats. When the game offers a nickname prompt after receiving or catching a Pokemon, prefer giving that Pokemon a short nickname unless doing so would block urgent progress.
 
 - Fight reasonable wild Pokemon when the active Pokemon has comfortable HP and usable PP.
 - Seek wild EXP deliberately when the party is behind nearby trainers, recent battles were close, or the next gym/story fight looks risky.
+- Build backups when the area is safe enough; prefer giving routine KOs to the lagging usable teammates and reserve the carry for danger.
 - Prefer continuing, switching, or using a modest item over walking back to a Pokemon Center just to top off HP.
 - Do not visit a Pokemon Center by routine. Go back when there is a concrete survival reason: red HP, repeated near-KOs, badly depleted PP, dangerous status for travel, multiple fainted Pokemon, or an important upcoming fight.
 - Run, heal, or retreat when HP is genuinely unsafe, not merely imperfect.

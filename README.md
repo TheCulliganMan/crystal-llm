@@ -36,6 +36,66 @@ node apps/web/scripts/prepare-public.js
 npm run build:cli
 ```
 
+## Docker Server Container
+
+The Docker dev server is the `pokecrystal-ts` service in `docker-compose.yml`.
+It runs the Next.js web/MCP server inside the container on port `3000` and
+publishes it on the host as `http://localhost:3003`.
+
+Start or rebuild the server container:
+
+```bash
+docker compose up --build pokecrystal-ts
+```
+
+Run it in the background:
+
+```bash
+docker compose up -d --build pokecrystal-ts
+```
+
+Stop the server container without deleting saves:
+
+```bash
+docker compose stop pokecrystal-ts
+```
+
+Start a stopped container again:
+
+```bash
+docker compose start pokecrystal-ts
+```
+
+Stop and remove the container/network while keeping the named save volume:
+
+```bash
+docker compose down
+```
+
+Follow server logs:
+
+```bash
+docker compose logs -f pokecrystal-ts
+```
+
+## Reset Docker Save State
+
+The Docker dev stack persists game saves in the named volume `pokecrystal_saves`,
+mounted at `/data` inside the container. That means a plain container restart
+does not reset the save state.
+
+To restart from a clean save in Docker:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
+
+`down -v` removes the save volume, so the next `up` starts with a fresh
+autosave slot. If you want to keep the container but wipe only the save files,
+remove the saved slot inside the running container under `/data` and then restart
+the service.
+
 The audio bundle is optional for launching the TUI, but required if you want the
 browser or CLI audio manifests and MP3 assets:
 

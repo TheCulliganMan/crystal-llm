@@ -2,11 +2,11 @@
 
 ## Service
 
-The service runs the `@pokecrystal/web` Next app from `$POKECRYSTAL_REPO` on port `3110`.
+The service runs the Docker `pokecrystal-ts` service from `$POKECRYSTAL_REPO` on host port `3003`.
 
 ```bash
 cd $POKECRYSTAL_REPO
-PORT=3110 npm run dev --workspace @pokecrystal/web
+docker compose up -d --build pokecrystal-ts
 ```
 
 After restart, reuse `session_id=codex-service`; the session should load `$POKECRYSTAL_REPO/apps/web/mcp-codex-service-autosave.sav`.
@@ -39,7 +39,7 @@ node $CODEX_HOME/skills/crystal-llm/scripts/mcp_call.mjs move --args '{"directio
 node $CODEX_HOME/skills/crystal-llm/scripts/mcp_call.mjs observe --args '{"include_image":true,"image_scale":2,"advance_frames":1,"detail":"compact","format":"json"}' --save-images $CODEX_HOME/pokecrystal/mcp-images/manual
 ```
 
-The helper talks directly to `http://127.0.0.1:3110/api/mcp?session_id=codex-service`, writes MCP image blocks as PNGs when `--save-images` is provided, and prints parsed JSON/text content.
+The helper talks directly to `http://127.0.0.1:3003/api/mcp?session_id=codex-service`, writes MCP image blocks as PNGs when `--save-images` is provided, and prints parsed JSON/text content.
 
 ## mcporter
 

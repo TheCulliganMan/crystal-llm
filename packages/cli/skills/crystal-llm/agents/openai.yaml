@@ -9,7 +9,7 @@ dependencies:
       value: "pokecrystal"
       description: "Local Pokemon Crystal MCP pinned to the Codex continuity session."
       transport: "streamable_http"
-      url: "http://127.0.0.1:3110/api/mcp?session_id=codex-service"
+      url: "http://127.0.0.1:3003/api/mcp?session_id=codex-service"
 
 policy:
   allow_implicit_invocation: true
