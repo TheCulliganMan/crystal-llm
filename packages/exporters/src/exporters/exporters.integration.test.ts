@@ -184,16 +184,20 @@ describe("core exporters integration", () => {
 
     const trainers = JSON.parse(fs.readFileSync(path.join(dataDir, "trainers.json"), "utf8")) as Array<{
       trainer_id?: string;
+      base_reward?: number;
       party?: unknown[];
     }>;
     expect(trainers).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           trainer_id: expect.any(String),
+          base_reward: expect.any(Number),
           party: expect.any(Array),
         }),
       ])
     );
+    expect(trainers.find((trainer) => trainer.trainer_id === "JACK1")?.base_reward).toBe(8);
+    expect(trainers.every((trainer) => typeof trainer.base_reward === "number" && trainer.base_reward > 0)).toBe(true);
 
     const mapAttributes = JSON.parse(
       fs.readFileSync(path.join(dataDir, "map_attributes.json"), "utf8")

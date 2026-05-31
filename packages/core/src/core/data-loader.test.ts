@@ -1663,7 +1663,7 @@ describe("DataLoader trainer rewards", () => {
             win_quote: "win",
             lose_quote: "lose",
             items: [],
-            base_reward: 0,
+            base_reward: 4,
             ai_move_flags: 0,
             ai_item_switch_flags: 0,
             encounter_music: "",
@@ -1687,12 +1687,23 @@ describe("DataLoader trainer rewards", () => {
     expect(loader.get_trainer("DON@")?.trainer_id).toBe("DON");
   });
 
-  it("hydrates base rewards from trainer class attributes", async () => {
+  it("uses exported trainer base rewards without reading ASM trainer attributes at runtime", async () => {
     jest.resetModules();
+    jest.spyOn(fs, "readFileSync").mockImplementation((pathLike, options) => {
+      const pathValue = String(pathLike);
+      if (
+        pathValue.endsWith("trainer_constants.asm") ||
+        pathValue.endsWith("data/trainers/attributes.asm")
+      ) {
+        throw new Error("runtime must use exported trainer base rewards");
+      }
+      return REAL_READ_FILE_SYNC(pathLike, options as Parameters<typeof fs.readFileSync>[1]);
+    });
     const { DataLoader } = await import("./data-loader");
     const loader = new DataLoader();
 
     expect(loader.get_trainer_base_reward("FALKNER1")).toBe(25);
+    expect(loader.get_trainer_base_reward("JACK1")).toBe(8);
   });
 
   it("throws when trainers.json is malformed instead of silently keeping an empty trainer table", async () => {

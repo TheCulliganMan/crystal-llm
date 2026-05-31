@@ -247,85 +247,6 @@ export const preloadCoreDataAssets = async (
   await preloadTextAssets(corePaths, { onProgress: options?.onProgress });
 };
 
-let trainerClassBaseRewardsCache: Record<string, number> | null = null;
-
-const isAsmNumericToken = (token: string): boolean => {
-  const trimmed = token.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (trimmed.startsWith("$") || trimmed.startsWith("%")) {
-    return true;
-  }
-  if (trimmed.toLowerCase().startsWith("0x")) {
-    return true;
-  }
-  return /^[0-9]/.test(trimmed);
-};
-
-const parseTrainerClassBaseRewards = (): Record<string, number> => {
-  if (isBrowser) {
-    return {};
-  }
-  const constantsPath = path.join(getDisassemblyRoot(), "constants", "trainer_constants.asm");
-  const lines = readAsmLines(constantsPath);
-  const classOrder: string[] = [];
-  for (const raw of lines) {
-    const line = stripAsmComment(raw).trim();
-    if (!line.startsWith("trainerclass ")) {
-      continue;
-    }
-    const tokens = line.split(/\s+/);
-    const className = tokens[1];
-    if (!className || className === "TRAINER_NONE") {
-      continue;
-    }
-    classOrder.push(className);
-  }
-  if (!classOrder.length) {
-    return {};
-  }
-  const attributesPath = path.join(getDisassemblyRoot(), "data", "trainers", "attributes.asm");
-  const attributeLines = readAsmLines(attributesPath);
-  const rewards: number[] = [];
-  for (const raw of attributeLines) {
-    const line = stripAsmComment(raw).trim();
-    if (!line.startsWith("db ")) {
-      continue;
-    }
-    const token = line.slice(3).trim().split(/[,\s]+/)[0];
-    if (!token || !isAsmNumericToken(token)) {
-      continue;
-    }
-    rewards.push(parseScriptInt(token));
-  }
-  if (!rewards.length) {
-    return {};
-  }
-  if (rewards.length !== classOrder.length) {
-    throw new Error(
-      `Trainer class base rewards (${rewards.length}) do not match trainer classes (${classOrder.length}).`
-    );
-  }
-  const result: Record<string, number> = {};
-  for (let i = 0; i < classOrder.length; i += 1) {
-    result[classOrder[i]] = rewards[i];
-  }
-  return result;
-};
-
-const getTrainerClassBaseRewards = (): Record<string, number> => {
-  if (!trainerClassBaseRewardsCache) {
-    // ASM: pokecrystal_disassembly/data/trainers/attributes.asm::TrainerClassAttributes
-    const parsed = parseTrainerClassBaseRewards();
-    if (Object.keys(parsed).length) {
-      trainerClassBaseRewardsCache = parsed;
-    }
-    return parsed;
-  }
-  return trainerClassBaseRewardsCache;
-};
-
 const normalizeScriptName = (label: string): string => {
   const cleaned = String(label ?? "").split(";", 1)[0].trim();
   return normalizeLabel(cleaned);
@@ -2010,23 +1931,12 @@ export class DataLoader {
         }
         this.trainer_data.clear();
         this.trainer_data_by_name.clear();
-        const classBaseRewards = getTrainerClassBaseRewards();
-        const hasClassRewards = Object.keys(classBaseRewards).length > 0;
-        const applyBaseReward = (trainer: Trainer): void => {
-            const trainerClass = String(trainer.trainer_class ?? "").trim();
-            if (!trainerClass) {
-                return;
-            }
-            if (!hasClassRewards) {
-                return;
-            }
-            if (!(trainerClass in classBaseRewards)) {
-                throw new Error(`Missing trainer base reward for class ${trainerClass}.`);
-            }
-            trainer.base_reward = classBaseRewards[trainerClass];
-        };
         for (const trainer of trainers) {
-            applyBaseReward(trainer);
+            if (!Number.isFinite(trainer.base_reward) || trainer.base_reward <= 0) {
+                throw new Error(
+                    `Exported trainer data must include a positive base_reward for ${trainer.trainer_id || trainer.name}.`
+                );
+            }
             for (const alias of trainerAliases(trainer)) {
                 if (!this.trainer_data.has(alias)) {
                     this.trainer_data.set(alias, trainer);

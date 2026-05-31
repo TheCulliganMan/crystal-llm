@@ -3,7 +3,7 @@ import path from "path";
 import type { Trainer } from "@pokecrystal/core/core/models/trainer";
 import { pokemonSpeciesDisplayName, type PokemonSpecies } from "@pokecrystal/core/core/models/pokemon";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
-import { stripInlineComment, writeJsonToTargets } from "./asm-utils";
+import { parseAsmNumber, stripInlineComment, writeJsonToTargets } from "./asm-utils";
 import { parseMoves } from "./export-data";
 
 const RIVAL_NAME_PLACEHOLDER = "<RIVAL>";
@@ -53,6 +53,44 @@ function parseTrainerMetadata(): Array<[string, string]> {
     }
   }
   return orderedMetadata;
+}
+
+function parseTrainerClassBaseRewards(): Record<string, number> {
+  const root = getDisassemblyRoot();
+  const constantsPath = path.join(root, "constants", "trainer_constants.asm");
+  const attributesPath = path.join(root, "data", "trainers", "attributes.asm");
+  const classOrder: string[] = [];
+
+  for (const raw of fs.readFileSync(constantsPath, "utf8").split(/\r?\n/)) {
+    const line = stripInlineComment(raw).trim();
+    if (!line.startsWith("trainerclass ")) {
+      continue;
+    }
+    const className = line.split(/\s+/)[1];
+    if (className && className !== "TRAINER_NONE") {
+      classOrder.push(className);
+    }
+  }
+
+  const rewards: number[] = [];
+  for (const raw of fs.readFileSync(attributesPath, "utf8").split(/\r?\n/)) {
+    const line = stripInlineComment(raw).trim();
+    if (!line.startsWith("db ") || !raw.includes("base reward")) {
+      continue;
+    }
+    const token = line.slice(3).trim().split(/[,\s]+/)[0];
+    if (token) {
+      rewards.push(parseAsmNumber(token));
+    }
+  }
+
+  if (classOrder.length !== rewards.length) {
+    throw new Error(
+      `Parsed trainer class rewards do not match trainer class count: ${rewards.length} != ${classOrder.length}`
+    );
+  }
+
+  return Object.fromEntries(classOrder.map((trainerClass, index) => [trainerClass, rewards[index]]));
 }
 
 export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string, PokemonSpecies>): Trainer[] {
@@ -212,12 +250,18 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
   flushTrainer();
 
   const metadata = parseTrainerMetadata();
+  const classBaseRewards = parseTrainerClassBaseRewards();
   if (metadata.length !== trainers.length) {
     throw new Error(`Parsed trainer count does not match ASM trainer metadata count: ${trainers.length} != ${metadata.length}`);
   }
   for (let index = 0; index < trainers.length; index += 1) {
     trainers[index].trainer_class = metadata[index][0];
     trainers[index].trainer_id = metadata[index][1];
+    const baseReward = classBaseRewards[trainers[index].trainer_class];
+    if (!baseReward) {
+      throw new Error(`Missing trainer base reward for class ${trainers[index].trainer_class}`);
+    }
+    trainers[index].base_reward = baseReward;
   }
   return trainers;
 }
