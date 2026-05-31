@@ -93,7 +93,10 @@ If a gym/route remains blocked after a partial dungeon clear, infer that the dun
 
 ## Battle And Training Policy
 
-- Be more gung ho in battle. The current team has been underleveled, so default toward fighting ordinary wild Pokemon during travel instead of dodging every encounter.
+- Training means committing to battles, not dodging them. Fight ordinary wild Pokemon and reachable trainers instead of avoiding encounters or escaping for comfort.
+- Do not run from training battles just because HP is low, the matchup is bad, or fainting is likely. Keep making concrete battle actions, switches, item uses, and attacks until the battle is won, the party wipes, or a hard tool/UI failure prevents further input.
+- Low HP is not a reason to retreat to town, leave grass, or abandon active training. Treat fainting and whiteout as acceptable training costs, then continue from the resulting live state.
+- Treat money as a tracked training resource. Check `poke status` before and after trainer battles, whiteouts, marts, and Mom-bank interactions; record wallet money and Mom's money when either changes or remains suspiciously stuck at zero.
 - When the run is corrected for rushing, being too objective-focused, or needing training, treat that as an explicit override: stop the badge/story push, leave the gym or capstone route if needed, and make trainer hunting, wild EXP, catches, supplies, and party development the active goal until live evidence shows the team improved.
 - Training is not only incidental travel work. Deliberately explore nearby routes, side buildings, grass, and reachable NPC/trainer lanes to find missed trainer fights and safe EXP before retrying a wall such as a gym leader.
 - Training means earning EXP and levels across the team, not just powering one lead. Default to real battles that produce at least one verified level gain for an underleveled or neglected party member when feasible.

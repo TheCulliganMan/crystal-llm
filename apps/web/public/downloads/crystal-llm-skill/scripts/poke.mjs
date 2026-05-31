@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { callMcpTool } from './mcp_call.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const HOME = process.env.HOME || '/home/owner';
+const HOME = process.env.HOME || os.homedir();
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
-const ROOT = process.env.POKECRYSTAL_REPO || '$POKECRYSTAL_REPO';
+const ROOT = process.env.POKECRYSTAL_REPO || process.cwd();
 const LEARNING_STATE =
   process.env.POKECRYSTAL_LEARNING_STATE ||
   path.join(CODEX_HOME, 'pokecrystal/poke_learning_state.json');
@@ -100,6 +101,14 @@ function firstObject(result) {
 
 function compactStatus(status) {
   if (!status) return null;
+  const money = status.money ?? status.resources?.money ?? null;
+  const momsMoney = status.moms_money ?? status.momsMoney ?? status.resources?.moms_money ?? status.resources?.momsMoney ?? null;
+  const momSavingSomeMoney =
+    status.mom_saving_some_money ??
+    status.momSavingSomeMoney ??
+    status.resources?.mom_saving_some_money ??
+    status.resources?.momSavingSomeMoney ??
+    null;
   return {
     mode: status.mode || null,
     map: status.map || status.location || null,
@@ -111,6 +120,9 @@ function compactStatus(status) {
     inDialog: Boolean(status.inDialog || status.textBoxOpen),
     partyCount: status.partyCount ?? null,
     badges: status.badges ?? null,
+    money,
+    momsMoney,
+    momSavingSomeMoney,
     goal: status.flowNextGoal || status.flowSummary || null,
     lastAudio: status.audio?.recentEvents?.at?.(-1)?.token || status.audio?.musicToken || null,
   };
