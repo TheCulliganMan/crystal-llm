@@ -1,4 +1,5 @@
 import { STORY_STEPS, type StoryStep } from "@/app/game-corner/progress-tracker";
+import { BADGE_ENGINE_FLAG_ORDER } from "@pokecrystal/core/core/badges";
 
 export type McpFlowMilestone = {
   id: string;
@@ -26,6 +27,10 @@ export type McpFlowStateSnapshot = {
 };
 
 type EventFlags = Record<string, boolean | undefined> | null | undefined;
+type BadgeState = {
+  johto?: readonly boolean[];
+  kanto?: readonly boolean[];
+} | null | undefined;
 
 const HIDDEN_STEP_IDS = new Set([
   "mahogany-rocket",
@@ -37,7 +42,24 @@ const TERMINAL_COMPLETION_TITLE = "Beat Mt. Silver";
 
 const PUBLIC_ID_PREFIX = "hidden";
 
-const isCompleted = (step: StoryStep, eventFlags: EventFlags): boolean => {
+const isCompletedByBadgeState = (setFlag: string, badges: BadgeState): boolean | null => {
+  const badgeIndex = BADGE_ENGINE_FLAG_ORDER.indexOf(setFlag);
+  if (badgeIndex < 0) {
+    return null;
+  }
+  if (!badges) {
+    return null;
+  }
+  const bank = badgeIndex < 8 ? badges.johto : badges.kanto;
+  const bankIndex = badgeIndex < 8 ? badgeIndex : badgeIndex - 8;
+  return Boolean(bank?.[bankIndex]);
+};
+
+const isCompleted = (step: StoryStep, eventFlags: EventFlags, badges: BadgeState): boolean => {
+  const badgeCompleted = isCompletedByBadgeState(step.setFlag, badges);
+  if (badgeCompleted !== null) {
+    return badgeCompleted;
+  }
   if (!eventFlags) {
     return false;
   }
@@ -98,14 +120,17 @@ const toMilestone = (
   };
 };
 
-export const buildFlowStateSnapshot = (eventFlags: EventFlags): McpFlowStateSnapshot => {
+export const buildFlowStateSnapshot = (
+  eventFlags: EventFlags,
+  badges?: BadgeState
+): McpFlowStateSnapshot => {
   const completedStepIds: string[] = [];
   for (const step of STORY_STEPS) {
     const prerequisitesMet = step.prerequisites.every((required) => completedStepIds.includes(required));
     if (!prerequisitesMet) {
       continue;
     }
-    if (isCompleted(step, eventFlags)) {
+    if (isCompleted(step, eventFlags, badges)) {
       completedStepIds.push(step.id);
     }
   }

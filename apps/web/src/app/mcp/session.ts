@@ -2797,7 +2797,8 @@ class McpGameSession {
     const flowState =
       synchronizedSnapshot.flow_state ??
       buildFlowStateSnapshot(
-        (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null
+        (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
+        state.sram.badges
       );
 
     return {
@@ -3073,7 +3074,8 @@ class McpGameSession {
     const game = this.getGame();
     const state = game.getGameState();
     return buildFlowStateSnapshot(
-      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null
+      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
+      state.sram.badges
     );
   }
 
@@ -4099,6 +4101,12 @@ class McpGameSession {
           wMapNumber?: number;
           event_flags?: Record<string, boolean | undefined> | null;
         };
+        sram?: {
+          badges?: {
+            johto?: readonly boolean[];
+            kanto?: readonly boolean[];
+          } | null;
+        };
       };
     };
     if (typeof game.getGameState !== "function") {
@@ -4128,7 +4136,8 @@ class McpGameSession {
     }
     const state = this.game.getGameState();
     return buildFlowStateSnapshot(
-      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null
+      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
+      state.sram?.badges ?? null
     );
   }
 

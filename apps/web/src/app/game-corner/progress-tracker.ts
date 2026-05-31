@@ -95,7 +95,7 @@ export const STORY_STEPS: readonly StoryStep[] = [
     asmLabel: "IlexForestFarfetchdScript",
     description: "Complete charcoal/Farfetch'd sequence and pass through forest to Goldenrod.",
     prerequisites: ["hive-badge"],
-    setFlag: "EVENT_CHARCOAL_KILN_BOSS",
+    setFlag: "EVENT_GOT_HM01_CUT",
     applyMovement: "IlexForestFarfetchdChaseMovement",
     mapRoute: "Azalea -> Ilex Forest -> Route 34",
   },

@@ -10,7 +10,7 @@ describe("buildFlowStateSnapshot", () => {
       EVENT_RIVAL_AZALEA_TOWN: true,
       EVENT_CLEARED_SLOWPOKE_WELL: true,
       ENGINE_HIVEBADGE: true,
-      EVENT_CHARCOAL_KILN_BOSS: true,
+      EVENT_GOT_HM01_CUT: true,
       ENGINE_PLAINBADGE: true,
       ENGINE_FOGBADGE: true,
       EVENT_GOT_SECRETPOTION_FROM_PHARMACY: true,
@@ -32,7 +32,7 @@ describe("buildFlowStateSnapshot", () => {
       EVENT_RIVAL_AZALEA_TOWN: true,
       EVENT_CLEARED_SLOWPOKE_WELL: true,
       ENGINE_HIVEBADGE: true,
-      EVENT_CHARCOAL_KILN_BOSS: true,
+      EVENT_GOT_HM01_CUT: true,
       ENGINE_PLAINBADGE: true,
       ENGINE_FOGBADGE: true,
       EVENT_GOT_SECRETPOTION_FROM_PHARMACY: true,
@@ -80,5 +80,27 @@ describe("buildFlowStateSnapshot", () => {
       "Mom + money setup",
       "Zephyr Badge",
     ]);
+  });
+
+  it("uses the canonical badge state for badge milestones", () => {
+    const snapshot = buildFlowStateSnapshot(
+      {
+        EVENT_GOT_A_POKEMON_FROM_ELM: true,
+        EVENT_GOT_MYSTERY_EGG_FROM_MR_POKEMON: true,
+        EVENT_TALKED_TO_MOM_AFTER_MYSTERY_EGG_QUEST: true,
+        EVENT_RIVAL_AZALEA_TOWN: true,
+        EVENT_CLEARED_SLOWPOKE_WELL: true,
+        EVENT_GOT_HM01_CUT: true,
+      },
+      {
+        johto: [true, true, false, false, false, false, false, false],
+        kanto: [false, false, false, false, false, false, false, false],
+      }
+    );
+
+    expect(snapshot.completed.map((step) => step.title)).toContain("Zephyr Badge");
+    expect(snapshot.completed.map((step) => step.title)).toContain("Hive Badge");
+    expect(snapshot.completed.map((step) => step.title)).toContain("Ilex Forest + Cut Gate");
+    expect(snapshot.next_goal?.title).toBe("Plain Badge");
   });
 });
