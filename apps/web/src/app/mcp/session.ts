@@ -373,6 +373,14 @@ export type McpStatusSnapshot = {
   map_id?: string;
   flow_state?: McpFlowStateSnapshot;
   badges_count?: number;
+  money?: number;
+  moms_money?: number;
+  mom_saving_some_money?: boolean;
+  resources?: {
+    money: number;
+    moms_money: number;
+    mom_saving_some_money: boolean;
+  };
   party?: {
     count: number;
     lead?: {
@@ -2659,6 +2667,22 @@ class McpGameSession {
     const johtoBadges = Array.isArray(badges?.johto) ? badges?.johto.filter(Boolean).length : 0;
     const kantoBadges = Array.isArray(badges?.kanto) ? badges?.kanto.filter(Boolean).length : 0;
     const badgesCount = johtoBadges + kantoBadges;
+    const sram = (state as {
+      sram?: {
+        money?: unknown;
+        moms_money?: unknown;
+        mom_saving_some_money?: unknown;
+      };
+    }).sram;
+    const walletMoney = Math.max(
+      0,
+      Math.min(999999, Number.isFinite(Number(sram?.money)) ? Math.trunc(Number(sram?.money)) : 0)
+    );
+    const momsMoney = Math.max(
+      0,
+      Math.min(999999, Number.isFinite(Number(sram?.moms_money)) ? Math.trunc(Number(sram?.moms_money)) : 0)
+    );
+    const momSavingSomeMoney = Boolean(sram?.mom_saving_some_money);
     const leadPokemon = (partyPokemon[0] ?? null) as {
       species?: unknown;
       level?: unknown;
@@ -2871,6 +2895,14 @@ class McpGameSession {
       map_id: mapId,
       flow_state: flowState,
       badges_count: badgesCount,
+      money: walletMoney,
+      moms_money: momsMoney,
+      mom_saving_some_money: momSavingSomeMoney,
+      resources: {
+        money: walletMoney,
+        moms_money: momsMoney,
+        mom_saving_some_money: momSavingSomeMoney,
+      },
       party: partyPokemon.length
         ? {
             count: partyPokemon.length,

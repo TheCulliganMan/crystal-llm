@@ -2827,6 +2827,57 @@ describe("McpGameSession status + recent events", () => {
     expect(playerContext.coords).toEqual({ x: 12, y: 13 });
   });
 
+  it("surfaces wallet and Mom-bank money in raw MCP status", async () => {
+    const session = getMcpSession("status-money-resources");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      getGame: jest.Mock;
+      game: unknown;
+    };
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    const game = {
+      getGameState: () => ({
+        wram: {
+          player_x: 4,
+          player_y: 5,
+          wXCoord: 4,
+          wYCoord: 5,
+          event_flags: {},
+        },
+        sram: {
+          money: 1234,
+          moms_money: 567,
+          mom_saving_some_money: true,
+          party: { pokemon: [] },
+        },
+      }),
+      getMapName: () => "GoldenrodCity",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => ({
+        current_map_name: "GoldenrodCity",
+        player_x: 4,
+        player_y: 5,
+        player_direction: "down",
+      }),
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+
+    const snapshot = await session.status();
+
+    expect(snapshot).toMatchObject({
+      money: 1234,
+      moms_money: 567,
+      mom_saving_some_money: true,
+      resources: {
+        money: 1234,
+        moms_money: 567,
+        mom_saving_some_money: true,
+      },
+    });
+  });
+
   it("settles transient post-cutscene movement locks before reporting status", async () => {
     const session = getMcpSession("status-settles-tail-lock");
     const sessionAny = session as unknown as {

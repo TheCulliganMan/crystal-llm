@@ -23,6 +23,7 @@ import {
 } from "@pokecrystal/core/core/enums";
 import { StatusCondition } from "@pokecrystal/core/core/enums/battle";
 import { TrainerBattle } from "@pokecrystal/core/engine/battle/battle/trainer-battle";
+import { finaliseBattle } from "@pokecrystal/core/engine/battle/battle/battle-finalization";
 import { AudioEngine } from "@pokecrystal/core/engine/systems/audio";
 import { determineBattleMusic } from "@pokecrystal/core/engine/battle/battle/music";
 
@@ -220,6 +221,57 @@ describe("Game battle start", () => {
     const battle = game.getBattle();
     expect(battle).not.toBeNull();
     expect(battle).toBeInstanceOf(TrainerBattle);
+  });
+
+  it("pays trainer battle reward through the game battle lifecycle", async () => {
+    const game = await buildGame();
+    const eventManager = getEventManager(game);
+    const gameState = game.getGameState();
+    const playerData = buildPokemonData("PLAYERMON", 12);
+    const enemyData = buildPokemonData("ENEMYMON", 8);
+    const trainer = TrainerSchema.parse({
+      name: "TRAINER_TEST",
+      trainer_class: "BUG_CATCHER",
+      party: [enemyData],
+      win_quote: "",
+      lose_quote: "",
+    });
+    gameState.sram.money = 0;
+    gameState.sram.moms_money = 0;
+    gameState.sram.mom_saving_some_money = false;
+    (game as unknown as { _runAutosave: jest.Mock })._runAutosave = jest.fn().mockResolvedValue(false);
+
+    eventManager.dispatch(
+      new StartBattleEvent({
+        player_pokemon: playerData,
+        enemy_pokemon: enemyData,
+        player_party: [playerData],
+        enemy_party: [enemyData],
+        trainer,
+        trainer_id: "TRAINER_TEST",
+        trainer_reward: 200,
+      })
+    );
+
+    const battle = game.getBattle();
+    expect(battle).toBeInstanceOf(TrainerBattle);
+    expect(battle?.context.trainerReward).toBe(200);
+    Object.assign(battle!.battleUi, {
+      pending_evolutions: [],
+      pending_move_learns: [],
+      block_on_move_learning: false,
+      block_on_pending_evolution: false,
+      active_evolution: null,
+    });
+    battle!.context.enemyParty.forEach((pokemon) => {
+      pokemon.hp = 0;
+    });
+    battle!.context.enemyPokemon.hp = 0;
+
+    finaliseBattle(battle!);
+    await Promise.resolve();
+
+    expect(gameState.sram.money).toBe(800);
   });
 
   it("starts battle music when a battle begins", async () => {

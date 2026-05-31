@@ -669,4 +669,46 @@ describe("statusHandler", () => {
       },
     });
   });
+
+  it("includes wallet and Mom-bank money in the compact agent-facing status", async () => {
+    mockLoadSession.mockResolvedValue({
+      observeText: jest.fn(() => "OVERWORLD\n@"),
+      status: jest.fn().mockResolvedValue({
+        mode: "overworld",
+        map: "GoldenrodCity",
+        map_details: undefined,
+        location_name: "GoldenrodCity",
+        map_id: "16:14",
+        coords: { x: 20, y: 8 },
+        facing: "down",
+        badges_count: 3,
+        money: 4321,
+        moms_money: 987,
+        mom_saving_some_money: true,
+        in_menu: false,
+        in_battle: false,
+        in_dialog: false,
+        textbox_open: false,
+        text_box_open: false,
+        prompt_pending: false,
+        movement_locked: false,
+        script_busy: false,
+        can_move: true,
+        input_blocked_reason: undefined,
+        flow_state: undefined,
+        party_summary: { count: 2 },
+        last_action_result: undefined,
+        last_n_events: [],
+      }),
+    });
+
+    const response = await statusHandler({}, {});
+    const payload = response.content[0]?.type === "text" ? JSON.parse(response.content[0].text) : null;
+
+    expect(payload).toMatchObject({
+      money: 4321,
+      momsMoney: 987,
+      momSavingSomeMoney: true,
+    });
+  });
 });
