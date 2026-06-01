@@ -341,6 +341,7 @@ export const handle_input = (state: BattleUIState, event: GameEngineEvent & KeyE
     if (!state.force_party_menu) {
       state.pending_pokemon_selection = null;
       state.pokemon_menu = null;
+      state.pokemon_stats = null;
       state.wram.current_menu = BattleMenu.MAIN;
       release_force_party_menu(state);
       ensure_menu_cursor(state.wram);

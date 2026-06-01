@@ -1124,6 +1124,38 @@ describe("battle-ui-input fight menu confirm latch", () => {
 });
 
 describe("battle-ui-input Pokemon and run confirm latches", () => {
+  it("clears the battle Pokemon stats overlay when backing out to the main menu", () => {
+    const state = {
+      active: true,
+      wram: {
+        current_menu: BattleMenu.POKEMON,
+        wBattleMenuCursorPosition: 1,
+        wMoveMenuCursorPosition: 0,
+        wPartyMenuCursorPosition: 1,
+        wPackMenuCursorPosition: 0,
+        confirm_pressed: false,
+        cancel_pressed: false,
+        select_pressed: false,
+      },
+      force_party_menu: false,
+      pending_pokemon_selection: 1,
+      pokemon_menu: {},
+      pokemon_stats: {},
+      game_state: {
+        wram: { wBattleTextDelay: 0, battle_type: "BATTLETYPE_NORMAL" },
+        hram: { joypad: { hJoyPressed: B_PAD_B, hJoypadPressed: B_PAD_B } },
+      },
+    } as unknown as import("./battle-ui-state").BattleUIState;
+
+    const bKey = buttonKeys(GameButton.B)[0];
+    handle_input(state, { type: "keydown", key: bKey, code: bKey } as any);
+
+    expect(state.wram.current_menu).toBe(BattleMenu.MAIN);
+    expect(state.pending_pokemon_selection).toBeNull();
+    expect(state.pokemon_menu).toBeNull();
+    expect(state.pokemon_stats).toBeNull();
+  });
+
   it("does not carry the main-menu Pokemon confirm press into the party menu", () => {
     const joypad = {
       hJoyPressed: B_PAD_A,
