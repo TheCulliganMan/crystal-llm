@@ -8,6 +8,7 @@ const CHAT_FINETUNE_FILENAME = "chat-finetune.jsonl";
 const CHAT_FINETUNE_META_FILENAME = "chat-finetune.meta.jsonl";
 const EVENTS_FILENAME = "events.jsonl";
 const AGENT_RUN_ROOT = ".pokecrystal-agents";
+const DEFAULT_MAX_TRAINING_JSONL_BYTES = 64 * 1024 * 1024;
 const WEB_DEV_MODEL = "web-dev-gameplay";
 const WEB_DEV_OBJECTIVE = "Drive the game through the dev server with Game Boy-faithful inputs.";
 const WEB_DEV_SUBGOAL = "Record browser-driven MCP actions in the same canonical training format as the agent runner.";
@@ -135,6 +136,48 @@ const writeManifest = (manifestPath: string, manifest: WebTrainingManifest): voi
 
 const appendJsonLine = (filePath: string, value: unknown): void => {
   fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
+};
+
+const parsePositiveInteger = (value: string | undefined, fallback: number): number => {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const maxTrainingJsonlBytes = (): number =>
+  parsePositiveInteger(process.env.POKECRYSTAL_WEB_MAX_TRAINING_JSONL_BYTES, DEFAULT_MAX_TRAINING_JSONL_BYTES);
+
+const isOversizedTrainingJsonl = (filePath: string): boolean => {
+  try {
+    return fs.statSync(filePath).size > maxTrainingJsonlBytes();
+  } catch {
+    return false;
+  }
+};
+
+const archiveTrainingFiles = (trainingDir: string, paths: ReturnType<typeof getTrainingPaths>): void => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (const filePath of [
+    paths.manifestPath,
+    paths.episodePath,
+    paths.chatFineTunePath,
+    paths.chatFineTuneMetaPath,
+    paths.eventsPath,
+  ]) {
+    if (fs.existsSync(filePath)) {
+      fs.renameSync(filePath, `${filePath}.oversized-${timestamp}`);
+    }
+  }
+  fs.mkdirSync(trainingDir, { recursive: true });
+};
+
+const rotateOversizedTrainingFiles = (trainingDir: string): void => {
+  const paths = getTrainingPaths(trainingDir);
+  if ([paths.episodePath, paths.chatFineTunePath, paths.chatFineTuneMetaPath, paths.eventsPath].some(isOversizedTrainingJsonl)) {
+    archiveTrainingFiles(trainingDir, paths);
+  }
 };
 
 const parseCompactBool = (text: string, key: string): boolean | undefined => {
@@ -323,6 +366,7 @@ export const recordWebTrainingTurn = (input: RecordWebTrainingTurnInput): void =
   }
 
   const trainingDir = resolveTrainingDir(input.sessionId);
+  rotateOversizedTrainingFiles(trainingDir);
   const paths = getTrainingPaths(trainingDir);
   const recordedAt = new Date().toISOString();
   const manifest = ensureManifest(input.sessionId, trainingDir, recordedAt);
