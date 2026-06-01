@@ -1119,6 +1119,9 @@ export class FieldDialogueManager {
     if (this.suspended) {
       return false;
     }
+    if (this.clear_stale_blank_wait_if_needed()) {
+      return isKeyDownEvent(event) || isKeyUpEvent(event);
+    }
     if (isKeyUpEvent(event)) {
       const keyCode = normalizeButtonKey(event.code ?? event.key ?? null);
       if (keyCode !== null && this.confirm_keys.has(keyCode)) {
@@ -1457,6 +1460,36 @@ export class FieldDialogueManager {
     this.window.open(nextText);
     this.current_text = nextText;
     this.waiting_for_input = this.pendingWaits > 0;
+  }
+
+  private clear_stale_blank_wait_if_needed(): boolean {
+    if (!this.waiting_for_input || this.pendingWaits > 0) {
+      return false;
+    }
+    if (
+      this.current_text.trim() ||
+      this.pending_text.length ||
+      this.window.current_page_text.trim() ||
+      this.window.has_more_pages() ||
+      this.yes_no_prompt ||
+      this.selection_prompt ||
+      this.pending_yes_no_request ||
+      this.pending_selection_request
+    ) {
+      return false;
+    }
+    this.waiting_for_input = false;
+    this.script_paused = false;
+    this.pending_script_waits = 0;
+    this.ignore_confirm_until_release = false;
+    this.auto_close_requested = false;
+    this.visible = false;
+    this.window.clear();
+    const runner = this.script_runner;
+    if (runner && (runner.stop_execution || runner.stopExecution || runnerAwaitingResume(runner) > 0)) {
+      runner.resume?.();
+    }
+    return true;
   }
 
   private format_event_text(text: string): string {
