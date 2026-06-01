@@ -318,6 +318,7 @@ export type BattleUIState = {
   fast_text_request: boolean;
   active: boolean;
   exp_animation?: unknown | null;
+  exp_animation_queue?: unknown[];
   sprites_enabled: boolean;
   trainer_sprites_visible: boolean;
   trainer_send_out_seen: boolean;

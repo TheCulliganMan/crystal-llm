@@ -2,6 +2,7 @@ import { awardStatExp, grantPlayerExperience } from './experience';
 import { Pokemon, PokemonSchema, PokemonSpecies, toPokemon } from '../../../core/models';
 import { GrowthRate, PokemonType, EggGroup, GenderRatio, MoveName, Ability } from '../../../core/enums';
 import { Battle } from './battle-logic';
+import { calculateExperience } from '../../experience';
 
 describe('grantPlayerExperience', () => {
     let participant: Pokemon;
@@ -115,6 +116,77 @@ describe('grantPlayerExperience', () => {
         expect(bench_warmer.defense_exp).toBe(0);
         expect(bench_warmer.speed_exp).toBe(0);
         expect(bench_warmer.special_exp).toBe(0);
+    });
+
+    it('levels a switched-in Caterpie participant on the immediate no-UI path', () => {
+        const caterpieSpecies: PokemonSpecies = {
+            id: 'CATERPIE',
+            int_id: 10,
+            base_stats: { hp: 45, attack: 30, defense: 35, speed: 45, special_attack: 20, special_defense: 20 },
+            type1: PokemonType.BUG,
+            type2: PokemonType.BUG,
+            catch_rate: 255,
+            base_exp: 53,
+            gender_ratio: GenderRatio.GENDER_F50,
+            unknown1: 0,
+            step_cycles_to_hatch: 15,
+            unknown2: 0,
+            growth_rate: GrowthRate.GROWTH_MEDIUM_FAST,
+            egg_group1: EggGroup.EGG_BUG,
+            egg_group2: EggGroup.EGG_BUG,
+            tmhm_learnset: [],
+            evolutions: null,
+            ability: Ability.NONE,
+            pic_size: 0,
+            front_pic: 0,
+            back_pic: 0,
+        } as any;
+        const faintedSpecies: PokemonSpecies = {
+            ...caterpieSpecies,
+            id: 'TEST_EXP_YIELD',
+            base_exp: 100,
+        } as PokemonSpecies;
+        const makeMon = (species: PokemonSpecies, nickname: string, level: number): Pokemon =>
+            toPokemon(PokemonSchema.parse({
+                species,
+                nickname,
+                level,
+                hp: 20,
+                max_hp: 20,
+                original_trainer_name: 'PLAYER',
+                original_trainer_id: 1,
+                experience: calculateExperience(species.growth_rate as GrowthRate, level),
+                hp_exp: 0,
+                attack_exp: 0,
+                defense_exp: 0,
+                speed_exp: 0,
+                special_exp: 0,
+                happiness: 70,
+                moves: [{ name: MoveName.TACKLE, current_pp: 35 }],
+            }));
+        const caterpie = makeMon(caterpieSpecies, 'CATERPIE', 4);
+        const finisher = makeMon(caterpieSpecies, 'FINISHER', 4);
+        const faintedEnemy = makeMon(faintedSpecies, 'ENEMY', 10);
+        const mockBattle = {
+            context: {
+                playerParty: [caterpie, finisher],
+                playerParticipantsNotFainted: new Set([0, 1]),
+                trainerBattle: false,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+                auto_exp_share_enabled: false,
+            },
+            battleUi: null,
+            battleUiCall: () => null,
+            eventManager: { dispatch: () => { } },
+        } as unknown as Battle;
+
+        grantPlayerExperience(mockBattle, faintedEnemy);
+
+        expect(caterpie.experience).toBe(135);
+        expect(caterpie.level).toBe(5);
+        expect(finisher.level).toBe(5);
     });
 
 });

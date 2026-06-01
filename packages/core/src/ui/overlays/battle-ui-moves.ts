@@ -33,18 +33,29 @@ export const HM_MOVE_NAMES = new Set<MoveName>([
   MoveName.WATERFALL,
 ]);
 
-export const enqueue_exp_gain = (
-  state: BattleUIState,
+type ExpGainAnimationRequest = {
+  pokemon: Pokemon;
+  expGain: number;
+};
+
+const exp_animation_queue = (state: BattleUIState): ExpGainAnimationRequest[] => {
+  if (!Array.isArray(state.exp_animation_queue)) {
+    state.exp_animation_queue = [];
+  }
+  return state.exp_animation_queue as ExpGainAnimationRequest[];
+};
+
+const build_exp_animation = (
   pokemon: Pokemon,
   exp_gain: number
-): void => {
+): ExpBarAnimationState | null => {
   if (exp_gain <= 0 || pokemon.level >= 100) {
-    return;
+    return null;
   }
   const growth = pokemon.species.growth_rate;
   if (!growth) {
     pokemon.experience += exp_gain;
-    return;
+    return null;
   }
   const maxExp = calculateExperience(growth, 100);
   const startExp = pokemon.experience;
@@ -52,7 +63,7 @@ export const enqueue_exp_gain = (
   const pending = buildLevelQueue(pokemon, target);
   const span = Math.max(1, target - startExp);
   const speed = Math.max(1, Math.floor(span / 48));
-  state.exp_animation = {
+  return {
     pokemon,
     targetExp: target,
     pendingLevels: pending,
@@ -60,9 +71,41 @@ export const enqueue_exp_gain = (
   } as ExpBarAnimationState;
 };
 
+const start_next_exp_animation = (state: BattleUIState): boolean => {
+  if (battle_dialogue.waiting_flag(state.dialogue)) {
+    return false;
+  }
+  const queue = exp_animation_queue(state);
+  while (queue.length) {
+    const request = queue.shift();
+    if (!request) {
+      continue;
+    }
+    const anim = build_exp_animation(request.pokemon, request.expGain);
+    if (anim) {
+      state.exp_animation = anim;
+      return true;
+    }
+  }
+  return false;
+};
+
+export const enqueue_exp_gain = (
+  state: BattleUIState,
+  pokemon: Pokemon,
+  exp_gain: number
+): void => {
+  if (state.exp_animation || exp_animation_queue(state).length > 0) {
+    exp_animation_queue(state).push({ pokemon, expGain: exp_gain });
+    return;
+  }
+  state.exp_animation = build_exp_animation(pokemon, exp_gain);
+};
+
 export const update_exp_animation = (state: BattleUIState): void => {
   const anim = state.exp_animation as ExpBarAnimationState | null | undefined;
   if (!anim) {
+    start_next_exp_animation(state);
     return;
   }
   const pokemon = anim.pokemon;

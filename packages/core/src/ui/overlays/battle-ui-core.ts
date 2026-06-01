@@ -214,6 +214,7 @@ export const create_battle_ui = (
     fast_text_request: false,
     active: true,
     exp_animation: null,
+    exp_animation_queue: [],
     sprites_enabled: true,
     trainer_sprites_visible: false,
     trainer_send_out_seen: false,
@@ -315,6 +316,7 @@ export const begin_battle = (state: BattleUIState): void => {
   state.pending_animation_events = [];
   state.fast_animation_request = false;
   state.exp_animation = null;
+  state.exp_animation_queue = [];
   state.trainer_intro = null;
   state.trainer_victory = null;
   state.trainer_exit = null;
@@ -361,6 +363,7 @@ export const end_battle = (state: BattleUIState): void => {
   state.fast_animation_request = false;
   state.pending_animation_events = [];
   state.exp_animation = null;
+  state.exp_animation_queue = [];
   state.evolution_animation = null;
   state.trainer_victory = null;
   state.trainer_exit = null;
@@ -631,6 +634,7 @@ export const should_block_state_advance = (state: BattleUIState): boolean => {
   const instantMode = Boolean(state.game_state?.wram?.instant_mode);
   const dialogueWait = battle_dialogue.waiting_flag(state.dialogue);
   const pendingLevels = state.exp_animation !== null;
+  const pendingExpQueue = (state.exp_animation_queue?.length ?? 0) > 0;
   const animations = state.animation_player.is_active();
   const pendingAnimationEvents = (state.pending_animation_events?.length ?? 0) > 0;
   const waits = state.manual_wait_override || state.waiting_for_input;
@@ -644,6 +648,7 @@ export const should_block_state_advance = (state: BattleUIState): boolean => {
       victoryAnimating ||
       dialogueWait ||
       pendingLevels ||
+      pendingExpQueue ||
       animations ||
       pendingAnimationEvents ||
       waits ||

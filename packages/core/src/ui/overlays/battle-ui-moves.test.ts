@@ -1,10 +1,12 @@
-import { MoveEffect, MoveName, PokemonType } from "../../core/enums";
-import type { LearnedMove, Move, Pokemon } from "../../core/models";
+import { GrowthRate, MoveEffect, MoveName, PokemonType } from "../../core/enums";
+import type { LearnedMove, Move, Pokemon, PokemonSpecies } from "../../core/models";
+import { createInitialGameState } from "../../core/state";
+import { calculateExperience } from "../../engine/experience";
 import type { BattleUIState } from "./battle-ui-state";
 import type { DialogueState } from "./battle-dialogue";
 import { MoveLearningPhase } from "./battle-ui-state";
 import { advance_dialogue } from "./battle-dialogue";
-import { process_move_learning } from "./battle-ui-moves";
+import { enqueue_exp_gain, process_move_learning, update_exp_animation } from "./battle-ui-moves";
 import { Surface } from "../surface";
 
 type DialogueHarness = DialogueState;
@@ -275,5 +277,109 @@ describe("battle-ui-moves learn move dialogue", () => {
     );
     expect(state.active_move_learn?.replace_index).toBeNull();
     expect(state.active_move_learn?.forget_move_name).toBeNull();
+  });
+});
+
+const expCaterpieSpecies = (): PokemonSpecies =>
+  ({
+    id: "CATERPIE",
+    int_id: 10,
+    base_stats: {
+      hp: 45,
+      attack: 30,
+      defense: 35,
+      speed: 45,
+      special_attack: 20,
+      special_defense: 20,
+    },
+    type1: PokemonType.BUG,
+    type2: PokemonType.BUG,
+    catch_rate: 255,
+    base_exp: 53,
+    gender_ratio: 127,
+    unknown1: 0,
+    step_cycles_to_hatch: 15,
+    unknown2: 0,
+    growth_rate: GrowthRate.GROWTH_MEDIUM_FAST,
+    egg_group1: "EGG_BUG",
+    egg_group2: "EGG_BUG",
+    tmhm_learnset: [],
+    evolutions: null,
+    ability: "NONE",
+    pic_size: 0,
+    front_pic: 0,
+    back_pic: 0,
+  }) as PokemonSpecies;
+
+const makeExpPokemon = (nickname: string, level: number): Pokemon => {
+  const species = expCaterpieSpecies();
+  return {
+    species,
+    nickname,
+    level,
+    hp: 18,
+    max_hp: 18,
+    dvs: { attack: 0, defense: 0, speed: 0, special: 0, hp: 0 },
+    original_trainer_name: "PLAYER",
+    original_trainer_id: 1,
+    experience: calculateExperience(species.growth_rate as GrowthRate, level),
+    hp_exp: 0,
+    attack_exp: 0,
+    defense_exp: 0,
+    speed_exp: 0,
+    special_exp: 0,
+    happiness: 70,
+    moves: [{ name: MoveName.TACKLE, current_pp: 35 }],
+    stat_boosts: {
+      ATTACK: 0,
+      DEFENSE: 0,
+      SPEED: 0,
+      SPECIAL_ATTACK: 0,
+      SPECIAL_DEFENSE: 0,
+      ACCURACY: 0,
+      EVASION: 0,
+    },
+  } as Pokemon;
+};
+
+const buildExpState = (): BattleUIState =>
+  ({
+    game_state: createInitialGameState(),
+    data_loader: null,
+    dialogue: buildDialogue(),
+    exp_animation: null,
+    exp_animation_queue: [],
+    pending_evolutions: [],
+    pending_move_learns: [],
+  }) as unknown as BattleUIState;
+
+describe("battle EXP animation queue", () => {
+  it("keeps a switched Caterpie's EXP gain instead of replacing it with the next participant", () => {
+    const state = buildExpState();
+    const caterpie = makeExpPokemon("CATERPIE", 4);
+    const finisher = makeExpPokemon("FINISHER", 4);
+
+    enqueue_exp_gain(state, caterpie, 71);
+    enqueue_exp_gain(state, finisher, 71);
+
+    for (let i = 0; i < 100 && state.exp_animation; i++) {
+      update_exp_animation(state);
+    }
+
+    expect(caterpie.experience).toBe(135);
+    expect(caterpie.level).toBe(5);
+    expect(finisher.experience).toBe(64);
+    expect(finisher.level).toBe(4);
+    expect(state.exp_animation_queue?.length).toBe(1);
+
+    clearDialogueWait(state);
+    update_exp_animation(state);
+    for (let i = 0; i < 100 && state.exp_animation; i++) {
+      update_exp_animation(state);
+    }
+
+    expect(finisher.experience).toBe(135);
+    expect(finisher.level).toBe(5);
+    expect(state.exp_animation_queue?.length).toBe(0);
   });
 });

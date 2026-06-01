@@ -5,6 +5,7 @@ import { Pokemon } from '../../../core/models';
 import { calculateExperience } from '../../experience';
 import { EventManager, Event } from '../../events/events';
 import { _normalizeItemName } from './damage-calculation';
+import { buildLevelQueue, type LevelUpInfo } from '../../../ui/overlays/battle-experience';
 
 type BattleGameStateWithAutoShare = GameState & {
     auto_exp_share_enabled?: boolean;
@@ -131,7 +132,35 @@ function _applyExpImmediately(pokemon: Pokemon, expGain: number): void {
         return;
     }
     const maxExp = calculateExperience(growth, 100);
-    pokemon.experience = Math.min(maxExp, pokemon.experience + expGain);
+    const targetExp = Math.min(maxExp, pokemon.experience + expGain);
+    const pendingLevels = buildLevelQueue(pokemon, targetExp);
+    pokemon.experience = targetExp;
+    for (const levelInfo of pendingLevels) {
+        _applyLevelUpImmediately(pokemon, levelInfo);
+    }
+}
+
+function _applyLevelUpImmediately(pokemon: Pokemon, info: LevelUpInfo): void {
+    pokemon.level = info.level;
+    const oldHp = pokemon.hp;
+    pokemon.max_hp = info.stats.max_hp;
+    pokemon.attack = info.stats.attack;
+    pokemon.defense = info.stats.defense;
+    pokemon.speed = info.stats.speed;
+    pokemon.special_attack = info.stats.special_attack;
+    pokemon.special_defense = info.stats.special_defense;
+    pokemon.hp = Math.min(pokemon.max_hp, Math.max(1, oldHp + info.hpDelta));
+    for (const learned of info.learnedMoves) {
+        if (pokemon.moves?.some((move) => move?.name === learned.name)) {
+            continue;
+        }
+        const moves = (pokemon.moves ?? []).filter(Boolean);
+        if (moves.length >= 4) {
+            continue;
+        }
+        moves.push({ ...learned });
+        pokemon.moves = moves;
+    }
 }
 
 function _boostOneAndAHalf(value: number): number {
