@@ -1,5 +1,4 @@
 
-import type { GameState } from '@pokecrystal/core/core/state';
 import { Battle } from './battle-logic';
 import { Pokemon } from '../../../core/models';
 import { calculateExperience } from '../../experience';
@@ -7,33 +6,29 @@ import { EventManager, Event } from '../../events/events';
 import { _normalizeItemName } from './damage-calculation';
 import { buildLevelQueue, type LevelUpInfo } from '../../../ui/overlays/battle-experience';
 
-type BattleGameStateWithAutoShare = GameState & {
-    auto_exp_share_enabled?: boolean;
-};
-
 export function grantPlayerExperience(battle: Battle, fainted: Pokemon): void {
+    if (_shouldSkipExperience(battle)) {
+        return;
+    }
     const participants = new Set<number>(battle.context.playerParticipantsNotFainted);
-    const autoShareEnabled = Boolean(
-        (battle.gameState as BattleGameStateWithAutoShare)?.auto_exp_share_enabled ?? false
-    );
-    const expShareHolders = autoShareEnabled ? new Set<number>() : _expShareHolders(battle);
+    const expShareHolders = _expShareHolders(battle);
 
-    // In Gen 2, only participants gain Stat Exp. It is not split.
-    // We intentionally fix the Gen 2 bug where holding an Exp.Share halves stat exp.
-    const halveStatYield = false;
-    _awardStatExpToAll(battle, fainted, participants, halveStatYield);
+    const participantBaseDivisor = expShareHolders.size > 0 ? 2 : 1;
+    _distributeExp(battle, fainted, participants, participantBaseDivisor);
 
-    // Now, distribute level-based experience.
-    const halveBaseYield = expShareHolders.size > 0 || autoShareEnabled;
-    _distributeExp(battle, fainted, participants, halveBaseYield);
-
-    if (expShareHolders.size > 0) {
-        _distributeExp(battle, fainted, expShareHolders, true);
+    if (expShareHolders.size) {
+        _distributeExp(battle, fainted, expShareHolders, 1);
     }
-    if (autoShareEnabled) {
-        const benchRecipients = _autoExpShareRecipients(battle);
-        _distributeAutoExpShare(battle, fainted, benchRecipients);
+
+    _resetBattleParticipants(battle);
+}
+
+function _shouldSkipExperience(battle: Battle): boolean {
+    if (Number(battle.gameState?.wram?.wLinkMode ?? 0) !== 0) {
+        return true;
     }
+    const battleType = String(battle.gameState?.wram?.battle_type ?? '').toUpperCase();
+    return battleType.includes('BATTLE_TOWER');
 }
 
 function _isTradedMon(battle: Battle, pokemon: Pokemon): boolean {
@@ -44,20 +39,19 @@ function _isTradedMon(battle: Battle, pokemon: Pokemon): boolean {
     return pokemon.original_trainer_id !== playerId;
 }
 
-function _distributeExp(battle: Battle, fainted: Pokemon, recipientIndices: Set<number>, halveBase: boolean): void {
+function _distributeExp(battle: Battle, fainted: Pokemon, recipientIndices: Set<number>, baseDivisor: number): void {
     const resolved = _resolveRecipients(battle, recipientIndices);
     if (resolved.length === 0) {
         return;
     }
 
-    let baseExp = fainted.species.base_exp || 0;
+    const divisor = Math.max(1, Math.trunc(baseDivisor));
+    const participantDivisor = resolved.length >= 2 ? resolved.length : 1;
+    const totalDivisor = divisor * participantDivisor;
+    const adjusted = _adjustedEnemyYield(fainted, totalDivisor);
 
-    if (halveBase) {
-        baseExp = Math.floor(baseExp / 2);
-    }
-
-    if (resolved.length >= 2) {
-        baseExp = Math.floor(baseExp / resolved.length);
+    for (const pokemon of resolved) {
+        awardStatExp(pokemon, adjusted.statsYield);
     }
 
     const faintedLevel = fainted.level > 0 ? fainted.level : 1;
@@ -65,7 +59,7 @@ function _distributeExp(battle: Battle, fainted: Pokemon, recipientIndices: Set<
         const expGain = _calculateExpGain(
             battle,
             pokemon,
-            baseExp,
+            adjusted.baseExp,
             faintedLevel,
             battle.context.trainerBattle
         );
@@ -73,30 +67,29 @@ function _distributeExp(battle: Battle, fainted: Pokemon, recipientIndices: Set<
     }
 }
 
-function _awardStatExpToAll(battle: Battle, fainted: Pokemon, recipientIndices: Set<number>, halveStatYield: boolean): void {
-    const resolved = _resolveRecipients(battle, recipientIndices);
-    if (resolved.length === 0) {
-        return;
-    }
-
+function _adjustedEnemyYield(fainted: Pokemon, divisor: number): {
+    baseExp: number;
+    statsYield: { hp: number; attack: number; defense: number; speed: number; special: number };
+} {
     const baseStats = fainted.species.base_stats;
-    const statsYield = {
+    const rawStatsYield = {
         hp: baseStats.hp,
         attack: baseStats.attack,
         defense: baseStats.defense,
         speed: baseStats.speed,
         special: baseStats.special_attack,
     };
-
-    if (halveStatYield) {
-        for (const key in statsYield) {
-            statsYield[key as keyof typeof statsYield] = Math.floor(statsYield[key as keyof typeof statsYield] / 2);
-        }
-    }
-
-    for (const pokemon of resolved) {
-        awardStatExp(pokemon, statsYield);
-    }
+    const adjustedDivisor = Math.max(1, Math.trunc(divisor));
+    return {
+        baseExp: Math.floor((fainted.species.base_exp || 0) / adjustedDivisor),
+        statsYield: {
+            hp: Math.floor(rawStatsYield.hp / adjustedDivisor),
+            attack: Math.floor(rawStatsYield.attack / adjustedDivisor),
+            defense: Math.floor(rawStatsYield.defense / adjustedDivisor),
+            speed: Math.floor(rawStatsYield.speed / adjustedDivisor),
+            special: Math.floor(rawStatsYield.special / adjustedDivisor),
+        },
+    };
 }
 
 export function awardStatExp(pokemon: Pokemon, statsYield: { [key: string]: number }): void {
@@ -119,7 +112,7 @@ function _calculateExpGain(battle: Battle, receiver: Pokemon, baseExp: number, f
     if (trainerBattle) {
         exp = _boostOneAndAHalf(exp);
     }
-    if (_holdingItem(receiver, "LUCKY_EGG")) {
+    if (_holdingItem(receiver, 'LUCKY_EGG')) {
         exp = _boostOneAndAHalf(exp);
     }
     return Math.max(0, exp);
@@ -180,7 +173,7 @@ function _expShareHolders(battle: Battle): Set<number> {
     const party = battle.context.playerParty;
     for (let i = 0; i < party.length; i++) {
         const pokemon = party[i];
-        if (pokemon && pokemon.hp > 0 && _holdingItem(pokemon, "EXP_SHARE")) {
+        if (pokemon && pokemon.hp > 0 && _holdingItem(pokemon, 'EXP_SHARE')) {
             holders.add(i);
         }
     }
@@ -190,59 +183,35 @@ function _expShareHolders(battle: Battle): Set<number> {
 function _resolveRecipients(battle: Battle, indices: Set<number>): Pokemon[] {
     const party = battle.context.playerParty;
     const resolved: Pokemon[] = [];
-    indices.forEach(index => {
-        if (index >= 0 && index < party.length) {
+    for (let index = 0; index < party.length; index++) {
+        if (indices.has(index)) {
             const pokemon = party[index];
             if (pokemon && pokemon.hp > 0) {
                 resolved.push(pokemon);
             }
         }
-    });
+    }
     return resolved;
 }
 
-function _autoExpShareRecipients(battle: Battle): Set<number> {
-    const party = battle.context.playerParty;
-    const activeIndex = battle.context.playerActiveIndex;
-    const recipients = new Set<number>();
-    for (let i = 0; i < party.length; i++) {
-        if (i === activeIndex) {
-            continue;
-        }
-        const pokemon = party[i];
-        if (pokemon && pokemon.hp > 0) {
-            recipients.add(i);
-        }
-    }
-    return recipients;
-}
-
-function _distributeAutoExpShare(battle: Battle, fainted: Pokemon, recipientIndices: Set<number>): void {
-    const resolved = _resolveRecipients(battle, recipientIndices);
-    if (resolved.length === 0) {
+function _resetBattleParticipants(battle: Battle): void {
+    const context = battle.context;
+    if (
+        !(context.playerParticipantsNotFainted instanceof Set) ||
+        !(context.playerParticipantsIncludingFainted instanceof Set)
+    ) {
         return;
     }
-
-    const baseExp = fainted.species.base_exp || 0;
-    const baseStats = fainted.species.base_stats;
-    const statsYield = {
-        hp: baseStats.hp,
-        attack: baseStats.attack,
-        defense: baseStats.defense,
-        speed: baseStats.speed,
-        special: baseStats.special_attack,
-    };
-    const faintedLevel = fainted.level > 0 ? fainted.level : 1;
-    for (const pokemon of resolved) {
-        let expGain = _calculateExpGain(
-            battle,
-            pokemon,
-            baseExp,
-            faintedLevel,
-            battle.context.trainerBattle
-        );
-        expGain = Math.floor((expGain * 3) / 4);
-        _grantExpGain(battle, pokemon, expGain);
+    const activeIndex = context.playerActiveIndex;
+    if (!Number.isInteger(activeIndex)) {
+        return;
+    }
+    context.playerParticipantsNotFainted.clear();
+    context.playerParticipantsIncludingFainted.clear();
+    const active = context.playerParty?.[activeIndex];
+    if (activeIndex >= 0 && active && active.hp > 0) {
+        context.playerParticipantsNotFainted.add(activeIndex);
+        context.playerParticipantsIncludingFainted.add(activeIndex);
     }
 }
 
@@ -253,11 +222,11 @@ function _grantExpGain(battle: Battle, pokemon: Pokemon, expGain: number): void 
 
     if (battle.eventManager instanceof EventManager) {
         battle.eventManager.dispatch(
-            new Event("show_text", { text: `${pokemon.nickname} gained ${expGain} EXP!` })
+            new Event('show_text', { text: `${pokemon.nickname} gained ${expGain} EXP!` })
         );
     }
 
-    const result = battle.battleUiCall("enqueue_exp_gain", pokemon, expGain);
+    const result = battle.battleUiCall('enqueue_exp_gain', pokemon, expGain);
 
     if (result === null && !battle.battleUi) {
         _applyExpImmediately(pokemon, expGain);

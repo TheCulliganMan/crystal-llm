@@ -61,13 +61,15 @@ describe('grantPlayerExperience', () => {
     it('should award stat experience only to participants', () => {
         const mockBattle = {
             context: {
-            playerParty: [participant, bench_warmer],
-            playerParticipantsNotFainted: [0],
-        },
-        gameState: {
-            sram: { player_id: 1 },
-            auto_exp_share_enabled: false,
-        },
+                playerParty: [participant, bench_warmer],
+                playerParticipantsNotFainted: new Set([0]),
+                playerParticipantsIncludingFainted: new Set([0]),
+                playerActiveIndex: 0,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+            },
+            battleUi: null,
             battleUiCall: () => null,
             eventManager: { dispatch: () => { } },
         } as unknown as Battle;
@@ -88,16 +90,19 @@ describe('grantPlayerExperience', () => {
         expect(bench_warmer.special_exp).toBe(0);
     });
 
-    it('should not halve stat experience when an Exp. Share is held or auto-share is enabled', () => {
+    it('matches ASM Exp.Share stat experience splitting', () => {
+        bench_warmer.item = 'EXP_SHARE';
         const mockBattle = {
             context: {
-            playerParty: [participant, bench_warmer],
-            playerParticipantsNotFainted: [0],
-        },
-        gameState: {
-            sram: { player_id: 1 },
-            auto_exp_share_enabled: true,
-        },
+                playerParty: [participant, bench_warmer],
+                playerParticipantsNotFainted: new Set([0]),
+                playerParticipantsIncludingFainted: new Set([0]),
+                playerActiveIndex: 0,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+            },
+            battleUi: null,
             battleUiCall: () => null,
             eventManager: { dispatch: () => { } },
         } as unknown as Battle;
@@ -105,17 +110,107 @@ describe('grantPlayerExperience', () => {
         grantPlayerExperience(mockBattle, fainted);
 
         const statsYield = fainted.species.base_stats;
-        expect(participant.hp_exp).toBe(statsYield.hp);
-        expect(participant.attack_exp).toBe(statsYield.attack);
-        expect(participant.defense_exp).toBe(statsYield.defense);
-        expect(participant.speed_exp).toBe(statsYield.speed);
-        expect(participant.special_exp).toBe(statsYield.special_attack);
+        expect(participant.hp_exp).toBe(Math.floor(statsYield.hp / 2));
+        expect(participant.attack_exp).toBe(Math.floor(statsYield.attack / 2));
+        expect(participant.defense_exp).toBe(Math.floor(statsYield.defense / 2));
+        expect(participant.speed_exp).toBe(Math.floor(statsYield.speed / 2));
+        expect(participant.special_exp).toBe(Math.floor(statsYield.special_attack / 2));
 
-        expect(bench_warmer.hp_exp).toBe(0);
-        expect(bench_warmer.attack_exp).toBe(0);
-        expect(bench_warmer.defense_exp).toBe(0);
-        expect(bench_warmer.speed_exp).toBe(0);
-        expect(bench_warmer.special_exp).toBe(0);
+        expect(bench_warmer.hp_exp).toBe(statsYield.hp);
+        expect(bench_warmer.attack_exp).toBe(statsYield.attack);
+        expect(bench_warmer.defense_exp).toBe(statsYield.defense);
+        expect(bench_warmer.speed_exp).toBe(statsYield.speed);
+        expect(bench_warmer.special_exp).toBe(statsYield.special_attack);
+        expect(participant.experience).toBe(147);
+        expect(bench_warmer.experience).toBe(169);
+    });
+
+    it('divides stat experience among battle participants like ASM', () => {
+        const mockBattle = {
+            context: {
+                playerParty: [participant, bench_warmer],
+                playerParticipantsNotFainted: new Set([0, 1]),
+                playerParticipantsIncludingFainted: new Set([0, 1]),
+                playerActiveIndex: 1,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+            },
+            battleUi: null,
+            battleUiCall: () => null,
+            eventManager: { dispatch: () => { } },
+        } as unknown as Battle;
+
+        grantPlayerExperience(mockBattle, fainted);
+
+        const statsYield = fainted.species.base_stats;
+        for (const pokemon of [participant, bench_warmer]) {
+            expect(pokemon.hp_exp).toBe(Math.floor(statsYield.hp / 2));
+            expect(pokemon.attack_exp).toBe(Math.floor(statsYield.attack / 2));
+            expect(pokemon.defense_exp).toBe(Math.floor(statsYield.defense / 2));
+            expect(pokemon.speed_exp).toBe(Math.floor(statsYield.speed / 2));
+            expect(pokemon.special_exp).toBe(Math.floor(statsYield.special_attack / 2));
+        }
+        expect(mockBattle.context.playerParticipantsNotFainted).toEqual(new Set([1]));
+        expect(mockBattle.context.playerParticipantsIncludingFainted).toEqual(new Set([1]));
+    });
+
+    it('applies traded, trainer, and Lucky Egg boosts in ASM order', () => {
+        participant.original_trainer_id = 2;
+        participant.item = 'LUCKY_EGG';
+        const mockBattle = {
+            context: {
+                playerParty: [participant, bench_warmer],
+                playerParticipantsNotFainted: new Set([0]),
+                playerParticipantsIncludingFainted: new Set([0]),
+                playerActiveIndex: 0,
+                trainerBattle: true,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+            },
+            battleUi: null,
+            battleUiCall: () => null,
+            eventManager: { dispatch: () => { } },
+        } as unknown as Battle;
+
+        grantPlayerExperience(mockBattle, fainted);
+
+        expect(participant.experience).toBe(273);
+    });
+
+    it('skips experience in link and Battle Tower battles like ASM', () => {
+        const linkBattle = {
+            context: {
+                playerParty: [participant],
+                playerParticipantsNotFainted: new Set([0]),
+                playerParticipantsIncludingFainted: new Set([0]),
+                playerActiveIndex: 0,
+                trainerBattle: false,
+            },
+            gameState: {
+                sram: { player_id: 1 },
+                wram: { wLinkMode: 1 },
+            },
+            battleUi: null,
+            battleUiCall: () => null,
+            eventManager: { dispatch: () => { } },
+        } as unknown as Battle;
+
+        grantPlayerExperience(linkBattle, fainted);
+        expect(participant.experience).toBe(125);
+        expect(participant.hp_exp).toBe(0);
+
+        const towerBattle = {
+            ...linkBattle,
+            gameState: {
+                sram: { player_id: 1 },
+                wram: { wLinkMode: 0, battle_type: 'BATTLETYPE_BATTLE_TOWER' },
+            },
+        } as unknown as Battle;
+        grantPlayerExperience(towerBattle, fainted);
+        expect(participant.experience).toBe(125);
+        expect(participant.hp_exp).toBe(0);
     });
 
     it('levels a switched-in Caterpie participant on the immediate no-UI path', () => {
@@ -171,11 +266,12 @@ describe('grantPlayerExperience', () => {
             context: {
                 playerParty: [caterpie, finisher],
                 playerParticipantsNotFainted: new Set([0, 1]),
+                playerParticipantsIncludingFainted: new Set([0, 1]),
+                playerActiveIndex: 1,
                 trainerBattle: false,
             },
             gameState: {
                 sram: { player_id: 1 },
-                auto_exp_share_enabled: false,
             },
             battleUi: null,
             battleUiCall: () => null,
