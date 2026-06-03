@@ -153,7 +153,7 @@ const classifyNpcHotspot = (
       token: "N",
     };
   }
-  if (hasTokenContaining(sourceTokens, "NURSE") || hasTokenContaining(sourceTokens, "POKECENTER")) {
+  if (hasTokenContaining(sourceTokens, "NURSE")) {
     return { type: "heal", label: "Healer", token: "H" };
   }
   if (
@@ -205,11 +205,18 @@ const classifyBgHotspot = (
       token: "P",
     };
   }
-  if (script.includes("HEALINGMACHINE") || script.includes("POKECENTER")) {
+  if (script.includes("HEALINGMACHINE")) {
     return {
       type: "heal",
       label: "Healing machine",
       token: "H",
+    };
+  }
+  if (script.includes("POKECENTER")) {
+    return {
+      type: "sign",
+      label: "Pokecenter sign",
+      token: "S",
     };
   }
   if (isTrashcanScript(script)) {
@@ -275,7 +282,7 @@ const classifyDestination = (
 ): Pick<McpMapHotspot, "type" | "label" | "token" | "spoiler_masked"> => {
   const normalized = `${normalizeName(targetName)} ${normalizeName(targetConstant)}`.trim();
   if (normalized.includes("POKECENTER")) {
-    return { type: "heal", label: "Pokecenter", token: "H" };
+    return { type: "warp", label: "Warp: Pokecenter", token: "D" };
   }
   if (normalized.includes("MART") || normalized.includes("DEPTSTORE") || normalized.includes("SHOP")) {
     return { type: "shop", label: "Shop", token: "$" };

@@ -857,6 +857,56 @@ describe("overworld rendering helpers", () => {
     expect(legendText).toContain("V=Vendor");
   });
 
+  it("renders Pokecenter signs as signs instead of healers", () => {
+    const textTarget = { renderOverworldOverlay: jest.fn() };
+    const mapData = {
+      mapName: "TEST_MAP",
+      width: 2,
+      height: 2,
+      getMetatileAt: () => 0,
+    };
+    const tileset = {
+      tilesetName: "TEST",
+      metatiles: [{ collision: [0, 0, 0, 0] }],
+    };
+
+    class TestOverworld extends OverworldRenderingMixin {}
+    const overworld = new TestOverworld() as OverworldRenderingMixin & Record<string, unknown>;
+    Object.assign(overworld, {
+      map: mapData,
+      tileset,
+      _map_events: {
+        warps: [],
+        coord_events: [],
+        bg_events: [{ x: 0, y: 0, event_type: "BGEVENT_READ", script: "PokecenterSignScript" }],
+      },
+      player_x: 7,
+      player_y: 7,
+      player_direction: "down",
+      TILES_PER_COLLISION: 2,
+      _text_ui_color: false,
+      _ascii_overlay_cache_key: null,
+      _ascii_overlay_cached_viewport: null,
+      _ascii_overlay_cached_info: null,
+      _ascii_overlay_last_npc_positions: [],
+      _ascii_overlay_last_event_identity: null,
+      _ascii_overlay_last_event_counts: null,
+      _last_block_feedback: null,
+      npcs: [],
+      game_state: null,
+    });
+
+    (overworld as any)._draw_ascii_overworld(textTarget);
+
+    const [viewportLines, infoLines] = (textTarget.renderOverworldOverlay as jest.Mock).mock.calls[0];
+    const viewportText = viewportLines.join("\n");
+    const legendText = infoLines.join("\n");
+
+    expect(viewportText).toContain("S");
+    expect(legendText).toContain("S=Sign");
+    expect(legendText).not.toContain("+=Healer");
+  });
+
   it("renders Elm and the three starter poke balls as separate ascii cells in Elm's Lab", () => {
     const textTarget = { renderOverworldOverlay: jest.fn() };
     const mapData = {

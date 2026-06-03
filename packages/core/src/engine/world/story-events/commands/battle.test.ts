@@ -1360,6 +1360,14 @@ describe("startbattle canlose handling", () => {
 });
 
 describe("trainer battle text parity", () => {
+  it("loads non-empty National Park Jack trainer text from bundled map scripts", () => {
+    const dataLoader = new DataLoader();
+
+    for (const label of ["SchoolboyJack1SeenText", "SchoolboyJack1BeatenText", "SchoolboyJackTradeMonText"]) {
+      expect(dataLoader.get_text(label)?.trim()).toBeTruthy();
+    }
+  });
+
   it("waits on trainer seen text before continuing into battle", () => {
     const gameState = createInitialGameState();
     gameState.sram.party.pokemon = [createTestPokemon("TOTODILE", 10, { hp: 10, max_hp: 10 }), null, null, null, null, null];
@@ -1449,6 +1457,38 @@ describe("trainer battle text parity", () => {
 
     const resolveTextMock = mockResolvedBattleText({
       BattleSeenText: "BattleSeenText",
+    });
+    try {
+      expect(() => command.execute(gameState, eventManager, overworld)).toThrow(
+        "Missing ASM battle text for label 'BattleSeenText'."
+      );
+    } finally {
+      resolveTextMock.mockRestore();
+    }
+  });
+
+  it("throws when seen text resolves to blank text", () => {
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [createTestPokemon("TOTODILE", 10, { hp: 10, max_hp: 10 }), null, null, null, null, null];
+    const eventManager = new EventManager(gameState);
+    const dataLoader = {
+      get_text: jest.fn().mockReturnValue(""),
+    } as unknown as DataLoader;
+    const overworld = { data_loader: dataLoader, dataLoader } as unknown as OverworldEngine;
+    const runner = {
+      _script_stack: [],
+      data_loader: dataLoader,
+      dataLoader,
+      last_value: null,
+      last_condition_result: false,
+      variables: {},
+    } as unknown as ScriptRunner;
+
+    const command = new TrainerCommand("LASS", "DANA1", "", "BattleSeenText", "0", "0", "");
+    command.runner = runner;
+
+    const resolveTextMock = mockResolvedBattleText({
+      BattleSeenText: "",
     });
     try {
       expect(() => command.execute(gameState, eventManager, overworld)).toThrow(

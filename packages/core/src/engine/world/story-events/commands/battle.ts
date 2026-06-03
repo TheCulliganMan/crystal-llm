@@ -461,6 +461,9 @@ const resolveBattleTextLabel = (
 ): string => {
   const resolved = resolveText(runner ?? null, overworld, label);
   const cleaned = String(resolved ?? "").replace(/@/g, "").replace(/\n/g, " ").trim();
+  if (!cleaned) {
+    throw new Error(`Missing ASM battle text for label '${label}'.`);
+  }
   if (cleaned === String(label).trim()) {
     throw new Error(`Missing ASM battle text for label '${label}'.`);
   }

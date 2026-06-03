@@ -100,6 +100,42 @@ describe("ScriptRunner pause handling", () => {
     expect(unlockedFrame).not.toBeNull();
   });
 
+  it("does not preserve an endifjustbattled stop behind a stale pause flag", () => {
+    const gameState = createInitialGameState();
+    gameState.wram.wRunningTrainerBattleScript = -1;
+    const eventManager = new EventManager(gameState);
+    const overworld = {
+      dialogue: {
+        active: false,
+        visible: false,
+        waiting_for_input: false,
+      },
+    } as unknown as OverworldEngine;
+    const dataLoader = new DataLoader();
+    dataLoader.get_script = (name: string) => {
+      if (name === "AfterTrainerScript") {
+        return [{ command: "endifjustbattled", args: [] }];
+      }
+      return null;
+    };
+
+    const runner = new ScriptRunnerImpl(
+      gameState,
+      eventManager,
+      dataLoader,
+      overworld,
+    );
+    (runner as unknown as { _pause_execution: boolean })._pause_execution = true;
+
+    runner.run("AfterTrainerScript");
+
+    expect(runner._awaiting_resume).toBe(0);
+    expect(runner._script_stack).toHaveLength(0);
+    expect(runner.stopExecution).toBe(false);
+    expect(runner.state).toBe(ScriptRunnerState.IDLE);
+    expect(gameState.wram.wRunningTrainerBattleScript).toBe(0);
+  });
+
   it("tracks queued overworld tasks until their callback resumes", () => {
     const gameState = createInitialGameState();
     const eventManager = new EventManager(gameState);

@@ -62,6 +62,7 @@ type OverworldScriptQueueContext = OverworldContext & {
   _logger?: { warn?: (message: string) => void };
   _process_special_phone_call?: () => boolean;
   is_moving?: boolean;
+  _text_lock_active?: boolean;
 };
 
 const asScriptQueueContext = (value: unknown): OverworldScriptQueueContext =>
@@ -70,32 +71,50 @@ const asScriptQueueContext = (value: unknown): OverworldScriptQueueContext =>
 export class OverworldScriptQueueMixin {
   playerMovementLocked(): boolean {
     const overworld = asScriptQueueContext(this);
+    const runner = overworld.script_runner;
+    const stackDepth = Array.isArray(runner?._script_stack) ? runner._script_stack.length : 0;
+    const awaitingResume = typeof runner?._awaiting_resume === "number"
+      ? runner._awaiting_resume
+      : Number(runner?._awaiting_resume ?? 0);
+    let runnerBusy = false;
+    let runnerHasWork = stackDepth > 0 || awaitingResume > 0;
+    if (!runner) {
+      runnerBusy = false;
+    } else {
+      // ASM: engine/overworld/events.asm::PlayerEvents blocks OWPlayerInput when wScriptRunning is set.
+      const runnerAny = runner as { is_busy?: unknown; _script_stack?: unknown[]; _awaiting_resume?: unknown; state?: ScriptRunnerState };
+      const isBusy = runnerAny.is_busy;
+      if (typeof isBusy === "boolean") {
+        runnerBusy = isBusy;
+      } else if (typeof isBusy === "function") {
+        runnerBusy = Boolean(isBusy.call(runner));
+      } else {
+        runnerBusy = (
+          stackDepth > 0
+          || awaitingResume > 0
+          || runnerAny.state === ScriptRunnerState.RUNNING
+          || runnerAny.state === ScriptRunnerState.PAUSED
+        );
+        runnerHasWork = runnerBusy;
+      }
+    }
     if ((overworld._movement_lock_count ?? 0) > 0) {
+      const tasksActive = Boolean(overworld._active_script_task || overworld._script_task_queue?.length);
+      if (!runnerHasWork && !tasksActive) {
+        if (isDebugEnabled("script:tasks") || isDebugEnabled("tasks") || isDebugEnabled("script")) {
+          pushDebugLog("[task] clearing orphaned movement lock", {
+            lockCount: overworld._movement_lock_count ?? 0,
+          });
+        }
+        overworld._movement_lock_count = 0;
+        overworld._text_lock_active = false;
+        overworld._blocking_task_count = 0;
+        overworld._blocking_movement_lock_active = false;
+        return false;
+      }
       return true;
     }
-    const runner = overworld.script_runner;
-    if (!runner) {
-      return false;
-    }
-    // ASM: engine/overworld/events.asm::PlayerEvents blocks OWPlayerInput when wScriptRunning is set.
-    const runnerAny = runner as { is_busy?: unknown; _script_stack?: unknown[]; _awaiting_resume?: unknown; state?: ScriptRunnerState };
-    const isBusy = runnerAny.is_busy;
-    if (typeof isBusy === "boolean") {
-      return isBusy;
-    }
-    if (typeof isBusy === "function") {
-      return Boolean(isBusy.call(runner));
-    }
-    const stackDepth = Array.isArray(runnerAny._script_stack) ? runnerAny._script_stack.length : 0;
-    const awaitingResume = typeof runnerAny._awaiting_resume === "number"
-      ? runnerAny._awaiting_resume
-      : Number(runnerAny._awaiting_resume ?? 0);
-    return (
-      stackDepth > 0
-      || awaitingResume > 0
-      || runnerAny.state === ScriptRunnerState.RUNNING
-      || runnerAny.state === ScriptRunnerState.PAUSED
-    );
+    return runnerBusy;
   }
 
   player_movement_locked(): boolean {

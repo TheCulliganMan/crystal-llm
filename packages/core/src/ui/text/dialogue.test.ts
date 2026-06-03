@@ -197,6 +197,64 @@ describe("FieldDialogueManager wait_for_input", () => {
     expect(resume).toHaveBeenCalledTimes(1);
   });
 
+  it("clears a stale visible blank textbox that has no text or pending prompt", () => {
+    const { dialogue, resume } = buildDialogueWithEvents();
+    const internals = dialogue as unknown as {
+      visible: boolean;
+      waiting_for_input: boolean;
+      script_paused: boolean;
+      pendingWaits: number;
+      pending_script_waits: number;
+      current_text: string;
+      pending_text: string[];
+      window: DialogueWindow;
+    };
+    internals.visible = true;
+    internals.waiting_for_input = false;
+    internals.script_paused = true;
+    internals.pendingWaits = 0;
+    internals.pending_script_waits = 1;
+    internals.current_text = "";
+    internals.pending_text = [];
+    internals.window.clear();
+
+    expect(dialogue.handle_input({ type: KEYS.KEYDOWN, key: KEYS.Z })).toBe(true);
+
+    expect(dialogue.waiting_for_input).toBe(false);
+    expect(dialogue.visible).toBe(false);
+    expect(dialogue.pending_waits).toBe(0);
+    expect(dialogue.pending_script_waits_count).toBe(0);
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a stale visible blank textbox during update", () => {
+    const { dialogue, resume } = buildDialogueWithEvents();
+    const internals = dialogue as unknown as {
+      visible: boolean;
+      waiting_for_input: boolean;
+      script_paused: boolean;
+      pendingWaits: number;
+      pending_script_waits: number;
+      current_text: string;
+      pending_text: string[];
+      window: DialogueWindow;
+    };
+    internals.visible = true;
+    internals.waiting_for_input = false;
+    internals.script_paused = true;
+    internals.pendingWaits = 0;
+    internals.pending_script_waits = 1;
+    internals.current_text = "";
+    internals.pending_text = [];
+    internals.window.clear();
+
+    dialogue.update();
+
+    expect(dialogue.visible).toBe(false);
+    expect(dialogue.pending_script_waits_count).toBe(0);
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
   it("resumes yes/no prompts even when the script stack is empty", () => {
     const gameState = createInitialGameState();
     const eventManager = new EventManager(gameState);

@@ -1067,7 +1067,13 @@ export class FieldDialogueManager {
   }
 
   update(): void {
-    if (this.suspended || !this.visible) {
+    if (this.suspended) {
+      return;
+    }
+    if (this.clear_stale_blank_wait_if_needed()) {
+      return;
+    }
+    if (!this.visible) {
       return;
     }
     this.window.update();
@@ -1463,7 +1469,7 @@ export class FieldDialogueManager {
   }
 
   private clear_stale_blank_wait_if_needed(): boolean {
-    if (!this.waiting_for_input || this.pendingWaits > 0) {
+    if ((!this.visible && !this.waiting_for_input) || this.pendingWaits > 0) {
       return false;
     }
     if (

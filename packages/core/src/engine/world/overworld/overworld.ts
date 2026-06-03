@@ -2545,6 +2545,25 @@ export class OverworldEngine extends OverworldMapManagerMixin {
       script_runner.resume?.();
     }
 
+    if (
+      script_runner &&
+      !script_runner.stop_execution &&
+      awaiting_resume === 0 &&
+      queued_overworld_tasks === 0 &&
+      !tasks_active &&
+      !dialogue_waiting &&
+      !prompt_transition_pending &&
+      pending_waits === 0 &&
+      !dialogue_paused &&
+      stack_depth > 0
+    ) {
+      pushDebugLog("[script] auto-resume paused stack without waits", {
+        stack: stack_depth,
+        map: this.current_map_name,
+      });
+      script_runner.resume?.();
+    }
+
     return false;
   }
 

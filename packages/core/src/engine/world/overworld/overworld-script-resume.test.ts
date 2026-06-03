@@ -61,6 +61,17 @@ describe("OverworldEngine queued task resume guard", () => {
     expect(resume).toHaveBeenCalledTimes(1);
   });
 
+  it("auto-resumes a paused stack when no dialogue wait remains", () => {
+    const { stub, resume } = buildOverworldStub(0);
+    stub.script_runner.stop_execution = false;
+    stub.script_runner._awaiting_resume = 0;
+
+    const result = updateDialogueAndScripts.call(stub);
+
+    expect(result).toBe(false);
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
   it("does not clear the text lock while a script is awaiting menu input", () => {
     const { stub } = buildOverworldStub(0);
     stub._text_lock_active = true;

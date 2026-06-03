@@ -930,6 +930,7 @@ export const statusHandler = async (
       scriptBusy: status.script_busy || undefined,
       canMove: visibleOverride?.canMove ?? status.can_move,
       blockedReason: visibleOverride?.blockedReason ?? status.input_blocked_reason ?? undefined,
+      engineDebug: status.engine_debug,
       localMovement: visibleOverride ? undefined : buildLocalMovementPayload(observeSnapshot),
       partyCount: status.party_summary?.count,
       flowSummary: status.flow_state?.summary,

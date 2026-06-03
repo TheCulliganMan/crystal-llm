@@ -877,7 +877,7 @@ export class ScriptRunnerImpl implements ScriptRunner {
                     break;
                 }
                 if (this.stopExecution) {
-                    if (this._pause_execution || this._awaiting_resume > 0) {
+                    if (this._awaiting_resume > 0) {
                         this._pause_execution = false;
                         this._paused_frame = frame;
                         if (traceStack) {
@@ -889,6 +889,7 @@ export class ScriptRunnerImpl implements ScriptRunner {
                         }
                         break;
                     }
+                    this._pause_execution = false;
                     this.stopExecution = false;
                     if (traceStack) {
                         pushDebugLog("[script] stopExecution without pause; popping frame", {

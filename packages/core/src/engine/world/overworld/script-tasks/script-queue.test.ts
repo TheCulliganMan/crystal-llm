@@ -18,6 +18,7 @@ class TestOverworld extends OverworldScriptQueueMixin {
   public _maybe_process_idle_phone_calls = jest.fn();
   public _clear_stale_blocking_tasks = jest.fn();
   public _movement_lock_count = 0;
+  public _text_lock_active = false;
   public script_runner: { _script_stack?: unknown[]; _awaiting_resume?: number; is_busy?: boolean } | null = null;
 }
 
@@ -53,6 +54,7 @@ describe("OverworldScriptQueueMixin", () => {
     mixin._movement_lock_count = 0;
     expect(mixin.player_movement_locked()).toBe(false);
     mixin._movement_lock_count = 2;
+    mixin.script_runner = { _script_stack: [{}] };
     expect(mixin.player_movement_locked()).toBe(true);
   });
 
@@ -60,6 +62,25 @@ describe("OverworldScriptQueueMixin", () => {
     const mixin = new TestOverworld();
     mixin.script_runner = { _script_stack: [{}] };
     expect(mixin.player_movement_locked()).toBe(true);
+  });
+
+  it("clears an orphaned movement lock when no script work is active", () => {
+    const mixin = new TestOverworld();
+    mixin._movement_lock_count = 1;
+
+    expect(mixin.player_movement_locked()).toBe(false);
+    expect(mixin._movement_lock_count).toBe(0);
+  });
+
+  it("clears an orphaned text lock even when runner busy is only a derived latch", () => {
+    const mixin = new TestOverworld();
+    mixin._movement_lock_count = 1;
+    mixin._text_lock_active = true;
+    mixin.script_runner = { _script_stack: [], _awaiting_resume: 0, is_busy: true };
+
+    expect(mixin.player_movement_locked()).toBe(false);
+    expect(mixin._movement_lock_count).toBe(0);
+    expect(mixin._text_lock_active).toBe(false);
   });
 
   it("keeps the active task when the queue is empty", () => {

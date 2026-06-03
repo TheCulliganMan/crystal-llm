@@ -95,4 +95,52 @@ describe("buildMapInfoSnapshot", () => {
     expect(healer).toEqual(expect.objectContaining({ label: "Healer", coords: { x: 7, y: 3 } }));
     expect(healer?.approach_tiles).toContainEqual({ coords: { x: 7, y: 7 }, facing: "up" });
   });
+
+  it("does not classify outdoor Pokecenter signs or entrances as direct heal interactions", () => {
+    const snapshot = buildMapInfoSnapshot({
+      map: "GoldenrodCity",
+      mapGroup: 0,
+      mapNumber: 0,
+      playerCoords: { x: 33, y: 57 },
+      facing: "up",
+      overworld: {
+        TILES_PER_COLLISION: 2,
+        _map_events: {
+          warps: [
+            {
+              index: 1,
+              x: 15,
+              y: 27,
+              target_map_constant: "GOLDENROD_POKECENTER_1F",
+              target_map: "GoldenrodPokecenter1F",
+              target_warp_id: 1,
+            },
+          ],
+          bg_events: [
+            {
+              x: 16,
+              y: 27,
+              event_type: "BGEVENT_READ",
+              script: "PokecenterSignScript",
+            },
+          ],
+          coord_events: [],
+        },
+      },
+    });
+
+    expect(snapshot.hotspots.find((hotspot) => hotspot.coords.x === 33 && hotspot.coords.y === 55)).toEqual(
+      expect.objectContaining({
+        type: "sign",
+        label: "Pokecenter sign",
+      })
+    );
+    expect(snapshot.hotspots.find((hotspot) => hotspot.coords.x === 31 && hotspot.coords.y === 55)).toEqual(
+      expect.objectContaining({
+        type: "warp",
+        label: "Warp: Pokecenter",
+      })
+    );
+    expect(snapshot.hotspots.filter((hotspot) => hotspot.type === "heal")).toHaveLength(0);
+  });
 });

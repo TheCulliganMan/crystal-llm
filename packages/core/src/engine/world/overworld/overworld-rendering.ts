@@ -158,7 +158,7 @@ const classifyObjectMarker = (
   if (spriteConstant === "SPRITE_FRUIT_TREE") {
     return { glyph: "B", label: "berry-tree" };
   }
-  if (source.includes("NURSE") || source.includes("POKECENTER")) {
+  if (source.includes("NURSE")) {
     return { glyph: "+", label: "healer" };
   }
   if (source.includes("MART") || source.includes("CLERK") || source.includes("SHOP")) {
@@ -192,7 +192,7 @@ const classifyBgEventMarker = (
   ) {
     return { glyph: "P", color: "1;35" };
   }
-  if (script.includes("HEALINGMACHINE") || script.includes("POKECENTER")) {
+  if (script.includes("HEALINGMACHINE")) {
     return { glyph: "+", color: "1;35" };
   }
   if (script.includes("BOOKSHELF")) {
