@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@pokecrystal/core": "file:../core",
     "ink": "^6.8.0",
     "react": "^19.2.3",
     "zod": "^4.2.1"

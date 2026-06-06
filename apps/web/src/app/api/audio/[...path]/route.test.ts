@@ -41,6 +41,7 @@ describe("audio route asset resolution", () => {
     await fs.mkdir(fixtureDir, { recursive: true });
     await fs.mkdir(musicDir, { recursive: true });
     await fs.mkdir(tempAudioRoot, { recursive: true });
+    await fs.mkdir(path.join(tempAudioRoot, "music"), { recursive: true });
     process.env.POKECRYSTAL_DISASSEMBLY_ROOT = tempDisassemblyRoot;
     await fs.writeFile(
       fixturePath,
@@ -69,6 +70,28 @@ describe("audio route asset resolution", () => {
       ].join("\n"),
     );
     await fs.writeFile(
+      path.join(tempAudioRoot, "music", "testpcm.asm"),
+      [
+        "Music_TestPcm:",
+        "\tchannel 1, Music_TestPcm_Ch1",
+        "\tchannel 2, Music_TestPcm_Ch2",
+        "",
+        "Music_TestPcm_Ch1:",
+        "\tnote_type 12, 15, 0",
+        "\toctave 4",
+        ".mainloop:",
+        "\tnote C_, 4",
+        "\tsound_loop 0, .mainloop",
+        "",
+        "Music_TestPcm_Ch2:",
+        "\tnote_type 12, 12, 0",
+        "\toctave 4",
+        ".mainloop:",
+        "\tnote E_, 4",
+        "\tsound_loop 0, .mainloop",
+      ].join("\n"),
+    );
+    await fs.writeFile(
       path.join(tempAudioRoot, "sfx.asm"),
       [
         "Sfx_TestSynth:",
@@ -82,7 +105,19 @@ describe("audio route asset resolution", () => {
       ].join("\n"),
     );
     await fs.writeFile(path.join(tempAudioRoot, "sfx_crystal.asm"), "");
-    await fs.writeFile(path.join(tempAudioRoot, "cries.asm"), "");
+    await fs.writeFile(
+      path.join(tempAudioRoot, "cries.asm"),
+      [
+        "Cry_Nidoran_M:",
+        "\tchannel_count 1",
+        "\tchannel 5, Cry_Nidoran_M_Ch5",
+        "",
+        "Cry_Nidoran_M_Ch5:",
+        "\tduty_cycle_pattern 0, 1, 2, 3",
+        "\tsquare_note 4, 15, 2, 1792",
+        "\tsound_ret",
+      ].join("\n"),
+    );
     await fs.writeFile(path.join(tempAudioRoot, "drumkits.asm"), "");
     await fs.writeFile(path.join(tempAudioRoot, "wave_samples.asm"), "");
   });
@@ -134,6 +169,84 @@ describe("audio route asset resolution", () => {
     const bytes = Buffer.from(await response.arrayBuffer());
     expect(bytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
     expect(bytes.subarray(8, 12).toString("ascii")).toBe("WAVE");
+  });
+
+  it("serves direct PCM music manifests and raw channel data", async () => {
+    const manifestResponse = await GET(
+      new Request("https://example.com/api/audio/pcm/music/testpcm.json"),
+      { params: Promise.resolve({ path: ["pcm", "music", "testpcm.json"] }) },
+    );
+
+    expect(manifestResponse.status).toBe(200);
+    expect(manifestResponse.headers.get("Content-Type")).toContain("application/json");
+    const manifest = await manifestResponse.json();
+    expect(manifest).toEqual(
+      expect.objectContaining({
+        kind: "music",
+        sampleRate: 44_100,
+        channelCount: 2,
+        stems: [
+          expect.objectContaining({ channel: 1, bitsPerSample: 16 }),
+          expect.objectContaining({ channel: 2, bitsPerSample: 16 }),
+        ],
+      }),
+    );
+    expect(manifest.durationFrames).toBeLessThan(60);
+    expect(manifest.stems[0].path).toBe("/api/audio/pcm/music/testpcm/ch1.pcm");
+
+    const rawResponse = await GET(
+      new Request("https://example.com/api/audio/pcm/music/testpcm/ch1.pcm"),
+      { params: Promise.resolve({ path: ["pcm", "music", "testpcm", "ch1.pcm"] }) },
+    );
+    expect(rawResponse.status).toBe(200);
+    expect(rawResponse.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect((await rawResponse.arrayBuffer()).byteLength).toBeGreaterThan(44);
+  });
+
+  it("serves direct PCM SFX manifests and raw clip data", async () => {
+    const manifestResponse = await GET(
+      new Request("https://example.com/api/audio/pcm/sfx/testsynth.json"),
+      { params: Promise.resolve({ path: ["pcm", "sfx", "testsynth.json"] }) },
+    );
+
+    expect(manifestResponse.status).toBe(200);
+    const manifest = await manifestResponse.json();
+    expect(manifest).toEqual(
+      expect.objectContaining({
+        kind: "sfx",
+        path: "/api/audio/pcm/sfx/testsynth.pcm",
+        sampleRate: 44_100,
+        bitsPerSample: 16,
+        ownedChannels: [8],
+      }),
+    );
+
+    const rawResponse = await GET(
+      new Request("https://example.com/api/audio/pcm/sfx/testsynth.pcm"),
+      { params: Promise.resolve({ path: ["pcm", "sfx", "testsynth.pcm"] }) },
+    );
+    expect(rawResponse.status).toBe(200);
+    expect((await rawResponse.arrayBuffer()).byteLength).toBeGreaterThan(0);
+  });
+
+  it("serves direct PCM cry manifests for legacy cry slugs", async () => {
+    const response = await GET(
+      new Request("https://example.com/api/audio/pcm/cries/nidoran_m.json"),
+      { params: Promise.resolve({ path: ["pcm", "cries", "nidoran_m.json"] }) },
+    );
+
+    expect(response.status).toBe(200);
+    const manifest = await response.json();
+    expect(manifest).toEqual(
+      expect.objectContaining({
+        kind: "cry",
+        path: "/api/audio/pcm/cries/nidoran_m.pcm",
+        sampleRate: 44_100,
+        bitsPerSample: 16,
+        ownedChannels: [5],
+        priorityClass: "cry",
+      }),
+    );
   });
 
   it("returns 404 for missing bundled audio assets", async () => {

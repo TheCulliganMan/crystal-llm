@@ -6,6 +6,15 @@ import type { Stats } from "node:fs";
 import { Readable } from "node:stream";
 import { AsmAudioParser, DrumkitParser, WaveSampleParser } from "@pokecrystal/core/audio-export/parsers";
 import { WavConverter } from "@pokecrystal/core/audio-export/converter";
+import { buildAsmAudioProgram, type AsmAudioProgramKind } from "@pokecrystal/core/audio-export/asm-programs";
+import {
+  pcmClipToBytes,
+  pcmClipToManifest,
+  renderPcmClipFromAsm,
+  renderPcmMusicStemsFromAsm,
+  type PcmClip,
+  type PcmMusicTrackManifest,
+} from "@pokecrystal/core/audio-export/pcm-clip";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 
 const DIRECT_AUDIO_ROOT_CANDIDATES = [
@@ -24,6 +33,8 @@ const DIRECT_CONTENT_TYPES: Record<string, string> = {
 const SYNTHESIZED_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const EXPORT_INFINITE_LOOP_REPEAT_LIMIT = 2;
 const synthesizedAudioCache = new Map<string, Uint8Array>();
+const synthesizedPcmClipCache = new Map<string, PcmClip>();
+const synthesizedPcmMusicStemCache = new Map<string, PcmClip[]>();
 
 type BundledAudioFile = {
   root: string;
@@ -36,7 +47,26 @@ type SynthesizedAudio = {
   cacheKey: string;
 };
 
+type PcmRoutePayload =
+  | {
+      body: Uint8Array;
+      contentType: string;
+      cacheKey: string;
+    }
+  | {
+      json: unknown;
+      cacheKey: string;
+    };
+
 export const runtime = "nodejs";
+
+const resolveDisassemblyAudioRoot = (): string =>
+  path.join(
+    process.env.POKECRYSTAL_DISASSEMBLY_ROOT
+      ? path.resolve(process.env.POKECRYSTAL_DISASSEMBLY_ROOT)
+      : getDisassemblyRoot(),
+    "audio",
+  );
 
 function isSynthesisAllowed(parts: string[]): boolean {
   const ext = path.extname(parts.at(-1) ?? "").toLowerCase();
@@ -75,90 +105,6 @@ async function findBundledAudioFile(parts: string[]): Promise<BundledAudioFile |
   return null;
 }
 
-const normalizeAsmSlug = (value: string): string =>
-  value.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-
-const normalizeStandaloneLocalLabels = (sourceText: string): string =>
-  sourceText.replace(/^(\s*)(\.[A-Za-z0-9_]+)\s*$/gm, "$1$2:");
-
-function extractAsmProgram(sourceText: string, entryLabel: string): string | null {
-  const lines = normalizeStandaloneLocalLabels(sourceText).split(/\r?\n/);
-  const labelIndex = new Map<string, number>();
-  for (let i = 0; i < lines.length; i += 1) {
-    const match = lines[i].match(/^([A-Za-z0-9_.]+):\s*$/);
-    if (match) {
-      labelIndex.set(match[1], i);
-    }
-  }
-
-  const readBlock = (label: string): string[] | null => {
-    const start = labelIndex.get(label);
-    if (start === undefined) {
-      return null;
-    }
-    let end = lines.length;
-    for (let i = start + 1; i < lines.length; i += 1) {
-      if (/^[A-Za-z0-9_]+:\s*$/.test(lines[i])) {
-        end = i;
-        break;
-      }
-    }
-    return lines.slice(start, end);
-  };
-
-  const queue = [entryLabel];
-  const seen = new Set<string>();
-  const blocks: string[] = [];
-
-  while (queue.length > 0) {
-    const label = queue.shift();
-    if (!label || seen.has(label)) {
-      continue;
-    }
-    seen.add(label);
-    const block = readBlock(label);
-    if (!block) {
-      continue;
-    }
-    blocks.push(block.join("\n"));
-    const blockText = block.join("\n");
-
-    for (const match of blockText.matchAll(/^\s*channel\s+\d+\s*,\s*([A-Za-z0-9_.]+)/gm)) {
-      queue.push(match[1]);
-    }
-
-    const owner = label.startsWith(".") ? null : label;
-    for (const match of blockText.matchAll(/^\s*sound_call\s+([A-Za-z0-9_.]+)/gm)) {
-      const raw = match[1];
-      queue.push(raw.startsWith(".") && owner ? `${owner}${raw}` : raw);
-    }
-  }
-
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
-}
-
-async function loadAsmCollectionSource(
-  root: string,
-  collectionFile: string,
-  requestStem: string,
-): Promise<string | null> {
-  const filePath = path.join(root, collectionFile);
-  let sourceText: string;
-  try {
-    sourceText = normalizeStandaloneLocalLabels(await fs.readFile(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-  const requestedSlug = normalizeAsmSlug(requestStem);
-  const labels = Array.from(sourceText.matchAll(/^([A-Za-z0-9_]+):\s*$/gm))
-    .map((match) => match[1]);
-  const entryLabel = labels.find((label) => normalizeAsmSlug(label.replace(/^(Sfx|Cry)_/, "")) === requestedSlug);
-  if (!entryLabel) {
-    return null;
-  }
-  return extractAsmProgram(sourceText, entryLabel);
-}
-
 async function buildSynthProgram(root: string, parts: string[]): Promise<{ cacheKey: string; source: string } | null> {
   const ext = path.extname(parts.at(-1) ?? "").toLowerCase();
   if (ext !== ".mid" && ext !== ".midi" && ext !== ".mp3" && ext !== ".wav") {
@@ -170,44 +116,20 @@ async function buildSynthProgram(root: string, parts: string[]): Promise<{ cache
     return null;
   }
 
+  let kind: AsmAudioProgramKind | null = null;
   if (parts.length === 1) {
-    const musicPath = path.join(root, "music", `${stem}.asm`);
-    try {
-      const source = await fs.readFile(musicPath, "utf8");
-      const normalizedSource = normalizeStandaloneLocalLabels(source);
-      return {
-        cacheKey: `music:${musicPath}`,
-        source: normalizedSource,
-      };
-    } catch {
-      return null;
-    }
+    kind = "music";
+  } else if (parts.length === 2 && parts[0] === "sfx") {
+    kind = "sfx";
+  } else if (parts.length === 2 && parts[0] === "cries") {
+    kind = "cry";
   }
 
-  if (parts.length === 2 && parts[0] === "sfx") {
-    const source = await loadAsmCollectionSource(root, "sfx.asm", stem)
-      ?? await loadAsmCollectionSource(root, "sfx_crystal.asm", stem);
-    if (!source) {
-      return null;
-    }
-    return {
-      cacheKey: `sfx:${stem}`,
-      source,
-    };
+  if (!kind) {
+    return null;
   }
 
-  if (parts.length === 2 && parts[0] === "cries") {
-    const source = await loadAsmCollectionSource(root, "cries.asm", stem);
-    if (!source) {
-      return null;
-    }
-    return {
-      cacheKey: `cry:${stem}`,
-      source,
-    };
-  }
-
-  return null;
+  return buildAsmAudioProgram(root, kind, stem);
 }
 
 function createWavFromStereo16(interleavedStereo: Int16Array, sampleRate: number): Uint8Array {
@@ -249,7 +171,7 @@ function writeAscii(view: DataView, offset: number, text: string): void {
 }
 
 async function synthesizeBundledAsmAudio(parts: string[]): Promise<SynthesizedAudio | null> {
-  const synthRoots = [path.join(getDisassemblyRoot(), "audio")];
+  const synthRoots = [resolveDisassemblyAudioRoot()];
   for (const root of synthRoots) {
     const program = await buildSynthProgram(root, parts);
     if (!program) {
@@ -300,6 +222,145 @@ async function synthesizeBundledAsmAudio(parts: string[]): Promise<SynthesizedAu
   return null;
 }
 
+const pcmAudioPath = (...parts: string[]): string =>
+  `/api/audio/${parts.map((part) => encodeURIComponent(part)).join("/")}`;
+
+const parsePcmStem = (filename: string, expectedExt: ".json" | ".pcm"): string | null => {
+  if (path.extname(filename).toLowerCase() !== expectedExt) {
+    return null;
+  }
+  const stem = path.basename(filename, expectedExt);
+  return stem && !stem.includes("/") && !stem.includes("\\") ? stem : null;
+};
+
+const loadPcmMusicStems = (audioRoot: string, stem: string, token: string): PcmClip[] | null => {
+  const cacheKey = `music:${audioRoot}:${stem}`;
+  const cached = synthesizedPcmMusicStemCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const rendered = renderPcmMusicStemsFromAsm(audioRoot, stem, token);
+  if (!rendered) {
+    return null;
+  }
+  synthesizedPcmMusicStemCache.set(cacheKey, rendered);
+  return rendered;
+};
+
+const loadPcmClip = (
+  audioRoot: string,
+  kind: "sfx" | "cry",
+  stem: string,
+  token: string,
+): PcmClip | null => {
+  const cacheKey = `${kind}:${audioRoot}:${stem}`;
+  const cached = synthesizedPcmClipCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const rendered = renderPcmClipFromAsm(audioRoot, kind, stem, token);
+  if (!rendered) {
+    return null;
+  }
+  synthesizedPcmClipCache.set(cacheKey, rendered);
+  return rendered;
+};
+
+function buildPcmMusicManifest(stem: string, token: string, clips: PcmClip[]): PcmMusicTrackManifest | null {
+  const first = clips[0];
+  if (!first) {
+    return null;
+  }
+  const stems = clips.map((clip) => {
+    const channel = clip.ownedChannels[0] ?? 0;
+    return {
+      ...pcmClipToManifest(clip, pcmAudioPath("pcm", "music", stem, `ch${channel}.pcm`)),
+      kind: "music" as const,
+      channel,
+    };
+  });
+  return {
+    kind: "music",
+    token,
+    sampleRate: first.sampleRate,
+    channelCount: stems.length,
+    durationFrames: Math.max(...clips.map((clip) => clip.durationFrames)),
+    loopStartSample: first.loopStartSample,
+    loopEndSample: first.loopEndSample,
+    stems,
+  };
+}
+
+function synthesizePcmRoute(parts: string[]): PcmRoutePayload | null {
+  if (parts[0] !== "pcm") {
+    return null;
+  }
+  const audioRoot = resolveDisassemblyAudioRoot();
+  const group = parts[1];
+
+  if (group === "music") {
+    if (parts.length === 3) {
+      const stem = parsePcmStem(parts[2], ".json");
+      if (!stem) {
+        return null;
+      }
+      const clips = loadPcmMusicStems(audioRoot, stem, stem);
+      const manifest = clips ? buildPcmMusicManifest(stem, stem, clips) : null;
+      return manifest ? { json: manifest, cacheKey: `pcm:music:${stem}:manifest` } : null;
+    }
+    if (parts.length === 4) {
+      const stem = parts[2];
+      const channelMatch = parts[3].match(/^ch(\d+)\.pcm$/i);
+      if (!stem || !channelMatch) {
+        return null;
+      }
+      const channel = Number(channelMatch[1]);
+      const clips = loadPcmMusicStems(audioRoot, stem, stem);
+      const clip = clips?.find((entry) => entry.ownedChannels.includes(channel));
+      return clip
+        ? {
+            body: pcmClipToBytes(clip),
+            contentType: "application/octet-stream",
+            cacheKey: `pcm:music:${stem}:ch${channel}`,
+          }
+        : null;
+    }
+    return null;
+  }
+
+  if (group !== "sfx" && group !== "cries") {
+    return null;
+  }
+  if (parts.length !== 3) {
+    return null;
+  }
+  const ext = path.extname(parts[2]).toLowerCase();
+  if (ext !== ".json" && ext !== ".pcm") {
+    return null;
+  }
+  const stem = parsePcmStem(parts[2], ext as ".json" | ".pcm");
+  if (!stem) {
+    return null;
+  }
+  const kind = group === "cries" ? "cry" : "sfx";
+  const token = kind === "cry" ? `CRY_${stem.toUpperCase()}` : `SFX_${stem.toUpperCase()}`;
+  const clip = loadPcmClip(audioRoot, kind, stem, token);
+  if (!clip) {
+    return null;
+  }
+  if (ext === ".json") {
+    return {
+      json: pcmClipToManifest(clip, pcmAudioPath("pcm", group, `${stem}.pcm`)),
+      cacheKey: `pcm:${group}:${stem}:manifest`,
+    };
+  }
+  return {
+    body: pcmClipToBytes(clip),
+    contentType: "application/octet-stream",
+    cacheKey: `pcm:${group}:${stem}:raw`,
+  };
+}
+
 export const buildAudioEtag = (stat: Pick<Stats, "mtimeMs" | "size">): string =>
   `"${Math.trunc(stat.mtimeMs).toString(16)}-${stat.size.toString(16)}"`;
 
@@ -311,6 +372,42 @@ export async function GET(
   { params }: { params: Promise<{ path?: string[] }> },
 ): Promise<Response> {
   const { path: parts = [] } = await params;
+  if (parts[0] === "pcm") {
+    try {
+      const pcm = synthesizePcmRoute(parts);
+      if (!pcm) {
+        return new NextResponse("Not found", { status: 404 });
+      }
+      if ("json" in pcm) {
+        const body = JSON.stringify(pcm.json);
+        return new NextResponse(body, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": String(Buffer.byteLength(body)),
+            "Cache-Control": SYNTHESIZED_CACHE_CONTROL,
+            ETag: `"pcm-${Buffer.from(pcm.cacheKey).toString("base64url")}"`,
+          },
+        });
+      }
+      const responseBodyBytes = Uint8Array.from(pcm.body);
+      const responseBody = new Blob([responseBodyBytes as unknown as BlobPart], {
+        type: pcm.contentType,
+      });
+      return new NextResponse(responseBody, {
+        status: 200,
+        headers: {
+          "Content-Type": pcm.contentType,
+          "Content-Length": String(pcm.body.byteLength),
+          "Cache-Control": SYNTHESIZED_CACHE_CONTROL,
+          ETag: `"pcm-${Buffer.from(pcm.cacheKey).toString("base64url")}-${pcm.body.byteLength.toString(16)}"`,
+        },
+      });
+    } catch {
+      return new NextResponse("Not found", { status: 404 });
+    }
+  }
+
   const bundledFile = await findBundledAudioFile(parts);
 
   if (bundledFile) {

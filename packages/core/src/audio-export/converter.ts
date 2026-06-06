@@ -107,7 +107,10 @@ export class WavConverter {
     this.waveInstrumentMap = options?.waveInstrumentMap ?? Object.fromEntries(Object.keys(waveSamples).map((k) => [Number(k), Number(k)]));
     this.qualityMode = options?.qualityMode ?? "enhanced";
     this.infiniteLoopRepeatLimit = Math.max(1, options?.infiniteLoopRepeatLimit ?? SOUND_LOOP_INFINITE_REPEAT_LIMIT);
-    this.loopedMusicExportSeconds = options?.loopedMusicExportSeconds ?? DEFAULT_LOOPED_MUSIC_EXPORT_SECONDS;
+    this.loopedMusicExportSeconds =
+      options && Object.prototype.hasOwnProperty.call(options, "loopedMusicExportSeconds")
+        ? options.loopedMusicExportSeconds ?? null
+        : DEFAULT_LOOPED_MUSIC_EXPORT_SECONDS;
     this.soloChannel = options?.soloChannel ?? null;
     this.nextWaveSampleIndex = Math.max(0x10, maxObjectKey(this.waveSamples, -1) + 1);
     this.nextWaveInstrumentId = Math.max(0x10, maxObjectKey(this.waveInstrumentMap, -1) + 1);
@@ -834,6 +837,9 @@ export class WavConverter {
         const target = directTarget ?? this.resolveLabel(frame.src, cmd.args[1], labelIndex);
         if (!target) {
           continue;
+        }
+        if (loopCount === 0 && this.loopedMusicExportSeconds === null && mainloopSeen) {
+          return;
         }
 
         const key = `${frame.src}:${frame.pc - 1}`;

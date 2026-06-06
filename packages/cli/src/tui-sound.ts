@@ -21,7 +21,11 @@ export type TuiAudioPlaybackSnapshot = {
 };
 
 export type TuiAudioPlayerInput = {
-  filePath: string;
+  source: string;
+  pcm: Int16Array;
+  sampleRate: number;
+  loopStartSample?: number | null;
+  loopEndSample?: number | null;
   token: string;
   kind: TuiAudioPlaybackEvent["kind"];
   loop: boolean;
@@ -39,6 +43,43 @@ export type TuiSoundController = {
 };
 
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
+const PCM_STREAM_CHUNK_MS = 80;
+
+export type TuiPcmClip = {
+  pcm: Int16Array;
+  sampleRate: number;
+  loopStartSample?: number | null;
+  loopEndSample?: number | null;
+};
+
+type PcmToolchain = {
+  renderPcmClipFromAsm: (
+    audioRoot: string,
+    kind: "music" | "sfx" | "cry",
+    stem: string,
+    token: string,
+  ) => TuiPcmClip | null;
+  getDisassemblyRoot: () => string;
+};
+
+let cachedPcmToolchain: PcmToolchain | null = null;
+
+const loadPcmToolchain = (): PcmToolchain => {
+  if (cachedPcmToolchain) {
+    return cachedPcmToolchain;
+  }
+  // Dynamic require keeps the CLI package build decoupled from core source rootDir rules.
+  // The published CLI depends on @pokecrystal/core at runtime.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const pcm = require("@pokecrystal/core/audio-export/pcm-clip") as Pick<PcmToolchain, "renderPcmClipFromAsm">;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const paths = require("@pokecrystal/core/core/paths") as Pick<PcmToolchain, "getDisassemblyRoot">;
+  cachedPcmToolchain = {
+    renderPcmClipFromAsm: pcm.renderPcmClipFromAsm,
+    getDisassemblyRoot: paths.getDisassemblyRoot,
+  };
+  return cachedPcmToolchain;
+};
 
 const candidateAudioRoots = (): string[] => [
   ...(process.env.POKECRYSTAL_CLI_AUDIO_ROOT ? [process.env.POKECRYSTAL_CLI_AUDIO_ROOT] : []),
@@ -84,40 +125,33 @@ const commandExists = (command: string): boolean => {
   return result.status === 0;
 };
 
-const resolvePlayerCommand = (): string[] | null => {
-  const configured = process.env.POKECRYSTAL_CLI_AUDIO_PLAYER?.trim();
+const resolvePcmPlayerCommand = (): string[] | null => {
+  const configured = process.env.POKECRYSTAL_CLI_PCM_PLAYER?.trim();
   if (configured) {
     return configured.split(/\s+/);
   }
-  const candidates =
-    process.platform === "darwin"
-      ? [["afplay"]]
-      : [
-          ["mpg123", "-q"],
-          ["mpv", "--no-video", "--really-quiet", "--no-terminal"],
-          ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"],
-          ["play", "-q"],
-          ["paplay"],
-        ];
+  const candidates = [
+    ["ffplay", "-f", "s16le", "-ar", "{sampleRate}", "-ac", "2", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+    ["play", "-q", "-t", "s16", "-r", "{sampleRate}", "-c", "2", "-"],
+    ["aplay", "-q", "-f", "S16_LE", "-r", "{sampleRate}", "-c", "2"],
+    ["paplay", "--raw", "--rate={sampleRate}", "--channels=2", "--format=s16le"],
+  ];
   return candidates.find((candidate) => commandExists(candidate[0] ?? "")) ?? null;
 };
 
-const spawnSingleAudioPlayer = (
-  filePath: string,
+const spawnSinglePcmPlayer = (
+  sampleRate: number,
   playerCommand: string[] | null,
 ): ChildProcess | null => {
   const [command, ...baseArgs] = playerCommand ?? [];
   if (!command) {
     return null;
   }
-  const args = baseArgs.map((arg) => (arg === "{file}" ? filePath : arg));
-  if (!baseArgs.includes("{file}")) {
-    args.push(filePath);
-  }
+  const args = baseArgs.map((arg) => arg.replace(/\{sampleRate\}/g, String(sampleRate)));
   try {
     const child = spawn(command, args, {
       detached: false,
-      stdio: "ignore",
+      stdio: ["pipe", "ignore", "ignore"],
     });
     child.once("error", () => undefined);
     return child;
@@ -126,57 +160,108 @@ const spawnSingleAudioPlayer = (
   }
 };
 
-const spawnAudioPlayer = (
+const pcmFramesToBuffer = (pcm: Int16Array, startFrame: number, frameCount: number): Buffer => {
+  const frames = Math.max(0, frameCount);
+  const buffer = Buffer.alloc(frames * 4);
+  for (let frame = 0; frame < frames; frame += 1) {
+    const sampleIndex = (startFrame + frame) * 2;
+    buffer.writeInt16LE(pcm[sampleIndex] ?? 0, frame * 4);
+    buffer.writeInt16LE(pcm[sampleIndex + 1] ?? 0, frame * 4 + 2);
+  }
+  return buffer;
+};
+
+const spawnPcmStreamPlayer = (
   input: TuiAudioPlayerInput,
   playerCommand: string[] | null,
 ): TuiAudioPlayerHandle | null => {
-  const startChild = (): ChildProcess | null => spawnSingleAudioPlayer(input.filePath, playerCommand);
-  if (!input.loop) {
-    const child = startChild();
-    return child ? { kill: () => child.kill() } : null;
+  const child = spawnSinglePcmPlayer(input.sampleRate, playerCommand);
+  if (!child?.stdin) {
+    return null;
   }
-
   let stopped = false;
-  let currentChild: ChildProcess | null = null;
-  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let cursor = 0;
+  const totalFrames = Math.floor(input.pcm.length / 2);
+  const loopStart = Math.max(0, Math.min(totalFrames, input.loopStartSample ?? 0));
+  const loopEnd = Math.max(loopStart + 1, Math.min(totalFrames, input.loopEndSample ?? totalFrames));
+  const chunkFrames = Math.max(1, Math.round((input.sampleRate * PCM_STREAM_CHUNK_MS) / 1000));
+  child.once("exit", () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
+  child.once("error", () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
 
-  const startLoop = (): void => {
+  const schedule = (): void => {
     if (stopped) {
       return;
     }
-    const child = startChild();
-    if (!child) {
-      return;
-    }
-    currentChild = child;
-    let handled = false;
-    const restart = (): void => {
-      if (handled || stopped) {
-        return;
-      }
-      handled = true;
-      restartTimer = setTimeout(() => {
-        restartTimer = null;
-        startLoop();
-      }, 25);
-    };
-    child.once("exit", restart);
-    child.once("error", restart);
+    timer = setTimeout(writeChunk, PCM_STREAM_CHUNK_MS);
   };
 
-  startLoop();
-  if (!currentChild) {
-    return null;
-  }
+  const writeChunk = (): void => {
+    timer = null;
+    if (stopped || totalFrames <= 0) {
+      return;
+    }
+    let remaining = chunkFrames;
+    const buffers: Buffer[] = [];
+    while (remaining > 0 && !stopped) {
+      if (cursor >= totalFrames) {
+        if (!input.loop) {
+          child.stdin?.end();
+          stopped = true;
+          break;
+        }
+        cursor = loopStart;
+      }
+      const end = input.loop ? loopEnd : totalFrames;
+      const take = Math.min(remaining, Math.max(0, end - cursor));
+      if (take <= 0) {
+        if (!input.loop) {
+          child.stdin?.end();
+          stopped = true;
+          break;
+        }
+        cursor = loopStart;
+        continue;
+      }
+      buffers.push(pcmFramesToBuffer(input.pcm, cursor, take));
+      cursor += take;
+      remaining -= take;
+      if (input.loop && cursor >= loopEnd) {
+        cursor = loopStart;
+      }
+    }
+    if (buffers.length === 0 || stopped) {
+      return;
+    }
+    const chunk = Buffer.concat(buffers);
+    if (!child.stdin?.write(chunk)) {
+      child.stdin?.once("drain", schedule);
+      return;
+    }
+    schedule();
+  };
+
+  writeChunk();
   return {
     kill: () => {
       stopped = true;
-      if (restartTimer) {
-        clearTimeout(restartTimer);
-        restartTimer = null;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
       }
-      currentChild?.kill();
-      currentChild = null;
+      child.kill();
     },
   };
 };
@@ -214,11 +299,70 @@ export const extractTuiAudioPlaybackSnapshot = (result?: ToolResult): TuiAudioPl
   };
 };
 
+const normalizeStem = (value: string): string =>
+  value.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+
+const parseSourceStem = (event: TuiAudioPlaybackEvent): { kind: "music" | "sfx" | "cry"; stem: string } | null => {
+  const source = event.source.trim();
+  const direct = source.match(/\/api\/audio\/pcm\/(music|sfx|cries)\/([^/.]+)(?:\.json)?(?:\/ch\d+\.pcm)?$/);
+  if (direct) {
+    return {
+      kind: direct[1] === "cries" ? "cry" : direct[1] as "music" | "sfx",
+      stem: normalizeStem(direct[2]),
+    };
+  }
+  const legacy = source.match(/\/api\/audio\/(?:(sfx|cries)\/)?([^/.]+)\.(?:mp3|wav|pcm|json)$/);
+  if (legacy) {
+    const group = legacy[1];
+    return {
+      kind: group === "cries" ? "cry" : group === "sfx" ? "sfx" : event.kind === "music" ? "music" : event.kind === "cry" ? "cry" : "sfx",
+      stem: normalizeStem(legacy[2]),
+    };
+  }
+  if (event.kind === "music" || event.kind === "sfx" || event.kind === "cry") {
+    return {
+      kind: event.kind === "cry" ? "cry" : event.kind,
+      stem: normalizeStem(path.basename(source, path.extname(source)) || event.token),
+    };
+  }
+  return null;
+};
+
+const createPcmClipResolver = (): ((event: TuiAudioPlaybackEvent) => TuiPcmClip | null) => {
+  const cache = new Map<string, TuiPcmClip | null>();
+  return (event) => {
+    const parsed = parseSourceStem(event);
+    if (!parsed) {
+      return null;
+    }
+    const cacheKey = `${parsed.kind}:${parsed.stem}`;
+    if (cache.has(cacheKey)) {
+      return cache.get(cacheKey) ?? null;
+    }
+    try {
+      const toolchain = loadPcmToolchain();
+      const audioRoot = path.join(toolchain.getDisassemblyRoot(), "audio");
+      const clip = toolchain.renderPcmClipFromAsm(
+        audioRoot,
+        parsed.kind,
+        parsed.stem,
+        event.token,
+      );
+      cache.set(cacheKey, clip);
+      return clip;
+    } catch {
+      cache.set(cacheKey, null);
+      return null;
+    }
+  };
+};
+
 export const createTuiSoundController = (options: {
   stdout?: Pick<NodeJS.WriteStream, "write">;
   enabled?: boolean;
   playerCommand?: string[] | null;
   player?: (input: TuiAudioPlayerInput) => TuiAudioPlayerHandle | null | undefined;
+  pcmResolver?: (event: TuiAudioPlaybackEvent) => TuiPcmClip | null | undefined;
 } = {}): TuiSoundController => {
   let enabled = options.enabled ?? false;
   let lastEventSequence = 0;
@@ -226,11 +370,12 @@ export const createTuiSoundController = (options: {
   let activeMusicSource: string | null = null;
   let activeMusicHandle: TuiAudioPlayerHandle | null = null;
   const stdout = options.stdout;
-  const playerCommand = options.playerCommand === undefined ? resolvePlayerCommand() : options.playerCommand;
+  const playerCommand = options.playerCommand === undefined ? resolvePcmPlayerCommand() : options.playerCommand;
+  const resolvePcmClip = options.pcmResolver ?? createPcmClipResolver();
   const player =
     options.player ??
     ((input: TuiAudioPlayerInput): TuiAudioPlayerHandle | null =>
-      spawnAudioPlayer(input, playerCommand));
+      spawnPcmStreamPlayer(input, playerCommand));
 
   const ringBell = (): void => {
     stdout?.write?.("\u0007");
@@ -244,13 +389,17 @@ export const createTuiSoundController = (options: {
   };
 
   const playSource = (event: TuiAudioPlaybackEvent, loop: boolean): TuiAudioPlayerHandle | null => {
-    const filePath = resolveTuiAudioSourcePath(event.source);
-    if (!filePath) {
+    const clip = resolvePcmClip(event);
+    if (!clip) {
       ringBell();
       return null;
     }
     const handle = player({
-      filePath,
+      source: event.source,
+      pcm: clip.pcm,
+      sampleRate: clip.sampleRate,
+      loopStartSample: clip.loopStartSample,
+      loopEndSample: clip.loopEndSample,
       token: event.token,
       kind: event.kind,
       loop,

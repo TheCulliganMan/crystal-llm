@@ -1,4 +1,8 @@
-import { AudioEngine } from "@pokecrystal/core/engine/systems/audio";
+import {
+  AudioEngine,
+  type PcmAudioPlaybackBackend,
+  type PcmBackendVoice,
+} from "@pokecrystal/core/engine/systems/audio";
 import { GB_FRAME_DURATION_MS } from "@pokecrystal/core/core/gb-timing";
 
 class FakeAudio {
@@ -31,6 +35,305 @@ class FakeAudio {
 
   constructor(public readonly src: string = "") {}
 }
+
+class FakePcmBackend implements PcmAudioPlaybackBackend {
+  public voices: PcmBackendVoice[] = [];
+  public updates: Array<{ id: number; patch: Partial<Pick<PcmBackendVoice, "volume" | "muted" | "pan" | "playbackRate">> }> = [];
+  public stopped: number[] = [];
+  public resumed = 0;
+  public disposed = 0;
+  private readonly endedCallbacks = new Map<number, () => void>();
+
+  playVoice(voice: PcmBackendVoice, onEnded?: () => void): void {
+    this.voices.push(voice);
+    if (onEnded) {
+      this.endedCallbacks.set(voice.id, onEnded);
+    }
+  }
+
+  stopVoice(id: number): void {
+    this.stopped.push(id);
+    this.endedCallbacks.delete(id);
+  }
+
+  updateVoice(id: number, patch: Partial<Pick<PcmBackendVoice, "volume" | "muted" | "pan" | "playbackRate">>): void {
+    this.updates.push({ id, patch });
+  }
+
+  async resume(): Promise<void> {
+    this.resumed += 1;
+  }
+
+  dispose(): void {
+    this.disposed += 1;
+    this.endedCallbacks.clear();
+  }
+
+  finish(id: number): void {
+    this.endedCallbacks.get(id)?.();
+  }
+}
+
+const pcmArrayBuffer = (samples: number[]): ArrayBuffer => {
+  const buffer = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(buffer);
+  samples.forEach((sample, index) => {
+    view.setInt16(index * 2, sample, true);
+  });
+  return buffer;
+};
+
+const jsonResponse = (payload: unknown): Response =>
+  ({
+    ok: true,
+    json: async () => payload,
+  }) as unknown as Response;
+
+const pcmResponse = (samples: number[]): Response =>
+  ({
+    ok: true,
+    arrayBuffer: async () => pcmArrayBuffer(samples),
+  }) as unknown as Response;
+
+const flushPromises = async (): Promise<void> => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+};
+
+describe("AudioEngine direct PCM backend", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("plays PCM music stems through the injected backend", async () => {
+    const backend = new FakePcmBackend();
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("test.json")) {
+        return jsonResponse({
+          kind: "music",
+          token: "MUSIC_TEST",
+          sampleRate: 44_100,
+          channelCount: 2,
+          durationFrames: 8,
+          loopStartSample: 0,
+          loopEndSample: 2,
+          stems: [
+            {
+              kind: "music",
+              token: "MUSIC_TEST",
+              channel: 1,
+              path: "/api/audio/pcm/music/test/ch1.pcm",
+              sampleRate: 44_100,
+              channels: 2,
+              bitsPerSample: 16,
+              durationFrames: 8,
+              loopStartSample: 0,
+              loopEndSample: 2,
+              ownedChannels: [1],
+              priorityClass: "none",
+            },
+            {
+              kind: "music",
+              token: "MUSIC_TEST",
+              channel: 2,
+              path: "/api/audio/pcm/music/test/ch2.pcm",
+              sampleRate: 44_100,
+              channels: 2,
+              bitsPerSample: 16,
+              durationFrames: 8,
+              loopStartSample: 0,
+              loopEndSample: 2,
+              ownedChannels: [2],
+              priorityClass: "none",
+            },
+          ],
+        });
+      }
+      return pcmResponse([100, 100, -100, -100]);
+    }) as unknown as typeof globalThis.fetch;
+
+    const engine = new AudioEngine({ playbackBackend: "direct-pcm", pcmBackend: backend });
+    engine.loadMusic("MUSIC_TEST", "/api/audio/pcm/music/test.json");
+    engine.playMusic("MUSIC_TEST", "map");
+    await flushPromises();
+
+    expect(backend.voices).toHaveLength(2);
+    expect(backend.voices.map((voice) => [voice.kind, voice.loop, voice.loopStartSample, voice.loopEndSample])).toEqual([
+      ["music", true, 0, 2],
+      ["music", true, 0, 2],
+    ]);
+    expect(engine.getPlaybackSnapshot().activeChannels).toEqual([
+      expect.objectContaining({ channel: 1, category: "music" }),
+      expect.objectContaining({ channel: 2, category: "music" }),
+    ]);
+  });
+
+  it("updates active PCM voice volume when the master volume changes", async () => {
+    const backend = new FakePcmBackend();
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("test.json")) {
+        return jsonResponse({
+          kind: "music",
+          token: "MUSIC_TEST",
+          sampleRate: 44_100,
+          channelCount: 1,
+          durationFrames: 8,
+          loopStartSample: 0,
+          loopEndSample: 2,
+          stems: [
+            {
+              kind: "music",
+              token: "MUSIC_TEST",
+              channel: 1,
+              path: "/api/audio/pcm/music/test/ch1.pcm",
+              sampleRate: 44_100,
+              channels: 2,
+              bitsPerSample: 16,
+              durationFrames: 8,
+              loopStartSample: 0,
+              loopEndSample: 2,
+              ownedChannels: [1],
+              priorityClass: "none",
+            },
+          ],
+        });
+      }
+      return pcmResponse([100, 100, -100, -100]);
+    }) as unknown as typeof globalThis.fetch;
+
+    const engine = new AudioEngine({ playbackBackend: "direct-pcm", pcmBackend: backend });
+    engine.loadMusic("MUSIC_TEST", "/api/audio/pcm/music/test.json");
+    engine.playMusic("MUSIC_TEST", "map");
+    await flushPromises();
+
+    const voiceId = backend.voices[0].id;
+    engine.setMasterVolume(0.25);
+
+    expect(engine.masterVolume).toBe(0.25);
+    expect(backend.updates).toContainEqual({
+      id: voiceId,
+      patch: expect.objectContaining({ volume: 0.25 }),
+    });
+  });
+
+  it("plays PCM SFX, tracks waits, and releases on backend end", async () => {
+    const backend = new FakePcmBackend();
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("item.json")) {
+        return jsonResponse({
+          kind: "sfx",
+          token: "SFX_ITEM",
+          path: "/api/audio/pcm/sfx/item.pcm",
+          sampleRate: 44_100,
+          channels: 2,
+          bitsPerSample: 16,
+          durationFrames: 4,
+          loopStartSample: null,
+          loopEndSample: null,
+          ownedChannels: [5],
+          priorityClass: "none",
+        });
+      }
+      return pcmResponse([200, 200, -200, -200]);
+    }) as unknown as typeof globalThis.fetch;
+
+    const engine = new AudioEngine({ playbackBackend: "direct-pcm", pcmBackend: backend });
+    engine.loadSound("SFX_ITEM", "/api/audio/pcm/sfx/item.json");
+    engine.playSound("SFX_ITEM", { panning: "left", pitch: 12 });
+    await flushPromises();
+
+    expect(backend.voices).toHaveLength(1);
+    expect(backend.voices[0]).toEqual(expect.objectContaining({
+      kind: "sfx",
+      token: "SFX_ITEM",
+      pan: -1,
+      playbackRate: 2,
+    }));
+    expect(engine.isSoundPlaying()).toBe(true);
+
+    backend.finish(backend.voices[0].id);
+
+    expect(engine.isSoundPlaying()).toBe(false);
+  });
+
+  it("suppresses overlapping music channels while PCM SFX owns those channels", async () => {
+    const backend = new FakePcmBackend();
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("music.json")) {
+        return jsonResponse({
+          kind: "music",
+          token: "MUSIC_TEST",
+          sampleRate: 44_100,
+          channelCount: 1,
+          durationFrames: 8,
+          loopStartSample: 0,
+          loopEndSample: 2,
+          stems: [
+            {
+              kind: "music",
+              token: "MUSIC_TEST",
+              channel: 1,
+              path: "/api/audio/pcm/music/test/ch1.pcm",
+              sampleRate: 44_100,
+              channels: 2,
+              bitsPerSample: 16,
+              durationFrames: 8,
+              loopStartSample: 0,
+              loopEndSample: 2,
+              ownedChannels: [1],
+              priorityClass: "none",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("fanfare.json")) {
+        return jsonResponse({
+          kind: "sfx",
+          token: "SFX_FANFARE",
+          path: "/api/audio/pcm/sfx/fanfare.pcm",
+          sampleRate: 44_100,
+          channels: 2,
+          bitsPerSample: 16,
+          durationFrames: 4,
+          loopStartSample: null,
+          loopEndSample: null,
+          ownedChannels: [5],
+          priorityClass: "priority",
+        });
+      }
+      return pcmResponse([100, 100, -100, -100]);
+    }) as unknown as typeof globalThis.fetch;
+
+    const engine = new AudioEngine({ playbackBackend: "direct-pcm", pcmBackend: backend });
+    engine.loadMusic("MUSIC_TEST", "/api/audio/pcm/music/music.json");
+    engine.loadSound("SFX_FANFARE", "/api/audio/pcm/sfx/fanfare.json");
+    engine.playMusic("MUSIC_TEST", "map");
+    await flushPromises();
+    const musicVoiceId = backend.voices[0].id;
+
+    engine.playSound("SFX_FANFARE");
+    await flushPromises();
+
+    expect(backend.updates).toContainEqual({
+      id: musicVoiceId,
+      patch: expect.objectContaining({ muted: true }),
+    });
+
+    backend.finish(backend.voices.at(-1)!.id);
+
+    expect(backend.updates).toContainEqual({
+      id: musicVoiceId,
+      patch: expect.objectContaining({ muted: false }),
+    });
+  });
+});
 
 describe("AudioEngine unlock", () => {
   type TestWindow = { Audio?: typeof FakeAudio };

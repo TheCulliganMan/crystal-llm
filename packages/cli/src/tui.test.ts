@@ -1399,10 +1399,13 @@ describe("TUI audio snapshot playback", () => {
       token: string;
       kind: string;
       loop: boolean;
-      filePath: string;
+      source: string;
+      pcm: Int16Array;
     }> = [];
     const killed: string[] = [];
+    const pcmClip = { pcm: new Int16Array([1, 1, -1, -1]), sampleRate: 44_100 };
     const controller = createTuiSoundController({
+      pcmResolver: () => pcmClip,
       player: (input) => {
         played.push(input);
         return { kill: () => killed.push(input.token) };
@@ -1432,7 +1435,8 @@ describe("TUI audio snapshot playback", () => {
         token: "MUSIC_ROUTE_29",
         kind: "music",
         loop: true,
-        filePath: __filename,
+        source: __filename,
+        pcm: pcmClip.pcm,
       }),
     ]);
 
@@ -1461,11 +1465,12 @@ describe("TUI audio snapshot playback", () => {
       token: string;
       kind: string;
       loop: boolean;
-      filePath: string;
+      source: string;
     }> = [];
     const killed: string[] = [];
     const controller = createTuiSoundController({
       enabled: true,
+      pcmResolver: () => ({ pcm: new Int16Array([1, 1, -1, -1]), sampleRate: 44_100 }),
       player: (input) => {
         played.push(input);
         return { kill: () => killed.push(input.token) };
@@ -1524,7 +1529,7 @@ describe("TUI audio snapshot playback", () => {
         token: "MUSIC_ROUTE_29",
         kind: "music",
         loop: true,
-        filePath: nextMusicSource,
+        source: nextMusicSource,
       }),
     );
   });

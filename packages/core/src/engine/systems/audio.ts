@@ -3,6 +3,12 @@ import * as path from "path";
 import { getAssetPath, getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { DISASSEMBLY_MUSIC_ALIASES, DISASSEMBLY_SFX_ALIASES } from "./audio-aliases";
 import { GB_FRAME_DURATION_MS } from "@pokecrystal/core/core/gb-timing";
+import {
+  pcmBytesToInt16,
+  type PcmAudioManifest,
+  type PcmClipManifest,
+  type PcmMusicTrackManifest,
+} from "@pokecrystal/core/audio-export/pcm-clip";
 
 const FRAME_MS = GB_FRAME_DURATION_MS;
 
@@ -98,18 +104,375 @@ export interface AudioPlaybackSnapshot {
   recentEvents: AudioPlaybackEvent[];
 }
 
-type AnyAudioManifest = MusicTrackManifest | SoundCueManifest;
+type AnyAudioManifest = MusicTrackManifest | SoundCueManifest | PcmAudioManifest;
+
+type AudioPlaybackBackendKind = "auto" | "direct-pcm" | "html";
+
+type AudioHandle = {
+  src: string;
+  loop: boolean;
+  volume: number;
+  muted: boolean;
+  paused: boolean;
+  ended: boolean;
+  currentTime: number;
+  playbackRate?: number;
+  play: () => Promise<void> | void;
+  pause: () => void;
+  addEventListener: (event: string, listener: () => void, options?: { once?: boolean }) => void;
+};
 
 type MusicPlaybackState = {
   source: string;
-  stems: Map<number, HTMLAudioElement>;
-  mixed: HTMLAudioElement | null;
-  manifest: MusicTrackManifest | null;
+  stems: Map<number, AudioHandle>;
+  mixed: AudioHandle | null;
+  manifest: MusicTrackManifest | PcmMusicTrackManifest | null;
   frameCursor: number;
   gain: number;
   role: string;
   token: string;
 };
+
+export type PcmBackendVoice = {
+  id: number;
+  kind: "music" | "sfx" | "cry" | "other";
+  token: string;
+  source: string;
+  pcm: Int16Array;
+  sampleRate: number;
+  loop: boolean;
+  loopStartSample: number | null;
+  loopEndSample: number | null;
+  volume: number;
+  muted: boolean;
+  pan: number | null;
+  playbackRate: number;
+};
+
+export interface PcmAudioPlaybackBackend {
+  playVoice(voice: PcmBackendVoice, onEnded?: () => void): void;
+  stopVoice(id: number): void;
+  updateVoice(id: number, patch: Partial<Pick<PcmBackendVoice, "volume" | "muted" | "pan" | "playbackRate">>): void;
+  resume(): Promise<void>;
+  dispose(): void;
+}
+
+const PCM_WORKLET_SOURCE = `
+class PokeCrystalPcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.voices = new Map();
+    this.port.onmessage = (event) => {
+      const message = event.data || {};
+      if (message.type === "play") {
+        const voice = message.voice;
+        this.voices.set(voice.id, {
+          ...voice,
+          pcm: new Int16Array(voice.pcm),
+          cursor: 0
+        });
+        return;
+      }
+      if (message.type === "stop") {
+        this.voices.delete(message.id);
+        return;
+      }
+      if (message.type === "update") {
+        const voice = this.voices.get(message.id);
+        if (voice) {
+          Object.assign(voice, message.patch || {});
+        }
+        return;
+      }
+      if (message.type === "clear") {
+        this.voices.clear();
+      }
+    };
+  }
+
+  process(_inputs, outputs) {
+    const output = outputs[0];
+    const left = output[0];
+    const right = output[1] || output[0];
+    left.fill(0);
+    if (right !== left) {
+      right.fill(0);
+    }
+    const ended = [];
+    for (const voice of this.voices.values()) {
+      if (voice.muted || voice.volume <= 0 || voice.pcm.length < 2) {
+        continue;
+      }
+      const frames = Math.floor(voice.pcm.length / 2);
+      const loopStart = Math.max(0, voice.loopStartSample == null ? 0 : voice.loopStartSample);
+      const loopEnd = Math.max(loopStart + 1, Math.min(frames, voice.loopEndSample == null ? frames : voice.loopEndSample));
+      const rate = Math.max(0.05, voice.playbackRate || 1) * (voice.sampleRate / sampleRate);
+      const pan = Math.max(-1, Math.min(1, voice.pan == null ? 0 : voice.pan));
+      const leftGain = pan <= 0 ? 1 : 1 - pan;
+      const rightGain = pan >= 0 ? 1 : 1 + pan;
+      for (let i = 0; i < left.length; i += 1) {
+        let frame = Math.floor(voice.cursor);
+        if (frame >= frames) {
+          if (voice.loop && loopStart < loopEnd) {
+            voice.cursor = loopStart + ((voice.cursor - loopStart) % (loopEnd - loopStart));
+            frame = Math.floor(voice.cursor);
+          } else {
+            ended.push(voice.id);
+            break;
+          }
+        }
+        const base = frame * 2;
+        left[i] += (voice.pcm[base] / 32768) * voice.volume * leftGain;
+        right[i] += (voice.pcm[base + 1] / 32768) * voice.volume * rightGain;
+        voice.cursor += rate;
+        if (voice.loop && voice.cursor >= loopEnd && loopStart < loopEnd) {
+          voice.cursor = loopStart + ((voice.cursor - loopStart) % (loopEnd - loopStart));
+        }
+      }
+    }
+    for (const id of ended) {
+      this.voices.delete(id);
+      this.port.postMessage({ type: "ended", id });
+    }
+    return true;
+  }
+}
+registerProcessor("pokecrystal-pcm", PokeCrystalPcmProcessor);
+`;
+
+let nextPcmVoiceId = 1;
+
+class PcmAudioHandle implements AudioHandle {
+  public readonly src: string;
+  public loop: boolean;
+  public ended = false;
+  public paused = true;
+  public currentTime = 0;
+  private volumeValue: number;
+  private mutedValue: boolean;
+  private playbackRateValue: number;
+  private readonly listeners = new Map<string, Array<{ listener: () => void; once: boolean }>>();
+
+  constructor(
+    private readonly backend: PcmAudioPlaybackBackend,
+    private readonly voice: PcmBackendVoice,
+  ) {
+    this.src = voice.source;
+    this.loop = voice.loop;
+    this.volumeValue = voice.volume;
+    this.mutedValue = voice.muted;
+    this.playbackRateValue = voice.playbackRate;
+  }
+
+  get id(): number {
+    return this.voice.id;
+  }
+
+  get volume(): number {
+    return this.volumeValue;
+  }
+
+  set volume(value: number) {
+    this.volumeValue = Math.max(0, Math.min(1, value));
+    this.voice.volume = this.volumeValue;
+    this.backend.updateVoice(this.id, { volume: this.volumeValue });
+  }
+
+  get muted(): boolean {
+    return this.mutedValue;
+  }
+
+  set muted(value: boolean) {
+    this.mutedValue = Boolean(value);
+    this.voice.muted = this.mutedValue;
+    this.backend.updateVoice(this.id, { muted: this.mutedValue });
+  }
+
+  get playbackRate(): number {
+    return this.playbackRateValue;
+  }
+
+  set playbackRate(value: number) {
+    this.playbackRateValue = Number.isFinite(value) ? Math.max(0.05, Math.min(4, value)) : 1;
+    this.voice.playbackRate = this.playbackRateValue;
+    this.backend.updateVoice(this.id, { playbackRate: this.playbackRateValue });
+  }
+
+  play(): Promise<void> {
+    this.paused = false;
+    this.ended = false;
+    this.backend.playVoice(
+      {
+        ...this.voice,
+        volume: this.volumeValue,
+        muted: this.mutedValue,
+        playbackRate: this.playbackRateValue,
+      },
+      () => this.finish(),
+    );
+    return this.backend.resume().catch(() => undefined);
+  }
+
+  pause(): void {
+    if (this.paused && this.ended) {
+      return;
+    }
+    this.paused = true;
+    this.backend.stopVoice(this.id);
+    this.emit("pause");
+  }
+
+  addEventListener(event: string, listener: () => void, options?: { once?: boolean }): void {
+    const entries = this.listeners.get(event) ?? [];
+    entries.push({ listener, once: Boolean(options?.once) });
+    this.listeners.set(event, entries);
+  }
+
+  private finish(): void {
+    if (this.ended) {
+      return;
+    }
+    this.ended = true;
+    this.paused = true;
+    this.emit("ended");
+  }
+
+  private emit(event: string): void {
+    const entries = this.listeners.get(event) ?? [];
+    const next: Array<{ listener: () => void; once: boolean }> = [];
+    for (const entry of entries) {
+      entry.listener();
+      if (!entry.once) {
+        next.push(entry);
+      }
+    }
+    this.listeners.set(event, next);
+  }
+}
+
+class BrowserPcmAudioBackend implements PcmAudioPlaybackBackend {
+  private context: AudioContext | null = null;
+  private node: AudioWorkletNode | null = null;
+  private initPromise: Promise<AudioWorkletNode | null> | null = null;
+  private workletUrl: string | null = null;
+  private readonly endedCallbacks = new Map<number, () => void>();
+
+  static isSupported(): boolean {
+    if (typeof window === "undefined" || typeof Blob === "undefined" || typeof URL === "undefined") {
+      return false;
+    }
+    const ContextCtor = (window as Window & { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).AudioContext
+      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!ContextCtor) {
+      return false;
+    }
+    return "audioWorklet" in ContextCtor.prototype ||
+      typeof (window as Window & { AudioWorkletNode?: typeof AudioWorkletNode }).AudioWorkletNode === "function";
+  }
+
+  playVoice(voice: PcmBackendVoice, onEnded?: () => void): void {
+    if (onEnded) {
+      this.endedCallbacks.set(voice.id, onEnded);
+    }
+    void this.ensureNode().then((node) => {
+      if (!node) {
+        return;
+      }
+      const pcm = new Int16Array(voice.pcm);
+      node.port.postMessage(
+        {
+          type: "play",
+          voice: {
+            ...voice,
+            pcm: pcm.buffer,
+          },
+        },
+        [pcm.buffer],
+      );
+    });
+  }
+
+  stopVoice(id: number): void {
+    this.endedCallbacks.delete(id);
+    this.node?.port.postMessage({ type: "stop", id });
+  }
+
+  updateVoice(id: number, patch: Partial<Pick<PcmBackendVoice, "volume" | "muted" | "pan" | "playbackRate">>): void {
+    this.node?.port.postMessage({ type: "update", id, patch });
+  }
+
+  async resume(): Promise<void> {
+    const node = await this.ensureNode();
+    if (!node || !this.context) {
+      return;
+    }
+    if (this.context.state === "suspended") {
+      await this.context.resume();
+    }
+  }
+
+  dispose(): void {
+    this.node?.port.postMessage({ type: "clear" });
+    this.node?.disconnect();
+    this.node = null;
+    this.initPromise = null;
+    this.endedCallbacks.clear();
+    if (this.workletUrl) {
+      URL.revokeObjectURL(this.workletUrl);
+      this.workletUrl = null;
+    }
+  }
+
+  private async ensureNode(): Promise<AudioWorkletNode | null> {
+    if (this.node) {
+      return this.node;
+    }
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+    this.initPromise = this.createNode();
+    return this.initPromise;
+  }
+
+  private async createNode(): Promise<AudioWorkletNode | null> {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const ContextCtor = (window as Window & { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).AudioContext
+      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!ContextCtor) {
+      return null;
+    }
+    const context = this.context ?? new ContextCtor();
+    this.context = context;
+    if (!context.audioWorklet) {
+      return null;
+    }
+    try {
+      const blob = new Blob([PCM_WORKLET_SOURCE], { type: "text/javascript" });
+      this.workletUrl = URL.createObjectURL(blob);
+      await context.audioWorklet.addModule(this.workletUrl);
+      const node = new AudioWorkletNode(context, "pokecrystal-pcm", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      node.port.onmessage = (event) => {
+        const message = event.data as { type?: string; id?: number };
+        if (message.type === "ended" && typeof message.id === "number") {
+          const callback = this.endedCallbacks.get(message.id);
+          this.endedCallbacks.delete(message.id);
+          callback?.();
+        }
+      };
+      node.connect(context.destination);
+      this.node = node;
+      return node;
+    } catch {
+      return null;
+    }
+  }
+}
 
 const MENU_SOUND_ALIASES: Record<string, string> = {
   menu_cursor: "SFX_MENU",
@@ -334,38 +697,40 @@ const getAudioAssetPath = (...parts: string[]): string => {
   return joinUrl(base, parts);
 };
 
-const resolveMusicAsset = (token: string): string | null => {
+const resolveMusicAsset = (token: string, directPcm: boolean): string | null => {
   const upper = token.toUpperCase();
   const aliases = loadDisassemblyAliases();
   if (upper.startsWith("MUSIC_")) {
     const mapped = aliases?.music[upper] ?? slugifyToken(upper.replace(/^MUSIC_/, ""));
-    return getAudioAssetPath(`${mapped}.mp3`);
+    return directPcm ? getAudioAssetPath("pcm", "music", `${mapped}.json`) : getAudioAssetPath(`${mapped}.mp3`);
   }
   const normalized = token.trim().toLowerCase();
   if (!normalized) {
     return null;
   }
-  return getAudioAssetPath(`${normalized}.mp3`);
+  return directPcm ? getAudioAssetPath("pcm", "music", `${normalized}.json`) : getAudioAssetPath(`${normalized}.mp3`);
 };
 
-const resolveSoundAsset = (token: string): string | null => {
+const resolveSoundAsset = (token: string, directPcm: boolean): string | null => {
   const alias = MENU_SOUND_ALIASES[token.toLowerCase()];
   if (alias) {
-    return resolveSoundAsset(alias);
+    return resolveSoundAsset(alias, directPcm);
   }
   const upper = token.toUpperCase();
   const aliases = loadDisassemblyAliases();
   if (upper.startsWith("SFX_")) {
     const mapped = aliases?.sfx[upper] ?? `sfx/${slugifyToken(upper.replace(/^SFX_/, ""))}`;
-    return getAudioAssetPath(`${mapped}.mp3`);
+    return directPcm
+      ? getAudioAssetPath("pcm", "sfx", `${path.basename(mapped)}.json`)
+      : getAudioAssetPath(`${mapped}.mp3`);
   }
   if (upper.startsWith("CRY_")) {
     const base = resolveCryBase(upper.replace(/^CRY_/, ""));
-    return getAudioAssetPath("cries", `${base}.mp3`);
+    return directPcm ? getAudioAssetPath("pcm", "cries", `${base}.json`) : getAudioAssetPath("cries", `${base}.mp3`);
   }
   if (upper.endsWith("_CRY")) {
     const base = upper.replace(/_CRY$/, "").toLowerCase();
-    return getAudioAssetPath("cries", `${base}.mp3`);
+    return directPcm ? getAudioAssetPath("pcm", "cries", `${base}.json`) : getAudioAssetPath("cries", `${base}.mp3`);
   }
   return null;
 };
@@ -375,7 +740,7 @@ export class AudioEngine {
   public readonly music: Record<string, string> = {};
   public masterVolume: number;
   public muted: boolean;
-  private currentMusic: HTMLAudioElement | null = null;
+  private currentMusic: AudioHandle | null = null;
   private currentMusicState: MusicPlaybackState | null = null;
   private currentMusicName: string | null = null;
   private currentMusicRole: string = "general";
@@ -390,16 +755,18 @@ export class AudioEngine {
         startVolume: number;
       }
     | null = null;
-  private activeSounds = new Map<string, HTMLAudioElement[]>();
-  private activeSoundReleases = new Map<HTMLAudioElement, SfxReleaseState>();
-  private activeSoundTimeouts = new Map<HTMLAudioElement, ReturnType<typeof setTimeout>>();
-  private activeSoundFrames = new Map<HTMLAudioElement, number>();
-  private activeSoundTokens = new Map<HTMLAudioElement, string>();
-  private activeSoundChannels = new Map<HTMLAudioElement, number[]>();
+  private activeSounds = new Map<string, AudioHandle[]>();
+  private activeSoundReleases = new Map<AudioHandle, SfxReleaseState>();
+  private activeSoundTimeouts = new Map<AudioHandle, ReturnType<typeof setTimeout>>();
+  private activeSoundFrames = new Map<AudioHandle, number>();
+  private activeSoundTokens = new Map<AudioHandle, string>();
+  private activeSoundChannels = new Map<AudioHandle, number[]>();
   private currentSfxPriority: number | null = null;
   private pendingSounds: PendingSound[] = [];
   private currentAudioContext: AudioContext | null = null;
-  private pendingGraphTeardowns = new Map<HTMLAudioElement, () => void>();
+  private pendingGraphTeardowns = new Map<AudioHandle, () => void>();
+  private readonly playbackBackendKind: AudioPlaybackBackendKind;
+  private readonly pcmBackend: PcmAudioPlaybackBackend | null;
   private musicMutedByController = false;
   private suppressedMusicChannels = new Set<number>();
   private pendingMusicAfterFade: { token: string; role: string } | null = null;
@@ -408,9 +775,19 @@ export class AudioEngine {
   private playbackEventSequence = 0;
   private recentPlaybackEvents: AudioPlaybackEvent[] = [];
 
-  constructor(options?: { masterVolume?: number; muted?: boolean }) {
+  constructor(options?: {
+    masterVolume?: number;
+    muted?: boolean;
+    playbackBackend?: AudioPlaybackBackendKind;
+    pcmBackend?: PcmAudioPlaybackBackend | null;
+  }) {
     this.masterVolume = options?.masterVolume ?? 1;
     this.muted = options?.muted ?? false;
+    this.playbackBackendKind = options?.playbackBackend ?? "auto";
+    this.pcmBackend =
+      options?.pcmBackend === undefined
+        ? (this._shouldUseDirectPcm() ? new BrowserPcmAudioBackend() : null)
+        : options.pcmBackend;
   }
 
   loadSound(name: string, filePath: string): void {
@@ -419,6 +796,20 @@ export class AudioEngine {
 
   loadMusic(name: string, filePath: string): void {
     this.music[name] = filePath;
+  }
+
+  private _shouldUseDirectPcm(): boolean {
+    if (this.playbackBackendKind === "html") {
+      return false;
+    }
+    if (this.playbackBackendKind === "direct-pcm") {
+      return true;
+    }
+    return BrowserPcmAudioBackend.isSupported();
+  }
+
+  private _usesDirectPcm(): boolean {
+    return this.pcmBackend !== null;
   }
 
   playSound(name: string, options: BattleSoundOptions = {}): void {
@@ -550,7 +941,7 @@ export class AudioEngine {
     return context;
   }
 
-  private _disposeSoundGraph(audio: HTMLAudioElement): void {
+  private _disposeSoundGraph(audio: AudioHandle): void {
     const teardown = this.pendingGraphTeardowns.get(audio);
     if (!teardown) {
       return;
@@ -559,7 +950,7 @@ export class AudioEngine {
     this.pendingGraphTeardowns.delete(audio);
   }
 
-  private _attachSoundGraph(audio: HTMLAudioElement, panning: number | null): (() => void) | null {
+  private _attachSoundGraph(audio: AudioHandle, panning: number | null): (() => void) | null {
     if (panning === null || typeof window === "undefined") {
       return null;
     }
@@ -568,7 +959,7 @@ export class AudioEngine {
       return null;
     }
     try {
-      const source = context.createMediaElementSource(audio);
+      const source = context.createMediaElementSource(audio as HTMLAudioElement);
       const panner = context.createStereoPanner();
       const gain = context.createGain();
       panner.pan.value = panning;
@@ -587,7 +978,7 @@ export class AudioEngine {
     }
   }
 
-  private _applyBattleSoundOptions(audio: HTMLAudioElement, options: ResolvedBattleSoundOptions): void {
+  private _applyBattleSoundOptions(audio: AudioHandle, options: ResolvedBattleSoundOptions): void {
     const playbackRate = this._toPlaybackRate(options.pitch ?? null);
     if (playbackRate !== null) {
       audio.playbackRate = playbackRate;
@@ -614,6 +1005,27 @@ export class AudioEngine {
     }
   }
 
+  setMasterVolume(volume: number): void {
+    if (!Number.isFinite(volume)) {
+      return;
+    }
+    const nextVolume = Math.max(0, Math.min(1, volume));
+    if (this.masterVolume === nextVolume) {
+      return;
+    }
+    this.masterVolume = nextVolume;
+    this._applyMusicState();
+    for (const sounds of this.activeSounds.values()) {
+      for (const audio of sounds) {
+        audio.volume = nextVolume;
+      }
+    }
+  }
+
+  set_master_volume(volume: number): void {
+    this.setMasterVolume(volume);
+  }
+
   unlock(): void {
     if (this.muted) {
       return;
@@ -622,6 +1034,7 @@ export class AudioEngine {
     if (context?.state === "suspended" && typeof context.resume === "function") {
       void context.resume().catch(() => null);
     }
+    void this.pcmBackend?.resume().catch(() => null);
     if (this.currentMusicState) {
       this._resumeMusicState();
     } else if (this.currentMusicName) {
@@ -681,7 +1094,7 @@ export class AudioEngine {
       token,
     };
     this._applyMusicState();
-    void audio.play().catch(() => null);
+    this._playAudioHandle(audio);
   }
 
   play_music(name: string, role?: string | { role?: string }): void {
@@ -727,6 +1140,7 @@ export class AudioEngine {
     this.priorityMuteCount = 0;
     this.musicMutedByPriority = false;
     this.suppressedMusicChannels.clear();
+    this.pcmBackend?.dispose();
     this._syncMuteState();
   }
 
@@ -950,7 +1364,9 @@ export class AudioEngine {
     if (table[lower]) {
       return table[lower];
     }
-    const resolved = table === this.music ? resolveMusicAsset(token) : resolveSoundAsset(token);
+    const resolved = table === this.music
+      ? resolveMusicAsset(token, this._usesDirectPcm())
+      : resolveSoundAsset(token, this._usesDirectPcm());
     if (resolved) {
       return resolved;
     }
@@ -975,7 +1391,7 @@ export class AudioEngine {
     return /\.[a-z0-9]+$/i.test(token);
   }
 
-  private _createAudio(source: string, loop: boolean): HTMLAudioElement | null {
+  private _createAudio(source: string, loop: boolean): AudioHandle | null {
     if (typeof window === "undefined" || typeof window.Audio !== "function") {
       return null;
     }
@@ -984,6 +1400,13 @@ export class AudioEngine {
     audio.volume = this.masterVolume;
     audio.muted = this.muted;
     return audio;
+  }
+
+  private _playAudioHandle(audio: AudioHandle): void {
+    const result = audio.play();
+    if (result && typeof result.then === "function") {
+      void result.catch(() => null);
+    }
   }
 
   private _playSoundSource(
@@ -1148,7 +1571,7 @@ export class AudioEngine {
     return category === "sfx" || category === "cry";
   }
 
-  private _releaseActiveSound(token: string, audio: HTMLAudioElement): void {
+  private _releaseActiveSound(token: string, audio: AudioHandle): void {
     this._clearTimedSoundState(audio);
     const entries = this.activeSounds.get(token) ?? [];
     const next = entries.filter((entry) => entry !== audio);
@@ -1180,7 +1603,7 @@ export class AudioEngine {
     }
   }
 
-  private _clearTimedSoundState(audio: HTMLAudioElement): void {
+  private _clearTimedSoundState(audio: AudioHandle): void {
     this.activeSoundFrames.delete(audio);
     this.activeSoundTokens.delete(audio);
     this.activeSoundChannels.delete(audio);
@@ -1191,7 +1614,7 @@ export class AudioEngine {
     this.activeSoundTimeouts.delete(audio);
   }
 
-  private _resolveSoundToken(audio: HTMLAudioElement): string | null {
+  private _resolveSoundToken(audio: AudioHandle): string | null {
     const directToken = this.activeSoundTokens.get(audio);
     if (directToken) {
       return directToken;
@@ -1204,7 +1627,7 @@ export class AudioEngine {
     return null;
   }
 
-  private _releaseSoundByElement(audio: HTMLAudioElement): void {
+  private _releaseSoundByElement(audio: AudioHandle): void {
     const token = this._resolveSoundToken(audio);
     if (!token) {
       this._clearTimedSoundState(audio);
@@ -1224,7 +1647,7 @@ export class AudioEngine {
     if (this.activeSoundFrames.size === 0) {
       return;
     }
-    const expired = new Set<HTMLAudioElement>();
+    const expired = new Set<AudioHandle>();
     for (const [audio, framesLeft] of Array.from(this.activeSoundFrames.entries())) {
       const next = framesLeft - 1;
       if (next <= 0) {
@@ -1239,7 +1662,7 @@ export class AudioEngine {
     }
   }
 
-  private _scheduleSoundDuration(token: string, audio: HTMLAudioElement, durationFrames: number | null): void {
+  private _scheduleSoundDuration(token: string, audio: AudioHandle, durationFrames: number | null): void {
     const duration = Math.max(0, Math.floor(durationFrames ?? 0));
     this.activeSoundTokens.set(audio, token);
     if (duration <= 0) {
@@ -1322,8 +1745,141 @@ export class AudioEngine {
     return null;
   }
 
+  private _isPcmMusicManifest(manifest: AnyAudioManifest | null): manifest is PcmMusicTrackManifest {
+    return Boolean(
+      manifest &&
+      manifest.kind === "music" &&
+      Array.isArray((manifest as PcmMusicTrackManifest).stems) &&
+      (manifest as Partial<MusicTrackManifest>).mixedPath === undefined &&
+      (manifest as PcmMusicTrackManifest).stems.every((stem) => typeof stem.path === "string" && stem.bitsPerSample === 16),
+    );
+  }
+
+  private _isPcmClipManifest(manifest: AnyAudioManifest | null): manifest is PcmClipManifest {
+    return Boolean(
+      manifest &&
+      (manifest.kind === "sfx" || manifest.kind === "cry") &&
+      typeof (manifest as PcmClipManifest).path === "string" &&
+      (manifest as PcmClipManifest).bitsPerSample === 16,
+    );
+  }
+
+  private _resolveManifestPath(manifestSource: string, assetPath: string): string {
+    if (/^(https?:)?\/\//.test(assetPath) || assetPath.startsWith("/")) {
+      return assetPath;
+    }
+    if (/^(https?:)?\/\//.test(manifestSource)) {
+      return new URL(assetPath, manifestSource).toString();
+    }
+    const slash = manifestSource.lastIndexOf("/");
+    return slash >= 0 ? `${manifestSource.slice(0, slash + 1)}${assetPath}` : assetPath;
+  }
+
+  private async _loadPcmBytes(source: string): Promise<Int16Array | null> {
+    try {
+      if (typeof fetch === "function") {
+        const response = await fetch(source, { cache: "force-cache" });
+        if (!response.ok) {
+          return null;
+        }
+        return pcmBytesToInt16(await response.arrayBuffer());
+      }
+      if (typeof window === "undefined") {
+        const raw = fs.readFileSync(source);
+        return pcmBytesToInt16(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  private _createPcmHandle(args: {
+    kind: PcmBackendVoice["kind"];
+    token: string;
+    source: string;
+    pcm: Int16Array;
+    sampleRate: number;
+    loop: boolean;
+    loopStartSample: number | null;
+    loopEndSample: number | null;
+    volume: number;
+    muted: boolean;
+    pan: number | null;
+    playbackRate: number;
+  }): AudioHandle | null {
+    if (!this.pcmBackend) {
+      return null;
+    }
+    return new PcmAudioHandle(this.pcmBackend, {
+      id: nextPcmVoiceId++,
+      ...args,
+    });
+  }
+
+  private async _playPcmMusicManifest(
+    token: string,
+    source: string,
+    role: string,
+    manifest: PcmMusicTrackManifest,
+  ): Promise<void> {
+    if (!this.pcmBackend) {
+      return;
+    }
+    const stems = new Map<number, AudioHandle>();
+    for (const stem of manifest.stems) {
+      const path = this._resolveManifestPath(source, stem.path);
+      const pcm = await this._loadPcmBytes(path);
+      if (!pcm) {
+        continue;
+      }
+      const handle = this._createPcmHandle({
+        kind: "music",
+        token,
+        source: path,
+        pcm,
+        sampleRate: stem.sampleRate,
+        loop: true,
+        loopStartSample: stem.loopStartSample,
+        loopEndSample: stem.loopEndSample,
+        volume: this.masterVolume,
+        muted: this.muted,
+        pan: null,
+        playbackRate: 1,
+      });
+      if (handle) {
+        stems.set(stem.channel, handle);
+      }
+    }
+    if (stems.size === 0) {
+      return;
+    }
+    if (this.currentMusicState) {
+      const currentState = this.currentMusicState;
+      for (const audio of currentState.stems.values()) {
+        audio.pause();
+      }
+      currentState.mixed?.pause();
+    }
+    this.currentMusic = stems.values().next().value ?? null;
+    this.currentMusicState = {
+      source,
+      stems,
+      mixed: null,
+      manifest,
+      frameCursor: 0,
+      gain: 1,
+      role,
+      token,
+    };
+    this._applyMusicState();
+    for (const audio of stems.values()) {
+      this._playAudioHandle(audio);
+    }
+  }
+
   private async _playMusicManifest(token: string, source: string, role: string, requestId: number): Promise<void> {
-    const manifest = await this._loadManifest<MusicTrackManifest>(source);
+    const manifest = await this._loadManifest<MusicTrackManifest | PcmMusicTrackManifest>(source);
     if (requestId !== this.pendingMusicRequestId || this.currentMusicName !== token) {
       return;
     }
@@ -1337,6 +1893,10 @@ export class AudioEngine {
       }
       return;
     }
+    if (this._isPcmMusicManifest(manifest)) {
+      await this._playPcmMusicManifest(token, source, role, manifest);
+      return;
+    }
     if (this.currentMusicState) {
       const currentState = this.currentMusicState;
       for (const audio of currentState.stems.values()) {
@@ -1344,14 +1904,14 @@ export class AudioEngine {
       }
       currentState.mixed?.pause();
     }
-    const stems = new Map<number, HTMLAudioElement>();
+    const stems = new Map<number, AudioHandle>();
     for (const stem of manifest.stems) {
       const audio = this._createAudio(stem.path, stem.loop ?? manifest.loop ?? true);
       if (audio) {
         stems.set(stem.channel, audio);
       }
     }
-    let mixed: HTMLAudioElement | null = null;
+    let mixed: AudioHandle | null = null;
     if (stems.size === 0) {
       mixed = this._createAudio(manifest.mixedPath, manifest.loop ?? true);
     }
@@ -1369,7 +1929,7 @@ export class AudioEngine {
     this._applyMusicState();
     const audios = stems.size > 0 ? [...stems.values()] : (mixed ? [mixed] : []);
     for (const audio of audios) {
-      void audio.play().catch(() => null);
+      this._playAudioHandle(audio);
     }
   }
 
@@ -1379,11 +1939,61 @@ export class AudioEngine {
     options: ResolvedBattleSoundOptions,
     requestId: number,
   ): Promise<void> {
-    const manifest = await this._loadManifest<SoundCueManifest>(source);
+    const manifest = await this._loadManifest<SoundCueManifest | PcmClipManifest>(source);
     if (requestId !== this.pendingSoundManifestRequestId) {
       return;
     }
     if (!manifest) {
+      return;
+    }
+    if (this._isPcmClipManifest(manifest)) {
+      const path = this._resolveManifestPath(source, manifest.path);
+      const pcm = await this._loadPcmBytes(path);
+      if (!pcm || !this._canPlaySfx(token)) {
+        return;
+      }
+      const pan = this._resolveBattlePan(options.panning, options.tracks);
+      const playbackRate = this._toPlaybackRate(options.pitch ?? null) ?? 1;
+      const audio = this._createPcmHandle({
+        kind: manifest.kind,
+        token,
+        source,
+        pcm,
+        sampleRate: manifest.sampleRate,
+        loop: false,
+        loopStartSample: null,
+        loopEndSample: null,
+        volume: this.masterVolume,
+        muted: this.muted,
+        pan,
+        playbackRate,
+      });
+      if (!audio) {
+        return;
+      }
+      this._recordPlaybackEvent({
+        kind: getSoundChannelCategory(token),
+        token,
+        source,
+        loop: false,
+      });
+      const ownedChannels = manifest.ownedChannels ?? [];
+      if (ownedChannels.length > 0) {
+        this.activeSoundChannels.set(audio, ownedChannels);
+      }
+      const priorityClass = manifest.priorityClass === "none" ? undefined : manifest.priorityClass;
+      const releasePriority = this._trackPrioritySound(token, ownedChannels, priorityClass);
+      this._scheduleSoundDuration(token, audio, options.duration ?? manifest.durationFrames ?? null);
+      const active = this.activeSounds.get(token) ?? [];
+      active.push(audio);
+      this.activeSounds.set(token, active);
+      this.activeSoundReleases.set(audio, { released: false, release: releasePriority });
+      const cleanup = () => {
+        this._releaseActiveSound(token, audio);
+      };
+      audio.addEventListener("ended", cleanup, { once: true });
+      audio.addEventListener("pause", cleanup, { once: true });
+      this._playAudioHandle(audio);
       return;
     }
     const assetPath = manifest.assetPath;
@@ -1408,7 +2018,7 @@ export class AudioEngine {
     if (!state) {
       return;
     }
-    const applyVolume = (audio: HTMLAudioElement) => {
+    const applyVolume = (audio: AudioHandle) => {
       audio.volume = Math.max(0, Math.min(1, this.masterVolume * state.gain));
     };
     for (const audio of state.stems.values()) {
@@ -1434,7 +2044,7 @@ export class AudioEngine {
         } catch {
           // ignore if media has not loaded enough metadata yet
         }
-        void audio.play().catch(() => null);
+        this._playAudioHandle(audio);
       }
     }
   }

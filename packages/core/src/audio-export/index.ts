@@ -5,6 +5,8 @@ export * from "./synthesis";
 export * from "./parsers";
 export * from "./midi-recorder";
 export * from "./converter";
+export * from "./asm-programs";
+export * from "./pcm-clip";
 export * from "./midi-safety";
 export * from "./midi-instrument";
 export * from "./ffmpeg-client";

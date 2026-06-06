@@ -198,7 +198,7 @@ Controls:
 - `:q!`: quit without saving
 - `:wq`, `:wq!`, `:x`, or `:x!`: save-compatible quit command aliases
 
-TUI audio is played by a local command-line audio player, not by terminal escape sequences. On macOS the CLI uses `afplay`; on Linux it tries common players such as `mpg123`, `mpv`, `ffplay`, `play`, and `paplay`. Ghostty does not need a special setting for game music or SFX, though its own BEL alert sound is controlled separately by Ghostty's `bell-features` config.
+TUI audio streams signed 16-bit little-endian stereo PCM from the same ASM-derived renderer used by the web runtime. The CLI tries stdin-capable raw PCM players such as `ffplay`, `play`, `aplay`, and `paplay`; macOS users commonly need to install one or set `POKECRYSTAL_CLI_PCM_PLAYER`. Ghostty does not need a special setting for game music or SFX, though its own BEL alert sound is controlled separately by Ghostty's `bell-features` config.
 
 ### Identity Bootstrap
 
@@ -230,8 +230,7 @@ pokecrystal-cli skill --print
 - `POKECRYSTAL_AGENT_GRAPH_CYCLE_STEPS`: default linked agent graph cycle budget.
 - `POKECRYSTAL_AGENT_REQUEST_DELAY_MS`: default delay between linked agent batches.
 - `POKECRYSTAL_AGENT_IDENTITY_NAME`: default linked agent identity name.
-- `POKECRYSTAL_CLI_AUDIO_PLAYER`: override the local audio player command. Use `{file}` where the audio path should be inserted, for example `ffplay -nodisp -autoexit -loglevel quiet {file}`.
-- `POKECRYSTAL_CLI_AUDIO_ROOT`: override the root directory used to resolve `/api/audio/...` files.
+- `POKECRYSTAL_CLI_PCM_PLAYER`: override the local raw PCM player command. The command must read signed 16-bit little-endian stereo PCM from stdin; use `{sampleRate}` where the sample rate should be inserted, for example `ffplay -f s16le -ar {sampleRate} -ac 2 -nodisp -autoexit -loglevel quiet -`.
 - `LLAMA_CPP_BASE_URL` or `OLLAMA_BASE_URL`: local OpenAI-compatible base URL for `ollama/*` agent models.
 - `OLLAMA_API_KEY`: dummy or real API key for local Ollama-compatible model adapters.
 
