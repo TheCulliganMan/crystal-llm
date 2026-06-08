@@ -767,6 +767,91 @@ describe("PokemonCenterPCSession", () => {
     billInteractiveSpy.mockRestore();
   });
 
+  it("deposits the sixth party Pokemon from Bill's PC manual deposit list", () => {
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [
+      makePokemon(gameState, "CYNDAQUIL"),
+      makePokemon(gameState, "GEODUDE", 25),
+      makePokemon(gameState, "SANDSHREW", 17),
+      makePokemon(gameState, "BELLSPROUT", 18),
+      makePokemon(gameState, "BUTTERFREE", 20),
+      makePokemon(gameState, "TOGEPI", 5),
+    ];
+    gameState.sram.pc_boxes = [makeBox()];
+    const ui = makeInteractiveMenuUi();
+    const menu = new PokemonPCMenu(ui, gameState, null);
+    menu.showBillAction("deposit");
+    for (let index = 0; index < 5; index += 1) {
+      gameEngine.event.post({ type: "keydown", key: gameEngine.K_DOWN }, ui.eventQueue);
+    }
+    gameEngine.event.post({ type: "keydown", button: "a" }, ui.eventQueue);
+    gameEngine.event.post({ type: "keydown", button: "b" }, ui.eventQueue);
+
+    const actions = menu.runInteractive({
+      actionHandler: (payload) => payload,
+    });
+
+    expect(actions).toEqual([
+      expect.objectContaining({
+        action: "deposit",
+        box: 0,
+        party_slot: 5,
+        slot: null,
+      }),
+    ]);
+  });
+
+  it("accepts MCP button-confirm events in Bill's PC manual deposit list", () => {
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [
+      makePokemon(gameState, "CYNDAQUIL"),
+      makePokemon(gameState, "GEODUDE", 25),
+      makePokemon(gameState, "SANDSHREW", 17),
+      makePokemon(gameState, "BELLSPROUT", 18),
+      makePokemon(gameState, "BUTTERFREE", 20),
+      makePokemon(gameState, "TOGEPI", 5),
+    ];
+    gameState.sram.pc_boxes = [makeBox()];
+    const ui = makeInteractiveMenuUi();
+    const menu = new PokemonPCMenu(ui, gameState, null);
+    menu.showBillAction("deposit");
+    for (let index = 0; index < 5; index += 1) {
+      menu.handleInput({ type: "keydown", key: gameEngine.K_DOWN, code: gameEngine.K_DOWN, is_press: true });
+    }
+
+    expect(menu.handleInput({ type: "keydown", button: "a", is_press: true })).toEqual([
+      "deposit",
+      0,
+      5,
+    ]);
+  });
+
+  it("deposits from Bill's PC even if the deposit list is in browse mode", () => {
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [
+      makePokemon(gameState, "CYNDAQUIL"),
+      makePokemon(gameState, "GEODUDE", 25),
+      makePokemon(gameState, "SANDSHREW", 17),
+      makePokemon(gameState, "BELLSPROUT", 18),
+      makePokemon(gameState, "BUTTERFREE", 20),
+      makePokemon(gameState, "TOGEPI", 5),
+    ];
+    gameState.sram.pc_boxes = [makeBox()];
+    const ui = makeInteractiveMenuUi();
+    const menu = new PokemonPCMenu(ui, gameState, null);
+    menu.showBillAction("deposit");
+    (menu as unknown as { mode: string }).mode = "browse";
+    for (let index = 0; index < 5; index += 1) {
+      menu.handleInput({ type: "keydown", key: gameEngine.K_DOWN, code: gameEngine.K_DOWN, is_press: true });
+    }
+
+    expect(menu.handleInput({ type: "keydown", button: "a", is_press: true })).toEqual([
+      "deposit",
+      0,
+      5,
+    ]);
+  });
+
   it("runs Player's PC through the synchronous interactive path", () => {
     const gameState = createInitialGameState();
     seedParty(gameState, makePokemon(gameState, "CYNDAQUIL"));
@@ -910,13 +995,16 @@ describe("PokemonCenterPCSession", () => {
     promptRunAsyncSpy.mockRestore();
   });
 
-  it("routes PC menu input to pending dialogue before accepting more menu input", () => {
+  it("clears stale dialogue waits before routing input to PC menus", () => {
     const gameState = createInitialGameState();
     seedParty(gameState, makePokemon(gameState, "CYNDAQUIL"));
     const dialogue = {
       visible: false,
       waiting_for_input: true,
       pending_waits: 1,
+      clear_script_waits: jest.fn(() => {
+        dialogue.pending_waits = 0;
+      }),
       handle_input: jest.fn((event: { button?: string }) => {
         if (event.button === "a") {
           dialogue.pending_waits = 0;
@@ -937,8 +1025,11 @@ describe("PokemonCenterPCSession", () => {
       }
     ).dialogueAwareEventProvider(provider);
 
-    expect(wrapped()).toEqual([]);
-    expect(dialogue.handle_input).toHaveBeenCalledWith(expect.objectContaining({ button: "a" }));
+    expect(wrapped()).toEqual([event]);
+    expect(dialogue.handle_input).not.toHaveBeenCalled();
+    expect(dialogue.clear_script_waits).toHaveBeenCalled();
+    expect(dialogue.waiting_for_input).toBe(false);
+    expect(dialogue.pending_waits).toBe(0);
     expect(wrapped()).toEqual([event]);
   });
 

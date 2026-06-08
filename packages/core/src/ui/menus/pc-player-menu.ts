@@ -316,6 +316,9 @@ export class PlayerPCMenu {
       return;
     }
     const viewportLines = ["PLAYER'S PC", this.statusText()];
+    const actionLabel = this.currentAction
+      ? this.menuActions.find((label) => PlayerPCMenu.actionFromLabel(label) === this.currentAction)
+      : null;
     const items = this.currentItems();
     if (this.mode === "list" || this.mode === "quantity") {
       const visibleCount = PLAYER_PC_ITEMS_MENU.rows;
@@ -344,7 +347,10 @@ export class PlayerPCMenu {
       : null;
     this.ui.renderSnapshot(
       viewportLines,
-      ["D-Pad=Move A=Select B=Back"],
+      [
+        ...(actionLabel ? [`ACTION: ${actionLabel}`] : []),
+        "D-Pad=Move A=Select B=Back",
+      ],
       "Player's PC",
       "Legend",
       menuLines,

@@ -682,6 +682,171 @@ describe("McpGameSession interactive battle presses", () => {
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(6, 64);
   });
 
+  it("retries confirmed Pokecenter healer scripts when a stale hardware press only changes the viewport", async () => {
+    const session = getMcpSession("press-healer-viewport-only-retry");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { viewport?: string[]; prompt?: string[] | null; dialogue?: string[] | null; menu?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      requestAutosave: jest.Mock;
+      game: {
+        getGameState: () => { wram: { player_x: number; player_y: number; last_talked: number } };
+        getMapName: () => string;
+        isMenuOpen: () => boolean;
+        isBattleActive: () => boolean;
+        getOverworld: () => {
+          current_map_name: string;
+          player_direction: string;
+          script_runner: {
+            is_busy?: boolean;
+            run: jest.Mock;
+            _script_stack?: unknown[];
+            _awaiting_resume?: number;
+            _queued_overworld_task_count?: number;
+            stop_execution?: boolean;
+            last_interaction_object_index?: number | null;
+          };
+          player_movement_locked: () => boolean;
+          script_tasks_active: () => boolean;
+          get_facing_tile_coords: () => [number, number];
+          _counter_adjusted_tile: (x: number, y: number) => [number, number];
+          _npc_on_tile: (x: number, y: number) => {
+            objectIndex: number;
+            x: number;
+            y: number;
+            walking: boolean;
+            jumping: boolean;
+            event: { script: string };
+          } | null;
+          _nearest_npc_covering_subtile: () => null;
+          _bg_event_at: () => null;
+          _play_interaction_sound: jest.Mock;
+        };
+      };
+      getGame: jest.Mock;
+      buildSnapshotMapInfo: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("OVERWORLD");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.requestAutosave = jest.fn().mockResolvedValue(undefined);
+    sessionAny.lastSnapshot = { viewport: ["old"], prompt: null, dialogue: null, menu: null };
+    const wram = { player_x: 7, player_y: 7, last_talked: 0 };
+    const scriptRunner = {
+      is_busy: false,
+      run: jest.fn(() => {
+        sessionAny.lastSnapshot = {
+          viewport: ["nurse"],
+          dialogue: ["We can heal your POKEMON."],
+          prompt: null,
+          menu: null,
+        };
+      }),
+      _script_stack: [],
+      _awaiting_resume: 0,
+      _queued_overworld_task_count: 0,
+      stop_execution: false,
+      last_interaction_object_index: null as number | null,
+    };
+    const overworld = {
+      current_map_name: "OlivinePokecenter1F",
+      player_direction: "up",
+      script_runner: scriptRunner,
+      player_movement_locked: () => false,
+      script_tasks_active: () => false,
+      get_facing_tile_coords: () => [7, 5] as [number, number],
+      _counter_adjusted_tile: () => [7, 3] as [number, number],
+      _npc_on_tile: (x: number, y: number) =>
+        x === 7 && y === 3
+          ? {
+              objectIndex: 1,
+              x: 7,
+              y: 3,
+              walking: false,
+              jumping: false,
+              event: { script: "OlivinePokecenter1FNurseScript" },
+            }
+          : null,
+      _nearest_npc_covering_subtile: () => null,
+      _bg_event_at: () => null,
+      _play_interaction_sound: jest.fn(),
+    };
+    const game = {
+      getGameState: () => ({ wram }),
+      getMapName: () => "OlivinePokecenter1F",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => overworld,
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.buildSnapshotMapInfo = jest.fn(() => ({
+      map: "OlivinePokecenter1F",
+      map_id: null,
+      coord_stride: 2,
+      player: { coords: { x: 7, y: 7 }, facing: "up" },
+      warps: [],
+      hotspots: [
+        {
+          id: "heal-olivine",
+          type: "heal",
+          label: "Healer",
+          coords: { x: 7, y: 3 },
+          visible: true,
+          interactable: true,
+          token: "H",
+          approach_tiles: [{ coords: { x: 7, y: 7 }, facing: "up" }],
+        },
+      ],
+    }));
+    sessionAny.scheduleKeyPress = jest.fn();
+    let stepCall = 0;
+    sessionAny.stepFrames = jest.fn(() => {
+      stepCall += 1;
+      if (stepCall === 1) {
+        sessionAny.lastSnapshot = { viewport: ["animated npc"], prompt: null, dialogue: null, menu: null };
+      }
+    });
+    const blankOverworld = {
+      mode: "overworld",
+      menu: false,
+      promptReason: null,
+      dialogueText: "",
+      viewportText: "",
+      menuText: "",
+      promptText: "",
+      markerText: "",
+    };
+    sessionAny.captureSceneSignal = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length
+        ? { ...blankOverworld, dialogueText: sessionAny.lastSnapshot.dialogue.join("\n") }
+        : blankOverworld
+    );
+    sessionAny.buildStateFingerprint = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length
+        ? "dialogue"
+        : stepCall > 0
+          ? "viewport-animation"
+          : "before"
+    );
+
+    const action = await session.press("a", 1);
+
+    expect(scriptRunner.run).toHaveBeenCalledWith("OlivinePokecenter1FNurseScript");
+    expect(wram.last_talked).toBe(1);
+    expect(scriptRunner.last_interaction_object_index).toBe(1);
+    expect(action.result.events).toContain("confirmed_heal_interaction_retried");
+    expect(action.result.changed).toBe(true);
+  });
+
   it("settles from closed overworld dialogue into a script-owned prompt snapshot", async () => {
     const session = getMcpSession("press-overworld-dialogue-to-prompt-settle");
     const sessionAny = session as unknown as {
@@ -828,7 +993,7 @@ describe("McpGameSession interactive battle presses", () => {
     await session.press("a", 1);
 
     expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith({
-      key: "KeyJ",
+      key: "KeyZ",
       button: "a",
       direction: undefined,
       holdFrames: 2,
@@ -2053,7 +2218,7 @@ describe("McpGameSession interactive battle presses", () => {
       expect(action.result.ok).toBe(true);
       expect(action.result.changed).toBe(true);
       expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith({
-        key: "KeyJ",
+        key: "KeyZ",
         button: "a",
         direction: undefined,
         holdFrames: 2,

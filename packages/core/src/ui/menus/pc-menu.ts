@@ -1602,13 +1602,8 @@ export class PokemonCenterPCSession {
       if (!this.dialogueIsWaiting()) {
         return events;
       }
-      const handleInput = this.dialogue?.handle_input ?? this.dialogue?.handleInput;
-      if (handleInput) {
-        for (const event of events) {
-          handleInput.call(this.dialogue, event);
-        }
-      }
-      return [];
+      this.releaseDialogueInputForPcMenu();
+      return events;
     };
   }
 

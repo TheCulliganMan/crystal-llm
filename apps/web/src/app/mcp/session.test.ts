@@ -124,6 +124,46 @@ describe("McpGameSession identity naming", () => {
     expect(sessionAny.isMenuOpenForSession({ isMenuOpen: () => false })).toBe(true);
   });
 
+  it("treats PC snapshots as async menu input owners", () => {
+    const session = getMcpSession("pc-menu-surface-input-owner");
+    const sessionAny = session as unknown as {
+      lastSnapshot: unknown;
+      isMenuOpenForSession: (game: { isMenuOpen: () => boolean }) => boolean;
+    };
+
+    sessionAny.lastSnapshot = {
+      viewport: ["DEPOSIT <PK><MN>", "BOX 01", "  DUX", "▶ TOGEPI"],
+      info: ["SELECTED: TOGEPI", "LEVEL: 5", "ITEM: -"],
+      menu: null,
+      prompt: null,
+      dialogue: null,
+      titles: { viewport: "PC", info: "PC" },
+    };
+
+    expect(__testing.isInputOwningSurfaceSnapshot(sessionAny.lastSnapshot as never)).toBe(true);
+    expect(sessionAny.isMenuOpenForSession({ isMenuOpen: () => false })).toBe(true);
+  });
+
+  it("treats PC prompt snapshots as async menu input owners", () => {
+    const session = getMcpSession("pc-prompt-surface-input-owner");
+    const sessionAny = session as unknown as {
+      lastSnapshot: unknown;
+      isMenuOpenForSession: (game: { isMenuOpen: () => boolean }) => boolean;
+    };
+
+    sessionAny.lastSnapshot = {
+      viewport: ["DEPOSIT #MON", "BOX 01", "  BELLSPROU", "▶ TOGEPI"],
+      info: ["SELECTED: TOGEPI", "LEVEL: 5", "ITEM: -"],
+      menu: null,
+      prompt: ["Choose a <PK><MN>."],
+      dialogue: null,
+      titles: { viewport: "Prompt", info: "Legend" },
+    };
+
+    expect(__testing.isInputOwningSurfaceSnapshot(sessionAny.lastSnapshot as never)).toBe(true);
+    expect(sessionAny.isMenuOpenForSession({ isMenuOpen: () => false })).toBe(true);
+  });
+
   it("uses an unthrottled text UI so stepped frames refresh snapshots immediately", () => {
     const session = getMcpSession("unthrottled-text-ui");
     const sessionAny = session as unknown as {
@@ -971,6 +1011,7 @@ const buildMoveHarness = () => {
     };
     getGame: jest.Mock;
     requestAutosave: jest.Mock;
+    scheduledEvents?: unknown[];
   };
   sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
   sessionAny.observeText = jest.fn().mockReturnValue("OK");
@@ -1078,6 +1119,32 @@ describe("McpGameSession move", () => {
         direction: "left",
         holdFrames: 2,
       }),
+    );
+  });
+
+  it("clears stale held and queued directions before discrete movement", async () => {
+    const { session, sessionAny, gameState, overworld } = buildMoveHarness();
+    installMoveStepper(sessionAny, gameState, overworld);
+    const heldDirections = new Map<string, null>([["up", null]]);
+    const overworldWithInputState = overworld as typeof overworld & {
+      _held_directions: Map<string, null>;
+      _queued_direction: string | null;
+    };
+    overworldWithInputState._held_directions = heldDirections;
+    overworldWithInputState._queued_direction = "up";
+    sessionAny.scheduledEvents = [{ frame: 100, event: { direction: "up" } }];
+
+    const action = await session.move("down", 1);
+
+    expect(action.result.ok).toBe(true);
+    expect(action.result.events).toContain("stale_input_cleared");
+    expect(action.result.events).toContain("moved:1");
+    expect(gameState.wram.player_x).toBe(1);
+    expect(gameState.wram.player_y).toBe(2);
+    expect(heldDirections.size).toBe(0);
+    expect(overworldWithInputState._queued_direction).toBeNull();
+    expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith(
+      expect.objectContaining({ direction: "down" }),
     );
   });
 
@@ -2087,6 +2154,65 @@ describe("McpGameSession executeNamedMacro", () => {
     expect(action.result.events).toEqual(expect.arrayContaining(["reason:closed_menu"]));
     expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith(
       expect.objectContaining({ button: "b", holdFrames: 1 })
+    );
+  });
+
+  it("clears stale A release guards before advancing dialogue macros", async () => {
+    const session = getMcpSession("named-macro-clears-stale-a-release");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      getGame: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+      normalizeTimes: jest.Mock;
+      normalizeDelayFrames: jest.Mock;
+      normalizeHoldFrames: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      getModalUiState: jest.Mock;
+      recordAction: jest.Mock;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      captureSnapshot: jest.Mock;
+      observeText: jest.Mock;
+      recordActionEvent: jest.Mock;
+    };
+    const overworld = {
+      _ignore_a_until_release: true,
+      dialogue: { ignore_confirm_until_release: true },
+    };
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.getGame = jest.fn(() => ({ getOverworld: () => overworld }));
+    sessionAny.captureSceneSignal = jest.fn(() => ({
+      mode: "overworld",
+      menu: false,
+      map: "TestMap",
+      promptReason: null,
+      menuText: "",
+      dialogueText: "We can heal your POKEMON.",
+      promptText: "",
+      markerText: "",
+    }));
+    sessionAny.buildStateFingerprint = jest.fn().mockReturnValueOnce("before").mockReturnValueOnce("after");
+    sessionAny.normalizeTimes = jest.fn(() => 1);
+    sessionAny.normalizeDelayFrames = jest.fn(() => 0);
+    sessionAny.normalizeHoldFrames = jest.fn(() => 1);
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.getModalUiState = jest.fn(() =>
+      modalState({ in_dialog: true, text_box_open: true, text_advance_pending: true, input_blocked_reason: "dialogue" })
+    );
+    sessionAny.recordAction = jest.fn();
+    sessionAny.scheduleKeyPress = jest.fn();
+    sessionAny.stepFrames = jest.fn();
+    sessionAny.captureSnapshot = jest.fn();
+    sessionAny.observeText = jest.fn(() => "OK");
+    sessionAny.recordActionEvent = jest.fn();
+
+    await session.executeNamedMacro("advance_dialog", { maxPresses: 1 });
+
+    expect(overworld._ignore_a_until_release).toBe(false);
+    expect(overworld.dialogue.ignore_confirm_until_release).toBe(false);
+    expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith(
+      expect.objectContaining({ button: "a", holdFrames: 1 })
     );
   });
 

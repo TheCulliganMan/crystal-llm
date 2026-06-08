@@ -1,6 +1,14 @@
 // ASM mapping: pokecrystal_disassembly/engine/menus/bills_pc.asm (BillsPC main loop and menu states).
 import { AudioEngine } from "@pokecrystal/core/engine/systems/audio";
-import { GameButton, KeyEvent, buttonKeys, isKeyDownEvent, normalizeButtonKey } from "@pokecrystal/core/input/buttons";
+import {
+  GameButton,
+  KeyEvent,
+  buttonKeys,
+  isCancelEvent,
+  isConfirmEvent,
+  isKeyDownEvent,
+  normalizeButtonKey,
+} from "@pokecrystal/core/input/buttons";
 import { saveGame } from "@pokecrystal/core/core/save";
 import { Box, BoxSchema, formatDefaultBoxName, Party, Pokemon, toPokemon } from "@pokecrystal/core/core/models";
 import { MAX_PC_BOXES } from "@pokecrystal/core/core/constants";
@@ -329,21 +337,21 @@ export class PokemonPCMenu {
     const keyCode = normalizeButtonKey(event.code ?? event.key ?? event.button ?? null);
     if (this.mode === PCMode.BROWSE) {
       this.ensureMonList();
-      return this.handleBrowseInput(keyName, keyCode);
+      return this.handleBrowseInput(event, keyName, keyCode);
     }
     if (this.mode === PCMode.ACTIONS) {
-      return this.handleActionMode(keyName, keyCode);
+      return this.handleActionMode(event, keyName, keyCode);
     }
     if (this.mode === PCMode.MOVE) {
-      return this.handleMoveMode(keyName, keyCode);
+      return this.handleMoveMode(event, keyName, keyCode);
     }
     if (this.mode === PCMode.DEPOSIT) {
-      return this.handleDepositMode(keyName, keyCode);
+      return this.handleDepositMode(event, keyName, keyCode);
     }
     return null;
   }
 
-  private handleBrowseInput(keyName: string, keyCode: number | null): [string, number | null, number] | null {
+  private handleBrowseInput(event: KeyEvent, keyName: string, keyCode: number | null): [string, number | null, number] | null {
     let moved = false;
     if (this.upKeys.has(keyName)) {
       moved = this.pressUp();
@@ -353,7 +361,7 @@ export class PokemonPCMenu {
       moved = this.pressLeft();
     } else if (this.rightKeys.has(keyName)) {
       moved = this.pressRight();
-    } else if (keyCode !== null && this.confirmKeys.has(keyCode)) {
+    } else if (isConfirmEvent(event) || (keyCode !== null && this.confirmKeys.has(keyCode))) {
       if (this.selectionIsCancel()) {
         return ["cancel", -1, -1];
       }
@@ -361,9 +369,16 @@ export class PokemonPCMenu {
       if (!entry) {
         return null;
       }
+      if (this.billAction === "deposit" && entry.boxIndex === null) {
+        this.mode = PCMode.BROWSE;
+        this.playConfirm();
+        this.clearPendingEntry();
+        this.jumptableState = BillsPCState.END_LOOP;
+        return ["deposit", this.boxIndex, entry.slotIndex];
+      }
       this.enterActionMode(entry);
       return null;
-    } else if (keyCode !== null && this.cancelKeys.has(keyCode)) {
+    } else if (isCancelEvent(event) || (keyCode !== null && this.cancelKeys.has(keyCode))) {
       return ["cancel", -1, -1];
     }
     if (moved) {
@@ -372,8 +387,11 @@ export class PokemonPCMenu {
     return null;
   }
 
-  private handleActionMode(keyName: string, keyCode: number | null): [string, number | null, number] | null {
-    const [newIndex, action] = this.actionNav.handleKey(keyName, keyCode, this.actionIndex);
+  private handleActionMode(event: KeyEvent, keyName: string, keyCode: number | null): [string, number | null, number] | null {
+    const [newIndex, navigatorAction] = this.actionNav.handleKey(keyName, keyCode, this.actionIndex);
+    const action =
+      navigatorAction ??
+      (isConfirmEvent(event) ? "confirm" : isCancelEvent(event) ? "cancel" : null);
     this.actionIndex = newIndex;
     if (action === "cursor_move") {
       this.playCursor();
@@ -483,7 +501,7 @@ export class PokemonPCMenu {
     this.statsModalActive = false;
   }
 
-  private handleMoveMode(keyName: string, keyCode: number | null): [string, number | null, number] | null {
+  private handleMoveMode(event: KeyEvent, keyName: string, keyCode: number | null): [string, number | null, number] | null {
     this.ensureMonList();
     let moved = false;
     if (this.upKeys.has(keyName)) {
@@ -499,7 +517,9 @@ export class PokemonPCMenu {
       this.playCursor();
       return null;
     }
-    const moveAction = this.moveNav.handleKey(keyName, keyCode);
+    const moveAction =
+      this.moveNav.handleKey(keyName, keyCode) ??
+      (isConfirmEvent(event) ? "confirm" : isCancelEvent(event) ? "cancel" : null);
     if (moveAction === "confirm") {
       const entry = this.currentSelectionEntry();
       if (this.moveOrigin === null || !entry || !this.moveOriginEntry) {
@@ -560,8 +580,10 @@ export class PokemonPCMenu {
     this.mode = PCMode.BROWSE;
   }
 
-  private handleDepositMode(keyName: string, keyCode: number | null): [string, number | null, number] | null {
-    const action = this.depositNav.handleKey(keyName, keyCode);
+  private handleDepositMode(event: KeyEvent, keyName: string, keyCode: number | null): [string, number | null, number] | null {
+    const action =
+      this.depositNav.handleKey(keyName, keyCode) ??
+      (isConfirmEvent(event) ? "confirm" : isCancelEvent(event) ? "cancel" : null);
     if (!action) {
       return null;
     }

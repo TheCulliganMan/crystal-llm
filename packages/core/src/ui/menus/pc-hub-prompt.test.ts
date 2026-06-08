@@ -101,4 +101,19 @@ describe("PCHubMenu", () => {
       null,
     );
   });
+
+  it("handles MCP string key direction events", () => {
+    const menu = new PCHubMenu(
+      {
+        screen: new Surface(160, 144),
+        font: { renderText: jest.fn() },
+        drawWindow: jest.fn(),
+      },
+      ["WITHDRAW", "DEPOSIT"],
+    );
+
+    menu.handleInput({ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true });
+
+    expect(menu.index).toBe(1);
+  });
 });

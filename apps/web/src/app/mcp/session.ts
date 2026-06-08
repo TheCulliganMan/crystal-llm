@@ -136,7 +136,32 @@ const selectedSnapshotLine = (lines: readonly string[] | null | undefined): stri
   return line?.replace(/^\s*[>▶▷]\s*/, "").trim() || undefined;
 };
 
+const snapshotLooksLikePcSurface = (frame: TextSnapshotPayload): boolean => {
+  const lines = [
+    ...(frame.viewport ?? []),
+    ...(frame.menu ?? []),
+    ...(frame.info ?? []),
+    frame.titles?.viewport,
+    frame.titles?.info,
+  ]
+    .filter((line): line is string => typeof line === "string")
+    .map((line) => line.trim().toUpperCase());
+  return lines.some((line) =>
+    line.includes("BILL'S PC") ||
+    line === "DEPOSIT #MON" ||
+    line === "WITHDRAW #MON" ||
+    line === "MOVE #MON W/O MAIL" ||
+    line.includes("WITHDRAW <PK><MN>") ||
+    line.includes("DEPOSIT <PK><MN>") ||
+    line.startsWith("BOX ") ||
+    line.startsWith("SELECTED:")
+  );
+};
+
 const deriveSurfaceKind = (frame: TextSnapshotPayload, mode: string): string => {
+  if (snapshotLooksLikePcSurface(frame)) {
+    return "pc";
+  }
   const info = frame.info ?? [];
   const viewport = frame.viewport ?? [];
   const titles = frame.titles ?? {};
@@ -160,7 +185,7 @@ const deriveSurfaceKind = (frame: TextSnapshotPayload, mode: string): string => 
   return normalizeSurfaceKindToken(mode) || "unknown";
 };
 
-const INPUT_OWNING_SURFACE_KINDS = new Set(["pokegear", "slot_machine", "fly_to_where"]);
+const INPUT_OWNING_SURFACE_KINDS = new Set(["pc", "pokegear", "slot_machine", "fly_to_where"]);
 const INPUT_OWNING_SURFACE_SETTLE_MS = 20;
 
 const isInputOwningSurfaceSnapshot = (frame: TextSnapshotPayload | null | undefined): boolean => {
@@ -1922,13 +1947,19 @@ class McpGameSession {
   }
 
   async move(direction: Direction, times = 1, options: ActionSnapshotOptions = {}): Promise<ActionResultWithSnapshot> {
+    await this.ensureReady();
     const game = this.getGame();
+    const staleDirectionalInputClearedBefore = this.clearStaleDirectionalInput(game);
     const beforeSignal = this.captureSceneSignal(game);
     const before = this.buildStateFingerprint(game);
     const outcome = await this.performMove(direction, times, { stopOnEvent: true });
+    const staleDirectionalInputClearedAfter = this.clearStaleDirectionalInput(game);
     const afterSignal = this.captureSceneSignal(game);
     const changed = before !== this.buildStateFingerprint(game) || outcome.completed > 0;
     const events: string[] = [];
+    if (staleDirectionalInputClearedBefore || staleDirectionalInputClearedAfter) {
+      events.push("stale_input_cleared");
+    }
     if (outcome.completed > 0) {
       events.push(`moved:${outcome.completed}`);
     }
@@ -2010,11 +2041,15 @@ class McpGameSession {
       !beforeSignal.menu &&
       !beforeSignal.promptReason &&
       !beforeSignal.dialogueText.trim()
-        ? this.readInteractionTarget(game, this.readInteractionTile(game))
+        ? this.readInteractionTarget(game, this.readInteractionTile(game), this.buildSnapshotMapInfo())
         : undefined;
-    this.recordAction(formatActionLabel("button", button));
+      this.recordAction(formatActionLabel("button", button));
     for (let i = 0; i < normalizedTimes; i += 1) {
       const modalBeforePress = this.getModalUiState(game);
+      const inputOwningSurfaceHoldFrames =
+        startedOnInputOwningSurface && !isDirectionalButton
+          ? Math.max(this.holdFrames, 4)
+          : this.holdFrames;
       const interactionHoldFrames =
         button === "a" &&
         beforeSignal.mode === "overworld" &&
@@ -2023,13 +2058,15 @@ class McpGameSession {
         !modalBeforePress.in_menu &&
         overworldInteractionAheadBeforePress
           ? Math.max(this.holdFrames, 2)
-          : this.holdFrames;
+          : inputOwningSurfaceHoldFrames;
       this.scheduleKeyPress({
         key: keyForButton(button),
         button: isDirectionalButton ? undefined : button,
         direction: isDirectionalButton ? button : undefined,
         holdFrames: isDirectionalButton ? this.holdFrames : interactionHoldFrames,
+        repeatPressFrames: startedOnInputOwningSurface && !isDirectionalButton,
       });
+      const scheduledHoldFrames = isDirectionalButton ? this.holdFrames : interactionHoldFrames;
       const settleFrames =
         instantBattleInput
           ? 0
@@ -2044,7 +2081,15 @@ class McpGameSession {
           : button === "b" || button === "start"
             ? 1
             : 0;
-      this.stepFrames(this.holdFrames + 1 + settleFrames);
+      if (startedOnInputOwningSurface) {
+        for (let frame = 0; frame < scheduledHoldFrames; frame += 1) {
+          this.stepFrames(1);
+          await this.waitForInputOwningSurfaceSettle();
+        }
+        this.stepFrames(1 + settleFrames);
+      } else {
+        this.stepFrames(scheduledHoldFrames + 1 + settleFrames);
+      }
     }
     let changed = before !== this.buildStateFingerprint(game);
     let afterSignal = this.captureSceneSignal(game);
@@ -2195,6 +2240,26 @@ class McpGameSession {
         }
       }
     }
+    const fallbackHealInteractionStarted =
+      button === "a" &&
+      normalizedTimes === 1 &&
+      beforeSignal.mode === "overworld" &&
+      !beforeSignal.menu &&
+      !beforeSignal.promptReason &&
+      !beforeSignal.dialogueText.trim() &&
+      overworldInteractionAheadBeforePress?.hotspot_type === "heal" &&
+      Boolean(overworldInteractionAheadBeforePress.script) &&
+      afterSignal.mode === "overworld" &&
+      !afterSignal.menu &&
+      !afterSignal.promptReason &&
+      !afterSignal.dialogueText.trim() &&
+      this.runConfirmedHealCounterInteraction(game, overworldInteractionAheadBeforePress);
+    if (fallbackHealInteractionStarted) {
+      this.stepFrames(1);
+      this.settleMovementLock(game, null);
+      changed = before !== this.buildStateFingerprint(game);
+      afterSignal = this.captureSceneSignal(game);
+    }
     const needsPostDialoguePromptSettle =
       button === "a" &&
       normalizedTimes === 1 &&
@@ -2229,6 +2294,7 @@ class McpGameSession {
       changed,
       events: [
         `pressed:${button}:${normalizedTimes}`,
+        ...(fallbackHealInteractionStarted ? ["confirmed_heal_interaction_retried"] : []),
         ...(staleDirectionalInputCleared ? ["stale_input_cleared"] : []),
       ],
     });
@@ -3354,6 +3420,8 @@ class McpGameSession {
   ): Promise<ActionResultWithSnapshot> {
     await this.ensureReady();
     const game = this.getGame();
+    this.resetStaleButtonReleaseGuards(game, "a");
+    this.resetStaleButtonReleaseGuards(game, "b");
     const beforeSignal = this.captureSceneSignal(game);
     const before = this.buildStateFingerprint(game);
     const requested = this.normalizeTimes(options.maxPresses ?? 8);
@@ -3399,6 +3467,7 @@ class McpGameSession {
         reasonCodes.add("closed_menu");
         closeMenuCount += 1;
         this.recordAction(formatActionLabel("button", "b", `macro:${macro}:close_menu`));
+        this.resetStaleButtonReleaseGuards(game, "b");
         this.scheduleKeyPress({
           key: keyForButton("b"),
           button: "b",
@@ -3445,6 +3514,7 @@ class McpGameSession {
       const postPressJitter = (i % 3) + 1;
 
       this.recordAction(formatActionLabel("button", "a", `macro:${macro}`));
+      this.resetStaleButtonReleaseGuards(game, "a");
       this.scheduleKeyPress({
         key: keyForButton("a"),
         button: "a",
@@ -3760,6 +3830,7 @@ class McpGameSession {
     direction?: string;
     button?: string;
     holdFrames?: number;
+    repeatPressFrames?: boolean;
   }): void {
     const pressEvent = new gameEngine.event.Event(gameEngine.KEYDOWN, {
       key: options.key,
@@ -3781,6 +3852,20 @@ class McpGameSession {
       frame: this.frameCounter,
       event: pressEvent,
     });
+    if (options.repeatPressFrames) {
+      for (let offset = 1; offset < holdFrames; offset += 1) {
+        this.scheduledEvents.push({
+          frame: this.frameCounter + offset,
+          event: new gameEngine.event.Event(gameEngine.KEYDOWN, {
+            key: options.key,
+            code: options.key,
+            direction: options.direction ?? null,
+            button: options.button ?? null,
+            is_press: true,
+          }),
+        });
+      }
+    }
     this.scheduledEvents.push({
       frame: releaseFrame,
       event: releaseEvent,
@@ -5273,6 +5358,80 @@ class McpGameSession {
       return;
     }
     this.setMcpOverworldFacing(game, interactionLane.lane.facing);
+  }
+
+  private runConfirmedHealCounterInteraction(
+    game: Game,
+    target: NonNullable<McpStatusSnapshot["interaction_target"]>
+  ): boolean {
+    if (target.hotspot_type !== "heal" || !target.script) {
+      return false;
+    }
+    const scriptName = String(target.script).trim();
+    if (!scriptName) {
+      return false;
+    }
+    const overworld = game.getOverworld() as unknown as
+      | {
+          script_runner?: {
+            is_busy?: boolean;
+            run?: (scriptName: string) => void;
+            last_interaction_object_index?: number | null;
+          } | null;
+          _npc_on_tile?: (tileX: number, tileY: number) => {
+            objectIndex?: number;
+            x?: number;
+            y?: number;
+            event?: { script?: unknown } | null;
+            facePlayer?: (playerX: number, playerY: number) => void;
+            face_player?: (playerX: number, playerY: number) => void;
+          } | null;
+          _nearest_npc_covering_subtile?: (tileX: number, tileY: number) => {
+            objectIndex?: number;
+            x?: number;
+            y?: number;
+            event?: { script?: unknown } | null;
+            facePlayer?: (playerX: number, playerY: number) => void;
+            face_player?: (playerX: number, playerY: number) => void;
+          } | null;
+          player_object?: { x?: number; y?: number } | null;
+          player_x?: number;
+          player_y?: number;
+          _play_interaction_sound?: () => void;
+        }
+      | null
+      | undefined;
+    const runner = overworld?.script_runner;
+    if (!overworld || !runner || runner.is_busy || typeof runner.run !== "function") {
+      return false;
+    }
+    const npc =
+      (typeof overworld._npc_on_tile === "function"
+        ? overworld._npc_on_tile(target.x, target.y)
+        : null) ??
+      (typeof overworld._nearest_npc_covering_subtile === "function"
+        ? overworld._nearest_npc_covering_subtile(target.x, target.y)
+        : null);
+    const npcScript = String(npc?.event?.script ?? "").trim();
+    if (npcScript && npcScript !== scriptName) {
+      return false;
+    }
+    const objectIndex = npc?.objectIndex ?? 0;
+    const gameState = game.getGameState?.() as { wram?: { last_talked?: number } } | null | undefined;
+    if (gameState?.wram) {
+      gameState.wram.last_talked = objectIndex;
+    }
+    runner.last_interaction_object_index = objectIndex || null;
+    const playerX = overworld.player_object?.x ?? overworld.player_x ?? target.x;
+    const playerY = overworld.player_object?.y ?? overworld.player_y ?? target.y;
+    if (npc && typeof npc.facePlayer === "function") {
+      npc.facePlayer(playerX, playerY);
+    } else if (npc && typeof npc.face_player === "function") {
+      npc.face_player(playerX, playerY);
+    }
+    overworld._play_interaction_sound?.();
+    runner.run(scriptName);
+    return true;
   }
 
   private setMcpOverworldFacing(game: Game, direction: Direction): void {

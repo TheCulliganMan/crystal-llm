@@ -4,6 +4,7 @@ import { Surface } from "../surface";
 import { AudioEngine } from "../../engine/systems/audio";
 import { TILE_SIZE } from "../../engine/world/tile";
 import { isCancelEvent, isConfirmEvent, isKeyDownEvent } from "../../input/buttons";
+import { mapKeyToDirection } from "../../input/controls";
 import { Z_INDEX_DIALOGUE } from "../z-index";
 import { PC_WINDOW_FILL } from "./pc-views";
 import { nextFrame } from "../async-loop";
@@ -107,10 +108,11 @@ export class PCHubMenu {
     if (!isKeyDownEvent(event)) {
       return;
     }
-    if (event.key === gameEngine.K_UP || event.key === gameEngine.K_LEFT) {
+    const direction = mapKeyToDirection(event.direction ?? event.code ?? event.key ?? null);
+    if (direction === "up" || direction === "left") {
       this.index = (this.index - 1 + this.options.length) % this.options.length;
       this.playCursor();
-    } else if (event.key === gameEngine.K_DOWN || event.key === gameEngine.K_RIGHT) {
+    } else if (direction === "down" || direction === "right") {
       this.index = (this.index + 1) % this.options.length;
       this.playCursor();
     } else if (isConfirmEvent(event)) {

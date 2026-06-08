@@ -360,6 +360,36 @@ describe("PokemonPCMenu", () => {
     expect(gameState.sram.current_pc_box).toBe(0);
   });
 
+  it("returns a deposit action from the async path for MCP button-confirm events", async () => {
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [
+      makePokemon(gameState, "CYNDAQUIL", 5),
+      makePokemon(gameState, "GEODUDE", 25),
+      makePokemon(gameState, "SANDSHREW", 17),
+      makePokemon(gameState, "BELLSPROUT", 18),
+      makePokemon(gameState, "BUTTERFREE", 20),
+      makePokemon(gameState, "TOGEPI", 5),
+    ];
+    gameState.sram.pc_boxes = [BoxSchema.parse({ name: formatDefaultBoxName(0) })];
+    const ui = makeUi([
+      [{ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true }],
+      [{ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true }],
+      [{ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true }],
+      [{ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true }],
+      [{ type: "keydown", key: "ArrowDown", code: "ArrowDown", is_press: true }],
+      [{ type: "keydown", button: "a", is_press: true }],
+      [{ type: "keydown", button: "b", is_press: true }],
+    ]);
+    const menu = new PokemonPCMenu(ui, gameState, null);
+    menu.showBillAction("deposit");
+
+    const actions = await menu.runInteractiveAsync({ actionHandler: (payload) => payload });
+
+    expect(actions).toEqual([
+      expect.objectContaining({ action: "deposit", box: 0, party_slot: 5, slot: null }),
+    ]);
+  });
+
   it("uses the ASM move submenu labels before entering move-target selection", () => {
     const gameState = createInitialGameState();
     gameState.sram.current_pc_box = 0;
