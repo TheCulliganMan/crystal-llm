@@ -109,11 +109,31 @@ describe("WhiteoutManager", () => {
     expect(fade_in_from_white).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to HOME when the ASM whiteout spawn map is not a spawn point", () => {
+  it("uses the saved last spawn when the WRAM whiteout spawn map is not a spawn point", () => {
     game_state.wram.wLastSpawnMapGroup = 99;
     game_state.wram.wLastSpawnMapNumber = 99;
     game_state.sram.last_spawn_map_group = 23;
     game_state.sram.last_spawn_map_number = 9;
+    const expectedSpawn = findSpawnForMap(game_state.sram.last_spawn_map_group, game_state.sram.last_spawn_map_number);
+    expect(expectedSpawn).toBeDefined();
+    (warp_to_spawn_point as jest.Mock).mockReturnValue(true);
+
+    const manager = new WhiteoutManager(game_state, overworld, event_manager);
+    event_manager.dispatch(new Event("battle_complete", { result: 1 }));
+
+    runUpdates(manager, 50);
+
+    expect(game_state.wram.wDefaultSpawnpoint).toBe(expectedSpawn?.[0]);
+    expect(game_state.wram.wLastSpawnMapGroup).toBe(23);
+    expect(game_state.wram.wLastSpawnMapNumber).toBe(9);
+    expect(warp_to_spawn_point).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to HOME when neither WRAM nor saved spawn resolves", () => {
+    game_state.wram.wLastSpawnMapGroup = 99;
+    game_state.wram.wLastSpawnMapNumber = 99;
+    game_state.sram.last_spawn_map_group = 88;
+    game_state.sram.last_spawn_map_number = 88;
     (warp_to_spawn_point as jest.Mock).mockReturnValue(true);
 
     const manager = new WhiteoutManager(game_state, overworld, event_manager);

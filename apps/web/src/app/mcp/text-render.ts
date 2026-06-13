@@ -1,6 +1,5 @@
 import { TextSnapshot } from "@pokecrystal/core/ui/text-ui";
 import { buildTextSnapshotLines } from "@pokecrystal/core/ui/text-snapshot-render";
-import type { McpFlowStateSnapshot } from "./flow-state";
 import type { McpMapInfoSnapshot } from "./map-info";
 
 export type McpMoveSummary = {
@@ -87,7 +86,6 @@ export type TextSnapshotPayload = {
   tasks: Record<string, unknown>[];
   mcp?: McpMeta;
   map?: McpMapInfoSnapshot;
-  flow_state?: McpFlowStateSnapshot;
 };
 
 export type PromptStatus = {
@@ -162,7 +160,6 @@ export const buildSnapshotPayload = (snapshot: TextSnapshot, options: {
   tasks?: Record<string, unknown>[] | null;
   mcp?: McpMeta | null;
   map?: McpMapInfoSnapshot | null;
-  flow_state?: McpFlowStateSnapshot | null;
   notices?: string[] | null;
 }): TextSnapshotPayload => {
   return {
@@ -182,7 +179,6 @@ export const buildSnapshotPayload = (snapshot: TextSnapshot, options: {
     tasks: options.tasks ?? [],
     mcp: options.mcp ?? undefined,
     map: options.map ?? undefined,
-    flow_state: options.flow_state ?? undefined,
   };
 };
 
@@ -289,24 +285,26 @@ const hotspotReferencePoint = (
 
 const hotspotTypePriority = (type: McpMapInfoSnapshot["hotspots"][number]["type"]): number => {
   switch (type) {
-    case "warp":
+    case "heal":
       return 0;
     case "objective":
       return 1;
-    case "npc":
-      return 2;
-    case "heal":
     case "shop":
+      return 2;
+    case "warp":
+      return 3;
+    case "npc":
+      return 4;
     case "gym":
     case "utility":
-      return 3;
+      return 5;
     case "trigger":
-      return 4;
+      return 6;
     case "sign":
     case "landmark":
-      return 5;
+      return 7;
     default:
-      return 6;
+      return 8;
   }
 };
 
@@ -357,18 +355,6 @@ const hotspotLines = (map: McpMapInfoSnapshot | undefined): string[] => {
       }
       return `${token}${hotspot.coords.x},${hotspot.coords.y} ${hotspot.label}`;
     });
-};
-
-const flowLines = (flowState: McpFlowStateSnapshot | undefined): string[] => {
-  if (!flowState) {
-    return [];
-  }
-  const lines = [flowState.summary];
-  if (flowState.next_goal) {
-    lines.push(`Next: ${flowState.next_goal.title}`);
-  }
-  lines.push(`Progress: ${flowState.completed_count}/${flowState.total_count}`);
-  return lines;
 };
 
 const appendSection = (lines: string[], label: string, entries: string[]): void => {
@@ -440,7 +426,6 @@ export const renderFrameToText = (frame: TextSnapshotPayload | null): string => 
   const output = compactRenderedLines(lines);
   appendSection(output, "Notice", (frame.notices ?? []).map((line) => line.trim()).filter(Boolean));
   appendSection(output, "Hotspots", hotspotLines(frame.map));
-  appendSection(output, "Flow", flowLines(frame.flow_state));
 
   return output.length ? output.join("\n") : "(empty frame)";
 };
@@ -479,7 +464,6 @@ export const renderFrameToCompactText = (frame: TextSnapshotPayload | null): str
   }
   appendSection(lines, "Notice", (frame.notices ?? []).map((line) => line.trim()).filter(Boolean));
   appendSection(lines, "Hotspots", hotspotLines(frame.map));
-  appendSection(lines, "Flow", flowLines(frame.flow_state));
 
   return lines.length ? lines.join("\n") : "(empty frame)";
 };

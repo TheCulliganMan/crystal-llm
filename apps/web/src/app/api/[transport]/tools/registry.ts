@@ -3,7 +3,6 @@ import { MAX_ADVANCE_FRAMES, type McpToolHandler } from "./common";
 import { ObserveSchema, observeHandler } from "./observe";
 import { MapInfoSchema, mapInfoHandler } from "./map_info";
 import { RouteRenderSchema, routeRenderHandler } from "./route_render";
-import { FlowStateSchema, flowStateHandler } from "./flow_state";
 import {
   ExecuteMacroSchema,
   executeMacroHandler,
@@ -17,8 +16,6 @@ import {
   pressHandler,
   RecentEventsSchema,
   recentEventsHandler,
-  StatusSchema,
-  statusHandler,
   TypeTextSchema,
   typeTextHandler,
 } from "./input";
@@ -78,7 +75,7 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "map_info",
     title: "Map info",
     description:
-      "Return structured current-map info, including player position, stable warps, and hotspot metadata for the current map. Use this when status is not enough for route planning.",
+      "Return structured current-map info, including player position, stable warps, and hotspot metadata for the current map.",
     inputSchema: withTrainingMetadata(MapInfoSchema),
     handler: mapInfoHandler,
   },
@@ -91,18 +88,10 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
     handler: routeRenderHandler,
   },
   {
-    name: "flow_state",
-    title: "Flow state",
-    description:
-      "Return spoiler-safe game progression state toward the Mt. Silver clear, masking surprise story beats as ???. Use this to confirm the next honest story goal.",
-    inputSchema: withTrainingMetadata(FlowStateSchema),
-    handler: flowStateHandler,
-  },
-  {
     name: "move",
     title: "Move",
     description:
-      "Send a directional input. Direction means x/y movement in the observe convention: left x-1, right x+1, up y-1, down y+1. In menus, name entry, and time entry it moves the cursor or adjusts the selected value. Prefer one small move, then check status again.",
+      "Send a directional input. Direction means x/y movement in the observe convention: left x-1, right x+1, up y-1, down y+1. In menus, name entry, and time entry it moves the cursor or adjusts the selected value. Prefer one small move, then observe again.",
     inputSchema: withTrainingMetadata(MoveSchema),
     handler: moveHandler,
   },
@@ -136,14 +125,6 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
       `Execute either explicit movement/button actions or a bounded built-in macro. Schema: { actions?: [{ type: "move", value: "up|down|left|right", times?: 1-${macroLimit}, hold_frames?: 1-${macroLimit}, delay_frames?: 0-${macroLimit} } | { type: "button", value: "a|b|start|select", times?: 1-${macroLimit}, hold_frames?: 1-${macroLimit}, delay_frames?: 0-${macroLimit} }], macro?: "advance_dialog"|"mash_a"|"interact"|"approach_target", target_token?: string, max_presses?: 1-${macroLimit}, max_steps?: 1-${macroLimit}, max_observes?: 1-${macroLimit}, max_tries?: 1-${macroLimit}, press_a?: boolean, settle_frames?: 0-${macroLimit}, delay_frames?: 0-${macroLimit}, stop_on_event?: boolean }`,
     inputSchema: withTrainingMetadata(ExecuteMacroSchema),
     handler: executeMacroHandler,
-  },
-  {
-    name: "status",
-    title: "Status",
-    description:
-      "Return compact structured session state and last action result, including localFocus, interactionSetup, interactionLane, localMovement, menu/dialog flags, and blockedReason. Use this first before observe.",
-    inputSchema: withTrainingMetadata(StatusSchema),
-    handler: statusHandler,
   },
   {
     name: "recent_events",

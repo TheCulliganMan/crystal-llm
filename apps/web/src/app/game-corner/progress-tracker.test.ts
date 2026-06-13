@@ -31,6 +31,51 @@ describe("progress-tracker helpers", () => {
     expect(getAvailableStepIds(STORY_STEPS, ["starter", "mr-pokemon"])).toEqual(["mom-bank"]);
   });
 
+  it("gates Mineral Badge behind Cianwood Medicine", () => {
+    const completedBeforeMedicine = [
+      "starter",
+      "mr-pokemon",
+      "mom-bank",
+      "violet-badge",
+      "union-cave",
+      "slowpoke-well",
+      "hive-badge",
+      "ilex-cut",
+      "plain-badge",
+      "fog-badge",
+    ];
+
+    expect(getAvailableStepIds(STORY_STEPS, completedBeforeMedicine)).toEqual([
+      "cianwood-medicine",
+      "storm-badge",
+    ]);
+    expect(getAvailableStepIds(STORY_STEPS, [...completedBeforeMedicine, "cianwood-medicine"]))
+      .toEqual(["storm-badge", "mineral-badge"]);
+  });
+
+  it("gates Mahogany behind both Mineral Badge and Storm Badge", () => {
+    const completedBeforeMahogany = [
+      "starter",
+      "mr-pokemon",
+      "mom-bank",
+      "violet-badge",
+      "union-cave",
+      "slowpoke-well",
+      "hive-badge",
+      "ilex-cut",
+      "plain-badge",
+      "fog-badge",
+      "cianwood-medicine",
+    ];
+
+    expect(getAvailableStepIds(STORY_STEPS, [...completedBeforeMahogany, "storm-badge"]))
+      .toEqual(["mineral-badge"]);
+    expect(getAvailableStepIds(STORY_STEPS, [...completedBeforeMahogany, "mineral-badge"]))
+      .toEqual(["storm-badge"]);
+    expect(getAvailableStepIds(STORY_STEPS, [...completedBeforeMahogany, "storm-badge", "mineral-badge"]))
+      .toEqual(["mahogany-rocket"]);
+  });
+
   it("validates the graph as acyclic with a route to Red", () => {
     const validation = validateStoryGraph(STORY_STEPS);
 

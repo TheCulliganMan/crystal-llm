@@ -68,7 +68,11 @@ describe("prompt builders", () => {
     expect(instructions).toContain("Never invent game state");
     expect(instructions).toContain("prefer giving that Pokemon a short nickname");
     expect(instructions).toContain("MCP gameplay tools directly");
+    expect(instructions).toContain("Never choose waiting, idling, no-op, skipping, deferring, or asking the user as gameplay");
     expect(instructions).toContain("Flow_state is the sequential backbone for beating the game");
+    expect(instructions).toContain("Story-gate reconciliation rule");
+    expect(instructions).toContain("require live proof that the prerequisite request or authorization exists");
+    expect(instructions).toContain("do not recheck the completed proof");
     expect(instructions).toContain("everything encountered on the honest route toward that flow goal as important route evidence");
     expect(instructions).toContain("required NPCs, signs, item balls, forced prompts, battles, doors, warps, blockers, and local clues");
     expect(instructions).toContain("required visible reason field");
@@ -151,6 +155,9 @@ describe("prompt builders", () => {
     expect(instructions).toContain("talk to one or two fresh NPCs");
     expect(instructions).toContain("verified interactable sampling as progress");
     expect(instructions).toContain("NPC-given goals and interactive-element clues as first-class planning inputs");
+    expect(instructions).toContain("Story-gate reconciliation rule");
+    expect(instructions).toContain("if the service refuses because the request is not active");
+    expect(instructions).toContain("do not recheck the completed proof");
     expect(instructions).toContain("Post-Mystery-Egg rule");
     expect(instructions).toContain("talk to Mom");
     expect(instructions).toContain("money-saving/bank prompt");
@@ -176,6 +183,7 @@ describe("prompt builders", () => {
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("Live objective authority");
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("any newly verified NPC/interactable goal");
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("Flow_state is the sequential backbone for beating the game");
+    expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("Story-gate reconciliation rule");
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("can all be the actual next step");
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("Mandatory next action: delegate to the player agent now");
     expect(buildTaskmasterPrompt(input, status, recentEvents)).toContain("state the concrete route objective");
@@ -191,6 +199,7 @@ describe("prompt builders", () => {
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Open adjacent movement");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Live objective authority");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Flow_state is the sequential backbone for beating the game");
+    expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Story-gate reconciliation rule");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("required NPCs, signs, item balls, forced prompts, battles, doors, warps, blockers, and local clues");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Execute the next useful gameplay action quickly and correctly");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("Convert the objective into valid movement");
@@ -225,6 +234,7 @@ describe("prompt builders", () => {
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("do not route straight toward Violet");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("If battle is active");
     expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("forced NPC exposition just ended");
+    expect(buildPlayerDelegationPrompt(input, status, recentEvents)).toContain("do not repeat that proof");
     expect(
       buildTaskmasterSummaryPrompt(
         input,
@@ -390,5 +400,32 @@ describe("prompt builders", () => {
     expect(prompt).toContain("Pick a battle plan from the visible battle menu");
     expect(prompt).toContain("B is not a reliable escape");
     expect(prompt).toContain("confirm FIGHT and choose a move");
+  });
+
+  it("turns completed request proof into follow-up routing instead of repeated proof checks", () => {
+    const prompt = buildPlayerDelegationPrompt(
+      {
+        ...input,
+        immediateGoal: "Verify the top-floor NPC asks for help again.",
+      },
+      {
+        ...status,
+        map: "StoryTowerTop",
+        mapId: "STORY_TOWER_TOP",
+        coords: [17, 19],
+        flowSummary: "Next goal: Obtain the requested medicine",
+        flowNextGoal: "Obtain the requested medicine",
+      },
+      [
+        "NPC dialogue: Please get medicine for my sick partner.",
+        "objectiveReconciliation: request proof complete; next proof is medicine reward text.",
+      ].join("\n"),
+    );
+
+    expect(prompt).toContain("Once live dialogue or state proves a prerequisite request exists");
+    expect(prompt).toContain("do not recheck the completed proof");
+    expect(prompt).toContain("route to the concrete follow-up named by that request");
+    expect(prompt).toContain("If the current objective is only a completed proof");
+    expect(prompt).toContain("route toward the follow-up objective established by live evidence");
   });
 });

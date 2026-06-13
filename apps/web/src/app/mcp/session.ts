@@ -53,7 +53,6 @@ import {
   type McpMapInfoSnapshot,
   type OverworldMapInfoSource,
 } from "./map-info";
-import { buildFlowStateSnapshot, type McpFlowStateSnapshot } from "./flow-state";
 import { YesNoPrompt } from "@pokecrystal/core/ui/text/dialogue";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { AudioPlaybackSnapshot } from "@pokecrystal/core/engine/systems/audio";
@@ -309,6 +308,7 @@ export type McpStatusSnapshot = {
     token?: string;
     hotspot_type?: McpMapHotspotType;
     script?: string;
+    object_index?: number;
   };
   scene?: {
     active_script?: string;
@@ -396,7 +396,6 @@ export type McpStatusSnapshot = {
   map_details?: McpMapInfoSnapshot;
   location_name?: string;
   map_id?: string;
-  flow_state?: McpFlowStateSnapshot;
   badges_count?: number;
   money?: number;
   moms_money?: number;
@@ -2046,6 +2045,7 @@ class McpGameSession {
       this.recordAction(formatActionLabel("button", button));
     for (let i = 0; i < normalizedTimes; i += 1) {
       const modalBeforePress = this.getModalUiState(game);
+      const startedOnNonBlockingPcUi = isNonBlockingPcUiSnapshot(this.lastSnapshot);
       const inputOwningSurfaceHoldFrames =
         startedOnInputOwningSurface && !isDirectionalButton
           ? Math.max(this.holdFrames, 4)
@@ -2064,7 +2064,7 @@ class McpGameSession {
         button: isDirectionalButton ? undefined : button,
         direction: isDirectionalButton ? button : undefined,
         holdFrames: isDirectionalButton ? this.holdFrames : interactionHoldFrames,
-        repeatPressFrames: startedOnInputOwningSurface && !isDirectionalButton,
+        repeatPressFrames: startedOnInputOwningSurface && !isDirectionalButton && !startedOnNonBlockingPcUi,
       });
       const scheduledHoldFrames = isDirectionalButton ? this.holdFrames : interactionHoldFrames;
       const settleFrames =
@@ -2240,21 +2240,21 @@ class McpGameSession {
         }
       }
     }
-    const fallbackHealInteractionStarted =
+    const fallbackScriptedInteractionStarted =
       button === "a" &&
       normalizedTimes === 1 &&
       beforeSignal.mode === "overworld" &&
       !beforeSignal.menu &&
       !beforeSignal.promptReason &&
       !beforeSignal.dialogueText.trim() &&
-      overworldInteractionAheadBeforePress?.hotspot_type === "heal" &&
-      Boolean(overworldInteractionAheadBeforePress.script) &&
+      Boolean(overworldInteractionAheadBeforePress?.script) &&
       afterSignal.mode === "overworld" &&
       !afterSignal.menu &&
       !afterSignal.promptReason &&
       !afterSignal.dialogueText.trim() &&
-      this.runConfirmedHealCounterInteraction(game, overworldInteractionAheadBeforePress);
-    if (fallbackHealInteractionStarted) {
+      overworldInteractionAheadBeforePress !== undefined &&
+      this.runConfirmedScriptedInteraction(game, overworldInteractionAheadBeforePress);
+    if (fallbackScriptedInteractionStarted) {
       this.stepFrames(1);
       this.settleMovementLock(game, null);
       changed = before !== this.buildStateFingerprint(game);
@@ -2294,7 +2294,10 @@ class McpGameSession {
       changed,
       events: [
         `pressed:${button}:${normalizedTimes}`,
-        ...(fallbackHealInteractionStarted ? ["confirmed_heal_interaction_retried"] : []),
+        ...(fallbackScriptedInteractionStarted ? ["confirmed_scripted_interaction_retried"] : []),
+        ...(fallbackScriptedInteractionStarted && overworldInteractionAheadBeforePress?.hotspot_type === "heal"
+          ? ["confirmed_heal_interaction_retried"]
+          : []),
         ...(staleDirectionalInputCleared ? ["stale_input_cleared"] : []),
       ],
     });
@@ -2860,13 +2863,6 @@ class McpGameSession {
       interactionLane,
       localFocus
     );
-    const flowState =
-      synchronizedSnapshot.flow_state ??
-      buildFlowStateSnapshot(
-        (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
-        state.sram.badges
-      );
-
     return {
       mode,
       menu: bootMode ? true : modal.in_menu,
@@ -2960,7 +2956,6 @@ class McpGameSession {
       map_details: mapDetails,
       location_name: locationName,
       map_id: mapId,
-      flow_state: flowState,
       badges_count: badgesCount,
       money: walletMoney,
       moms_money: momsMoney,
@@ -3133,16 +3128,6 @@ class McpGameSession {
     }, {
       cellSize: options.cellSize,
     });
-  }
-
-  async flowState(): Promise<McpFlowStateSnapshot> {
-    await this.ensureReady();
-    const game = this.getGame();
-    const state = game.getGameState();
-    return buildFlowStateSnapshot(
-      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
-      state.sram.badges
-    );
   }
 
   async recentEvents(limit = 10): Promise<McpRecentEventsSnapshot> {
@@ -4071,7 +4056,6 @@ class McpGameSession {
       tasks: [],
       mcp: this.lastMcpMeta ?? undefined,
       map: this.safeBuildSnapshotMapInfo(),
-      flow_state: this.safeBuildSnapshotFlowState(),
       notices: this.safeBuildSessionNotices(),
     });
     this.lastMcpMeta = null;
@@ -4081,14 +4065,6 @@ class McpGameSession {
   private safeBuildSnapshotMapInfo(): McpMapInfoSnapshot | undefined {
     try {
       return this.buildSnapshotMapInfo();
-    } catch {
-      return undefined;
-    }
-  }
-
-  private safeBuildSnapshotFlowState(): McpFlowStateSnapshot | undefined {
-    try {
-      return this.buildSnapshotFlowState();
     } catch {
       return undefined;
     }
@@ -4210,20 +4186,6 @@ class McpGameSession {
       dataLoader: resolveSessionMapDataLoader(state),
       eventFlags: (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
     });
-  }
-
-  private buildSnapshotFlowState(): McpFlowStateSnapshot | undefined {
-    if (!this.game) {
-      return undefined;
-    }
-    if (typeof this.game.getGameState !== "function") {
-      return undefined;
-    }
-    const state = this.game.getGameState();
-    return buildFlowStateSnapshot(
-      (state.wram.event_flags ?? null) as Record<string, boolean | undefined> | null,
-      state.sram?.badges ?? null
-    );
   }
 
   private buildSessionNotices(game: Game): string[] {
@@ -5360,11 +5322,11 @@ class McpGameSession {
     this.setMcpOverworldFacing(game, interactionLane.lane.facing);
   }
 
-  private runConfirmedHealCounterInteraction(
+  private runConfirmedScriptedInteraction(
     game: Game,
     target: NonNullable<McpStatusSnapshot["interaction_target"]>
   ): boolean {
-    if (target.hotspot_type !== "heal" || !target.script) {
+    if (!target.script) {
       return false;
     }
     const scriptName = String(target.script).trim();
@@ -5375,14 +5337,16 @@ class McpGameSession {
       | {
           script_runner?: {
             is_busy?: boolean;
-            run?: (scriptName: string) => void;
+            run?: (scriptName: string, options?: { allow_fallthrough?: boolean }) => void;
             last_interaction_object_index?: number | null;
           } | null;
+          _bg_event_at?: (tileX: number, tileY: number) => { script?: unknown } | null;
+          _handle_bg_event?: (event: { script?: unknown }) => boolean;
           _npc_on_tile?: (tileX: number, tileY: number) => {
             objectIndex?: number;
             x?: number;
             y?: number;
-            event?: { script?: unknown } | null;
+            event?: { script?: unknown; object_type?: unknown } | null;
             facePlayer?: (playerX: number, playerY: number) => void;
             face_player?: (playerX: number, playerY: number) => void;
           } | null;
@@ -5390,7 +5354,7 @@ class McpGameSession {
             objectIndex?: number;
             x?: number;
             y?: number;
-            event?: { script?: unknown } | null;
+            event?: { script?: unknown; object_type?: unknown } | null;
             facePlayer?: (playerX: number, playerY: number) => void;
             face_player?: (playerX: number, playerY: number) => void;
           } | null;
@@ -5405,6 +5369,14 @@ class McpGameSession {
     if (!overworld || !runner || runner.is_busy || typeof runner.run !== "function") {
       return false;
     }
+    if (target.kind === "bg_event" && typeof overworld._bg_event_at === "function") {
+      const bgEvent = overworld._bg_event_at(target.x, target.y);
+      if (bgEvent && String(bgEvent.script ?? "").trim() === scriptName) {
+        if (typeof overworld._handle_bg_event === "function") {
+          return overworld._handle_bg_event(bgEvent);
+        }
+      }
+    }
     const npc =
       (typeof overworld._npc_on_tile === "function"
         ? overworld._npc_on_tile(target.x, target.y)
@@ -5416,7 +5388,7 @@ class McpGameSession {
     if (npcScript && npcScript !== scriptName) {
       return false;
     }
-    const objectIndex = npc?.objectIndex ?? 0;
+    const objectIndex = npc?.objectIndex ?? target.object_index ?? 0;
     const gameState = game.getGameState?.() as { wram?: { last_talked?: number } } | null | undefined;
     if (gameState?.wram) {
       gameState.wram.last_talked = objectIndex;
@@ -5430,7 +5402,12 @@ class McpGameSession {
       npc.face_player(playerX, playerY);
     }
     overworld._play_interaction_sound?.();
-    runner.run(scriptName);
+    const objectType = String(npc?.event?.object_type ?? "").toUpperCase();
+    if (objectType === "OBJECTTYPE_TRAINER") {
+      runner.run(scriptName, { allow_fallthrough: false });
+    } else {
+      runner.run(scriptName);
+    }
     return true;
   }
 
@@ -5560,16 +5537,16 @@ class McpGameSession {
         script: rawObjectScript,
       };
     }
-    const blueprintScript =
+    const blueprintTarget =
       hotspotAtInteractionTile &&
       /^npc-(\d+)$/i.test(hotspotAtInteractionTile.id)
-        ? this.readBlueprintInteractionScript(
+        ? this.readBlueprintInteractionTargetByObjectIndex(
             overworld._npc_blueprints,
             typeof overworld.current_map_name === "string" ? overworld.current_map_name : mapDetails?.map ?? null,
             Number.parseInt(hotspotAtInteractionTile.id.slice(4), 10)
           )
         : undefined;
-    if (blueprintScript) {
+    if (blueprintTarget?.script) {
       return {
         x: interactionTile.x,
         y: interactionTile.y,
@@ -5577,7 +5554,7 @@ class McpGameSession {
         label: hotspotAtInteractionTile?.label,
         token: hotspotAtInteractionTile?.token,
         hotspot_type: hotspotAtInteractionTile?.type,
-        script: blueprintScript,
+        script: blueprintTarget.script,
       };
     }
     const bgEvent =
@@ -5585,7 +5562,10 @@ class McpGameSession {
         ? overworld._bg_event_at(interactionTile.x, interactionTile.y)
         : null;
     if (!bgEvent) {
-      return this.fallbackInteractionTargetFromHotspot(interactionTile, mapDetails);
+      return this.fallbackInteractionTargetFromHotspot(interactionTile, mapDetails, {
+        blueprints: overworld._npc_blueprints,
+        mapName: typeof overworld.current_map_name === "string" ? overworld.current_map_name : mapDetails?.map ?? null,
+      });
     }
     const eventType = String(bgEvent.event_type ?? "").trim().toUpperCase();
     const scriptName = String(bgEvent.script ?? "").trim();
@@ -5594,7 +5574,10 @@ class McpGameSession {
         ? overworld._bg_event_allowed_by_flags(eventType, scriptName)
         : true;
     if (!allowed) {
-      return this.fallbackInteractionTargetFromHotspot(interactionTile, mapDetails);
+      return this.fallbackInteractionTargetFromHotspot(interactionTile, mapDetails, {
+        blueprints: overworld._npc_blueprints,
+        mapName: typeof overworld.current_map_name === "string" ? overworld.current_map_name : mapDetails?.map ?? null,
+      });
     }
     return {
       x: interactionTile.x,
@@ -5607,11 +5590,11 @@ class McpGameSession {
     };
   }
 
-  private readBlueprintInteractionScript(
+  private readBlueprintInteractionTargetByObjectIndex(
     blueprints: Map<string, Map<string, [unknown, number]>> | undefined,
     mapName: string | null | undefined,
     objectIndex: number
-  ): string | undefined {
+  ): { script: string; objectIndex: number } | undefined {
     if (!blueprints || !mapName || !Number.isFinite(objectIndex) || objectIndex <= 0) {
       return undefined;
     }
@@ -5626,7 +5609,47 @@ class McpGameSession {
       }
       const script = String((rawEvent as { script?: unknown }).script ?? "").trim();
       if (script) {
-        return script;
+        return { script, objectIndex };
+      }
+    }
+    return undefined;
+  }
+
+  private readBlueprintInteractionTargetByCoords(
+    blueprints: Map<string, Map<string, [unknown, number]>> | undefined,
+    mapName: string | null | undefined,
+    interactionTile: { x: number; y: number },
+    coordStride: number | null | undefined
+  ): { script: string; objectIndex: number } | undefined {
+    if (!blueprints || !mapName) {
+      return undefined;
+    }
+    const blueprint = blueprints.get(mapName);
+    if (!blueprint) {
+      return undefined;
+    }
+    const stride = Number.isFinite(coordStride) && Number(coordStride) > 1 ? Number(coordStride) : 1;
+    for (const [, entry] of blueprint.entries()) {
+      const [rawEvent, rawIndex] = Array.isArray(entry) ? entry : [null, null];
+      if (!rawEvent || typeof rawEvent !== "object" || !Number.isFinite(rawIndex)) {
+        continue;
+      }
+      const event = rawEvent as { x?: unknown; y?: unknown; script?: unknown };
+      const eventX = Number(event.x);
+      const eventY = Number(event.y);
+      if (!Number.isFinite(eventX) || !Number.isFinite(eventY)) {
+        continue;
+      }
+      const matchesTile =
+        (eventX === interactionTile.x && eventY === interactionTile.y) ||
+        (eventX * stride + Math.max(0, stride - 1) === interactionTile.x &&
+          eventY * stride + Math.max(0, stride - 1) === interactionTile.y);
+      if (!matchesTile) {
+        continue;
+      }
+      const script = String(event.script ?? "").trim();
+      if (script) {
+        return { script, objectIndex: Number(rawIndex) };
       }
     }
     return undefined;
@@ -5634,7 +5657,11 @@ class McpGameSession {
 
   private fallbackInteractionTargetFromHotspot(
     interactionTile: { x: number; y: number },
-    mapDetails?: McpMapInfoSnapshot
+    mapDetails?: McpMapInfoSnapshot,
+    blueprintContext?: {
+      blueprints?: Map<string, Map<string, [unknown, number]>>;
+      mapName?: string | null;
+    }
   ): McpStatusSnapshot["interaction_target"] {
     const hotspotAtInteractionTile =
       mapDetails?.hotspots.find((hotspot) =>
@@ -5646,17 +5673,27 @@ class McpGameSession {
     if (!hotspotAtInteractionTile) {
       return undefined;
     }
-    if (hotspotAtInteractionTile.type !== "npc") {
+    if (hotspotAtInteractionTile.type !== "npc" && hotspotAtInteractionTile.type !== "heal") {
       return undefined;
     }
+    const blueprintTarget =
+      hotspotAtInteractionTile.type === "heal"
+        ? this.readBlueprintInteractionTargetByCoords(
+            blueprintContext?.blueprints,
+            blueprintContext?.mapName ?? mapDetails?.map ?? null,
+            interactionTile,
+            mapDetails?.coord_stride
+          )
+        : undefined;
     return {
       x: interactionTile.x,
       y: interactionTile.y,
-      kind: hotspotAtInteractionTile.type === "npc" ? "npc" : "bg_event",
+      kind: "npc",
       label: hotspotAtInteractionTile.label,
       token: hotspotAtInteractionTile.token,
       hotspot_type: hotspotAtInteractionTile.type,
-      script: undefined,
+      script: blueprintTarget?.script,
+      object_index: blueprintTarget?.objectIndex,
     };
   }
 

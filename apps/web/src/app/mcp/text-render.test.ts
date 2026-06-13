@@ -513,6 +513,55 @@ describe("renderFrameToCompactText", () => {
     expect(text.indexOf("D Warp: New Bark Town (1W)")).toBeLessThan(text.indexOf("S Sign (5N 8W) face up"));
   });
 
+  it("keeps Pokemon Center healer guidance visible in crowded rooms", () => {
+    const payload = baseSnapshot();
+    payload.map = {
+      map: "GoldenrodPokecenter1F",
+      map_id: "10:14",
+      coord_stride: 2,
+      player: {
+        coords: { x: 19, y: 5 },
+        facing: "up",
+      },
+      warps: [],
+      hotspots: [
+        ...Array.from({ length: 5 }, (_, index) => ({
+          id: `warp-${index + 1}`,
+          type: "warp" as const,
+          label: `Warp ${index + 1}`,
+          coords: { x: 1 + index * 2, y: 13 },
+          visible: true,
+          interactable: true,
+          token: "D",
+        })),
+        ...Array.from({ length: 4 }, (_, index) => ({
+          id: `npc-${index + 1}`,
+          type: "npc" as const,
+          label: "NPC",
+          coords: { x: 13 + index * 2, y: 3 },
+          visible: true,
+          interactable: true,
+          token: "N",
+        })),
+        {
+          id: "npc-nurse",
+          type: "heal",
+          label: "Healer",
+          coords: { x: 7, y: 3 },
+          visible: true,
+          interactable: true,
+          token: "H",
+          approach_tiles: [{ coords: { x: 7, y: 7 }, facing: "up" }],
+        },
+      ],
+    };
+
+    const text = renderFrameToCompactText(payload);
+
+    expect(text).toContain("H Healer");
+    expect(text).toContain("face up");
+  });
+
   it("does not render non-interactable route triggers in agent-facing hotspot text", () => {
     const payload = baseSnapshot();
     payload.map = {

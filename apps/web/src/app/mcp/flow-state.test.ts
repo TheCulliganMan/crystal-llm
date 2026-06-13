@@ -103,4 +103,72 @@ describe("buildFlowStateSnapshot", () => {
     expect(snapshot.completed.map((step) => step.title)).toContain("Ilex Forest + Cut Gate");
     expect(snapshot.next_goal?.title).toBe("Plain Badge");
   });
+
+  it("does not let Mineral Badge bypass the Cianwood medicine prerequisite", () => {
+    const snapshot = buildFlowStateSnapshot({
+      EVENT_GOT_A_POKEMON_FROM_ELM: true,
+      EVENT_GOT_MYSTERY_EGG_FROM_MR_POKEMON: true,
+      EVENT_TALKED_TO_MOM_AFTER_MYSTERY_EGG_QUEST: true,
+      ENGINE_ZEPHYRBADGE: true,
+      EVENT_RIVAL_AZALEA_TOWN: true,
+      EVENT_CLEARED_SLOWPOKE_WELL: true,
+      ENGINE_HIVEBADGE: true,
+      EVENT_GOT_HM01_CUT: true,
+      ENGINE_PLAINBADGE: true,
+      ENGINE_FOGBADGE: true,
+      ENGINE_MINERALBADGE: true,
+    });
+
+    expect(snapshot.completed.map((step) => step.title)).not.toContain("Mineral Badge");
+    expect(snapshot.next_goal?.title).toBe("Cianwood Medicine");
+    expect(snapshot.available.map((step) => step.title)).toEqual([
+      "Cianwood Medicine",
+      "Storm Badge",
+    ]);
+  });
+
+  it("routes from medicine pickup to Mineral Badge without repeating Cianwood Medicine", () => {
+    const snapshot = buildFlowStateSnapshot({
+      EVENT_GOT_A_POKEMON_FROM_ELM: true,
+      EVENT_GOT_MYSTERY_EGG_FROM_MR_POKEMON: true,
+      EVENT_TALKED_TO_MOM_AFTER_MYSTERY_EGG_QUEST: true,
+      ENGINE_ZEPHYRBADGE: true,
+      EVENT_RIVAL_AZALEA_TOWN: true,
+      EVENT_CLEARED_SLOWPOKE_WELL: true,
+      ENGINE_HIVEBADGE: true,
+      EVENT_GOT_HM01_CUT: true,
+      ENGINE_PLAINBADGE: true,
+      ENGINE_FOGBADGE: true,
+      EVENT_GOT_SECRETPOTION_FROM_PHARMACY: true,
+    });
+
+    expect(snapshot.completed.map((step) => step.title)).toContain("Cianwood Medicine");
+    expect(snapshot.next_goal?.title).toBe("Storm Badge");
+    expect(snapshot.available.map((step) => step.title)).toEqual([
+      "Storm Badge",
+      "Mineral Badge",
+    ]);
+  });
+
+  it("routes to Storm Badge after Jasmine when Chuck is still unfinished", () => {
+    const snapshot = buildFlowStateSnapshot({
+      EVENT_GOT_A_POKEMON_FROM_ELM: true,
+      EVENT_GOT_MYSTERY_EGG_FROM_MR_POKEMON: true,
+      EVENT_TALKED_TO_MOM_AFTER_MYSTERY_EGG_QUEST: true,
+      ENGINE_ZEPHYRBADGE: true,
+      EVENT_RIVAL_AZALEA_TOWN: true,
+      EVENT_CLEARED_SLOWPOKE_WELL: true,
+      ENGINE_HIVEBADGE: true,
+      EVENT_GOT_HM01_CUT: true,
+      ENGINE_PLAINBADGE: true,
+      ENGINE_FOGBADGE: true,
+      EVENT_GOT_SECRETPOTION_FROM_PHARMACY: true,
+      ENGINE_MINERALBADGE: true,
+    });
+
+    expect(snapshot.completed.map((step) => step.title)).toContain("Mineral Badge");
+    expect(snapshot.completed.map((step) => step.title)).not.toContain("Storm Badge");
+    expect(snapshot.next_goal?.title).toBe("Storm Badge");
+    expect(snapshot.available.map((step) => step.title)).toEqual(["Storm Badge"]);
+  });
 });

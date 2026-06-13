@@ -263,9 +263,14 @@ export class WhiteoutManager {
     }
 
     private _resolve_whiteout_spawn(): void {
-        const group = this.game_state.wram.wLastSpawnMapGroup;
-        const mapId = this.game_state.wram.wLastSpawnMapNumber;
-        const resolved = findSpawnForMap(group, mapId);
+        const wramGroup = this.game_state.wram.wLastSpawnMapGroup;
+        const wramMapId = this.game_state.wram.wLastSpawnMapNumber;
+        let resolved = findSpawnForMap(wramGroup, wramMapId);
+        if (!resolved) {
+            const sramGroup = this.game_state.sram.last_spawn_map_group;
+            const sramMapId = this.game_state.sram.last_spawn_map_number;
+            resolved = findSpawnForMap(sramGroup, sramMapId);
+        }
         const spawn = resolved ? resolved[0] : Spawn.HOME;
         const spawnPoint = getSpawnPoint(spawn);
         this.game_state.wram.wDefaultSpawnpoint = spawn;

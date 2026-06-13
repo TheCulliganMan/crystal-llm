@@ -77,11 +77,23 @@ Track objectives symbolically, not just by movement or partial fights. For every
 
 Do not mark a story objective complete just because the character entered the area, beat one trainer, reached an early room, or returned to town. A story objective is complete only after a symbolic capstone or state change is verified. Examples of valid completion evidence include a relevant NPC arriving or talking after progress, hostile blockers leaving, a guard no longer blocking a gym or route, a reward/key item text, a badge/TM text, or a new warp/door becoming usable.
 
+Current Olivine Lighthouse cron objective must be treated literally: before the sick-Amphy medicine errand exists in live dialogue, the only active goal is to climb to the top of Olivine Lighthouse and talk to Jasmine, the Olivine Gym Leader, in the top-floor Jasmine/Amphy room. Reaching Olivine, entering the lighthouse, reaching a lower floor, healing, shopping, training, surfing, returning to Cianwood, or checking the pharmacy is not completion. Healing is only a tactical recovery step if live HP/status makes continued lighthouse routing unsafe, and the run must immediately return to the lighthouse-top Jasmine dialogue goal afterward.
+
 When an NPC or the story gives a hint, treat it as the primary route clue. If a relevant NPC appears, moves, gives a speech, or reacts to progress, stop and update the ledger before pathing. Do not downgrade explicit instructional dialogue into flavor text. If text says to use, teach, equip, show, deliver, return, buy, heal, or bring something, the next proof step must be that concrete action or a live verification that the action is impossible right now.
 
-When a reward, hint, item, or obstacle points to an overworld HM/TM field move, be precise: use observed TUI/map text to identify what is actually cuttable, surfable, pushable, etc.; distinguish the obstacle type, teach/use the correct move from live menus, then retest the original blocker before rerouting.
+Do not confuse a progress-tracker gate label with the next action the client should take. Treat status/flow goals as weak labels: they name a broad gate, but they do not override NPC clues, live dialogue, durable trajectory memory, or the missing capstone proof. If status says a gate such as "Cianwood Medicine" while NPC/story evidence says the request has not been established, largely ignore the status label for action selection and follow the clue chain that can create the missing story state. If an item, clerk, guard, or counter refuses because the story has not established the request yet, record the refusal as gate evidence and explore for the missing story capstone or prerequisite. A medicine/pharmacy request is gated by first receiving the relevant sick-Pokemon errand in live story text; before that quest text exists, repeated pharmacy attempts are not progress.
+
+Manage story progress through explicit subtasks. Keep a compact `subtaskLedger` with the current hard gate, immediate subtask, why that subtask advances the gate, proof needed to finish it, checked leads, and next unchecked lead. When the hard gate is broad, do not let the agent choose the gate label as the action. Choose a concrete exploratory subtask that can produce live evidence, then update or replace the subtask after each capstone, refusal, dead branch, NPC clue, warp transition, or route failure.
+
+When repeated runs prove the same refusal, blocked service, route edge, or local room, turn that proof into a route-away obligation. The next run plan must name the hard gate, the active prerequisite, the retired attractor, the nearest route-away waypoint, and the completion proof required before the attractor can be retried. Do not publish, summarize, or count another copy of the same refusal as progress. A status/flow label, current map name, or nearby visible object must not rewrite the active prerequisite until the required completion proof is observed live.
+
+When NPC dialogue, town clues, or repeated blocker evidence identify a specific story location or capstone, make that capstone the route target and keep pushing until it is reached or live evidence proves a different prerequisite. For a tower, dungeon, or multi-floor story building, reaching the building or an early floor is not enough; keep climbing, using stairs, holes, side rooms, and trainer lanes until the top-floor NPC/capstone is observed.
 
 If a gym/route remains blocked after a partial dungeon clear, infer that the dungeon/story task is not done and return to find the unvisited branch, remaining trainer, boss, item, or capstone event. If a route remains blocked immediately after receiving an explicit tool/hint for that exact blocker, infer that the missing step is applying the tool/hint, not more random pathing.
+
+## HM Capability Check
+
+Keep a compact `hmCapabilityLedger` only for observed HM ownership and badge usability. Check it when the current route is blocked by an HM-style obstacle or when the run just received/taught an HM. Do not run broad clue searches or repeat status checks solely because an HM exists; use live party/menu evidence only when it affects the immediate blocker.
 
 ## Resource And Catching Policy
 
@@ -96,7 +108,7 @@ If a gym/route remains blocked after a partial dungeon clear, infer that the dun
 - Training means committing to battles, not dodging them. Fight ordinary wild Pokemon and reachable trainers instead of avoiding encounters or escaping for comfort.
 - Do not run from training battles just because HP is low, the matchup is bad, or fainting is likely. Keep making concrete battle actions, switches, item uses, and attacks until the battle is won, the party wipes, or a hard tool/UI failure prevents further input.
 - Low HP is not a reason to retreat to town, leave grass, or abandon active training. Treat fainting and whiteout as acceptable training costs, then continue from the resulting live state.
-- Treat money as a tracked training resource. Check `poke status` before and after trainer battles, whiteouts, marts, and Mom-bank interactions; record wallet money and Mom's money when either changes or remains suspiciously stuck at zero.
+- Treat money as a tracked training resource when it is visible or directly relevant to the current choice.
 - When the run is corrected for rushing, being too objective-focused, or needing training, treat that as an explicit override: stop the badge/story push, leave the gym or capstone route if needed, and make trainer hunting, wild EXP, catches, supplies, and party development the active goal until live evidence shows the team improved.
 - Training is not only incidental travel work. Deliberately explore nearby routes, side buildings, grass, and reachable NPC/trainer lanes to find missed trainer fights and safe EXP before retrying a wall such as a gym leader.
 - Training means earning EXP and levels across the team, not just powering one lead. Default to real battles that produce at least one verified level gain for an underleveled or neglected party member when feasible.
@@ -155,7 +167,7 @@ poke context
 
 Use `context` instead of reading the full learning-state JSON when you only need the current map, next prompt, and route memory. Use `route` when the Game Boy viewport is too local for navigation; it renders the full current map without adding pathfinding or scripted movement. Add `--tiles` when a high-fidelity full-map tile image is needed instead of the schematic PNG. Use `observe --grid` only when viewport text terrain is needed; plain `observe` saves a real PNG and omits the grid to keep output small.
 
-Use TUI and tile views together: TUI/`observe --grid` is best for exact text, selected menu rows, prompts, and local obstacle tokens; `route --tiles` or `route --no-image` is best for spatial layout, connected floors, warps, ledges, water, and tree clusters. For HM/TM field moves or blockers, cross-check both before deciding what is actually usable.
+Use TUI and tile views together: TUI/`observe --grid` is best for exact text, selected menu rows, prompts, and local obstacle tokens; `route --tiles` or `route --no-image` is best for spatial layout, connected floors, warps, ledges, water, and tree clusters. For HM blockers, consult the HM ledger only when the immediate route obstacle makes it relevant.
 
 ## Memory Contract
 
@@ -166,6 +178,8 @@ Route-specific corrections must live outside this reusable skill.
 - Daily sidecar: `$CODEX_HOME/pokecrystal/memory/YYYY-MM-DD-pokecrystal-learning.md`
 - Durable learning log: `$CODEX_HOME/pokecrystal/learnings/LEARNINGS.md`
 - Tool/runtime failures: `$CODEX_HOME/pokecrystal/learnings/ERRORS.md`
+
+When a repeated-run failure, stale objective, or trajectory mistake is found, improve durable memory before playing more. Do not only add a journal warning. Update the canonical state fields that future runs consume: `trajectoryLedger`, `objectiveReconciliation`, `subtaskLedger`, `objectiveLock`, `nextPrompt`, and relevant `routeMemory` waypoints. Prune active ledger entries that name the retired attractor as the target. Preserve one compact proof fact for the stale local result, then point the next proof step to the missing prerequisite that can change story state. Validate that JSON parses and that `poke context` exposes the corrected `nextPrompt`.
 
 Store route-specific data under `routeMemory[mapName]`:
 
@@ -217,6 +231,8 @@ Before moving, write a short run plan in durable notes or the runner summary:
 
 - live map and current goal
 - current route memory for that map
+- active trajectory reconciliation: hard gate, active prerequisite, stale attractors, route-away waypoint, completion proof, and why the status/flow label is not enough if it conflicts
+- current `hmCapabilityLedger` only if the immediate blocker or newly received move makes HM capability relevant
 - recent movement audit: last 5-10 movement events, net displacement, repeated blockers, dead pockets just proven, and the last useful landmark
 - recent failed attempts on that map
 - story completion ledger: objective, expected capstone, current evidence, remaining blocker, and next proof step

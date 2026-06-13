@@ -29,6 +29,9 @@ const POST_MYSTERY_EGG_MOM_GUIDANCE =
 const FLOW_ROUTE_IMPORTANCE_GUIDANCE =
   "Flow_state is the sequential backbone for beating the game: it tells the next major story goal in order. Treat everything encountered on the honest route toward that flow goal as important route evidence, not noise: required NPCs, signs, item balls, forced prompts, battles, doors, warps, blockers, and local clues can all be the actual next step.";
 
+const STORY_GATE_RECONCILIATION_GUIDANCE =
+  "Story-gate reconciliation rule: before routing to a service, reward, gate, or handoff, require live proof that the prerequisite request or authorization exists; if the service refuses because the request is not active, retire that service as the immediate target and pursue the story source that creates the request. Once live dialogue or state proves a prerequisite request exists, do not recheck the completed proof; immediately route to the concrete follow-up named by that request.";
+
 export const BUTTON_PROMPT_GUIDANCE =
   "Button prompt rule: A means forward by confirming, selecting, or advancing text; B means back/exit by canceling, closing, or declining; use menu cursor movement otherwise. Still verify the live state before pressing either.";
 
@@ -127,6 +130,7 @@ function buildLiveObjectiveGuidance(input: RunnerInput, status: Status): string 
   const lines = [
     `Live objective authority: status.flowNextGoal="${status.flowNextGoal}", partyCount=${status.partyCount}. Treat this live evidence and any newly verified NPC/interactable goal from recent context as higher authority than stale immediate-goal wording.`,
     FLOW_ROUTE_IMPORTANCE_GUIDANCE,
+    STORY_GATE_RECONCILIATION_GUIDANCE,
   ];
   if (status.partyCount > 0 && /\bstarter\b/i.test(input.immediateGoal)) {
     lines.push(
@@ -151,6 +155,7 @@ export function buildPlayerInstructions(): string {
     "You are only responsible for immediate play execution against the live MCP tool surface.",
     "Make the run fast and robust: direct objective pressure, useful local information, and no repeated failed inputs.",
     "Use the MCP gameplay tools directly: status, observe, map_info, flow_state, move, press, type_text, hold_button, and recent_events.",
+    "Never choose waiting, idling, no-op, skipping, deferring, or asking the user as gameplay; choose a concrete live-state tool action or report a real blocker.",
     "On name entry, prefer type_text with clear:true and submit:true for a complete player/rival/nickname entry; use plain type_text for incremental letters, and press B only for manual correction.",
     "Every action tool call (move, press, hold_button) must include its required visible reason field: explain the live evidence and intended effect without just repeating button arguments.",
     "Never use execute_macro.",
@@ -232,6 +237,7 @@ export function buildTaskmasterInstructions(): string {
     "Delegate scouting goals that explicitly ask the player to talk to one or two fresh NPCs, read signs, inspect item balls, or check unique objects when entering a new area or lacking a route clue.",
     "Treat verified interactable sampling as progress, not a detour, when it produces route clues, items, open-question answers, or a safer next objective.",
     "Treat NPC-given goals and interactive-element clues as first-class planning inputs alongside flow_state; if an NPC tells me to do something or go somewhere, turn that into a concrete next goal when it is actionable.",
+    STORY_GATE_RECONCILIATION_GUIDANCE,
     POST_MYSTERY_EGG_MOM_GUIDANCE,
     "Prefer immediate goals like 'reach the nearest verified exit', 'complete the forced interaction', 'talk to the fresh NPC by the route', 'inspect the nearby sign/item/object for a clue', and 'collect the current progression reward' over vague exploration goals.",
     "Use working memory to keep canonical run state up to date: runSummary, discoveries, blockers, routeNotes, partyNotes, npcGoals, interactableNotes, and openQuestions.",
@@ -338,6 +344,7 @@ export function buildPlayerDelegationPrompt(
     "If a press returns reason=menu or changes mode to menu, reassess before the next input and re-read status before acting.",
     "If a confirm press returns reason=busy while a prompt is changing, assume the transition is in flight and re-read status or observe before repeating the same confirm.",
     "If direct story progress is blocked, pick the nearest honest exploration or training action that can unlock progress.",
+    "If the current objective is only a completed proof, do not repeat that proof; leave the proof location and route toward the follow-up objective established by live evidence.",
     "Do not speculate about unseen geometry when localMovement, interactionSetup, or interactionLane already give safer guidance.",
     "Use the newest live state and recent outcomes to decide whether to continue pathing, interact, confirm, back out, or reassess.",
     "Use concrete MCP tool actions and report the concrete result.",

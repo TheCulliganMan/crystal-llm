@@ -9,7 +9,10 @@ import { OverworldEngine } from "@pokecrystal/core/engine/world/overworld/overwo
 import { isDebugEnabled } from "@pokecrystal/core/core/debug-flags";
 import { pushDebugLog } from "@pokecrystal/core/core/debug-log";
 import { createInitialGameState, type GameState } from "@pokecrystal/core/core/state";
+import { DataLoader } from "@pokecrystal/core/core/data-loader";
 import type { ObjectEvent } from "@pokecrystal/core/core/models/map";
+import { OverworldMap } from "@pokecrystal/core/engine/world/overworld/overworld-map";
+import { OverworldTileset } from "@pokecrystal/core/engine/world/overworld/overworld-tileset";
 
 jest.mock("@pokecrystal/core/core/debug-flags", () => {
   const actual = jest.requireActual("@pokecrystal/core/core/debug-flags");
@@ -356,6 +359,48 @@ describe("OverworldInputMixin audio guards", () => {
     expect(input.check_for_npc_interaction()).toBe(true);
     expect(input._counter_adjusted_tile).toHaveBeenCalledWith(7, 5);
     expect(input.script_runner?.run).toHaveBeenCalledWith("EcruteakPokecenter1FNurseScript");
+    expect(input.game_state.wram.last_talked).toBe(1);
+  });
+
+  it("interacts with the real Olivine Pokecenter nurse across the counter lane", async () => {
+    const loader = new DataLoader();
+    loader.load_map_attributes();
+    loader.load_map_dimensions();
+    loader.load_npc_data();
+    const attributes = loader.map_attributes.get("OlivinePokecenter1F");
+    const dimensions = loader.map_dimensions.get("OLIVINE_POKECENTER_1F");
+    const nurseEvent = loader.npc_data
+      .get("OlivinePokecenter1F")
+      ?.find((event) => event.script === "OlivinePokecenter1FNurseScript");
+    expect(attributes?.tileset_name).toBe("pokecenter");
+    expect(dimensions).toBeTruthy();
+    expect(nurseEvent).toBeTruthy();
+
+    const input = new TestOverworldInput();
+    input.setGameState(createTestGameState());
+    input.setPlayer(7, 7);
+    input.facingCoords = [7, 5];
+    input.setMap(new OverworldMap("OlivinePokecenter1F", dimensions!.width, dimensions!.height, dimensions!.blocks));
+    input.setTilesPerCollision(2);
+    input.script_runner = { is_busy: false, run: jest.fn(), last_interaction_object_index: null };
+    const tileset = new OverworldTileset(attributes!.tileset_name, "day");
+    await tileset.ready;
+    input.tileset = tileset;
+    input._counter_adjusted_tile = OverworldEngine.prototype._counter_adjusted_tile.bind(
+      input as unknown as OverworldEngine
+    );
+
+    const npc = new OverworldObject(nurseEvent!);
+    npc.objectIndex = 1;
+    npc.setCollisionStride(2);
+    npc.x = nurseEvent!.x * 2 + 1;
+    npc.y = nurseEvent!.y * 2 + 1;
+    npc.prevX = npc.x;
+    npc.prevY = npc.y;
+    input.npcs = [npc];
+
+    expect(input.check_for_npc_interaction()).toBe(true);
+    expect(input.script_runner?.run).toHaveBeenCalledWith("OlivinePokecenter1FNurseScript");
     expect(input.game_state.wram.last_talked).toBe(1);
   });
 

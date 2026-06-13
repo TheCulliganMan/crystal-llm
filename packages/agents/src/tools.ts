@@ -13,19 +13,29 @@ const compactPlayerToolNames = new Set([
   "status",
 ]);
 
+const fullPlayerToolNames = new Set([
+  ...compactPlayerToolNames,
+  "flow_state",
+  "type_text",
+  "hold_button",
+  "recent_events",
+]);
+
 const normalizeToolName = (name: string): string =>
   name.startsWith("krabbyclaw_") ? name.slice("krabbyclaw_".length) : name;
 
 export async function createPlayerTools(session: KrabbyClawSession, options: PlayerToolOptions = {}) {
   const tools = await session.listPlayerTools();
+  const allowedNames = options.compact ? compactPlayerToolNames : fullPlayerToolNames;
+  const filteredTools = Object.fromEntries(
+    Object.entries(tools).filter(([name]) => allowedNames.has(normalizeToolName(name))),
+  );
   if (!options.compact) {
-    return tools;
+    return filteredTools;
   }
 
   // Local llama.cpp models are context-constrained. Never recover with runner-chosen
   // gameplay actions; shrink only the model-visible tool schema and force another
   // agent choice when the model fails.
-  return Object.fromEntries(
-    Object.entries(tools).filter(([name]) => compactPlayerToolNames.has(normalizeToolName(name))),
-  );
+  return filteredTools;
 }

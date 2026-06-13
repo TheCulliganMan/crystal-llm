@@ -48,12 +48,48 @@ describe("player tool selection", () => {
   it("keeps the full toolset outside compact mode", async () => {
     const allTools = {
       observe: {},
+      flow_state: {},
+      move: {},
+      press: {},
+      type_text: {},
+      hold_button: {},
+      execute_macro: {},
+      wait: {},
+      noop: {},
       recent_events: {},
     };
     const session = {
       listPlayerTools: jest.fn().mockResolvedValue(allTools),
     };
 
-    await expect(createPlayerTools(session as never)).resolves.toBe(allTools);
+    await expect(createPlayerTools(session as never)).resolves.toEqual({
+      observe: {},
+      flow_state: {},
+      move: {},
+      press: {},
+      type_text: {},
+      hold_button: {},
+      recent_events: {},
+    });
+  });
+
+  it("filters disallowed gameplay tools from namespaced full mode", async () => {
+    const session = {
+      listPlayerTools: jest.fn().mockResolvedValue({
+        krabbyclaw_status: {},
+        krabbyclaw_move: {},
+        krabbyclaw_press: {},
+        krabbyclaw_execute_macro: {},
+        krabbyclaw_wait: {},
+        krabbyclaw_skip: {},
+        unrelated_tool: {},
+      }),
+    };
+
+    await expect(createPlayerTools(session as never)).resolves.toEqual({
+      krabbyclaw_status: {},
+      krabbyclaw_move: {},
+      krabbyclaw_press: {},
+    });
   });
 });

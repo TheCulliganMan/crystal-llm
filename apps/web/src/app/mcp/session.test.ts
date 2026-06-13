@@ -4531,6 +4531,80 @@ describe("McpGameSession reason consistency", () => {
     });
   });
 
+  it("surfaces blueprint-backed Pokecenter healer targets from heal hotspots", async () => {
+    const session = getMcpSession("status-blueprint-healer-interaction-target");
+    const sessionAny = session as unknown as {
+      readInteractionTarget: (
+        game: unknown,
+        interactionTile: { x: number; y: number },
+        mapDetails: {
+          map: string;
+          coord_stride: number;
+          hotspots: Array<{
+            id: string;
+            coords: { x: number; y: number };
+            visible: boolean;
+            interactable: boolean;
+            label: string;
+            token: string;
+            type: string;
+          }>;
+        }
+      ) => unknown;
+    };
+
+    const game = {
+      getOverworld: () => ({
+        current_map_name: "EcruteakPokecenter1F",
+        _npc_on_tile: () => null,
+        _nearest_npc_covering_subtile: () => null,
+        _bg_event_at: () => null,
+        _npc_blueprints: new Map([
+          [
+            "EcruteakPokecenter1F",
+            new Map([
+              [
+                "ECRUTEAKPOKECENTER1F_NURSE",
+                [{ x: 7, y: 3, script: "EcruteakPokecenter1FNurseScript" }, 1],
+              ],
+            ]),
+          ],
+        ]),
+      }),
+    };
+
+    expect(
+      sessionAny.readInteractionTarget(
+        game as never,
+        { x: 7, y: 3 },
+        {
+          map: "EcruteakPokecenter1F",
+          coord_stride: 2,
+          hotspots: [
+            {
+              id: "heal-ecruteak",
+              type: "heal",
+              label: "Healer",
+              coords: { x: 7, y: 3 },
+              visible: true,
+              interactable: true,
+              token: "H",
+            },
+          ],
+        }
+      )
+    ).toEqual({
+      x: 7,
+      y: 3,
+      kind: "npc",
+      label: "Healer",
+      token: "H",
+      hotspot_type: "heal",
+      script: "EcruteakPokecenter1FNurseScript",
+      object_index: 1,
+    });
+  });
+
   it("keeps an objective lane surfaced underfoot even when the current facing no longer confirms the target", async () => {
     const session = getMcpSession("status-underfoot-objective-lane-without-confirmed-target");
     const sessionAny = session as unknown as {

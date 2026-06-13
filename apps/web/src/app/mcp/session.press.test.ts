@@ -417,7 +417,7 @@ describe("McpGameSession interactive battle presses", () => {
     expect(action.result.changed).toBe(true);
     expect(action.result.reason).toBeUndefined();
     expect(action.result.ok).toBe(true);
-    expect(sessionAny.waitForInputOwningSurfaceSettle).toHaveBeenCalledTimes(3);
+    expect(sessionAny.waitForInputOwningSurfaceSettle).toHaveBeenCalledTimes(4);
   });
 
   it("treats runner interaction state changes as real overworld press progress even before dialogue text lands", async () => {
@@ -674,7 +674,7 @@ describe("McpGameSession interactive battle presses", () => {
     expect(action.result.changed).toBe(true);
     expect(action.result.reason).toBeUndefined();
     expect(action.result.ok).toBe(true);
-    expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(1, 2);
+    expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(1, 3);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(2, 4);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(3, 8);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(4, 16);
@@ -847,6 +847,410 @@ describe("McpGameSession interactive battle presses", () => {
     expect(action.result.changed).toBe(true);
   });
 
+  it("retries blueprint-backed Pokecenter healer hotspots when the live NPC lookup misses", async () => {
+    const session = getMcpSession("press-healer-blueprint-hotspot-retry");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { viewport?: string[]; prompt?: string[] | null; dialogue?: string[] | null; menu?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      requestAutosave: jest.Mock;
+      game: {
+        getGameState: () => { wram: { player_x: number; player_y: number; last_talked: number } };
+        getMapName: () => string;
+        isMenuOpen: () => boolean;
+        isBattleActive: () => boolean;
+        getOverworld: () => {
+          current_map_name: string;
+          player_direction: string;
+          script_runner: {
+            is_busy?: boolean;
+            run: jest.Mock;
+            _script_stack?: unknown[];
+            _awaiting_resume?: number;
+            _queued_overworld_task_count?: number;
+            stop_execution?: boolean;
+            last_interaction_object_index?: number | null;
+          };
+          player_movement_locked: () => boolean;
+          script_tasks_active: () => boolean;
+          get_facing_tile_coords: () => [number, number];
+          _counter_adjusted_tile: (x: number, y: number) => [number, number];
+          _npc_on_tile: () => null;
+          _nearest_npc_covering_subtile: () => null;
+          _bg_event_at: () => null;
+          _npc_blueprints: Map<string, Map<string, [unknown, number]>>;
+          _play_interaction_sound: jest.Mock;
+        };
+      };
+      getGame: jest.Mock;
+      buildSnapshotMapInfo: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("OVERWORLD");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.requestAutosave = jest.fn().mockResolvedValue(undefined);
+    sessionAny.lastSnapshot = { viewport: ["old"], prompt: null, dialogue: null, menu: null };
+    const wram = { player_x: 7, player_y: 7, last_talked: 0 };
+    const scriptRunner = {
+      is_busy: false,
+      run: jest.fn(() => {
+        sessionAny.lastSnapshot = {
+          viewport: ["nurse"],
+          dialogue: ["We can heal your POKEMON."],
+          prompt: null,
+          menu: null,
+        };
+      }),
+      _script_stack: [],
+      _awaiting_resume: 0,
+      _queued_overworld_task_count: 0,
+      stop_execution: false,
+      last_interaction_object_index: null as number | null,
+    };
+    const overworld = {
+      current_map_name: "EcruteakPokecenter1F",
+      player_direction: "up",
+      script_runner: scriptRunner,
+      player_movement_locked: () => false,
+      script_tasks_active: () => false,
+      get_facing_tile_coords: () => [7, 5] as [number, number],
+      _counter_adjusted_tile: () => [7, 3] as [number, number],
+      _npc_on_tile: () => null,
+      _nearest_npc_covering_subtile: () => null,
+      _bg_event_at: () => null,
+      _npc_blueprints: new Map([
+        [
+          "EcruteakPokecenter1F",
+          new Map([
+            [
+              "ECRUTEAKPOKECENTER1F_NURSE",
+              [{ x: 7, y: 3, script: "EcruteakPokecenter1FNurseScript" }, 1],
+            ],
+          ]),
+        ],
+      ]),
+      _play_interaction_sound: jest.fn(),
+    };
+    const game = {
+      getGameState: () => ({ wram }),
+      getMapName: () => "EcruteakPokecenter1F",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => overworld,
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.buildSnapshotMapInfo = jest.fn(() => ({
+      map: "EcruteakPokecenter1F",
+      map_id: null,
+      coord_stride: 2,
+      player: { coords: { x: 7, y: 7 }, facing: "up" },
+      warps: [],
+      hotspots: [
+        {
+          id: "heal-ecruteak",
+          type: "heal",
+          label: "Healer",
+          coords: { x: 7, y: 3 },
+          visible: true,
+          interactable: true,
+          token: "H",
+          approach_tiles: [{ coords: { x: 7, y: 7 }, facing: "up" }],
+        },
+      ],
+    }));
+    sessionAny.scheduleKeyPress = jest.fn();
+    let stepCall = 0;
+    sessionAny.stepFrames = jest.fn(() => {
+      stepCall += 1;
+    });
+    const blankOverworld = {
+      mode: "overworld",
+      menu: false,
+      promptReason: null,
+      dialogueText: "",
+      viewportText: "",
+      menuText: "",
+      promptText: "",
+      markerText: "",
+    };
+    sessionAny.captureSceneSignal = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length
+        ? { ...blankOverworld, dialogueText: sessionAny.lastSnapshot.dialogue.join("\n") }
+        : blankOverworld
+    );
+    sessionAny.buildStateFingerprint = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length ? "dialogue" : stepCall > 0 ? "after-press" : "before"
+    );
+
+    const action = await session.press("a", 1);
+
+    expect(scriptRunner.run).toHaveBeenCalledWith("EcruteakPokecenter1FNurseScript");
+    expect(wram.last_talked).toBe(1);
+    expect(scriptRunner.last_interaction_object_index).toBe(1);
+    expect(action.result.events).toContain("confirmed_heal_interaction_retried");
+    expect(action.result.changed).toBe(true);
+  });
+
+  it("retries confirmed PC background-event scripts when a stale hardware press only changes the viewport", async () => {
+    const session = getMcpSession("press-pc-bg-event-viewport-only-retry");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { viewport?: string[]; prompt?: string[] | null; dialogue?: string[] | null; menu?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      requestAutosave: jest.Mock;
+      game: unknown;
+      getGame: jest.Mock;
+      buildSnapshotMapInfo: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("OVERWORLD");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.requestAutosave = jest.fn().mockResolvedValue(undefined);
+    sessionAny.lastSnapshot = { viewport: ["old"], prompt: null, dialogue: null, menu: null };
+
+    const pcEvent = { event_type: "BGEVENT_DOWN", script: "PCScript", x: 7, y: 11 };
+    const scriptRunner = {
+      is_busy: false,
+      run: jest.fn(),
+      _script_stack: [],
+      _awaiting_resume: 0,
+      _queued_overworld_task_count: 0,
+      stop_execution: false,
+      last_interaction_object_index: null as number | null,
+    };
+    const overworld = {
+      current_map_name: "CherrygrovePokecenter1F",
+      player_direction: "down",
+      script_runner: scriptRunner,
+      player_movement_locked: () => false,
+      script_tasks_active: () => false,
+      get_facing_tile_coords: () => [7, 11] as [number, number],
+      _counter_adjusted_tile: (x: number, y: number) => [x, y] as [number, number],
+      _npc_on_tile: () => null,
+      _nearest_npc_covering_subtile: () => null,
+      _bg_event_at: (x: number, y: number) => (x === 7 && y === 11 ? pcEvent : null),
+      _handle_bg_event: jest.fn(() => {
+        sessionAny.lastSnapshot = {
+          viewport: ["PC"],
+          menu: ["▶ BILL's PC", "  CHRIS's PC", "  TURN OFF"],
+          prompt: null,
+          dialogue: null,
+        };
+        return true;
+      }),
+    };
+    const game = {
+      getGameState: () => ({ wram: { player_x: 7, player_y: 9, last_talked: 0 } }),
+      getMapName: () => "CherrygrovePokecenter1F",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => overworld,
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.buildSnapshotMapInfo = jest.fn(() => ({
+      map: "CherrygrovePokecenter1F",
+      map_id: null,
+      coord_stride: 2,
+      player: { coords: { x: 7, y: 9 }, facing: "down" },
+      warps: [],
+      hotspots: [
+        {
+          id: "bg-pc",
+          type: "utility",
+          label: "PC",
+          coords: { x: 7, y: 11 },
+          visible: true,
+          interactable: true,
+          token: "P",
+          approach_tiles: [{ coords: { x: 7, y: 9 }, facing: "down" }],
+        },
+      ],
+    }));
+    sessionAny.scheduleKeyPress = jest.fn();
+    let stepCall = 0;
+    sessionAny.stepFrames = jest.fn(() => {
+      stepCall += 1;
+      if (!sessionAny.lastSnapshot?.menu?.length) {
+        sessionAny.lastSnapshot = { viewport: ["viewport changed"], prompt: null, dialogue: null, menu: null };
+      }
+    });
+    const blankOverworld = {
+      mode: "overworld",
+      menu: false,
+      promptReason: null,
+      dialogueText: "",
+      viewportText: "",
+      menuText: "",
+      promptText: "",
+      markerText: "",
+    };
+    sessionAny.captureSceneSignal = jest.fn(() =>
+      sessionAny.lastSnapshot?.menu?.length
+        ? { ...blankOverworld, menu: true, menuText: sessionAny.lastSnapshot.menu.join("\n") }
+        : blankOverworld
+    );
+    sessionAny.buildStateFingerprint = jest.fn(() =>
+      sessionAny.lastSnapshot?.menu?.length ? "pc-menu" : stepCall > 0 ? "viewport-animation" : "before"
+    );
+
+    const action = await session.press("a", 1);
+
+    expect(overworld._handle_bg_event).toHaveBeenCalledWith(pcEvent);
+    expect(action.result.events).toContain("confirmed_scripted_interaction_retried");
+    expect(action.result.changed).toBe(true);
+  });
+
+  it("retries confirmed Gym Leader NPC scripts when a stale hardware press only changes the viewport", async () => {
+    const session = getMcpSession("press-gym-leader-npc-viewport-only-retry");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { viewport?: string[]; prompt?: string[] | null; dialogue?: string[] | null; menu?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      requestAutosave: jest.Mock;
+      game: unknown;
+      getGame: jest.Mock;
+      buildSnapshotMapInfo: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("OVERWORLD");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.requestAutosave = jest.fn().mockResolvedValue(undefined);
+    sessionAny.lastSnapshot = { viewport: ["old"], prompt: null, dialogue: null, menu: null };
+
+    const wram = { player_x: 9, player_y: 7, last_talked: 0 };
+    const leader = {
+      objectIndex: 2,
+      x: 9,
+      y: 5,
+      walking: false,
+      jumping: false,
+      event: { script: "VioletGymFalknerScript", object_type: "OBJECTTYPE_TRAINER" },
+      facePlayer: jest.fn(),
+    };
+    const scriptRunner = {
+      is_busy: false,
+      run: jest.fn(() => {
+        sessionAny.lastSnapshot = {
+          viewport: ["GYM"],
+          dialogue: ["I'm FALKNER, the VIOLET POKEMON GYM leader!"],
+          prompt: null,
+          menu: null,
+        };
+      }),
+      _script_stack: [],
+      _awaiting_resume: 0,
+      _queued_overworld_task_count: 0,
+      stop_execution: false,
+      last_interaction_object_index: null as number | null,
+    };
+    const overworld = {
+      current_map_name: "VioletGym",
+      player_x: 9,
+      player_y: 7,
+      player_direction: "up",
+      player_object: { x: 9, y: 7 },
+      script_runner: scriptRunner,
+      player_movement_locked: () => false,
+      script_tasks_active: () => false,
+      get_facing_tile_coords: () => [9, 5] as [number, number],
+      _counter_adjusted_tile: (x: number, y: number) => [x, y] as [number, number],
+      _npc_on_tile: (x: number, y: number) => (x === 9 && y === 5 ? leader : null),
+      _nearest_npc_covering_subtile: () => null,
+      _bg_event_at: () => null,
+      _play_interaction_sound: jest.fn(),
+    };
+    const game = {
+      getGameState: () => ({ wram }),
+      getMapName: () => "VioletGym",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => overworld,
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.buildSnapshotMapInfo = jest.fn(() => ({
+      map: "VioletGym",
+      map_id: null,
+      coord_stride: 2,
+      player: { coords: { x: 9, y: 7 }, facing: "up" },
+      warps: [],
+      hotspots: [
+        {
+          id: "npc-2",
+          type: "gym",
+          label: "Gym Leader",
+          coords: { x: 9, y: 5 },
+          visible: true,
+          interactable: true,
+          token: "G",
+          approach_tiles: [{ coords: { x: 9, y: 7 }, facing: "up" }],
+        },
+      ],
+    }));
+    sessionAny.scheduleKeyPress = jest.fn();
+    let stepCall = 0;
+    sessionAny.stepFrames = jest.fn(() => {
+      stepCall += 1;
+      if (!sessionAny.lastSnapshot?.dialogue?.length) {
+        sessionAny.lastSnapshot = { viewport: ["viewport changed"], prompt: null, dialogue: null, menu: null };
+      }
+    });
+    const blankOverworld = {
+      mode: "overworld",
+      menu: false,
+      promptReason: null,
+      dialogueText: "",
+      viewportText: "",
+      menuText: "",
+      promptText: "",
+      markerText: "",
+    };
+    sessionAny.captureSceneSignal = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length
+        ? { ...blankOverworld, dialogueText: sessionAny.lastSnapshot.dialogue.join("\n") }
+        : blankOverworld
+    );
+    sessionAny.buildStateFingerprint = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length ? "gym-dialogue" : stepCall > 0 ? "viewport-animation" : "before"
+    );
+
+    const action = await session.press("a", 1);
+
+    expect(wram.last_talked).toBe(2);
+    expect(scriptRunner.last_interaction_object_index).toBe(2);
+    expect(leader.facePlayer).toHaveBeenCalledWith(9, 7);
+    expect(overworld._play_interaction_sound).toHaveBeenCalledTimes(1);
+    expect(scriptRunner.run).toHaveBeenCalledWith("VioletGymFalknerScript", { allow_fallthrough: false });
+    expect(action.result.events).toContain("confirmed_scripted_interaction_retried");
+    expect(action.result.changed).toBe(true);
+  });
+
   it("settles from closed overworld dialogue into a script-owned prompt snapshot", async () => {
     const session = getMcpSession("press-overworld-dialogue-to-prompt-settle");
     const sessionAny = session as unknown as {
@@ -997,6 +1401,7 @@ describe("McpGameSession interactive battle presses", () => {
       button: "a",
       direction: undefined,
       holdFrames: 2,
+      repeatPressFrames: false,
     });
   });
 
@@ -1260,7 +1665,7 @@ describe("McpGameSession interactive battle presses", () => {
     expect(action.result.changed).toBe(true);
     expect(action.result.reason).toBeUndefined();
     expect(action.result.ok).toBe(true);
-    expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(1, 2);
+    expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(1, 3);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(2, 4);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(3, 8);
     expect(sessionAny.stepFrames).toHaveBeenNthCalledWith(4, 16);
@@ -1926,6 +2331,66 @@ describe("McpGameSession interactive battle presses", () => {
     expect(sessionAny.stepFrames).toHaveBeenCalledWith(4);
   });
 
+  it("does not repeat A across non-blocking PC prompt hold frames", async () => {
+    const session = getMcpSession("press-pc-top-menu-a-no-repeat");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { menu?: string[] | null; prompt?: string[] | null; dialogue?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      game: {
+        getGameState: () => { wram: { player_x: number; player_y: number } };
+        getMapName: () => string;
+        isMenuOpen: () => boolean;
+        isBattleActive: () => boolean;
+        getOverworld: () => {
+          script_runner: { is_busy?: boolean } | null;
+          player_movement_locked: () => boolean;
+          script_tasks_active: () => boolean;
+        };
+      };
+      getGame: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("PROMPT\n▶ WITHDRAW <PK><MN>\n  DEPOSIT <PK><MN>");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.lastSnapshot = {
+      prompt: null,
+      dialogue: null,
+      menu: ["> WITHDRAW <PK><MN>", "  DEPOSIT <PK><MN>", "  CHANGE BOX", "  SEE YA!"],
+    };
+    const game = {
+      getGameState: () => ({ wram: { player_x: 19, player_y: 5 } }),
+      getMapName: () => "CHERRYGROVE_POKECENTER_1F",
+      isMenuOpen: () => true,
+      isBattleActive: () => false,
+      getOverworld: () => ({
+        script_runner: null,
+        player_movement_locked: () => false,
+        script_tasks_active: () => false,
+      }),
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.scheduleKeyPress = jest.fn();
+    sessionAny.stepFrames = jest.fn();
+
+    await session.press("a", 1);
+
+    expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        button: "a",
+        holdFrames: 4,
+        repeatPressFrames: false,
+      }),
+    );
+  });
+
   it("gives battle-menu d-pad presses one extra bounded settle pass when the main cursor lands late", async () => {
     const session = getMcpSession("press-battle-menu-direction-late");
     const sessionAny = session as unknown as {
@@ -2109,6 +2574,16 @@ describe("McpGameSession interactive battle presses", () => {
         },
         script_runner: {
           is_busy: false,
+          run: jest.fn((startedScriptName: string) => {
+            overworld.script_runner._script_stack = [{ name: startedScriptName }];
+            overworld.script_runner._awaiting_resume = 1;
+            overworld.script_runner.stop_execution = true;
+            sessionAny.lastSnapshot = {
+              prompt: null,
+              dialogue: ["We can heal your POKEMON."],
+              menu: null,
+            };
+          }),
           _script_stack: [] as Array<{ name: string }>,
           _awaiting_resume: 0,
           stop_execution: false,
@@ -2193,21 +2668,7 @@ describe("McpGameSession interactive battle presses", () => {
       sessionAny.getGame = jest.fn(() => game);
       sessionAny.buildSnapshotMapInfo = jest.fn(() => mapInfo);
       sessionAny.scheduleKeyPress = jest.fn();
-      sessionAny.stepFrames = jest.fn(() => {
-        if (overworld.player_direction !== "up") {
-          return;
-        }
-        wram.last_talked = nurseObjectIndex;
-        overworld.script_runner.last_interaction_object_index = nurseObjectIndex;
-        overworld.script_runner._script_stack = [{ name: scriptName }];
-        overworld.script_runner._awaiting_resume = 1;
-        overworld.script_runner.stop_execution = true;
-        sessionAny.lastSnapshot = {
-          prompt: null,
-          dialogue: ["We can heal your POKEMON."],
-          menu: null,
-        };
-      });
+      sessionAny.stepFrames = jest.fn();
 
       const action = await session.press("a", 1);
 
@@ -2215,13 +2676,18 @@ describe("McpGameSession interactive battle presses", () => {
       expect(overworld.player_object.direction).toBe("up");
       expect(overworld.player_object.updatePixelPosition).toHaveBeenCalledTimes(1);
       expect(wram.last_talked).toBe(nurseObjectIndex);
+      expect(overworld.script_runner.last_interaction_object_index).toBe(nurseObjectIndex);
+      expect(overworld.script_runner.run).toHaveBeenCalledWith(scriptName);
+      expect(overworld.script_runner._script_stack).toEqual([{ name: scriptName }]);
       expect(action.result.ok).toBe(true);
       expect(action.result.changed).toBe(true);
+      expect(action.result.events).toContain("confirmed_heal_interaction_retried");
       expect(sessionAny.scheduleKeyPress).toHaveBeenCalledWith({
         key: "KeyZ",
         button: "a",
         direction: undefined,
         holdFrames: 2,
+        repeatPressFrames: false,
       });
     }
   );

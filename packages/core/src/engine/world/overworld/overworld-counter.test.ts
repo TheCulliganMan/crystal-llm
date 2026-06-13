@@ -1,5 +1,8 @@
 import { OverworldEngine } from "./overworld";
+import { DataLoader } from "@pokecrystal/core/core/data-loader";
 import { resolveCollisionValue } from "./collision-data";
+import { OverworldMap } from "./overworld-map";
+import { OverworldTileset } from "./overworld-tileset";
 
 type TestMap = {
   width: number;
@@ -98,5 +101,34 @@ describe("OverworldEngine._counter_adjusted_tile", () => {
 
     const result = OverworldEngine.prototype._counter_adjusted_tile.call(context, 7, 7);
     expect(result).toEqual([5, 5]);
+  });
+
+  it("finds the Olivine Pokecenter nurse behind the real counter", async () => {
+    const loader = new DataLoader();
+    loader.load_map_attributes();
+    loader.load_map_dimensions();
+    const attributes = loader.map_attributes.get("OlivinePokecenter1F");
+    const dimensions = loader.map_dimensions.get("OLIVINE_POKECENTER_1F");
+    expect(attributes?.tileset_name).toBe("pokecenter");
+    expect(dimensions).toBeTruthy();
+
+    const map = new OverworldMap(
+      "OlivinePokecenter1F",
+      dimensions!.width,
+      dimensions!.height,
+      dimensions!.blocks
+    );
+    const tileset = new OverworldTileset(attributes!.tileset_name, "day");
+    await tileset.ready;
+    const context = {
+      map,
+      tileset,
+      player_x: 7,
+      player_y: 7,
+      TILES_PER_COLLISION: 2,
+    } as unknown as OverworldEngine;
+
+    const result = OverworldEngine.prototype._counter_adjusted_tile.call(context, 7, 5);
+    expect(result).toEqual([7, 3]);
   });
 });
