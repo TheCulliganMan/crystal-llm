@@ -153,9 +153,9 @@ apps/web/.playwright-cli/*
 **/.next/
 .playwright/cli.config.json
 apps/web/output/web-game/*
-apps/electron/dist/
-apps/electron/release/
-apps/electron/.webpack/
+apps/desktop/dist/
+apps/desktop/zig-out/
+apps/desktop/.zig-cache/
 apps/web/public/ffmpeg/ffmpeg-core.wasm
 apps/web/.next_stale*
 apps/web/output/*
@@ -187,7 +187,7 @@ apps/web/.pokecrystal-agents/runs/*
 packages/core/output/
 tmp/
 packages/agents/.mastra/*
-apps/web/.next-electron/*
+apps/web/.next-desktop/*
 apps/web/.next-dev-codex/*
 apps/web/.next-nodisasm/*
 apps/web/public/disassembly*

@@ -6,7 +6,7 @@
 
 ![Bedroom](bedroom.png)
 
-![Electron](electron.png)
+![Desktop](desktop.png)
 
 ![Full text rendering](full-text-rendering.png)
 

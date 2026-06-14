@@ -1335,7 +1335,7 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
-  it("ignores duplicate held control keydowns even when Electron does not mark them as repeats", async () => {
+  it("ignores duplicate held control keydowns even when the native shell does not mark them as repeats", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);
 
@@ -1375,7 +1375,7 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
-  it("clears stuck held keyboard controls when the Electron window blurs", async () => {
+  it("clears stuck held keyboard controls when the native window blurs", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);
     const inputStateSpy = jest.fn();

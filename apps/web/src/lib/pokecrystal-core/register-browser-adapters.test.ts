@@ -30,6 +30,12 @@ describe("register-browser-adapters", () => {
     expect(adapters.isBrowserCloudSaveConfigured()).toBe(false);
   });
 
+  it("recognizes the Zero Native asset origin as desktop", async () => {
+    const { isDesktopBrowserLocation } = await import("./register-browser-adapters");
+
+    expect(isDesktopBrowserLocation({ pathname: "/index.html", protocol: "zero:" })).toBe(true);
+  });
+
   it("keeps cloud save available on non-desktop routes when Supabase is configured", async () => {
     const adapters = await import("@pokecrystal/core/adapters");
     adapters.resetCloudSaveAdapters();

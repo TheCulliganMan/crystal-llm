@@ -85,7 +85,7 @@ const candidateAudioRoots = (): string[] => [
   ...(process.env.POKECRYSTAL_CLI_AUDIO_ROOT ? [process.env.POKECRYSTAL_CLI_AUDIO_ROOT] : []),
   path.join(repoRoot, "apps", "web", "assets", "audio"),
   path.join(repoRoot, "apps", "web", "public", "assets", "audio"),
-  path.join(repoRoot, "apps", "web", ".next-electron", "standalone", "apps", "web", "assets", "audio"),
+  path.join(repoRoot, "apps", "web", ".next-desktop", "assets", "audio"),
 ];
 
 const fileExists = (filePath: string): boolean => {
