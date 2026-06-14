@@ -101,6 +101,78 @@ const flushPromises = async (): Promise<void> => {
   await new Promise((resolve) => setImmediate(resolve));
 };
 
+const makeFakeAudioWindow = (): { Audio: typeof FakeAudio; AudioContext: unknown } => {
+  class FakeAudioContext {
+    public state = "running";
+    public destination = {};
+    public audioWorklet = {
+      addModule: jest.fn(async () => undefined),
+    };
+    public resume = jest.fn(async () => undefined);
+  }
+  Object.defineProperty(FakeAudioContext.prototype, "audioWorklet", {
+    configurable: true,
+    get() {
+      return {
+        addModule: jest.fn(async () => undefined),
+      };
+    },
+  });
+  return {
+    Audio: FakeAudio,
+    AudioContext: FakeAudioContext,
+  };
+};
+
+const installPcmFetchMock = (): void => {
+  globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/audio/pcm/music/") && url.endsWith(".json")) {
+      const stem = url.split("/").pop()?.replace(/\.json$/, "") ?? "test";
+      return jsonResponse({
+        kind: "music",
+        token: stem,
+        sampleRate: 44_100,
+        channelCount: 1,
+        durationFrames: 4,
+        loopStartSample: 0,
+        loopEndSample: 4,
+        stems: [
+          {
+            kind: "music",
+            channel: 1,
+            path: `/api/audio/pcm/music/${stem}/ch1.pcm`,
+            sampleRate: 44_100,
+            bitsPerSample: 16,
+            durationFrames: 4,
+            loopStartSample: 0,
+            loopEndSample: 4,
+            ownedChannels: [1],
+          },
+        ],
+      });
+    }
+    if (url.includes("/api/audio/pcm/") && url.endsWith(".json")) {
+      const kind = url.includes("/cries/") ? "cry" : "sfx";
+      const stem = url.split("/").pop()?.replace(/\.json$/, "") ?? "test";
+      return jsonResponse({
+        kind,
+        token: stem,
+        path: url.replace(/\.json$/, ".pcm"),
+        sampleRate: 44_100,
+        bitsPerSample: 16,
+        durationFrames: 4,
+        ownedChannels: [kind === "cry" ? 5 : 8],
+        priorityClass: kind === "cry" || stem.includes("fanfare") || stem.includes("caught") ? kind === "cry" ? "cry" : "priority" : "none",
+      });
+    }
+    if (url.endsWith(".pcm")) {
+      return pcmResponse([0, 0, 512, -512, 0, 0, -512, 512]);
+    }
+    return { ok: false } as Response;
+  });
+};
+
 describe("AudioEngine direct PCM backend", () => {
   const originalFetch = globalThis.fetch;
 
@@ -427,12 +499,15 @@ describe("AudioEngine priority muting", () => {
   const globalAny = globalThis as unknown as { window?: TestWindow };
   const hadWindow = "window" in globalAny;
   const originalWindow = globalAny.window;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    globalAny.window = { Audio: FakeAudio };
+    globalAny.window = makeFakeAudioWindow() as TestWindow;
+    installPcmFetchMock();
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     if (!hadWindow) {
       delete globalAny.window;
       return;
@@ -449,7 +524,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("SFX_FANFARE");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(true);
 
@@ -470,7 +545,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("CRY_PIKACHU");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(true);
 
@@ -491,7 +566,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("SFX_CAUGHT_MON");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(true);
 
@@ -512,7 +587,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("SFX_DEX_FANFARE_50_79");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(true);
 
@@ -533,7 +608,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(false);
   });
@@ -548,7 +623,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("wooper_cry");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(currentMusic.muted).toBe(true);
 
@@ -569,7 +644,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(false);
 
     engine.playSound("SFX_FANFARE");
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     const [fanfare] = activeSounds.get("SFX_FANFARE") ?? [];
@@ -577,7 +652,7 @@ describe("AudioEngine priority muting", () => {
     expect(currentMusic.muted).toBe(true);
 
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const [item] = activeSounds.get("SFX_ITEM") ?? [];
     expect(item).toBeTruthy();
@@ -592,7 +667,7 @@ describe("AudioEngine priority muting", () => {
     engine.playMusic("MUSIC_TEST", "map");
 
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     const [item] = activeSounds.get("SFX_ITEM") ?? [];
@@ -600,7 +675,7 @@ describe("AudioEngine priority muting", () => {
     expect(engine.isSoundPlaying()).toBe(true);
 
     engine.playSound("SFX_FANFARE");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(activeSounds.get("SFX_FANFARE")).toBeUndefined();
     expect(activeSounds.get("SFX_ITEM")?.length).toBe(1);
@@ -611,7 +686,7 @@ describe("AudioEngine priority muting", () => {
   it("checks any active SFX when no token is provided", async () => {
     const engine = new AudioEngine();
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(engine.isSoundPlaying()).toBe(true);
   });
@@ -619,7 +694,7 @@ describe("AudioEngine priority muting", () => {
   it("does not keep paused SFX active for global waits", async () => {
     const engine = new AudioEngine();
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     const [item] = activeSounds.get("SFX_ITEM") ?? [];
@@ -634,7 +709,7 @@ describe("AudioEngine priority muting", () => {
   it("includes cry playback in global SFX waits", async () => {
     const engine = new AudioEngine();
     engine.playSound("CRY_PIKACHU");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(engine.isSoundPlaying()).toBe(true);
     expect(engine.isSoundPlaying("CRY_PIKACHU")).toBe(true);
@@ -643,7 +718,7 @@ describe("AudioEngine priority muting", () => {
   it("resolves aliased and case-variant sound tokens in named SFX checks", async () => {
     const engine = new AudioEngine();
     engine.playSound("menu_cursor");
-    await Promise.resolve();
+    await flushPromises();
 
     expect(engine.isSoundPlaying("SFX_MENU")).toBe(true);
     expect(engine.isSoundPlaying("menu_cursor")).toBe(true);
@@ -653,7 +728,7 @@ describe("AudioEngine priority muting", () => {
     const engine = new AudioEngine();
     engine.playSound("CRY_PIKACHU");
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     const [cry] = activeSounds.get("CRY_PIKACHU") ?? [];
@@ -670,9 +745,9 @@ describe("AudioEngine priority muting", () => {
   it("still allows SFX playback while a cry is active", async () => {
     const engine = new AudioEngine();
     engine.playSound("CRY_PIKACHU");
-    await Promise.resolve();
+    await flushPromises();
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     expect(activeSounds.get("CRY_PIKACHU")?.length).toBe(1);
@@ -686,7 +761,7 @@ describe("AudioEngine priority muting", () => {
     engine.loadMusic("MUSIC_TEST", "test.mp3");
     engine.playMusic("MUSIC_TEST", "map");
     engine.playSound("SFX_ITEM");
-    await Promise.resolve();
+    await flushPromises();
 
     const snapshot = engine.getPlaybackSnapshot();
     expect(snapshot.musicToken).toBe("MUSIC_TEST");
@@ -705,7 +780,7 @@ describe("AudioEngine priority muting", () => {
         sequence: 2,
         kind: "sfx",
         token: "SFX_ITEM",
-        source: "/api/audio/sfx/item.mp3",
+        source: "/api/audio/pcm/sfx/item.json",
         loop: false,
       }),
     ]);
@@ -798,12 +873,15 @@ describe("AudioEngine music aliases", () => {
   const globalAny = globalThis as unknown as { window?: TestWindow };
   const hadWindow = "window" in globalAny;
   const originalWindow = globalAny.window;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    globalAny.window = { Audio: FakeAudio };
+    globalAny.window = makeFakeAudioWindow() as TestWindow;
+    installPcmFetchMock();
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     if (!hadWindow) {
       delete globalAny.window;
       return;
@@ -811,28 +889,31 @@ describe("AudioEngine music aliases", () => {
     globalAny.window = originalWindow;
   });
 
-  it("maps gym leader battle music to the disassembly pointer asset", () => {
+  it("maps gym leader battle music to the disassembly pointer asset", async () => {
     const engine = new AudioEngine();
     engine.playMusic("MUSIC_KANTO_GYM_LEADER_BATTLE");
+    await flushPromises();
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
     expect(currentMusic).toBeTruthy();
-    expect(currentMusic.src).toBe("/api/audio/kantogymbattle.mp3");
+    expect(currentMusic.src).toBe("/api/audio/pcm/music/kantogymbattle/ch1.pcm");
   });
 
-  it("maps wild victory music to the disassembly pointer asset", () => {
+  it("maps wild victory music to the disassembly pointer asset", async () => {
     const engine = new AudioEngine();
     engine.playMusic("MUSIC_WILD_VICTORY");
+    await flushPromises();
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
     expect(currentMusic).toBeTruthy();
-    expect(currentMusic.src).toBe("/api/audio/wildpokemonvictory.mp3");
+    expect(currentMusic.src).toBe("/api/audio/pcm/music/wildpokemonvictory/ch1.pcm");
   });
 
-  it("maps crystal intro music to the baked intro asset", () => {
+  it("maps crystal intro music to the baked intro asset", async () => {
     const engine = new AudioEngine();
     engine.playMusic("MUSIC_CRYSTAL_OPENING");
+    await flushPromises();
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
     expect(currentMusic).toBeTruthy();
-    expect(currentMusic.src).toBe("/api/audio/crystalopening.mp3");
+    expect(currentMusic.src).toBe("/api/audio/pcm/music/crystalopening/ch1.pcm");
   });
 });
 
@@ -841,12 +922,15 @@ describe("AudioEngine intro SFX aliases", () => {
   const globalAny = globalThis as unknown as { window?: TestWindow };
   const hadWindow = "window" in globalAny;
   const originalWindow = globalAny.window;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    globalAny.window = { Audio: FakeAudio };
+    globalAny.window = makeFakeAudioWindow() as TestWindow;
+    installPcmFetchMock();
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     if (!hadWindow) {
       delete globalAny.window;
       return;
@@ -855,18 +939,18 @@ describe("AudioEngine intro SFX aliases", () => {
   });
 
   it.each([
-    ["SFX_INTRO_UNOWN_1", "/api/audio/sfx/introunown1.mp3"],
-    ["SFX_INTRO_UNOWN_2", "/api/audio/sfx/introunown2.mp3"],
-    ["SFX_INTRO_UNOWN_3", "/api/audio/sfx/introunown3.mp3"],
-    ["SFX_INTRO_PICHU", "/api/audio/sfx/intropichu.mp3"],
-    ["SFX_INTRO_SUICUNE_2", "/api/audio/sfx/introsuicune2.mp3"],
-    ["SFX_INTRO_SUICUNE_3", "/api/audio/sfx/introsuicune3.mp3"],
-    ["SFX_INTRO_SUICUNE_4", "/api/audio/sfx/introsuicune4.mp3"],
-    ["SFX_INTRO_WHOOSH", "/api/audio/sfx/introwhoosh.mp3"],
+    ["SFX_INTRO_UNOWN_1", "/api/audio/pcm/sfx/introunown1.json"],
+    ["SFX_INTRO_UNOWN_2", "/api/audio/pcm/sfx/introunown2.json"],
+    ["SFX_INTRO_UNOWN_3", "/api/audio/pcm/sfx/introunown3.json"],
+    ["SFX_INTRO_PICHU", "/api/audio/pcm/sfx/intropichu.json"],
+    ["SFX_INTRO_SUICUNE_2", "/api/audio/pcm/sfx/introsuicune2.json"],
+    ["SFX_INTRO_SUICUNE_3", "/api/audio/pcm/sfx/introsuicune3.json"],
+    ["SFX_INTRO_SUICUNE_4", "/api/audio/pcm/sfx/introsuicune4.json"],
+    ["SFX_INTRO_WHOOSH", "/api/audio/pcm/sfx/introwhoosh.json"],
   ])("maps %s to %s", async (token, expected) => {
     const engine = new AudioEngine();
     engine.playSound(token);
-    await Promise.resolve();
+    await flushPromises();
 
     const activeSounds = (engine as unknown as { activeSounds: Map<string, FakeAudio[]> }).activeSounds;
     const [sound] = activeSounds.get(token) ?? [];

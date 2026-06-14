@@ -132,7 +132,7 @@ describe("statusHandler", () => {
         audio: {
           musicToken: "MUSIC_NEW_BARK_TOWN",
           musicRole: "map",
-          musicSource: "/api/audio/newbarktown.mp3",
+          musicSource: "/api/audio/pcm/music/newbarktown.json",
           musicFrame: 12,
           fadedVolume: 1,
           activeChannels: [{ channel: 0, ownerToken: "MUSIC_NEW_BARK_TOWN", category: "music", role: "map" }],
@@ -141,7 +141,7 @@ describe("statusHandler", () => {
               sequence: 7,
               kind: "sfx",
               token: "SFX_READ_TEXT_2",
-              source: "/api/audio/sfx/readtext2.mp3",
+              source: "/api/audio/pcm/sfx/readtext2.json",
             },
           ],
         },
@@ -155,13 +155,13 @@ describe("statusHandler", () => {
       audio: {
         musicToken: "MUSIC_NEW_BARK_TOWN",
         musicRole: "map",
-        musicSource: "/api/audio/newbarktown.mp3",
+        musicSource: "/api/audio/pcm/music/newbarktown.json",
         recentEvents: [
           {
             sequence: 7,
             kind: "sfx",
             token: "SFX_READ_TEXT_2",
-            source: "/api/audio/sfx/readtext2.mp3",
+            source: "/api/audio/pcm/sfx/readtext2.json",
           },
         ],
       },

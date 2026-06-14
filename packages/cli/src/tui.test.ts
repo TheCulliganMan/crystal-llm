@@ -1329,14 +1329,14 @@ describe("TUI audio snapshot playback", () => {
             mode: "overworld",
             audio: {
               musicToken: "MUSIC_ROUTE_29",
-              musicSource: "/api/audio/route29.mp3",
+              musicSource: "/api/audio/pcm/music/route29.json",
               musicRole: "map",
               recentEvents: [
                 {
                   sequence: 7,
                   kind: "sfx",
                   token: "SFX_READ_TEXT_2",
-                  source: "/api/audio/sfx/readtext2.mp3",
+                  source: "/api/audio/pcm/sfx/readtext2.json",
                 },
               ],
             },
@@ -1347,26 +1347,26 @@ describe("TUI audio snapshot playback", () => {
 
     expect(snapshot).toEqual({
       musicToken: "MUSIC_ROUTE_29",
-      musicSource: "/api/audio/route29.mp3",
+      musicSource: "/api/audio/pcm/music/route29.json",
       musicRole: "map",
       recentEvents: [
         {
           sequence: 7,
           kind: "sfx",
           token: "SFX_READ_TEXT_2",
-          source: "/api/audio/sfx/readtext2.mp3",
+          source: "/api/audio/pcm/sfx/readtext2.json",
         },
       ],
     });
   });
 
-  it("resolves web audio URLs to local asset files before treating paths as absolute", () => {
+  it("resolves non-PCM web audio URLs to local asset files before treating paths as absolute", () => {
     const previousAudioRoot = process.env.POKECRYSTAL_CLI_AUDIO_ROOT;
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "pokecrystal-tui-audio-"),
     );
-    const route29Path = path.join(tempRoot, "route29.mp3");
-    const readTextPath = path.join(tempRoot, "sfx", "readtext2.mp3");
+    const route29Path = path.join(tempRoot, "route29.wav");
+    const readTextPath = path.join(tempRoot, "sfx", "readtext2.wav");
     fs.mkdirSync(path.dirname(readTextPath), { recursive: true });
     fs.writeFileSync(route29Path, "audio");
     fs.writeFileSync(readTextPath, "audio");
@@ -1374,13 +1374,13 @@ describe("TUI audio snapshot playback", () => {
     try {
       process.env.POKECRYSTAL_CLI_AUDIO_ROOT = tempRoot;
 
-      expect(resolveTuiAudioSourcePath("/api/audio/route29.mp3")).toBe(
+      expect(resolveTuiAudioSourcePath("/api/audio/route29.wav")).toBe(
         route29Path,
       );
-      expect(resolveTuiAudioSourcePath("/assets/audio/sfx/readtext2.mp3")).toBe(
+      expect(resolveTuiAudioSourcePath("/assets/audio/sfx/readtext2.wav")).toBe(
         readTextPath,
       );
-      expect(resolveTuiAudioSourcePath("/audio/sfx/readtext2.mp3")).toBe(
+      expect(resolveTuiAudioSourcePath("/audio/sfx/readtext2.wav")).toBe(
         readTextPath,
       );
       expect(resolveTuiAudioSourcePath(route29Path)).toBe(route29Path);

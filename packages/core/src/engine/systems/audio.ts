@@ -697,18 +697,18 @@ const getAudioAssetPath = (...parts: string[]): string => {
   return joinUrl(base, parts);
 };
 
-const resolveMusicAsset = (token: string, directPcm: boolean): string | null => {
+const resolveMusicAsset = (token: string, _directPcm: boolean): string | null => {
   const upper = token.toUpperCase();
   const aliases = loadDisassemblyAliases();
   if (upper.startsWith("MUSIC_")) {
     const mapped = aliases?.music[upper] ?? slugifyToken(upper.replace(/^MUSIC_/, ""));
-    return directPcm ? getAudioAssetPath("pcm", "music", `${mapped}.json`) : getAudioAssetPath(`${mapped}.mp3`);
+    return getAudioAssetPath("pcm", "music", `${mapped}.json`);
   }
   const normalized = token.trim().toLowerCase();
   if (!normalized) {
     return null;
   }
-  return directPcm ? getAudioAssetPath("pcm", "music", `${normalized}.json`) : getAudioAssetPath(`${normalized}.mp3`);
+  return getAudioAssetPath("pcm", "music", `${normalized}.json`);
 };
 
 const resolveSoundAsset = (token: string, directPcm: boolean): string | null => {
@@ -720,17 +720,15 @@ const resolveSoundAsset = (token: string, directPcm: boolean): string | null => 
   const aliases = loadDisassemblyAliases();
   if (upper.startsWith("SFX_")) {
     const mapped = aliases?.sfx[upper] ?? `sfx/${slugifyToken(upper.replace(/^SFX_/, ""))}`;
-    return directPcm
-      ? getAudioAssetPath("pcm", "sfx", `${path.basename(mapped)}.json`)
-      : getAudioAssetPath(`${mapped}.mp3`);
+    return getAudioAssetPath("pcm", "sfx", `${path.basename(mapped)}.json`);
   }
   if (upper.startsWith("CRY_")) {
     const base = resolveCryBase(upper.replace(/^CRY_/, ""));
-    return directPcm ? getAudioAssetPath("pcm", "cries", `${base}.json`) : getAudioAssetPath("cries", `${base}.mp3`);
+    return getAudioAssetPath("pcm", "cries", `${base}.json`);
   }
   if (upper.endsWith("_CRY")) {
     const base = upper.replace(/_CRY$/, "").toLowerCase();
-    return directPcm ? getAudioAssetPath("pcm", "cries", `${base}.json`) : getAudioAssetPath("cries", `${base}.mp3`);
+    return getAudioAssetPath("pcm", "cries", `${base}.json`);
   }
   return null;
 };
@@ -771,7 +769,6 @@ export class AudioEngine {
   private suppressedMusicChannels = new Set<number>();
   private pendingMusicAfterFade: { token: string; role: string } | null = null;
   private pendingMusicRequestId = 0;
-  private pendingSoundManifestRequestId = 0;
   private playbackEventSequence = 0;
   private recentPlaybackEvents: AudioPlaybackEvent[] = [];
 
@@ -823,8 +820,7 @@ export class AudioEngine {
     }
     const normalized = this._normalizeBattleSoundOptions(options);
     if (this._isManifestSource(source)) {
-      const requestId = ++this.pendingSoundManifestRequestId;
-      void this._playSoundManifest(token, source, normalized, requestId);
+      void this._playSoundManifest(token, source, normalized);
       return;
     }
     this._playSoundSource(token, source, true, normalized);
@@ -1937,12 +1933,8 @@ export class AudioEngine {
     token: string,
     source: string,
     options: ResolvedBattleSoundOptions,
-    requestId: number,
   ): Promise<void> {
     const manifest = await this._loadManifest<SoundCueManifest | PcmClipManifest>(source);
-    if (requestId !== this.pendingSoundManifestRequestId) {
-      return;
-    }
     if (!manifest) {
       return;
     }

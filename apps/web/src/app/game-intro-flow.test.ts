@@ -364,7 +364,7 @@ describe("Game intro/title startup parity", () => {
     const snapshot = game.getAudioPlaybackSnapshot();
     const musicSource = snapshot.musicSource?.replace(/\\/g, "/") ?? "";
     expect(snapshot.musicToken).toBe("MUSIC_NEW_BARK_TOWN");
-    expect(musicSource).toContain("/assets/audio/newbarktown.mp3");
+    expect(musicSource).toContain("/assets/audio/pcm/music/newbarktown.json");
     expect(musicSource).not.toContain("/assets/data/audio/");
   });
 

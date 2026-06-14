@@ -158,17 +158,13 @@ describe("audio route asset resolution", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
-  it("synthesizes playable audio from the configured disassembly when media files are absent", async () => {
+  it("does not synthesize legacy mp3 media from the configured disassembly", async () => {
     const response = await GET(
       new Request("https://example.com/api/audio/sfx/testsynth.mp3"),
       { params: Promise.resolve({ path: ["sfx", "testsynth.mp3"] }) },
     );
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("audio/wav");
-    const bytes = Buffer.from(await response.arrayBuffer());
-    expect(bytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
-    expect(bytes.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    expect(response.status).toBe(404);
   });
 
   it("serves direct PCM music manifests and raw channel data", async () => {

@@ -2855,7 +2855,7 @@ describe("Ink TUI e2e", () => {
                   can_move: true,
                   audio: {
                     musicToken: "MUSIC_NEW_BARK_TOWN",
-                    musicSource: "/api/audio/newbarktown.mp3",
+                    musicSource: "/api/audio/pcm/music/newbarktown.json",
                     musicRole: "map",
                     recentEvents: pressCount
                       ? [
@@ -2863,7 +2863,7 @@ describe("Ink TUI e2e", () => {
                             sequence: 1,
                             kind: "sfx",
                             token: "SFX_READ_TEXT_2",
-                            source: "/api/audio/sfx/readtext2.mp3",
+                            source: "/api/audio/pcm/sfx/readtext2.json",
                           },
                         ]
                       : [],
@@ -2919,7 +2919,7 @@ describe("Ink TUI e2e", () => {
     expect(soundController.syncSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({
         musicToken: "MUSIC_NEW_BARK_TOWN",
-        musicSource: "/api/audio/newbarktown.mp3",
+        musicSource: "/api/audio/pcm/music/newbarktown.json",
       }),
     );
     expect(soundController.syncSnapshot).toHaveBeenCalledWith(
@@ -2927,7 +2927,7 @@ describe("Ink TUI e2e", () => {
         recentEvents: [
           expect.objectContaining({
             token: "SFX_READ_TEXT_2",
-            source: "/api/audio/sfx/readtext2.mp3",
+            source: "/api/audio/pcm/sfx/readtext2.json",
           }),
         ],
       }),

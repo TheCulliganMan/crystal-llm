@@ -4,9 +4,6 @@ import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import type { Stats } from "node:fs";
 import { Readable } from "node:stream";
-import { AsmAudioParser, DrumkitParser, WaveSampleParser } from "@pokecrystal/core/audio-export/parsers";
-import { WavConverter } from "@pokecrystal/core/audio-export/converter";
-import { buildAsmAudioProgram, type AsmAudioProgramKind } from "@pokecrystal/core/audio-export/asm-programs";
 import {
   pcmClipToBytes,
   pcmClipToManifest,
@@ -24,27 +21,18 @@ const DIRECT_AUDIO_ROOT_CANDIDATES = [
 
 const DIRECT_CONTENT_TYPES: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
-  ".mp3": "audio/mpeg",
   ".mid": "audio/midi",
   ".midi": "audio/midi",
   ".wav": "audio/wav",
 };
 
 const SYNTHESIZED_CACHE_CONTROL = "public, max-age=31536000, immutable";
-const EXPORT_INFINITE_LOOP_REPEAT_LIMIT = 2;
-const synthesizedAudioCache = new Map<string, Uint8Array>();
 const synthesizedPcmClipCache = new Map<string, PcmClip>();
 const synthesizedPcmMusicStemCache = new Map<string, PcmClip[]>();
 
 type BundledAudioFile = {
   root: string;
   path: string;
-};
-
-type SynthesizedAudio = {
-  body: Uint8Array;
-  contentType: string;
-  cacheKey: string;
 };
 
 type PcmRoutePayload =
@@ -68,17 +56,6 @@ const resolveDisassemblyAudioRoot = (): string =>
     "audio",
   );
 
-function isSynthesisAllowed(parts: string[]): boolean {
-  const ext = path.extname(parts.at(-1) ?? "").toLowerCase();
-  if (ext === ".mid" || ext === ".midi") {
-    return parts.length === 1;
-  }
-  if (ext === ".mp3" || ext === ".wav") {
-    return parts.length === 2 && (parts[0] === "sfx" || parts[0] === "cries");
-  }
-  return false;
-}
-
 function resolveSafePath(root: string, parts: string[]): string | null {
   const resolved = path.resolve(root, ...parts);
   if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) {
@@ -101,123 +78,6 @@ async function findBundledAudioFile(parts: string[]): Promise<BundledAudioFile |
     } catch {
       // keep checking other candidates
     }
-  }
-  return null;
-}
-
-async function buildSynthProgram(root: string, parts: string[]): Promise<{ cacheKey: string; source: string } | null> {
-  const ext = path.extname(parts.at(-1) ?? "").toLowerCase();
-  if (ext !== ".mid" && ext !== ".midi" && ext !== ".mp3" && ext !== ".wav") {
-    return null;
-  }
-
-  const stem = path.basename(parts.at(-1) ?? "", ext);
-  if (!stem) {
-    return null;
-  }
-
-  let kind: AsmAudioProgramKind | null = null;
-  if (parts.length === 1) {
-    kind = "music";
-  } else if (parts.length === 2 && parts[0] === "sfx") {
-    kind = "sfx";
-  } else if (parts.length === 2 && parts[0] === "cries") {
-    kind = "cry";
-  }
-
-  if (!kind) {
-    return null;
-  }
-
-  return buildAsmAudioProgram(root, kind, stem);
-}
-
-function createWavFromStereo16(interleavedStereo: Int16Array, sampleRate: number): Uint8Array {
-  const channels = 2;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-  const dataBytes = interleavedStereo.length * 2;
-  const buffer = new ArrayBuffer(44 + dataBytes);
-  const view = new DataView(buffer);
-
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataBytes, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, dataBytes, true);
-
-  let offset = 44;
-  for (let i = 0; i < interleavedStereo.length; i += 1) {
-    view.setInt16(offset, interleavedStereo[i], true);
-    offset += 2;
-  }
-
-  return new Uint8Array(buffer);
-}
-
-function writeAscii(view: DataView, offset: number, text: string): void {
-  for (let i = 0; i < text.length; i += 1) {
-    view.setUint8(offset + i, text.charCodeAt(i));
-  }
-}
-
-async function synthesizeBundledAsmAudio(parts: string[]): Promise<SynthesizedAudio | null> {
-  const synthRoots = [resolveDisassemblyAudioRoot()];
-  for (const root of synthRoots) {
-    const program = await buildSynthProgram(root, parts);
-    if (!program) {
-      continue;
-    }
-
-    const ext = path.extname(parts.at(-1) ?? "").toLowerCase();
-    const synthFormat = ext === ".mid" || ext === ".midi" ? "midi" : "pcm";
-    const contentType = synthFormat === "midi" ? "audio/midi" : "audio/wav";
-    const cacheKey = `${program.cacheKey}:${synthFormat}`;
-    const cached = synthesizedAudioCache.get(cacheKey);
-    if (cached) {
-      return {
-        body: cached,
-        contentType,
-        cacheKey,
-      };
-    }
-
-    const [drumkitsText, waveSamplesText] = await Promise.all([
-      fs.readFile(path.join(root, "drumkits.asm"), "utf8"),
-      fs.readFile(path.join(root, "wave_samples.asm"), "utf8"),
-    ]);
-    const musicData = new AsmAudioParser(program.source).parse();
-    const drumkits = new DrumkitParser().parseFromText(drumkitsText);
-    const waveSampleParser = new WaveSampleParser();
-    const waveSamples = waveSampleParser.parseFromText(waveSamplesText);
-    const converter = new WavConverter(
-      musicData,
-      drumkits,
-      waveSamples,
-      {
-        waveInstrumentMap: waveSampleParser.instrumentMap,
-        infiniteLoopRepeatLimit: EXPORT_INFINITE_LOOP_REPEAT_LIMIT,
-      },
-    );
-    const rendered = converter.convert(synthFormat);
-    const body = synthFormat === "midi"
-      ? rendered.midiBytes ?? new Uint8Array()
-      : createWavFromStereo16(rendered.stereo, rendered.sampleRate);
-    synthesizedAudioCache.set(cacheKey, body);
-    return {
-      body,
-      contentType,
-      cacheKey,
-    };
   }
   return null;
 }
@@ -372,6 +232,9 @@ export async function GET(
   { params }: { params: Promise<{ path?: string[] }> },
 ): Promise<Response> {
   const { path: parts = [] } = await params;
+  if (parts.some((part) => path.extname(part).toLowerCase() === ".mp3")) {
+    return new NextResponse("Not found", { status: 404 });
+  }
   if (parts[0] === "pcm") {
     try {
       const pcm = synthesizePcmRoute(parts);
@@ -440,30 +303,5 @@ export async function GET(
       return new NextResponse("Not found", { status: 404 });
     }
   }
-
-  if (!isSynthesisAllowed(parts)) {
-    return new NextResponse("Not found", { status: 404 });
-  }
-
-  try {
-    const synthesized = await synthesizeBundledAsmAudio(parts);
-    if (!synthesized) {
-      return new NextResponse("Not found", { status: 404 });
-    }
-    const responseBodyBytes = Uint8Array.from(synthesized.body);
-    const responseBody = new Blob([responseBodyBytes as unknown as BlobPart], {
-      type: synthesized.contentType,
-    });
-    return new NextResponse(responseBody, {
-      status: 200,
-      headers: {
-        "Content-Type": synthesized.contentType,
-        "Content-Length": String(synthesized.body.byteLength),
-        "Cache-Control": SYNTHESIZED_CACHE_CONTROL,
-        ETag: `"synth-${Buffer.from(synthesized.cacheKey).toString("base64url")}-${synthesized.body.byteLength.toString(16)}"`,
-      },
-    });
-  } catch {
-    return new NextResponse("Not found", { status: 404 });
-  }
+  return new NextResponse("Not found", { status: 404 });
 }

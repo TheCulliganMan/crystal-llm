@@ -8380,7 +8380,7 @@ describe("McpGameSession reason consistency", () => {
       getAudioPlaybackSnapshot: () => ({
         musicToken: "MUSIC_ROUTE_29",
         musicRole: "map",
-        musicSource: "/api/audio/route29.mp3",
+        musicSource: "/api/audio/pcm/music/route29.json",
         musicFrame: 0,
         fadedVolume: 1,
         activeChannels: [],
@@ -8389,7 +8389,7 @@ describe("McpGameSession reason consistency", () => {
             sequence: 1,
             kind: "sfx",
             token: "SFX_READ_TEXT_2",
-            source: "/api/audio/sfx/readtext2.mp3",
+            source: "/api/audio/pcm/sfx/readtext2.json",
           },
         ],
       }),
@@ -8427,11 +8427,11 @@ describe("McpGameSession reason consistency", () => {
         }),
         audio: expect.objectContaining({
           musicToken: "MUSIC_ROUTE_29",
-          musicSource: "/api/audio/route29.mp3",
+          musicSource: "/api/audio/pcm/music/route29.json",
           recentEvents: [
             expect.objectContaining({
               token: "SFX_READ_TEXT_2",
-              source: "/api/audio/sfx/readtext2.mp3",
+              source: "/api/audio/pcm/sfx/readtext2.json",
             }),
           ],
         }),
