@@ -1,6 +1,10 @@
 # compiled objects
 *.o
 
+# Finder-style duplicate files
+* [0-9].*
+* [0-9][0-9].*
+
 # local-only pret disassembly checkout and generated public mirror
 vendor/pokecrystal/
 pokecrystal_disassembly/
