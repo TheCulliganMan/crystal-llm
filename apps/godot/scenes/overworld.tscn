@@ -1,0 +1,142 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/overworld_runtime.gd" id="1"]
+
+[node name="OverworldRuntime" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+
+[node name="Margin" type="MarginContainer" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = -16.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="Margin"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 8
+
+[node name="TitleLabel" type="Label" parent="Margin/VBox"]
+layout_mode = 2
+text = "OVERWORLD"
+
+[node name="MapControls" type="HBoxContainer" parent="Margin/VBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="PrevMapButton" type="Button" parent="Margin/VBox/MapControls"]
+layout_mode = 2
+text = "Prev"
+
+[node name="MapSelector" type="OptionButton" parent="Margin/VBox/MapControls"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="NextMapButton" type="Button" parent="Margin/VBox/MapControls"]
+layout_mode = 2
+text = "Next"
+
+[node name="ReloadMapButton" type="Button" parent="Margin/VBox/MapControls"]
+layout_mode = 2
+text = "Reload"
+
+[node name="MapSurfacePanel" type="PanelContainer" parent="Margin/VBox"]
+layout_mode = 2
+custom_minimum_size = Vector2(320, 288)
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="MapSurfaceMargin" type="MarginContainer" parent="Margin/VBox/MapSurfacePanel"]
+layout_mode = 2
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+
+[node name="MapSurfaceVBox" type="VBoxContainer" parent="Margin/VBox/MapSurfacePanel/MapSurfaceMargin"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 4
+
+[node name="MapTexture" type="TextureRect" parent="Margin/VBox/MapSurfacePanel/MapSurfaceMargin/MapSurfaceVBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+expand_mode = 1
+stretch_mode = 5
+
+[node name="MapSurfaceLabel" type="Label" parent="Margin/VBox/MapSurfacePanel/MapSurfaceMargin/MapSurfaceVBox"]
+layout_mode = 2
+text = "map surface: loading"
+
+[node name="StatusPanel" type="PanelContainer" parent="Margin/VBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Margin" type="MarginContainer" parent="Margin/VBox/StatusPanel"]
+layout_mode = 2
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="StatusVBox" type="VBoxContainer" parent="Margin/VBox/StatusPanel/Margin"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 6
+
+[node name="MapLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "map: loading"
+
+[node name="SelectionLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "selection: loading"
+
+[node name="PlayerLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "tile: 0,0"
+
+[node name="MovementLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "movement: idle"
+
+[node name="ResultLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+autowrap_mode = 2
+text = "result: move=idle collision=none warp=none"
+
+[node name="HooksLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "hooks: collision=false warp=false"
+
+[node name="AssetsLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "Assets: loading..."
+
+[node name="RuntimeLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+text = "Runtime: loading..."
+
+[node name="DebugLabel" type="Label" parent="Margin/VBox/StatusPanel/Margin/StatusVBox"]
+layout_mode = 2
+autowrap_mode = 2
+text = "Waiting for map data..."
