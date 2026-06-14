@@ -7,12 +7,12 @@
   "packageManager": "npm@11.3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/pokecrystal-python.git"
+    "url": "git+https://github.com/TheCulliganMan/crystal-llm.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/pokecrystal-python/issues"
+    "url": "https://github.com/TheCulliganMan/crystal-llm/issues"
   },
-  "homepage": "https://github.com/OWNER/pokecrystal-python#readme",
+  "homepage": "https://github.com/TheCulliganMan/crystal-llm#readme",
   "workspaces": [
     "apps/web",
     "apps/electron",
@@ -34,7 +34,7 @@
     "electron:build": "npm run build --workspace @pokecrystal/electron",
     "electron:package": "npm run package --workspace @pokecrystal/electron",
     "electron:smoke": "npm run smoke --workspace @pokecrystal/electron",
-    "test": "npm run test --workspace @pokecrystal/core -- --runInBand && npm run test --workspace @pokecrystal/assets && npm run test --workspace @pokecrystal/exporters && npm run test --workspace @pokecrystal/cli -- --runInBand && npm run test --workspace @pokecrystal/web -- --runInBand",
+    "test": "npm run test --workspace @pokecrystal/core -- --runInBand && npm run test --workspace @pokecrystal/assets && npm run test --workspace @pokecrystal/exporters && npm run test --workspace @pokecrystal/cli -- --runInBand && npm run test --workspace @pokecrystal/agents -- --runInBand && npm run test --workspace @pokecrystal/web -- --runInBand",
     "test:agents": "npm run test --workspace @pokecrystal/agents",
     "test:cli": "npm run test --workspace @pokecrystal/cli",
     "test:smoke": "npm run test --workspace @pokecrystal/web -- src/app/game-corner/page.test.tsx src/app/page.test.tsx",
@@ -44,7 +44,7 @@
     "test:web": "npm run test --workspace @pokecrystal/web",
     "pack:dry-run": "npm pack --dry-run --workspace @pokecrystal/core && npm pack --dry-run --workspace @pokecrystal/assets && npm pack --dry-run --workspace @pokecrystal/exporters && npm pack --dry-run --workspace @pokecrystal/cli && npm pack --dry-run --workspace @pokecrystal/agents",
     "release:check": "CI=1 npm run build:packages && CI=1 npm run test:core && CI=1 npm run test:assets && CI=1 npm run test:exporters && CI=1 npm run test:cli -- --runInBand --ci && CI=1 npm run test:agents -- --ci && npm run pack:dry-run",
-    "typecheck": "npm run lint:types --workspace @pokecrystal/core && npm run lint:types --workspace @pokecrystal/assets && npm run lint:types --workspace @pokecrystal/exporters && npm run lint:types --workspace @pokecrystal/cli && npm run lint:types --workspace @pokecrystal/web",
+    "typecheck": "npm run lint:types --workspace @pokecrystal/core && npm run lint:types --workspace @pokecrystal/assets && npm run lint:types --workspace @pokecrystal/exporters && npm run lint:types --workspace @pokecrystal/cli && npm run lint:types --workspace @pokecrystal/agents && npm run lint:types --workspace @pokecrystal/web",
     "export:core": "npm run export:core --workspace @pokecrystal/exporters",
     "dev": "npm run dev --workspace @pokecrystal/web",
     "save:testrun-team": "node scripts/optimize-save-team.js --session-id testrun --kill-running",

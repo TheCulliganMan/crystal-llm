@@ -13,13 +13,13 @@ import {
   normalizeCodexMoveArgs,
   readCodexVisibleActionReason,
   summarizeCodexRouteTarget,
-} from "./codex-harness";
+} from "./codex-harness.js";
 import {
   DEFAULT_OPENAI_MODEL,
   normalizeAgentModel,
   resolveMastraModel,
-} from "./defaults";
-import type { RunnerInput, Status } from "./types";
+} from "./defaults.js";
+import type { RunnerInput, Status } from "./types.js";
 
 describe("codex harness helpers", () => {
   it("recognizes codex model refs", () => {
@@ -102,24 +102,22 @@ describe("codex harness helpers", () => {
   it("emits only the new suffix when codex exec repeats full message snapshots", () => {
     const accumulator = { textByItemId: new Map<string, string>() };
 
-    expect(
-      codexCliStreamEventFromJsonLine(
-        JSON.stringify({
-          type: "item.updated",
-          item: { id: "msg-1", type: "agentMessage", text: "Press A" },
-        }),
-        accumulator
-      )?.text
-    ).toBe("Press A");
-    expect(
-      codexCliStreamEventFromJsonLine(
-        JSON.stringify({
-          type: "item.updated",
-          item: { id: "msg-1", type: "agentMessage", text: "Press A, then wait" },
-        }),
-        accumulator
-      )?.text
-    ).toBe(", then wait");
+    const firstEvent = codexCliStreamEventFromJsonLine(
+      JSON.stringify({
+        type: "item.updated",
+        item: { id: "msg-1", type: "agentMessage", text: "Press A" },
+      }),
+      accumulator
+    );
+    expect(firstEvent).toMatchObject({ type: "text-delta", text: "Press A" });
+    const secondEvent = codexCliStreamEventFromJsonLine(
+      JSON.stringify({
+        type: "item.updated",
+        item: { id: "msg-1", type: "agentMessage", text: "Press A, then wait" },
+      }),
+      accumulator
+    );
+    expect(secondEvent).toMatchObject({ type: "text-delta", text: ", then wait" });
   });
 
   it("clamps move and frame arguments to Game Boy-safe bounds", () => {

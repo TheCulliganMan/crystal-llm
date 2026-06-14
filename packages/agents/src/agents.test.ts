@@ -15,8 +15,8 @@ import {
   shouldContinueDirectPlayerBatch,
   shouldUseDirectPlayerBatch,
   supportsDirectPlayerImageInput,
-} from "./agents";
-import type { Status } from "./types";
+} from "./agents.js";
+import type { Status } from "./types.js";
 
 describe("taskmaster iteration control", () => {
   it("keeps iterating until the player has been delegated", () => {

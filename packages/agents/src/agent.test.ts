@@ -1,4 +1,4 @@
-import { compactAgentGoal, derivePlayerMaxSteps, shouldRestartWorkflowRun, summarizeWorkflowFailure } from "./agent";
+import { compactAgentGoal, derivePlayerMaxSteps, shouldRestartWorkflowRun, summarizeWorkflowFailure } from "./agent.js";
 
 describe("agent runtime budgets", () => {
   it("lets the player batch use the full graph cycle budget up to the hard cap", () => {

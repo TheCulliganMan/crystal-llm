@@ -14,9 +14,9 @@ import {
   normalizeAgentModel,
   resolveMastraModel,
   resolveMastraProviderOptions,
-} from "./defaults";
-import { createTaskmasterMemory } from "./memory";
-import { runnerInputSchema } from "./types";
+} from "./defaults.js";
+import { createTaskmasterMemory } from "./memory.js";
+import { runnerInputSchema } from "./types.js";
 
 describe("agent defaults", () => {
   afterEach(() => {

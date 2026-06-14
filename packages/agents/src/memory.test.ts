@@ -1,4 +1,4 @@
-import { createDefaultMastraStorage, createTaskmasterMemoryScope } from "./memory";
+import { createDefaultMastraStorage, createTaskmasterMemoryScope } from "./memory.js";
 
 describe("memory helpers", () => {
   it("derives stable taskmaster memory identifiers from the session", () => {

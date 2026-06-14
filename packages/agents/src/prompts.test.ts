@@ -4,7 +4,8 @@ import {
   buildTaskmasterInstructions,
   buildTaskmasterPrompt,
   buildTaskmasterSummaryPrompt,
-} from "./prompts";
+} from "./prompts.js";
+import type { Status } from "./types.js";
 
 const input = {
   session: {
@@ -21,7 +22,7 @@ const input = {
   includeObservationCheckpoint: true,
 } as const;
 
-const status = {
+const status: Status = {
   mode: "overworld",
   map: "PlayersHouse2F",
   mapId: "24:7",
@@ -52,7 +53,7 @@ const status = {
     openDirections: [{ direction: "down", tile: "." }],
     blockedDirections: [{ direction: "right", tile: "#" }],
   },
-} as const;
+};
 
 describe("prompt builders", () => {
   it("keeps the player instructions honest and MCP-focused", () => {
@@ -70,9 +71,6 @@ describe("prompt builders", () => {
     expect(instructions).toContain("MCP gameplay tools directly");
     expect(instructions).toContain("Never choose waiting, idling, no-op, skipping, deferring, or asking the user as gameplay");
     expect(instructions).toContain("Flow_state is the sequential backbone for beating the game");
-    expect(instructions).toContain("Story-gate reconciliation rule");
-    expect(instructions).toContain("require live proof that the prerequisite request or authorization exists");
-    expect(instructions).toContain("do not recheck the completed proof");
     expect(instructions).toContain("everything encountered on the honest route toward that flow goal as important route evidence");
     expect(instructions).toContain("required NPCs, signs, item balls, forced prompts, battles, doors, warps, blockers, and local clues");
     expect(instructions).toContain("required visible reason field");

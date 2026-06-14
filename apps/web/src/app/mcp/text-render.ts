@@ -1,5 +1,6 @@
 import { TextSnapshot } from "@pokecrystal/core/ui/text-ui";
 import { buildTextSnapshotLines } from "@pokecrystal/core/ui/text-snapshot-render";
+import type { McpFlowStateSnapshot } from "./flow-state";
 import type { McpMapInfoSnapshot } from "./map-info";
 
 export type McpMoveSummary = {
@@ -86,6 +87,7 @@ export type TextSnapshotPayload = {
   tasks: Record<string, unknown>[];
   mcp?: McpMeta;
   map?: McpMapInfoSnapshot;
+  flow_state?: McpFlowStateSnapshot | null;
 };
 
 export type PromptStatus = {
@@ -368,6 +370,16 @@ const appendSection = (lines: string[], label: string, entries: string[]): void 
   lines.push(...entries);
 };
 
+const flowStateLines = (flowState: TextSnapshotPayload["flow_state"]): string[] => {
+  if (!flowState) {
+    return [];
+  }
+  return [
+    flowState.summary,
+    `Progress: ${flowState.completed_count}/${flowState.total_count}`,
+  ].filter((line) => line.trim().length > 0);
+};
+
 const DROP_SECTION_HEADINGS = new Set([
   "INFO",
   "ACTION LOG",
@@ -464,6 +476,7 @@ export const renderFrameToCompactText = (frame: TextSnapshotPayload | null): str
   }
   appendSection(lines, "Notice", (frame.notices ?? []).map((line) => line.trim()).filter(Boolean));
   appendSection(lines, "Hotspots", hotspotLines(frame.map));
+  appendSection(lines, "Flow", flowStateLines(frame.flow_state));
 
   return lines.length ? lines.join("\n") : "(empty frame)";
 };

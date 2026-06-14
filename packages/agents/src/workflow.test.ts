@@ -1,4 +1,4 @@
-import { createPokemonCrystalMastra, createPokemonCrystalWorkflow } from "./workflow";
+import { createPokemonCrystalMastra, createPokemonCrystalWorkflow } from "./workflow.js";
 
 describe("workflow factory", () => {
   it("creates the workflow and registers it on a Mastra instance", () => {

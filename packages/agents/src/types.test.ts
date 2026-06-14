@@ -1,4 +1,4 @@
-import { statusSchema } from "./types";
+import { statusSchema } from "./types.js";
 
 describe("status schema", () => {
   it("parses the richer krabbyclaw status guidance fields", () => {

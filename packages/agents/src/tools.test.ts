@@ -1,4 +1,4 @@
-import { createPlayerTools } from "./tools";
+import { createPlayerTools } from "./tools.js";
 
 describe("player tool selection", () => {
   it("keeps only the small local-model gameplay surface in compact mode", async () => {

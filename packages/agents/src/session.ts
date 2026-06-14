@@ -26,7 +26,7 @@ import {
 
 type McpTextPart = { type: "text"; text: string };
 type McpImagePart = { type: "image"; data: string; mimeType?: string; mime_type?: string };
-type McpToolResult = { content?: Array<McpTextPart | McpImagePart> };
+export type McpToolResult = { content?: Array<McpTextPart | McpImagePart> };
 type KrabbyClawToolset = Record<string, Tool<any, any, any, any>>;
 type KrabbyClawNamespacedTools = Record<string, Tool<any, any, any, any>>;
 type DirectMcpClient = {

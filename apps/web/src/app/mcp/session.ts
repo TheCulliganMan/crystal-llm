@@ -19,6 +19,7 @@ import type {
   McpMeta,
   TextSnapshotPayload,
 } from "./text-render";
+import type { McpFlowStateSnapshot } from "./flow-state";
 import { normalizeSessionId } from "./session-guards";
 import { PRIMARY_MCP_SESSION_ID } from "./session-id";
 import { encodeSurfaceToPng } from "./image-encoding";
@@ -394,6 +395,7 @@ export type McpStatusSnapshot = {
   coords?: { x: number; y: number };
   map?: string;
   map_details?: McpMapInfoSnapshot;
+  flow_state?: McpFlowStateSnapshot | null;
   location_name?: string;
   map_id?: string;
   badges_count?: number;

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { z } from "zod";
 
 import {
   bootstrapSession,
@@ -10,7 +11,8 @@ import {
   parseFirstJsonText,
   parseObservation,
   prepareVisibleActionToolInput,
-} from "./session";
+  type McpToolResult,
+} from "./session.js";
 
 describe("session helpers", () => {
   const originalSessionDir = process.env.POKECRYSTAL_AGENT_SESSION_DIR;
@@ -38,14 +40,14 @@ describe("session helpers", () => {
   });
 
   it("extracts text parts and parses json payloads", () => {
-    const result = {
+    const result: McpToolResult = {
       content: [
         { type: "text", text: '{"mode":"overworld","map":"PlayersHouse2F","mapId":"24:7","coords":[3,3],"facing":"down","badges":0,"canMove":true,"partyCount":0,"flowSummary":"x","flowNextGoal":"Starter","flowCompletionTarget":"Beat Mt. Silver"}' },
       ],
     };
 
     expect(extractTextParts(result)).toHaveLength(1);
-    expect(parseFirstJsonText(result, value => value)).toMatchObject({
+    expect(parseFirstJsonText(result, (value: unknown) => value)).toMatchObject({
       mode: "overworld",
       map: "PlayersHouse2F",
     });
@@ -102,11 +104,14 @@ describe("session helpers", () => {
     const tools = await session.listPlayerTools();
     expect(tools.wait).toBeUndefined();
 
-    expect(tools.press.inputSchema.safeParse({ button: " A ", reason: "Confirm the current prompt." })).toMatchObject({
+    const pressSchema = tools.press.inputSchema as z.ZodTypeAny;
+    const holdButtonSchema = tools.hold_button.inputSchema as z.ZodTypeAny;
+
+    expect(pressSchema.safeParse({ button: " A ", reason: "Confirm the current prompt." })).toMatchObject({
       success: true,
       data: { button: "a" },
     });
-    expect(tools.hold_button.inputSchema.safeParse({
+    expect(holdButtonSchema.safeParse({
       button: " Select ",
       frames: 2,
       reason: "Open select-bound action.",

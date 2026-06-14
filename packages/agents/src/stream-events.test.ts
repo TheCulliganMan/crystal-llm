@@ -2,7 +2,7 @@ import {
   agentStreamEventFromChunk,
   emitAgentMcpCall,
   emitAgentStreamEvent,
-} from "./stream-events";
+} from "./stream-events.js";
 
 describe("agent stream events", () => {
   it("maps Mastra text and reasoning chunks to TUI stream events", () => {

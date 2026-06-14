@@ -9,12 +9,12 @@
   "packageManager": "npm@11.3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/pokecrystal-python.git"
+    "url": "git+https://github.com/TheCulliganMan/crystal-llm.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/pokecrystal-python/issues"
+    "url": "https://github.com/TheCulliganMan/crystal-llm/issues"
   },
-  "homepage": "https://github.com/OWNER/pokecrystal-python#readme",
+  "homepage": "https://github.com/TheCulliganMan/crystal-llm#readme",
   "publishConfig": {
     "access": "public"
   },

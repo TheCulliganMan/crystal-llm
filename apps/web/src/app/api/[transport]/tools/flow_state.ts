@@ -25,7 +25,7 @@ export const flowStateHandler = async (
   return withRequestIdentity(extra, async () => {
     const resolvedSessionId = resolveSessionId(extra);
     const session = await loadSession(resolvedSessionId, extra);
-    const flowState = await session.flowState();
+    const flowState = session.observePayload()?.flow_state ?? null;
     normalizePayloadOptions({
       format: input.format,
       detail: input.detail,
