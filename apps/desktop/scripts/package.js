@@ -93,9 +93,16 @@ const ensureBuilderArtifacts = () => {
     throw new Error(`Zero Native packaging completed without creating ${DESKTOP_PACKAGE_DIR}.`);
   }
 
-  const entries = fs.readdirSync(DESKTOP_PACKAGE_DIR);
-  if (entries.length === 0) {
-    throw new Error(`Zero Native packaging completed without creating any artifacts in ${DESKTOP_PACKAGE_DIR}.`);
+  const expectedBundleFiles = [
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Info.plist"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw-desktop"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "index.html"),
+  ];
+
+  for (const expectedFile of expectedBundleFiles) {
+    if (!fs.existsSync(expectedFile)) {
+      throw new Error(`Zero Native packaging completed without creating ${expectedFile}.`);
+    }
   }
 };
 

@@ -5,7 +5,7 @@ Zero Native desktop host for the PokeCrystal web runtime.
 ## Status
 - This workspace is private and is not intended for npm publication.
 - The native shell is Zero Native. It loads the existing `apps/web` `/desktop` route.
-- The web runtime still builds as a Next standalone server because the app uses server routes.
+- The packaged app loads the static `/desktop` output through `zero://app`.
 
 ## Prerequisites
 - Run commands from the repository root or this workspace with root dependencies installed.
@@ -15,13 +15,13 @@ Zero Native desktop host for the PokeCrystal web runtime.
 ## Commands
 - `npm run dev`: start the web workspace in development mode and open `/desktop` inside the Zero Native shell.
 - `npm run build`: generate desktop icons, build the dedicated `.next-desktop` web output, stage desktop resources, and compile the Zero Native binary.
-- `npm run package`: package the Zero Native app into `apps/desktop/dist/package`.
+- `npm run package`: package the Zero Native app into `apps/desktop/dist/KrabbyClaw Desktop.app`.
 - `npm run test`: run Zero Native Zig tests.
 - `npm run clean`: remove generated desktop build output.
 
 ## Packaging Notes
 - Desktop web resources are staged in `apps/desktop/dist/resources`.
-- The staged resources include the Next standalone server under `web-standalone`.
+- The staged resources include `index.html`, `_next/static`, filtered public assets, and the app icon.
 - `KRABBY_DESKTOP_URL` can override the desktop target during development-style runs.
 - The `/desktop` route stays local-first for save behavior, even if Supabase environment variables are present.
 
