@@ -32,7 +32,7 @@ Do not inspect ROM/source files, map/event files, save internals, emulator memor
 - Route memory and live map context beat inferred generic lessons. In Cherrygrove, the live goal is Mr. Pokemon + Mystery Egg, not stall recovery.
 - In Cherrygrove, do not repeatedly push north after it fails. Use visible town context, move west through town toward the Route 30 approach, interact with NPCs when useful, and keep pursuing progress.
 - If a route is not visible in the current viewport, say that. Do not overclaim route impossibility.
-- Prefer roads/floors at low HP; use grass deliberately when training or when no route avoids it.
+- Prefer roads/floors at low HP only when they actually reach the goal. If grass is the only visible route to recovery, town, supplies, a Pokemon Center, a gate, or the current objective, cross the grass anyway and handle any encounter from the live battle state.
 
 ## Subgoal Completion Tracking
 
@@ -52,15 +52,19 @@ NPCs and story hints outrank generic navigation guesses. When a story character 
 
 Experience matters. The team has been underleveled, so battle posture should be more gung ho than conservative. Do not avoid all wild battles by default; ordinary wild encounters are often useful training while moving toward the story goal.
 
-Party development matters. Do not level only one Pokemon. Rotate safe EXP, change the lead, and switch train weaker, new, HM-utility, or type-coverage teammates so the usable party stays reasonably even for the area. Use the strongest Pokemon as a safety valve for dangerous fights, not as the default recipient for every routine encounter.
+Party development matters during active training blocks. Do not level only one Pokemon. Rotate safe EXP and change the lead when it is efficient. Switch training is optional and situational; do not let it consume runs that should be used for recovery, supplies, gym attempts, route progress, or story progress. Use the strongest Pokemon as a safety valve for dangerous fights, not as the default recipient for every routine encounter.
 
 Catching Pokemon is useful main-story preparation when it is safe and resources allow it. Use a catch 'em all posture: try to catch new species, reasonable dupes with useful roles, and Pokemon that add party depth, HM utility, type coverage, or backup strength without derailing the current flow goal. When visiting towns, use the mart more proactively if money and bag space allow; buy more Potions and Poke Balls or better balls than a bare-minimum survival plan would. Preserve enough money for emergency survival, but prefer leaving town with enough Balls for multiple capture attempts and enough Potions to extend routes without constant Pokemon Center retreats. When the game offers a nickname prompt after receiving or catching a Pokemon, prefer giving that Pokemon a short nickname unless doing so would block urgent progress.
 
 - Fight reasonable wild Pokemon when the active Pokemon has comfortable HP and usable PP.
+- If live party evidence shows the team is underleveled for the current obstacle, actively seek experience instead of treating training as incidental. Prefer reachable trainer fights, then efficient nearby wild grass or other encounter areas, and keep going while fights produce useful EXP without derailing urgent recovery or supplies.
+- Training still matters during travel. Fight ordinary wild Pokemon when the active battler or a reasonable switch can win without burning the run down. Do not flee just because HP is imperfect, the matchup is mildly bad, or the fight takes a few turns.
+- During recovery, supply runs, gym routing, or story progress, wild battles are optional hazards when they become a bad trade. Run when live evidence says the fight is likely to wipe the party, severely drain PP/items, has no good available matchup, or is delaying the current objective. If Run fails, choose the next live-safe action: try Run again, switch, use an item, attack, or accept whiteout only if that is the best recovery path.
 - Seek wild EXP deliberately when the party is behind nearby trainers, recent battles were close, or the next gym/story fight looks risky.
 - Build backups when the area is safe enough; prefer giving routine KOs to the lagging usable teammates and reserve the carry for danger.
 - Prefer continuing, switching, or using a modest item over walking back to a Pokemon Center just to top off HP.
 - Do not visit a Pokemon Center by routine. Go back when there is a concrete survival reason: red HP, repeated near-KOs, badly depleted PP, dangerous status for travel, multiple fainted Pokemon, or an important upcoming fight.
+- Do not require a Pokemon Center before entering grass if the current route to the Pokemon Center, shop, town, gate, or objective itself crosses grass. Move through the grass and accept the encounter risk.
 - Run, heal, or retreat when HP is genuinely unsafe, not merely imperfect.
 - If Ryan explicitly allows whiteouts for training, EXP preservation can make a reset acceptable.
 - Do not chain red-HP encounters without a deliberate heal/reset/whiteout decision.

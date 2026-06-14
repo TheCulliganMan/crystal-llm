@@ -17,8 +17,8 @@ const DEFAULT_IMAGE_DIR = path.join(CODEX_HOME, 'pokecrystal/mcp-images/stock-to
 function usage() {
   console.error(`Usage:
   poke.mjs status
-  poke.mjs observe [--grid] [--no-image] [--save-images <dir>]
-  poke.mjs route [--no-image] [--tiles] [--save-images <dir>] [--cell-size 8]
+  poke.mjs observe [--grid] [--raw] [--image|--save-images <dir>] [--no-tui]
+  poke.mjs route [--image] [--tiles] [--save-images <dir>] [--cell-size 8]
   poke.mjs proof [label]
   poke.mjs context
   poke.mjs move <up|down|left|right> [--steps 1]
@@ -76,6 +76,64 @@ function truncate(value, max = 900) {
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
+function compactHmCapabilityLedger(ledger) {
+  if (!ledger || typeof ledger !== 'object') return null;
+  return {
+    lastUpdated: ledger.lastUpdated || null,
+    proof: truncate(ledger.proof, 700),
+    fieldMoves: ledger.fieldMoves && typeof ledger.fieldMoves === 'object'
+      ? Object.fromEntries(Object.entries(ledger.fieldMoves).map(([move, entry]) => [
+          move,
+          entry && typeof entry === 'object'
+            ? {
+                pokemon: entry.pokemon || null,
+                learned: entry.learned ?? null,
+                usable: entry.usable ?? null,
+                proof: truncate(entry.proof, 350),
+                lastVerified: entry.lastVerified || null,
+              }
+            : entry,
+        ]))
+      : {},
+    unknownOrNeeded: Array.isArray(ledger.unknownOrNeeded) ? ledger.unknownOrNeeded.slice(0, 12) : [],
+    activeDirective: truncate(ledger.activeDirective, 700),
+  };
+}
+
+function compactObjectiveReconciliation(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    lastUpdated: entry.lastUpdated || null,
+    flowObjective: truncate(entry.flowObjective, 300),
+    memoryBlocker: truncate(entry.memoryBlocker, 700),
+    requiredPrerequisite: truncate(entry.requiredPrerequisite, 500),
+    liveEvidence: truncate(entry.liveEvidence, 700),
+    nextProofStep: truncate(entry.nextProofStep, 700),
+  };
+}
+
+function compactLedger(ledger) {
+  if (!ledger || typeof ledger !== 'object') return null;
+  const compactEntries = (entries, max = 6) =>
+    Array.isArray(entries)
+      ? entries.slice(0, max).map((entry) => {
+          if (!entry || typeof entry !== 'object') return entry;
+          return Object.fromEntries(
+            Object.entries(entry).map(([key, value]) => [
+              key,
+              typeof value === 'string' ? truncate(value, 500) : value,
+            ])
+          );
+        })
+      : [];
+  return {
+    lastUpdated: ledger.lastUpdated || null,
+    currentObjective: truncate(ledger.currentObjective, 500),
+    checked: compactEntries(ledger.checked),
+    uncheckedLeads: compactEntries(ledger.uncheckedLeads),
+  };
+}
+
 async function callMcp(tool, args = {}, saveImages = null) {
   return callMcpTool(tool, args || {}, { repo: ROOT, saveImages });
 }
@@ -128,12 +186,13 @@ function compactStatus(status) {
   };
 }
 
-function compactObserve(result, { grid = false } = {}) {
+function compactObserve(result, { grid = false, tui = true } = {}) {
   const object = firstObject(result) || {};
   const snapshot = result.snapshot || object;
   const view = snapshot.view || {};
   const map = snapshot.map || {};
   const ctx = snapshot.ctx || {};
+  const textBlocks = contentTexts(result).filter((text) => typeof text === 'string');
   const hotspots = Array.isArray(map.hs) ? map.hs.slice(0, 10).map((hotspot) => ({
     type: hotspot.t,
     label: hotspot.l,
@@ -151,6 +210,25 @@ function compactObserve(result, { grid = false } = {}) {
     imagePaths: result.imagePaths || [],
   };
   if (grid && Array.isArray(view.viewport)) out.viewport = view.viewport;
+  if (tui) {
+    const tuiText = textBlocks[0] || snapshot.tui || object.tui || snapshot.text || object.text || null;
+    if (tuiText) out.tui = tuiText;
+    if (Array.isArray(view.viewport) && view.viewport.length) out.viewport = view.viewport;
+    if (Array.isArray(view.info) && view.info.length) out.info = view.info;
+    if (view.menu) out.menu = view.menu;
+    const textKeys = [
+      'viewportLines',
+      'infoLines',
+      'menuLines',
+      'promptLines',
+      'dialogueLines',
+      'controlLines',
+    ];
+    for (const key of textKeys) {
+      const value = snapshot[key] ?? object[key] ?? view[key];
+      if (Array.isArray(value) && value.length) out[key] = value;
+    }
+  }
   return out;
 }
 
@@ -195,6 +273,10 @@ function compactRouteContext(status) {
     status: compactStatus(status),
     nextPrompt: truncate(state.nextPrompt, 900),
     currentHypothesis: truncate(state.currentHypothesis, 700),
+    objectiveReconciliation: compactObjectiveReconciliation(state.objectiveReconciliation),
+    npcLedger: compactLedger(state.npcLedger),
+    buildingLedger: compactLedger(state.buildingLedger),
+    hmCapabilityLedger: compactHmCapabilityLedger(state.hmCapabilityLedger),
     routeMemory: memory ? {
       lastUpdated: memory.lastUpdated || null,
       note: truncate(memory.note, 500),
@@ -219,20 +301,28 @@ async function main() {
   }
 
   if (cmd === 'observe') {
-    const saveImages = flags['no-image'] ? null : (flags['save-images'] || DEFAULT_IMAGE_DIR);
+    const includeImage = Boolean(flags.image || flags['save-images']);
+    const includeTui = !flags['no-tui'];
+    const saveImages = includeImage ? (flags['save-images'] || DEFAULT_IMAGE_DIR) : null;
     const result = await callMcp('observe', {
-      include_image: !flags['no-image'],
+      include_image: includeImage,
+      include_snapshot_text: includeTui,
+      include_tui_state: includeTui,
       image_scale: 2,
       advance_frames: 1,
       detail: 'compact',
       format: 'json',
     }, saveImages);
-    print(compactObserve(result, { grid: Boolean(flags.grid) }));
+    if (flags.raw) {
+      print(result);
+      return;
+    }
+    print(compactObserve(result, { grid: Boolean(flags.grid), tui: includeTui }));
     return;
   }
 
   if (cmd === 'route') {
-    const includeImage = !flags['no-image'];
+    const includeImage = Boolean(flags.image || flags['save-images']);
     const saveImages = includeImage ? (flags['save-images'] || path.join(DEFAULT_IMAGE_DIR, 'route-render')) : null;
     const result = await callMcp('route_render', {
       include_image: includeImage,
