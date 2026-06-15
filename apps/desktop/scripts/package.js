@@ -335,6 +335,10 @@ const ensureBuilderArtifacts = () => {
   const expectedBundleFiles = [
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Info.plist"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw-desktop"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", PACKAGED_NATIVE_BINARY_NAME),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop-launcher.mjs"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "node", "bin", "node"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "web-standalone", "apps", "web", "server.js"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop", "index.html"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "assets", "data", "pokegear_landmarks.json"),
   ];
@@ -360,6 +364,7 @@ const packageDesktopApp = () => {
   const zeroNativeCliPath = resolveZeroNativeCliPath();
   fs.rmSync(DESKTOP_PACKAGE_DIR, { recursive: true, force: true });
   fs.mkdirSync(DESKTOP_PACKAGE_DIR, { recursive: true });
+  writeAppExecutableLauncher();
 
   runSync(process.execPath, [
     zeroNativeCliPath,
@@ -369,7 +374,7 @@ const packageDesktopApp = () => {
     "--manifest",
     path.join(DESKTOP_DIR, "app.zon"),
     "--binary",
-    NATIVE_BINARY,
+    LAUNCHER_BINARY,
     "--assets",
     DESKTOP_RESOURCES_DIR,
     "--output",
@@ -380,6 +385,10 @@ const packageDesktopApp = () => {
     cwd: DESKTOP_DIR,
     env: withLocalBinPath(),
   });
+
+  const packagedNativeBinary = path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", PACKAGED_NATIVE_BINARY_NAME);
+  fs.copyFileSync(NATIVE_BINARY, packagedNativeBinary);
+  fs.chmodSync(packagedNativeBinary, 0o755);
 
   ensureBuilderArtifacts();
 };
