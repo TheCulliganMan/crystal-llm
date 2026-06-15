@@ -15,7 +15,7 @@ Zero Native desktop host for the PokeCrystal web runtime.
 ## Commands
 - `npm run dev`: start the web workspace in development mode and open `/desktop` inside the Zero Native shell.
 - `npm run build`: generate desktop icons, build the dedicated `.next-desktop` web output, stage desktop resources, and compile the Zero Native binary.
-- `npm run package`: package the Zero Native app into `apps/desktop/dist/KrabbyClaw Desktop.app`.
+- `npm run package`: package the Zero Native app into `apps/desktop/dist/KrabbyClaw.app`.
 - `npm run test`: run Zero Native Zig tests.
 - `npm run clean`: remove generated desktop build output.
 

@@ -1,7 +1,7 @@
 .{
     .id = "com.pokecrystal.desktop",
-    .name = "krabbyclaw-desktop",
-    .display_name = "KrabbyClaw Desktop",
+    .name = "krabbyclaw",
+    .display_name = "KrabbyClaw",
     .version = "1.0.0",
     .icons = .{ "assets/icon.icns" },
     .platforms = .{ "macos", "linux" },
@@ -27,6 +27,6 @@
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
     .windows = .{
-        .{ .label = "main", .title = "KrabbyClaw Desktop", .width = 1280, .height = 720, .restore_state = true },
+        .{ .label = "main", .title = "KrabbyClaw", .width = 1280, .height = 720, .restore_state = true },
     },
 }

@@ -10,7 +10,7 @@ const App = struct {
     fn app(self: *@This()) zero_native.App {
         return .{
             .context = self,
-            .name = "krabbyclaw-desktop",
+            .name = "krabbyclaw",
             .source = zero_native.WebViewSource.assets(.{
                 .root_path = "dist/resources",
                 .entry = "desktop/index.html",
@@ -48,8 +48,8 @@ const dev_origins = [_][]const u8{
 pub fn main(init: std.process.Init) !void {
     var app = App{ .env_map = init.environ_map };
     try runner.runWithOptions(app.app(), .{
-        .app_name = "KrabbyClaw Desktop",
-        .window_title = "KrabbyClaw Desktop",
+        .app_name = "KrabbyClaw",
+        .window_title = "KrabbyClaw",
         .bundle_id = "com.pokecrystal.desktop",
         .icon_path = "assets/icon.icns",
         .security = .{
@@ -59,5 +59,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "app name is configured" {
-    try std.testing.expectEqualStrings("krabbyclaw-desktop", "krabbyclaw-desktop");
+    try std.testing.expectEqualStrings("krabbyclaw", "krabbyclaw");
 }

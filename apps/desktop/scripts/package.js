@@ -24,9 +24,9 @@ if (location.pathname !== "/desktop") {
   history.replaceState(null, "", "/desktop" + location.search + location.hash);
 }
 </script>`;
-const NATIVE_BINARY = path.join(DESKTOP_DIR, "zig-out", "bin", process.platform === "win32" ? "krabbyclaw-desktop.exe" : "krabbyclaw-desktop");
+const NATIVE_BINARY = path.join(DESKTOP_DIR, "zig-out", "bin", process.platform === "win32" ? "krabbyclaw.exe" : "krabbyclaw");
 const PACKAGED_NATIVE_BINARY_NAME = process.platform === "win32" ? "krabbyclaw-native.exe" : "krabbyclaw-native";
-const LAUNCHER_BINARY = path.join(DESKTOP_DIR, "dist", "bin", process.platform === "win32" ? "krabbyclaw-desktop.cmd" : "krabbyclaw-desktop");
+const LAUNCHER_BINARY = path.join(DESKTOP_DIR, "dist", "bin", process.platform === "win32" ? "krabbyclaw.cmd" : "krabbyclaw");
 const NODE_VERSION = "24.1.0";
 const NODE_PLATFORM = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : null;
 const NODE_ARCH = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64" : null;
@@ -348,7 +348,7 @@ const ensureBuilderArtifacts = () => {
 
   const expectedBundleFiles = [
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Info.plist"),
-    path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw-desktop"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", PACKAGED_NATIVE_BINARY_NAME),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop-launcher.mjs"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "node", "bin", "node"),

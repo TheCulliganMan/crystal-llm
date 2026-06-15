@@ -11,7 +11,7 @@ const DESKTOP_DIR = path.resolve(__dirname, "..");
 const DESKTOP_ASSETS_DIR = path.join(DESKTOP_DIR, "assets");
 const DESKTOP_BUILD_DIST_DIR = ".next-desktop";
 const DESKTOP_RESOURCES_DIR = path.join(DESKTOP_DIR, "dist", "resources");
-const DESKTOP_PACKAGE_DIR = path.join(DESKTOP_DIR, "dist", "KrabbyClaw Desktop.app");
+const DESKTOP_PACKAGE_DIR = path.join(DESKTOP_DIR, "dist", "KrabbyClaw.app");
 const SESSION_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
 const resolveInstalledPackageJsonPath = (specifier, resolver = require.resolve) =>
