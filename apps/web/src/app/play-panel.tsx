@@ -1957,7 +1957,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   newGame={shouldStartFromTitleScreen}
                   preloadMode="auto"
                   rendererMode={rendererMode}
-                  runtimeMode="local"
+                  runtimeMode="server"
                   canvasClassName="playui-screen-canvas block h-auto w-full bg-black outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   canvasStyle={{ maxWidth: "100%", maxHeight: "100%" }}
                   onInputStateChange={handleInputStateChange}
@@ -1982,7 +1982,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           <aside
             id="desktop-sidebar"
             data-testid="desktop-sidebar"
-            className="flex w-[22rem] max-w-[34vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
+            className="flex w-[28rem] max-w-[42vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
           >
             <div className="border-b border-white/10 p-4">
               <div className="mb-3 flex items-center justify-between gap-2">

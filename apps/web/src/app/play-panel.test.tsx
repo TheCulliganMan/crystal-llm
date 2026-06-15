@@ -353,8 +353,10 @@ describe("PlayPanel controls dialog", () => {
     expect(findButtonByLabel(container, "Settings")).toBeTruthy();
     expect(findButtonByLabel(container, "Saves")).toBeTruthy();
     expect(findButtonByLabel(container, "Debug")).toBeUndefined();
+    expect(container.querySelector('[data-testid="desktop-sidebar"]')?.className).toContain("w-[28rem]");
     expect(container.querySelector('[data-testid="settings-panel"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="multiplayer-menu"]')).toBeNull();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({ runtimeMode: "server" });
 
     await act(async () => {
       root.unmount();
