@@ -517,6 +517,12 @@ describe("PlayPanel controls dialog", () => {
     expect(findButtonByLabel(container, "Show Sidebar")).toBeTruthy();
 
     const initialShowButton = findButtonByLabel(container, "Show Sidebar");
+    const canvasBeforeShow = container.querySelector('[data-testid="game-canvas"]') as HTMLCanvasElement | null;
+    canvasBeforeShow?.focus();
+    expect(initialShowButton?.tabIndex).toBe(-1);
+    const initialPointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(initialShowButton?.dispatchEvent(initialPointerDown)).toBe(false);
+    expect(document.activeElement).toBe(canvasBeforeShow);
     await act(async () => {
       initialShowButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
@@ -529,6 +535,9 @@ describe("PlayPanel controls dialog", () => {
 
     const hideButton = container.querySelector('button[aria-label="Hide sidebar"]') as HTMLButtonElement | null;
     expect(hideButton).toBeTruthy();
+    expect(hideButton?.tabIndex).toBe(-1);
+    const hidePointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(hideButton?.dispatchEvent(hidePointerDown)).toBe(false);
     await act(async () => {
       hideButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
@@ -540,6 +549,9 @@ describe("PlayPanel controls dialog", () => {
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("false");
 
     const showButton = findButtonByLabel(container, "Show Sidebar");
+    expect(showButton?.tabIndex).toBe(-1);
+    const showPointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(showButton?.dispatchEvent(showPointerDown)).toBe(false);
     await act(async () => {
       showButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();

@@ -595,6 +595,20 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     }
     focusDesktopGameCanvas();
   }, [focusDesktopGameCanvas]);
+  const preventDesktopControlFocus = useCallback((
+    event: React.MouseEvent<HTMLButtonElement> | React.PointerEvent<HTMLButtonElement>
+  ) => {
+    event.preventDefault();
+    focusDesktopGameCanvas();
+  }, [focusDesktopGameCanvas]);
+  const showDesktopSidebar = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    applyDesktopSidebarVisible(true);
+  }, [applyDesktopSidebarVisible]);
+  const hideDesktopSidebar = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    applyDesktopSidebarVisible(false);
+  }, [applyDesktopSidebarVisible]);
   const refreshOnlineCounts = useCallback(() => {
     const mp = useMultiplayerStore.getState();
     const frontendCount = Math.max(0, Math.trunc(frontendPlayerCountRef.current));
@@ -1960,7 +1974,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
             <button
               type="button"
               className="btn btn-sm btn-outline absolute right-4 top-4 z-10 gap-2 rounded border-white/25 bg-black/70 text-white normal-case shadow hover:bg-white/10"
-              onClick={() => applyDesktopSidebarVisible(true)}
+              tabIndex={-1}
+              onPointerDown={preventDesktopControlFocus}
+              onMouseDown={preventDesktopControlFocus}
+              onClick={showDesktopSidebar}
               aria-label="Show sidebar"
               aria-expanded={false}
               aria-controls="desktop-sidebar"
@@ -2038,7 +2055,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   <button
                     type="button"
                     className="btn btn-square btn-sm btn-ghost rounded text-white/75 hover:bg-white/10 hover:text-white"
-                    onClick={() => applyDesktopSidebarVisible(false)}
+                    tabIndex={-1}
+                    onPointerDown={preventDesktopControlFocus}
+                    onMouseDown={preventDesktopControlFocus}
+                    onClick={hideDesktopSidebar}
                     aria-label="Hide sidebar"
                     aria-expanded={true}
                     aria-controls="desktop-sidebar"
