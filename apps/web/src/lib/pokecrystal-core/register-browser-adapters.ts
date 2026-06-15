@@ -5,8 +5,13 @@ import {
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 
+type BrowserLocation = Pick<Location, "pathname" | "protocol">;
+
+export const isDesktopBrowserLocation = (location: BrowserLocation): boolean =>
+  location.pathname.startsWith("/desktop") || location.protocol === "zero:";
+
 const isDesktopRoute = (): boolean =>
-  typeof window !== "undefined" && window.location.pathname.startsWith("/desktop");
+  typeof window !== "undefined" && isDesktopBrowserLocation(window.location);
 
 setBrowserCloudSaveAdapter({
   isConfigured: () => isSupabaseConfigured() && !isDesktopRoute(),

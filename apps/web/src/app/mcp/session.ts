@@ -1715,15 +1715,18 @@ class McpGameSession {
   private lastActionResult: ActionResult | null = null;
   private ready = false;
   private interactiveMode = false;
+  private instantMode: boolean;
 
   constructor(options?: {
     sessionId?: string;
     maxActionsPerCall?: number;
     maxFramesPerCall?: number;
+    instantMode?: boolean;
   }) {
     this.sessionId = options?.sessionId ?? PRIMARY_MCP_SESSION_ID;
     const settings = getSettings();
-    const instantMode = DEFAULT_MCP_INSTANT_MODE;
+    const instantMode = options?.instantMode ?? DEFAULT_MCP_INSTANT_MODE;
+    this.instantMode = instantMode;
     const renderUi = new DomCanvasUI(160, 144, 1);
     const textUi = new TextUI(160, 144, 1, null, true, null, true);
     const composite = new CompositeUI(
@@ -1744,7 +1747,14 @@ class McpGameSession {
   }
 
   private isInstantMode(): boolean {
-    return DEFAULT_MCP_INSTANT_MODE;
+    return this.instantMode;
+  }
+
+  public setInstantMode(enabled: boolean): void {
+    this.instantMode = enabled;
+    const settings = getSettings();
+    this.holdFrames = enabled ? 1 : settings.mcpHoldFrames;
+    this.applyInputModeToGameState(this.game?.getGameState?.());
   }
 
   private applyInputModeToGameState(
@@ -1772,9 +1782,8 @@ class McpGameSession {
 
   public setInteractiveMode(interactive: boolean): void {
     this.interactiveMode = interactive;
-    // Interactive CLI play should behave like distinct button taps, not the longer
-    // MCP automation holds that can make battle menus double-handle a confirm.
-    this.holdFrames = 1;
+    const settings = getSettings();
+    this.holdFrames = this.isInstantMode() ? 1 : settings.mcpHoldFrames;
     this.applyInputModeToGameState(this.game?.getGameState?.());
   }
 
@@ -3132,6 +3141,10 @@ class McpGameSession {
     });
   }
 
+  getAudioPlaybackSnapshot(): AudioPlaybackSnapshot | undefined {
+    return this.game?.getAudioPlaybackSnapshot?.();
+  }
+
   async recentEvents(limit = 10): Promise<McpRecentEventsSnapshot> {
     await this.ensureReady();
     const now = Date.now();
@@ -3859,6 +3872,23 @@ class McpGameSession {
     });
   }
 
+  async postInputEvent(input: {
+    key: string;
+    direction?: string | null;
+    button?: string | null;
+    isPress: boolean;
+  }): Promise<void> {
+    await this.ensureReady();
+    const event = new gameEngine.event.Event(input.isPress ? gameEngine.KEYDOWN : gameEngine.KEYUP, {
+      key: input.key,
+      code: input.key,
+      direction: input.direction ?? null,
+      button: input.button ?? null,
+      is_press: input.isPress,
+    });
+    this.getGame().postEvent(event);
+  }
+
   private scheduleTextInput(text: string): void {
     const key = /^[a-z]$/i.test(text) ? `Key${text.toUpperCase()}` : text;
     this.scheduledEvents.push({
@@ -3977,7 +4007,7 @@ class McpGameSession {
       );
     }
     this.game = await this.gamePromise;
-    this.holdFrames = 1;
+    this.holdFrames = this.isInstantMode() ? 1 : settings.mcpHoldFrames;
     const identityProfile = await loadIdentityPlayProfile(identityContext?.playerId);
     const gameState = (
       this.game as {

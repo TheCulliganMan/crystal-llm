@@ -1476,6 +1476,10 @@ export class Game {
     this.audioEngine.setMusicMutedByController(muted);
   }
 
+  public playMusic(name: string, role = "desktop-mirror"): void {
+    this.audioEngine.playMusic(name, role);
+  }
+
   public getAudioPlaybackSnapshot(): AudioPlaybackSnapshot {
     return this.audioEngine.getPlaybackSnapshot();
   }

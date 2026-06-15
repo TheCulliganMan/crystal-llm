@@ -20,22 +20,25 @@ jest.mock("@pokecrystal/core/core/mcp-identity-context.server", () => ({
 
 const mockEnsureReady = jest.fn().mockResolvedValue(undefined);
 const mockSetInteractiveMode = jest.fn();
+const mockSetInstantMode = jest.fn();
 const mockGetMcpSession = jest.fn(() => ({
   ensureReady: mockEnsureReady,
   setInteractiveMode: mockSetInteractiveMode,
+  setInstantMode: mockSetInstantMode,
 }));
 
 jest.mock("@/app/mcp/session", () => ({
   getMcpSession: (...args: unknown[]) => mockGetMcpSession(...args),
 }));
 
-import { loadSession, resolveSessionMode, runToolWithTelemetry } from "./common";
+import { loadSession, resolveInstantMode, resolveSessionMode, runToolWithTelemetry } from "./common";
 
 describe("runToolWithTelemetry", () => {
   beforeEach(() => {
     mockReportArenaEvent.mockReset();
     mockEnsureReady.mockClear();
     mockSetInteractiveMode.mockClear();
+    mockSetInstantMode.mockClear();
     mockGetMcpSession.mockClear();
   });
 
@@ -152,14 +155,35 @@ describe("runToolWithTelemetry", () => {
     ).toBe("interactive");
   });
 
+  it("parses instant mode headers for desktop playback calls", () => {
+    expect(
+      resolveInstantMode({
+        requestInfo: {
+          headers: { "x-pokecrystal-instant-mode": "0" },
+        },
+      })
+    ).toBe(false);
+    expect(
+      resolveInstantMode({
+        requestInfo: {
+          headers: { "x-mcp-instant-mode": "true" },
+        },
+      })
+    ).toBe(true);
+  });
+
   it("loads sessions in interactive mode when the play header is present", async () => {
     await loadSession("session-play", {
       requestInfo: {
-        headers: { "x-pokecrystal-session-mode": "interactive" },
+        headers: {
+          "x-pokecrystal-session-mode": "interactive",
+          "x-pokecrystal-instant-mode": "0",
+        },
       },
     });
 
     expect(mockGetMcpSession).toHaveBeenCalledWith("session-play");
+    expect(mockSetInstantMode).toHaveBeenCalledWith(false);
     expect(mockSetInteractiveMode).toHaveBeenCalledWith(true);
     expect(mockEnsureReady).toHaveBeenCalledTimes(1);
   });

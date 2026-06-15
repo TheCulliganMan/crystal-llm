@@ -14,11 +14,13 @@ import { faFloppyDisk } from "@fortawesome/free-solid-svg-icons/faFloppyDisk";
 import { faGamepad } from "@fortawesome/free-solid-svg-icons/faGamepad";
 import { faGear } from "@fortawesome/free-solid-svg-icons/faGear";
 import { faPlay } from "@fortawesome/free-solid-svg-icons/faPlay";
+import { faPlug } from "@fortawesome/free-solid-svg-icons/faPlug";
 import { faUsers } from "@fortawesome/free-solid-svg-icons/faUsers";
 import { GameCanvas } from "./game-canvas";
 import { VirtualGamepad } from "./virtual-gamepad";
 import { GuestSavePanel } from "./guest-save-panel";
 import { SettingsPanel } from "./settings-panel";
+import { DesktopMcpPanel } from "./desktop-mcp-panel";
 import { VisualDebugPanel } from "./visual-debug-panel";
 import { KeybindingsEditor } from "./keybindings-editor";
 import type { BrandTheme } from "./settings-panel";
@@ -47,6 +49,7 @@ import {
   getNextRendererMode,
   getRendererModeActionLabel,
 } from "./renderer-mode";
+import { PRIMARY_MCP_SESSION_ID } from "./mcp/session-id";
 import { computeFullscreenCanvasLayout } from "./play-layout";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
@@ -141,7 +144,7 @@ const toPresenceDirection = (value: unknown): "up" | "down" | "left" | "right" =
 };
 
 type ControlTone = "neutral" | "accent" | "ember";
-type UtilityPanelView = "multiplayer" | "settings" | "saves" | "debug";
+type UtilityPanelView = "multiplayer" | "settings" | "mcp" | "saves" | "debug";
 export type PlayPanelProps = {
   variant?: "default" | "desktop";
 };
@@ -233,11 +236,12 @@ const CONTROL_TIPS = [
 const UTILITY_PANEL_OPTIONS: Array<{ view: UtilityPanelView; label: string; icon: IconDefinition }> = [
   { view: "multiplayer", label: "Lobby", icon: faUsers },
   { view: "settings", label: "Settings", icon: faGear },
+  { view: "mcp", label: "MCP", icon: faPlug },
   { view: "saves", label: "Saves", icon: faFloppyDisk },
   { view: "debug", label: "Debug", icon: faBug },
 ];
 const DESKTOP_UTILITY_PANEL_OPTIONS = UTILITY_PANEL_OPTIONS.filter(
-  (option) => option.view !== "multiplayer" && option.view !== "debug"
+  (option) => option.view !== "multiplayer" && option.view !== "debug" && option.view !== "mcp"
 );
 const MODAL_MAX_HEIGHT = "calc(min(100vh, 92vh) - 1.5rem)";
 const MODAL_BODY_MAX_HEIGHT = "calc(100% - 5.5rem)";
@@ -562,6 +566,25 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const supabaseClientRef = useRef(createSupabaseBrowserClient());
   const hydratedSupabaseSettingsRef = useRef(false);
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+  const focusDesktopGameCanvas = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const focus = () => {
+      const container = canvasContainerRef.current;
+      const focusTarget = container?.querySelector("canvas");
+      if (focusTarget instanceof HTMLCanvasElement) {
+        focusTarget.focus({ preventScroll: true });
+      }
+    };
+    focus();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(focus);
+    }
+    window.setTimeout(focus, 0);
+    window.setTimeout(focus, 50);
+    window.setTimeout(focus, 150);
+  }, []);
   const applyDesktopSidebarVisible = useCallback((visible: boolean) => {
     setDesktopSidebarVisible(visible);
     if (typeof window === "undefined") {
@@ -572,7 +595,28 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     } catch {
       // Ignore storage failures; the in-memory state is enough for this session.
     }
-  }, []);
+    focusDesktopGameCanvas();
+  }, [focusDesktopGameCanvas]);
+  const preventDesktopControlFocus = useCallback((
+    event: React.MouseEvent<HTMLButtonElement> | React.PointerEvent<HTMLButtonElement>
+  ) => {
+    event.preventDefault();
+    focusDesktopGameCanvas();
+  }, [focusDesktopGameCanvas]);
+  const showDesktopSidebar = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    applyDesktopSidebarVisible(true);
+  }, [applyDesktopSidebarVisible]);
+  const hideDesktopSidebar = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    applyDesktopSidebarVisible(false);
+  }, [applyDesktopSidebarVisible]);
+  useEffect(() => {
+    if (!isDesktopVariant) {
+      return;
+    }
+    focusDesktopGameCanvas();
+  }, [desktopSidebarVisible, focusDesktopGameCanvas, isDesktopVariant]);
   const refreshOnlineCounts = useCallback(() => {
     const mp = useMultiplayerStore.getState();
     const frontendCount = Math.max(0, Math.trunc(frontendPlayerCountRef.current));
@@ -1008,6 +1052,26 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     postEventRef.current?.(event);
   }, []);
 
+  const toggleSoundEnabled = useCallback(() => {
+    setSoundEnabled((current) => {
+      const next = !current;
+      soundEnabledRef.current = next;
+      gameRef.current?.setAudioMuted(!next);
+      return next;
+    });
+  }, []);
+
+  const toggleInstantModeEnabled = useCallback(() => {
+    setInstantModeEnabled((current) => {
+      const next = !current;
+      const gameState = gameRef.current?.getGameState?.();
+      if (gameState?.wram) {
+        gameState.wram.instant_mode = next;
+      }
+      return next;
+    });
+  }, []);
+
   const handleLoadSave = useCallback(() => {
     if (secureMode && typeof window !== "undefined") {
       try {
@@ -1055,21 +1119,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     requestStart();
   }, [requestStart, secureMode, isDesktopVariant, shouldStartFromTitleScreen, startToken]);
 
-  const applyGender = useCallback((value: PlayerGender) => {
-    playerGenderRef.current = value;
-    setPlayerGender(value);
-    gameRef.current?.setPlayerGender(value);
-  }, []);
-
   const applyName = useCallback((value: string) => {
     playerNameRef.current = value;
     setPlayerName(value);
     gameRef.current?.setPlayerName(value);
-  }, []);
-
-  const applyTimeOfDay = useCallback((value: TimeOfDay) => {
-    setTimeOfDay(value);
-    gameRef.current?.setTimeOfDay(value);
   }, []);
 
   const applyDayOfWeek = useCallback((value: number) => {
@@ -1077,34 +1130,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     gameRef.current?.setDayOfWeek(value);
   }, []);
 
-  const applySoundEnabled = useCallback((enabled: boolean) => {
-    soundEnabledRef.current = enabled;
-    setSoundEnabled(enabled);
-    gameRef.current?.setAudioMuted(!enabled);
-  }, []);
-
-  const applyInstantModeEnabled = useCallback((enabled: boolean) => {
-    setInstantModeEnabled(enabled);
-    const game = gameRef.current;
-    if (game) {
-      game.getGameState().wram.instant_mode = enabled;
-    }
-  }, []);
-
   const applyBrandTheme = useCallback((value: BrandTheme) => {
     setBrandTheme(value);
-  }, []);
-
-  const applySkipToPlayEnabled = useCallback((enabled: boolean) => {
-    setPlayIntroEnabled(!enabled);
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      window.localStorage.setItem(PLAY_INTRO_STORAGE_KEY, String(!enabled));
-    } catch {
-      // ignore
-    }
   }, []);
 
   const toggleRendererMode = useCallback(() => {
@@ -1431,7 +1458,51 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     setUtilityPanelView(view);
     setUtilityPanelOpen(true);
   }, []);
+  const closeUtilityPanel = useCallback(() => {
+    setUtilityPanelOpen(false);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (url.pathname === "/desktop" && url.searchParams.has("panel")) {
+      window.history.replaceState({}, "", "/desktop");
+    }
+  }, []);
   const utilityPanelOptions = isDesktopVariant ? DESKTOP_UTILITY_PANEL_OPTIONS : UTILITY_PANEL_OPTIONS;
+
+  useEffect(() => {
+    if (!isDesktopVariant || typeof window === "undefined") {
+      return;
+    }
+    const panel = new URL(window.location.href).searchParams.get("panel");
+    if (panel === "settings" || panel === "saves" || panel === "mcp") {
+      openUtilityPanel(panel);
+    }
+  }, [isDesktopVariant, openUtilityPanel]);
+
+  useEffect(() => {
+    if (!isDesktopVariant || typeof window === "undefined") {
+      return;
+    }
+    const handleMenuCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{ command?: unknown }>).detail;
+      const command = typeof detail?.command === "string" ? detail.command : "";
+      if (command === "settings") {
+        window.location.assign("/desktop?panel=settings");
+      } else if (command === "saves") {
+        window.location.assign("/desktop?panel=saves");
+      } else if (command === "mcp") {
+        window.location.assign("/desktop?panel=mcp");
+      } else if (command === "copy-mcp-url" && navigator.clipboard) {
+        const url = new URL(`/api/mcp?session_id=${encodeURIComponent(PRIMARY_MCP_SESSION_ID)}`, window.location.origin);
+        void navigator.clipboard.writeText(url.toString());
+      }
+    };
+    window.addEventListener("zero-native:menu-command", handleMenuCommand as EventListener);
+    return () => {
+      window.removeEventListener("zero-native:menu-command", handleMenuCommand as EventListener);
+    };
+  }, [isDesktopVariant, openUtilityPanel]);
 
   useEffect(() => {
     if (isDesktopVariant && (utilityPanelView === "multiplayer" || utilityPanelView === "debug")) {
@@ -1443,6 +1514,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     switch (utilityPanelView) {
       case "multiplayer":
         return "Multiplayer Lobby";
+      case "mcp":
+        return "MCP Streamable HTTP";
       case "saves":
         return "Local Save Snapshots";
       case "debug":
@@ -1617,7 +1690,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           setTimeOfDay(stored.time_of_day);
           soundEnabledRef.current = stored.sound_enabled;
           setSoundEnabled(stored.sound_enabled);
-          setInstantModeEnabled(stored.instant_mode_enabled);
+          const nextInstantMode = isDesktopVariant ? false : stored.instant_mode_enabled;
+          setInstantModeEnabled(nextInstantMode);
           setBrandTheme(stored.brand_theme);
           const game = gameRef.current;
           game?.setPlayerName(nextName);
@@ -1625,7 +1699,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           game?.setTimeOfDay(stored.time_of_day);
           game?.setAudioMuted(!stored.sound_enabled);
           if (game) {
-            game.getGameState().wram.instant_mode = stored.instant_mode_enabled;
+            game.getGameState().wram.instant_mode = nextInstantMode;
           }
         }
       } catch {
@@ -1639,7 +1713,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     return () => {
       cancelled = true;
     };
-  }, [supabaseUserId]);
+  }, [isDesktopVariant, supabaseUserId]);
 
   useEffect(() => {
     const supabase = supabaseClientRef.current;
@@ -1858,26 +1932,18 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     if (utilityPanelView === "saves") {
       return <GuestSavePanel onLoadSave={handleLoadSave} />;
     }
+    if (utilityPanelView === "mcp") {
+      return <DesktopMcpPanel />;
+    }
     if (utilityPanelView === "debug") {
       return <VisualDebugPanel game={gameRef.current} />;
     }
     return (
       <SettingsPanel
-        playerGender={playerGender}
-        onPlayerGenderChange={applyGender}
-        timeOfDay={timeOfDay}
-        onTimeOfDayChange={applyTimeOfDay}
         playerName={playerName}
         onPlayerNameChange={applyName}
-        soundEnabled={soundEnabled}
-        onSoundEnabledChange={applySoundEnabled}
-        instantModeEnabled={instantModeEnabled}
-        onInstantModeEnabledChange={applyInstantModeEnabled}
         brandTheme={brandTheme}
         onBrandThemeChange={applyBrandTheme}
-        playIntroEnabled={skipToPlayEnabled}
-        onPlayIntroEnabledChange={applySkipToPlayEnabled}
-        showBootModeControl={!isDesktopVariant}
       />
     );
   }, [
@@ -1902,32 +1968,24 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     incomingRequest,
     interactionStatus,
     handleLoadSave,
-    playerGender,
-    applyGender,
-    timeOfDay,
-    applyTimeOfDay,
     playerName,
     applyName,
-    soundEnabled,
-    applySoundEnabled,
-    instantModeEnabled,
-    applyInstantModeEnabled,
     brandTheme,
     applyBrandTheme,
-    isDesktopVariant,
-    skipToPlayEnabled,
-    applySkipToPlayEnabled,
   ]);
 
   if (isDesktopVariant) {
     return (
-      <div className="flex h-full min-h-0 w-full overflow-hidden bg-black text-white">
+      <div className="relative flex h-full min-h-0 w-full overflow-hidden bg-black text-white">
         <main className="relative flex min-w-0 flex-1 flex-col p-3">
           {!desktopSidebarVisible ? (
             <button
               type="button"
               className="btn btn-sm btn-outline absolute right-4 top-4 z-10 gap-2 rounded border-white/25 bg-black/70 text-white normal-case shadow hover:bg-white/10"
-              onClick={() => applyDesktopSidebarVisible(true)}
+              tabIndex={-1}
+              onPointerDown={preventDesktopControlFocus}
+              onMouseDown={preventDesktopControlFocus}
+              onClick={showDesktopSidebar}
               aria-label="Show sidebar"
               aria-expanded={false}
               aria-controls="desktop-sidebar"
@@ -1964,6 +2022,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   preloadMode="auto"
                   rendererMode={rendererMode}
                   runtimeMode="local"
+                  mcpActionMirrorSessionId={PRIMARY_MCP_SESSION_ID}
+                  mcpActionMirrorPollMs={150}
                   canvasClassName="playui-screen-canvas block h-auto w-full bg-black outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   canvasStyle={{ maxWidth: "100%", maxHeight: "100%" }}
                   onInputStateChange={handleInputStateChange}
@@ -1988,7 +2048,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           <aside
             id="desktop-sidebar"
             data-testid="desktop-sidebar"
-            className="flex w-[22rem] max-w-[34vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
+            className="absolute inset-y-0 right-0 z-20 flex w-[28rem] max-w-[42vw] flex-col overflow-hidden border-l border-white/10 bg-[#101010] shadow-2xl"
           >
             <div className="border-b border-white/10 p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
@@ -2003,7 +2063,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   <button
                     type="button"
                     className="btn btn-square btn-sm btn-ghost rounded text-white/75 hover:bg-white/10 hover:text-white"
-                    onClick={() => applyDesktopSidebarVisible(false)}
+                    tabIndex={-1}
+                    onPointerDown={preventDesktopControlFocus}
+                    onMouseDown={preventDesktopControlFocus}
+                    onClick={hideDesktopSidebar}
                     aria-label="Hide sidebar"
                     aria-expanded={true}
                     aria-controls="desktop-sidebar"
@@ -2016,6 +2079,22 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" className="btn btn-sm btn-primary rounded normal-case" onClick={toggleRendererMode}>
                   {rendererActionLabel}
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm rounded normal-case ${soundEnabled ? "btn-outline" : "btn-warning"}`}
+                  onClick={toggleSoundEnabled}
+                  aria-pressed={soundEnabled}
+                >
+                  {soundEnabled ? "Sound On" : "Sound Muted"}
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm rounded normal-case ${instantModeEnabled ? "btn-warning" : "btn-outline"}`}
+                  onClick={toggleInstantModeEnabled}
+                  aria-pressed={instantModeEnabled}
+                >
+                  {instantModeEnabled ? "Instant On" : "Instant Off"}
                 </button>
                 {fullscreenAvailable ? (
                   <button
@@ -2051,6 +2130,33 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               </div>
             </div>
           </aside>
+        ) : null}
+        {utilityPanelOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3"
+            style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="flex w-full max-w-3xl flex-col rounded border border-base-300 bg-base-100 text-base-content shadow-2xl"
+              style={MODAL_DIALOG_STYLE}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-base-300 px-4 py-3">
+                <h2 className="text-lg font-semibold">{utilityPanelTitle}</h2>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline rounded normal-case"
+                  onClick={closeUtilityPanel}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-4" style={{ maxHeight: MODAL_BODY_MAX_HEIGHT }}>
+                {desktopPanelContent}
+              </div>
+            </div>
+          </div>
         ) : null}
       </div>
     );
@@ -2426,7 +2532,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                 <button
                   type="button"
                   className="btn btn-xs btn-ghost join-item min-w-16 rounded-md border-0 normal-case sm:btn-sm"
-                  onClick={() => setUtilityPanelOpen(false)}
+                  onClick={closeUtilityPanel}
                 >
                   Close
                 </button>
@@ -2469,22 +2575,13 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               ) : null}
               {utilityPanelView === "settings" ? (
                 <SettingsPanel
-                  playerGender={playerGender}
-                  onPlayerGenderChange={applyGender}
-                  timeOfDay={timeOfDay}
-                  onTimeOfDayChange={applyTimeOfDay}
                   playerName={playerName}
                   onPlayerNameChange={applyName}
-                  soundEnabled={soundEnabled}
-                  onSoundEnabledChange={applySoundEnabled}
-                  instantModeEnabled={instantModeEnabled}
-                  onInstantModeEnabledChange={applyInstantModeEnabled}
                   brandTheme={brandTheme}
                   onBrandThemeChange={applyBrandTheme}
-                  playIntroEnabled={skipToPlayEnabled}
-                  onPlayIntroEnabledChange={applySkipToPlayEnabled}
                 />
               ) : null}
+              {utilityPanelView === "mcp" ? <DesktopMcpPanel /> : null}
               {utilityPanelView === "saves" ? <GuestSavePanel onLoadSave={handleLoadSave} /> : null}
               {utilityPanelView === "debug" ? <VisualDebugPanel game={gameRef.current} /> : null}
             </div>

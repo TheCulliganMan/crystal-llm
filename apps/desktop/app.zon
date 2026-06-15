@@ -1,0 +1,32 @@
+.{
+    .id = "com.pokecrystal.desktop",
+    .name = "krabbyclaw",
+    .display_name = "KrabbyClaw",
+    .version = "1.0.0",
+    .icons = .{ "assets/icon.icns" },
+    .platforms = .{ "macos", "linux" },
+    .permissions = .{},
+    .capabilities = .{ "webview" },
+    .frontend = .{
+        .dist = "dist/resources",
+        .entry = "desktop/index.html",
+        .spa_fallback = false,
+        .dev = .{
+            .url = "http://127.0.0.1:3000/desktop",
+            .command = .{ "npm", "run", "dev", "--workspace", "@pokecrystal/web" },
+            .ready_path = "/desktop",
+            .timeout_ms = 120000,
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:3000", "http://127.0.0.1:37631" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+    .windows = .{
+        .{ .label = "main", .title = "KrabbyClaw", .width = 1280, .height = 720, .restore_state = true },
+    },
+}

@@ -1071,10 +1071,7 @@ const exportBattleAnimationBundle = ({
 } = {}) => {
   const standaloneDisassemblyRoot = path.join(
     projectRoot,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );
@@ -1216,10 +1213,7 @@ const exportBattleAnimationGfxSourceTable = ({
 } = {}) => {
   const standaloneDisassemblyRoot = path.join(
     projectRoot,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );
@@ -1450,10 +1444,7 @@ const exportSpriteAnimationBundle = ({
 } = {}) => {
   const standaloneDisassemblyRoot = path.join(
     projectRoot,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );
@@ -1505,10 +1496,7 @@ const exportTilesetRuntimeData = () => {
   const targetDir = path.join(outDir, "tilesets");
   const standaloneDisassemblyRoot = path.join(
     DEFAULT_PROJECT_ROOT,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );
@@ -1598,10 +1586,7 @@ const exportCollisionStdScripts = ({
   const targetDir = path.join(outDir, "collision");
   const standaloneDisassemblyRoot = path.join(
     projectRoot,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );
@@ -2102,10 +2087,7 @@ const exportInitializeEvents = ({
 } = {}) => {
   const standaloneDisassemblyRoot = path.join(
     projectRoot,
-    ".next-electron",
-    "standalone",
-    "apps",
-    "web",
+    ".next-desktop",
     "public",
     "disassembly"
   );

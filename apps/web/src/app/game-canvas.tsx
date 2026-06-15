@@ -13,6 +13,7 @@ import type { GameEngineEvent } from "@pokecrystal/core/ui/game-engine";
 import type { TextSnapshot, TextUI } from "@pokecrystal/core/ui/text-ui";
 import type { SnapshotLine } from "@pokecrystal/core/ui/text-snapshot-render";
 import { buildTextSnapshotLayout, MAX_TEXT_RENDER_CHARS } from "@pokecrystal/core/ui/text-snapshot-render";
+import type { AudioPlaybackSnapshot } from "@pokecrystal/core/engine/systems/audio";
 import { callMcpTool, type McpToolResult } from "./mcp-client";
 import { PRIMARY_MCP_SESSION_ID } from "@/app/mcp/session-id";
 import logger from "@pokecrystal/core/core/logger";
@@ -104,7 +105,19 @@ type GameCanvasProps = {
   remoteRefreshMs?: number;
   remoteFrameScale?: number;
   remoteAdvanceFrames?: number;
+  remoteInstantMode?: boolean;
   remoteFrameRefreshKey?: number;
+  mcpActionMirrorSessionId?: string;
+  mcpActionMirrorPollMs?: number;
+};
+
+type MirroredMcpInput =
+  | { kind: "move"; value: "up" | "down" | "left" | "right" }
+  | { kind: "button"; value: "a" | "b" | "start" | "select" };
+type MirroredMcpButton = Extract<MirroredMcpInput, { kind: "button" }>["value"];
+
+type PostKeyboardEventOptions = {
+  mirrorToMcp?: boolean;
 };
 
 type SyntheticRepeatPolicyArgs = {
@@ -472,12 +485,16 @@ export const GameCanvas = React.memo(({
   remoteRefreshMs = MCP_POLL_MS,
   remoteFrameScale = 2,
   remoteAdvanceFrames = MCP_ADVANCE_FRAMES,
+  remoteInstantMode,
   remoteFrameRefreshKey = 0,
+  mcpActionMirrorSessionId,
+  mcpActionMirrorPollMs = 150,
 }: GameCanvasProps) => {
   const canvasShellRef = useRef<HTMLDivElement>(null);
   const tileCanvasRef = useRef<HTMLCanvasElement>(null);
   const textCanvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<Game | null>(null);
+  const remoteAudioMirrorGameRef = useRef<Game | null>(null);
   const textUiRef = useRef<TextUI | null>(null);
   const textBitmapFontRef = useRef<CompactBitmapFont | null>(null);
   const textRenderBenchmarkRef = useRef<MutableTextRenderBenchmark>(createTextRenderBenchmark());
@@ -485,6 +502,7 @@ export const GameCanvas = React.memo(({
   const remoteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const remoteActiveRef = useRef(false);
   const remoteFrameRefreshRef = useRef<(() => void) | null>(null);
+  const remoteAudioMusicTokenRef = useRef<string | null>(null);
   const lastRemoteFrameRefreshKeyRef = useRef(remoteFrameRefreshKey);
   const remoteDirectionTimersRef = useRef<Map<string, number>>(new Map());
   const initialMutedRef = useRef(muted ?? false);
@@ -730,6 +748,7 @@ export const GameCanvas = React.memo(({
 
     let mounted = true;
     let cleanupRenderLoop: (() => void) | null = null;
+    let cleanupRemoteAudioMirror: (() => void) | null = null;
     let postEvent: ((event: GameEngineEvent) => void) | null = null;
     const remoteDirectionTimers = remoteDirectionTimersRef.current;
 
@@ -765,10 +784,51 @@ export const GameCanvas = React.memo(({
       const origin = typeof window !== "undefined" ? window.location.origin : undefined;
       const url = sessionId ? withSessionId(MCP_BASE_URL, sessionId, origin) : MCP_BASE_URL;
       const task = remoteQueueRef.current.then(() =>
-        callMcpTool(name, args, { baseUrl: url })
+        callMcpTool(name, args, {
+          baseUrl: url,
+          headers: remoteInstantMode === undefined
+            ? undefined
+            : { "x-pokecrystal-instant-mode": remoteInstantMode ? "1" : "0" },
+        })
       );
       remoteQueueRef.current = task.catch(() => null);
       return task;
+    };
+
+    const postRemoteInputEvent = (
+      event: GameEngineEvent,
+      isPress: boolean,
+      direction: string | null,
+      button: string | null
+    ): void => {
+      const sessionId = ensureSessionId();
+      if (!sessionId || !remoteActiveRef.current) {
+        return;
+      }
+      const key = String(event.code ?? event.key ?? direction ?? button ?? "");
+      if (!key) {
+        return;
+      }
+      void fetch("/api/arena/input", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(PUBLIC_SNAPSHOT_TOKEN ? { "x-mcp-token": PUBLIC_SNAPSHOT_TOKEN } : {}),
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          key,
+          direction,
+          button,
+          is_press: isPress,
+          instant: remoteInstantMode ?? false,
+        }),
+        cache: "no-store",
+      }).catch((error) => {
+        if (remoteActiveRef.current) {
+          logger.debug("[game-canvas] remote input event failed", error);
+        }
+      });
     };
 
     const enqueueRemoteInput = (event: GameEngineEvent): void => {
@@ -777,8 +837,15 @@ export const GameCanvas = React.memo(({
         return;
       }
       const isPress = event.is_press ?? event.type === gameEngine.KEYDOWN;
+      const direction =
+        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
+      const button =
+        event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
+      if (remoteInstantMode === false) {
+        postRemoteInputEvent(event, isPress, direction, button);
+        return;
+      }
       if (!isPress) {
-        const direction = event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
         if (direction) {
           const timerId = remoteDirectionTimers.get(direction);
           if (timerId !== undefined) {
@@ -788,10 +855,6 @@ export const GameCanvas = React.memo(({
         }
         return;
       }
-      const direction =
-        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
-      const button =
-        event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
       if (direction) {
         for (const [heldDirection, timerId] of remoteDirectionTimers.entries()) {
           if (heldDirection !== direction) {
@@ -836,6 +899,38 @@ export const GameCanvas = React.memo(({
       postEvent = readOnly ? null : enqueueRemoteInput;
       onPostEventReady?.(postEvent);
 
+      if (!readOnly && typeof document !== "undefined") {
+        let mirrorStopped = false;
+        const mirrorCanvas = document.createElement("canvas");
+        mirrorCanvas.width = TILE_CANVAS_WIDTH;
+        mirrorCanvas.height = TILE_CANVAS_HEIGHT;
+        const { ui: mirrorUi } = buildUi(mirrorCanvas, { rendererMode: "tile", scale: 1 });
+        void Game.create(mirrorUi, {
+          loadSlot: MANUAL_SAVE_SLOT,
+          muted: muted ?? false,
+          playIntro: false,
+          newGame: false,
+          preloadMode,
+        }).then((game) => {
+          if (mirrorStopped) {
+            game.destroy();
+            return;
+          }
+          game.setAudioMuted(muted ?? false);
+          game.setMusicMuted(musicMuted);
+          game.start();
+          remoteAudioMirrorGameRef.current = game;
+        }).catch((error) => {
+          logger.debug("[game-canvas] remote audio mirror failed", error);
+        });
+        cleanupRemoteAudioMirror = () => {
+          mirrorStopped = true;
+          remoteAudioMirrorGameRef.current?.destroy();
+          remoteAudioMirrorGameRef.current = null;
+          remoteAudioMusicTokenRef.current = null;
+        };
+      }
+
       const handleRemoteError = (error: unknown) => {
         if (mounted) {
           logger.debug("[game-canvas] remote render failed", error);
@@ -850,6 +945,15 @@ export const GameCanvas = React.memo(({
                 refreshMs: remoteRefreshMs,
                 scale: remoteFrameScale,
                 advanceFrames: remoteAdvanceFrames,
+                instantMode: remoteInstantMode,
+                onAudioSnapshot: (audio) => {
+                  const token = audio?.musicToken ?? null;
+                  if (!token || token === remoteAudioMusicTokenRef.current) {
+                    return;
+                  }
+                  remoteAudioMusicTokenRef.current = token;
+                  remoteAudioMirrorGameRef.current?.playMusic(token, audio?.musicRole ?? "map");
+                },
                 onError: handleRemoteError,
               });
           remoteFrameRefreshRef.current = loop.refresh;
@@ -1131,9 +1235,13 @@ export const GameCanvas = React.memo(({
         pressedKeys,
       });
     };
+    let releaseHeldKeyboardControl = (_keyValue: string | number): void => {};
     const clearHeldKeyboardInput = () => {
       if (heldKeys.size === 0 && repeatFramesByKey.size === 0) {
         return;
+      }
+      for (const keyValue of heldKeys) {
+        releaseHeldKeyboardControl(keyValue);
       }
       heldKeys.clear();
       repeatFramesByKey.clear();
@@ -1141,6 +1249,14 @@ export const GameCanvas = React.memo(({
     };
     const shouldIgnoreKeyEvent = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      if (!target) {
+        return false;
+      }
+      const tag = target.tagName;
+      return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    };
+    const isTextEntryElement = (element: Element | null): boolean => {
+      const target = element as HTMLElement | null;
       if (!target) {
         return false;
       }
@@ -1185,6 +1301,12 @@ export const GameCanvas = React.memo(({
       if (isInputTarget(document.activeElement)) {
         return true;
       }
+      if (isServerMode) {
+        return true;
+      }
+      if (!isTextEntryElement(document.activeElement)) {
+        return true;
+      }
       const game = gameRef.current;
       const state = game?.getGameState?.();
       const isUnownModalActive = Boolean(state?.wram?.wUnownState);
@@ -1194,7 +1316,53 @@ export const GameCanvas = React.memo(({
       );
       return isUnownModalActive || isOverworldCaptureActive;
     };
-    const postKeyboardEvent = (type: string | number, key: string, code: string): void => {
+    const pendingLocalMcpEchoInputs: MirroredMcpInput[] = [];
+    const mirrorNativeInputToMcp = (event: GameEngineEvent): void => {
+      if (isServerMode || readOnly || !mcpActionMirrorSessionId) {
+        return;
+      }
+      const isPress = event.is_press ?? event.type === gameEngine.KEYDOWN;
+      if (!isPress) {
+        return;
+      }
+      const direction = normalizeRepeatDirection(
+        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null)
+      );
+      const button = normalizeMcpMirrorButton(
+        event.button ?? mapKeyToButton(event.code ?? event.key ?? null)
+      );
+      const input: MirroredMcpInput | null =
+        direction ? { kind: "move", value: direction } :
+          button ? { kind: "button", value: button } :
+            null;
+      if (!input) {
+        return;
+      }
+      pendingLocalMcpEchoInputs.push(input);
+      const toolName = input.kind === "move" ? "move" : "press";
+      const args = input.kind === "move" ? { direction: input.value } : { button: input.value };
+      void callRemoteTool(toolName, args).catch((error) => {
+        const index = pendingLocalMcpEchoInputs.findIndex((pending) => isSameMirroredMcpInput(pending, input));
+        if (index >= 0) {
+          pendingLocalMcpEchoInputs.splice(index, 1);
+        }
+        logger.debug("[game-canvas] native MCP input mirror failed", error);
+      });
+    };
+    const consumePendingLocalMcpEcho = (input: MirroredMcpInput): boolean => {
+      const index = pendingLocalMcpEchoInputs.findIndex((pending) => isSameMirroredMcpInput(pending, input));
+      if (index < 0) {
+        return false;
+      }
+      pendingLocalMcpEchoInputs.splice(index, 1);
+      return true;
+    };
+    const postKeyboardEvent = (
+      type: string | number,
+      key: string,
+      code: string,
+      options: PostKeyboardEventOptions = {}
+    ): void => {
       const lookupKey = code || key;
       const direction = mapKeyToDirection(lookupKey) ?? mapKeyToDirection(key);
       const button = mapKeyToButton(lookupKey) ?? mapKeyToButton(key);
@@ -1206,6 +1374,117 @@ export const GameCanvas = React.memo(({
         is_press: type === gameEngine.KEYDOWN,
       });
       postEvent?.(engineEvent);
+      if (options.mirrorToMcp !== false) {
+        mirrorNativeInputToMcp(engineEvent);
+      }
+    };
+    releaseHeldKeyboardControl = (keyValue: string | number): void => {
+      const keyToken = String(keyValue);
+      postKeyboardEvent(gameEngine.KEYUP, keyToken, keyToken, { mirrorToMcp: false });
+    };
+    let mcpMirrorTimer: number | null = null;
+    const mcpMirrorReleaseTimers: number[] = [];
+    const mcpMirrorLastTotalRef = { current: null as number | null };
+    const replayMirroredMcpInput = (input: MirroredMcpInput): void => {
+      if (!mounted || readOnly || isServerMode || !gameRef.current) {
+        return;
+      }
+      const key =
+        input.kind === "move"
+          ? ({
+              up: "ArrowUp",
+              down: "ArrowDown",
+              left: "ArrowLeft",
+              right: "ArrowRight",
+            } as const)[input.value]
+          : ({
+              a: "KeyZ",
+              b: "KeyX",
+              start: "Enter",
+              select: "Backspace",
+            } as const)[input.value];
+      const keyValue =
+        key === "KeyZ" ? "z" :
+          key === "KeyX" ? "x" :
+            key === "Enter" ? "Enter" :
+              key === "Backspace" ? "Backspace" :
+                key;
+      postKeyboardEvent(gameEngine.KEYDOWN, keyValue, key, { mirrorToMcp: false });
+      const holdMs = input.kind === "move" ? 180 : 60;
+      const timerId = window.setTimeout(() => {
+        postKeyboardEvent(gameEngine.KEYUP, keyValue, key, { mirrorToMcp: false });
+      }, holdMs);
+      mcpMirrorReleaseTimers.push(timerId);
+    };
+    const pollMcpActionMirror = async (): Promise<void> => {
+      if (!mounted || readOnly || isServerMode || !mcpActionMirrorSessionId || !gameRef.current) {
+        return;
+      }
+      const origin = typeof window !== "undefined" ? window.location.origin : undefined;
+      const result = await callMcpTool("recent_events", { limit: 20 }, {
+        baseUrl: withSessionId(MCP_BASE_URL, mcpActionMirrorSessionId, origin),
+      });
+      const text = extractTextBlock(result);
+      if (!text) {
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        return;
+      }
+      const eventPayload = payload as {
+        total?: unknown;
+        events?: Array<{ action?: unknown }>;
+      };
+      const total = typeof eventPayload.total === "number" ? eventPayload.total : null;
+      const events = Array.isArray(eventPayload.events) ? eventPayload.events : [];
+      if (total === null) {
+        return;
+      }
+      const previousTotal = mcpMirrorLastTotalRef.current;
+      mcpMirrorLastTotalRef.current = total;
+      if (previousTotal === null || total <= previousTotal) {
+        return;
+      }
+      const newCount = Math.min(total - previousTotal, events.length);
+      for (const event of events.slice(events.length - newCount)) {
+        if (typeof event.action !== "string") {
+          continue;
+        }
+        const input = parseMirroredMcpAction(event.action);
+        if (input && !consumePendingLocalMcpEcho(input)) {
+          replayMirroredMcpInput(input);
+        }
+      }
+    };
+    if (
+      !isServerMode &&
+      !readOnly &&
+      mcpActionMirrorSessionId &&
+      typeof window !== "undefined"
+    ) {
+      const poll = () => {
+        void pollMcpActionMirror().catch((error) => {
+          if (mounted) {
+            logger.debug("[game-canvas] MCP action mirror failed", error);
+          }
+        });
+      };
+      poll();
+      mcpMirrorTimer = window.setInterval(
+        poll,
+        Math.max(50, Math.floor(mcpActionMirrorPollMs))
+      );
+    }
+    const postCanvasConfirmTap = (): void => {
+      const game = gameRef.current;
+      if (!game || game.getState() !== "title") {
+        return;
+      }
+      postKeyboardEvent(gameEngine.KEYDOWN, "z", "KeyZ");
+      postKeyboardEvent(gameEngine.KEYUP, "z", "KeyZ");
     };
     const stepHeldControlRepeats = (framesToAdvance: number): void => {
       if (framesToAdvance <= 0 || !canAcceptKeyboardInput()) {
@@ -1287,12 +1566,19 @@ export const GameCanvas = React.memo(({
       if (!readOnly) {
         gameRef.current?.unlockAudio();
       }
+      const target = event.target as Element | null;
+      if (!isInputTarget(target)) {
+        clearHeldKeyboardInput();
+      }
       if (shouldIgnorePointerEvent(event)) {
         return;
       }
-      const target = event.target as Element | null;
       const targetCanvas = isInputTarget(target) ? (target as HTMLCanvasElement) : primaryCanvas;
+      clearHeldKeyboardInput();
       targetCanvas?.focus({ preventScroll: true });
+      if (isInputTarget(target)) {
+        postCanvasConfirmTap();
+      }
     };
     window.addEventListener("pointerdown", handlePointerDown, { capture: true });
 
@@ -1313,7 +1599,9 @@ export const GameCanvas = React.memo(({
         } else {
           heldGamepadControls.delete(control);
         }
-        postEvent?.(buildGamepadEvent(control, isPressed));
+        const event = buildGamepadEvent(control, isPressed);
+        postEvent?.(event);
+        mirrorNativeInputToMcp(event);
       }
       if (changed) {
         emitInputState();
@@ -1366,6 +1654,13 @@ export const GameCanvas = React.memo(({
       mounted = false;
       remoteActiveRef.current = false;
       remoteFrameRefreshRef.current = null;
+      if (mcpMirrorTimer !== null) {
+        window.clearInterval(mcpMirrorTimer);
+      }
+      for (const timerId of mcpMirrorReleaseTimers) {
+        window.clearTimeout(timerId);
+      }
+      cleanupRemoteAudioMirror?.();
       cleanupRenderLoop?.();
       for (const timerId of remoteDirectionTimers.values()) {
         window.clearInterval(timerId);
@@ -1416,18 +1711,23 @@ export const GameCanvas = React.memo(({
     playIntro,
     remoteAdvanceFrames,
     remoteFrameScale,
+    remoteInstantMode,
     remoteRefreshMs,
     remoteVisualMode,
     runtimeMode,
     sessionId,
+    mcpActionMirrorPollMs,
+    mcpActionMirrorSessionId,
   ]);
 
   useEffect(() => {
     gameRef.current?.setAudioMuted(muted ?? false);
+    remoteAudioMirrorGameRef.current?.setAudioMuted(muted ?? false);
   }, [muted]);
 
   useEffect(() => {
     gameRef.current?.setMusicMuted(musicMuted);
+    remoteAudioMirrorGameRef.current?.setMusicMuted(musicMuted);
   }, [musicMuted]);
 
   useEffect(() => {
@@ -1612,6 +1912,7 @@ type FrameResponse = {
   width?: number;
   height?: number;
   frame?: number;
+  audio?: AudioPlaybackSnapshot;
   error?: string;
 };
 
@@ -1621,6 +1922,8 @@ type RemoteFrameRenderOptions = {
   refreshMs: number;
   scale: number;
   advanceFrames: number;
+  instantMode?: boolean;
+  onAudioSnapshot?: (audio: AudioPlaybackSnapshot | undefined) => void;
   onError?: (error: unknown) => void;
 };
 
@@ -1629,11 +1932,19 @@ const PUBLIC_SNAPSHOT_TOKEN =
   process.env.NEXT_PUBLIC_ARENA_SNAPSHOT_TOKEN?.trim() ??
   "";
 
-const buildArenaFrameUrl = (sessionId: string, scale: number, advanceFrames: number): string => {
+const buildArenaFrameUrl = (
+  sessionId: string,
+  scale: number,
+  advanceFrames: number,
+  instantMode?: boolean
+): string => {
   const params = new URLSearchParams();
   params.set("session_id", sessionId);
   params.set("scale", String(Math.min(8, Math.max(1, Math.floor(scale)))));
   params.set("advance", String(Math.max(0, Math.floor(advanceFrames))));
+  if (instantMode !== undefined) {
+    params.set("instant", instantMode ? "1" : "0");
+  }
   return `/api/arena/frame?${params.toString()}`;
 };
 
@@ -1646,6 +1957,35 @@ const extractTextBlock = (result: McpToolResult | null | undefined): string | nu
   }
   return null;
 };
+
+const parseMirroredMcpAction = (action: string): MirroredMcpInput | null => {
+  const parts = action.toLowerCase().split(":").filter(Boolean);
+  for (let index = parts.length - 2; index >= 0; index -= 1) {
+    const kind = parts[index];
+    const value = parts[index + 1];
+    if (kind === "move" && (value === "up" || value === "down" || value === "left" || value === "right")) {
+      return { kind, value };
+    }
+    if (kind === "button" && (value === "a" || value === "b" || value === "start" || value === "select")) {
+      return { kind, value };
+    }
+    if (kind === "press" && (value === "a" || value === "b" || value === "start" || value === "select")) {
+      return { kind: "button", value };
+    }
+  }
+  return null;
+};
+
+const normalizeMcpMirrorButton = (value: string | null | undefined): MirroredMcpButton | null => {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "a" || normalized === "b" || normalized === "start" || normalized === "select") {
+    return normalized;
+  }
+  return null;
+};
+
+const isSameMirroredMcpInput = (left: MirroredMcpInput, right: MirroredMcpInput): boolean =>
+  left.kind === right.kind && left.value === right.value;
 
 const buildSnapshotLinesFromText = (text: string): SnapshotLine[] => {
   const lines = text.split(/\r?\n/);
@@ -1767,7 +2107,7 @@ const drawFrameImageToCanvas = async (
 };
 
 const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: () => void; refresh: () => void } => {
-  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, onError } = options;
+  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, instantMode, onAudioSnapshot, onError } = options;
   if (typeof window === "undefined" || !tileCanvas) {
     return { stop: () => undefined, refresh: () => undefined };
   }
@@ -1784,7 +2124,7 @@ const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: 
     }
     inflight = true;
     try {
-      const response = await fetch(buildArenaFrameUrl(sessionId, scale, advanceFrames), {
+      const response = await fetch(buildArenaFrameUrl(sessionId, scale, advanceFrames, instantMode), {
         cache: "no-store",
         headers: PUBLIC_SNAPSHOT_TOKEN ? { "x-mcp-token": PUBLIC_SNAPSHOT_TOKEN } : undefined,
       });
@@ -1799,6 +2139,7 @@ const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: 
         width: payload.width,
         height: payload.height,
       });
+      onAudioSnapshot?.(payload.audio);
     } catch (error) {
       onError?.(error);
     } finally {

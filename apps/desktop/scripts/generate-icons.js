@@ -5,13 +5,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const sharp = require("sharp");
-const { ELECTRON_ASSETS_DIR, ROOT_DIR } = require("./launch-helpers");
+const { DESKTOP_ASSETS_DIR, ROOT_DIR } = require("./launch-helpers");
 
 const SPRITE_PNG = path.join(ROOT_DIR, "apps/web/assets/gfx/pokemon/krabby/front.png");
-const SOURCE_SVG = path.join(ROOT_DIR, "apps/electron/assets/icon-source.svg");
-const TARGET_PNG = path.join(ELECTRON_ASSETS_DIR, "icon.png");
-const TARGET_ICO = path.join(ELECTRON_ASSETS_DIR, "icon.ico");
-const TARGET_ICNS = path.join(ELECTRON_ASSETS_DIR, "icon.icns");
+const SOURCE_SVG = path.join(ROOT_DIR, "apps/desktop/assets/icon-source.svg");
+const TARGET_PNG = path.join(DESKTOP_ASSETS_DIR, "icon.png");
+const TARGET_ICO = path.join(DESKTOP_ASSETS_DIR, "icon.ico");
+const TARGET_ICNS = path.join(DESKTOP_ASSETS_DIR, "icon.icns");
 
 const PNG_SIZE = 1024;
 const ICONSET_SIZES = [16, 32, 128, 256, 512];
@@ -183,7 +183,7 @@ const generateIcns = async () => {
 
 const main = async () => {
   ensureSourceIcon(SOURCE_SVG);
-  fs.mkdirSync(ELECTRON_ASSETS_DIR, { recursive: true });
+  fs.mkdirSync(DESKTOP_ASSETS_DIR, { recursive: true });
   fs.writeFileSync(TARGET_PNG, await renderSourcePng(PNG_SIZE));
   await writeIco();
   await generateIcns();
@@ -197,7 +197,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  ELECTRON_ASSETS_DIR,
+  DESKTOP_ASSETS_DIR,
   ICO_SIZES,
   PNG_SIZE,
   SOURCE_SVG,

@@ -78,9 +78,9 @@ const SaveRow = ({
   actions: React.ReactNode;
 }) => (
   <div className="card card-bordered bg-base-200">
-    <div className="card-body p-3 md:flex md:flex-row md:items-start md:justify-between md:gap-3">
-      <div className="space-y-1">{children}</div>
-      <div className="mt-2 flex flex-wrap gap-2 md:mt-0">{actions}</div>
+    <div className="card-body gap-3 p-3">
+      <div className="min-w-0 space-y-1">{children}</div>
+      <div className="flex flex-wrap gap-2">{actions}</div>
     </div>
   </div>
 );
@@ -235,8 +235,8 @@ export const GuestSavePanel = React.memo(({ onLoadSave }: GuestSavePanelProps) =
   );
 
   return (
-    <section className="card card-bordered card-body space-y-3 text-base-content">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+    <section className="card card-bordered card-body min-w-0 space-y-3 text-base-content">
+      <div className="flex flex-col gap-3">
         <div className="space-y-1">
           <div className="text-xs font-semibold uppercase tracking-wide text-base-content/70">Guest Saves</div>
           <h2 className="text-lg font-semibold">Local save snapshots</h2>

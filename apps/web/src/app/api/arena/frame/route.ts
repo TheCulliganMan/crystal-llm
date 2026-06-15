@@ -67,6 +67,22 @@ const resolveAdvanceFrames = (request: Request): number => {
   return normalized;
 };
 
+const resolveInstantMode = (request: Request): boolean | undefined => {
+  const url = new URL(request.url);
+  const raw = url.searchParams.get("instant");
+  if (raw === null) {
+    return undefined;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "off") {
+    return false;
+  }
+  throw new Error("Instant must be true or false.");
+};
+
 export async function GET(request: Request) {
   try {
     const token = process.env.POKECRYSTAL_ARENA_SNAPSHOT_TOKEN ?? "";
@@ -77,10 +93,12 @@ export async function GET(request: Request) {
     let sessionId: string | undefined;
     let scale: number;
     let advanceFrames: number;
+    let instantMode: boolean | undefined;
     try {
       sessionId = resolveSessionId(request);
       scale = resolveScale(request);
       advanceFrames = resolveAdvanceFrames(request);
+      instantMode = resolveInstantMode(request);
     } catch (error) {
       return jsonError(400, error instanceof Error ? error.message : "Invalid request.");
     }
@@ -89,12 +107,16 @@ export async function GET(request: Request) {
     // have to evaluate the full session stack for this dynamic API route.
     const { getMcpSession } = await import("@/app/mcp/session");
     const session = getMcpSession(sessionId);
+    if (instantMode !== undefined) {
+      session.setInstantMode(instantMode);
+    }
     if (advanceFrames > 0) {
       await session.advanceFrames(advanceFrames);
     } else {
       await session.ensureReady();
     }
     const image = await session.observeTilemapImage({ scale });
+    const audio = session.getAudioPlaybackSnapshot?.();
     return NextResponse.json(
       {
         ok: true,
@@ -102,6 +124,7 @@ export async function GET(request: Request) {
         width: image.width,
         height: image.height,
         frame: session.getFrameCount(),
+        audio,
       },
       { headers: noStoreHeaders }
     );

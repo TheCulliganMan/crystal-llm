@@ -2,7 +2,6 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { PlayPanel } from "./play-panel";
-import type { BrandTheme } from "./settings-panel";
 import { useMultiplayerStore } from "@pokecrystal/core/multiplayer/multiplayer-store";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { MANUAL_SAVE_SLOT } from "@pokecrystal/core/core/save-slots";
@@ -10,6 +9,7 @@ import { MANUAL_SAVE_SLOT } from "@pokecrystal/core/core/save-slots";
 let consoleWarnSpy: jest.SpyInstance;
 let consoleErrorSpy: jest.SpyInstance;
 const mockSettingsPanelSpy = jest.fn();
+const mockDesktopMcpPanelSpy = jest.fn();
 const mockMultiplayerMenuSpy = jest.fn();
 const mockGameCanvasSpy = jest.fn();
 const mockGuestSavePanelSpy = jest.fn();
@@ -22,7 +22,7 @@ const mockWebRtcConnections: any[] = [];
 jest.mock("./game-canvas", () => ({
   GameCanvas: (props: Record<string, unknown>) => {
     mockGameCanvasSpy(props);
-    return <div data-testid="game-canvas" />;
+    return <canvas data-testid="game-canvas" tabIndex={0} />;
   },
 }));
 
@@ -36,6 +36,13 @@ jest.mock("./settings-panel", () => ({
   SettingsPanel: (props: Record<string, unknown>) => {
     mockSettingsPanelSpy(props);
     return <div data-testid="settings-panel" />;
+  },
+}));
+
+jest.mock("./desktop-mcp-panel", () => ({
+  DesktopMcpPanel: (props: Record<string, unknown>) => {
+    mockDesktopMcpPanelSpy(props);
+    return <div data-testid="desktop-mcp-panel" />;
   },
 }));
 
@@ -171,6 +178,12 @@ const flushPromises = async (): Promise<void> => {
   await Promise.resolve();
 };
 
+const flushTimers = async (): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+};
+
 const findButtonByLabel = (container: HTMLElement, label: string): HTMLButtonElement | undefined =>
   Array.from(container.querySelectorAll("button")).find(
     (button) => button.textContent?.trim() === label
@@ -269,6 +282,7 @@ describe("PlayPanel controls dialog", () => {
 
   beforeEach(() => {
     mockSettingsPanelSpy.mockClear();
+    mockDesktopMcpPanelSpy.mockClear();
     mockMultiplayerMenuSpy.mockClear();
     mockGameCanvasSpy.mockClear();
     mockGuestSavePanelSpy.mockClear();
@@ -341,11 +355,145 @@ describe("PlayPanel controls dialog", () => {
     });
 
     expect(findButtonByLabel(container, "Lobby")).toBeUndefined();
+    expect(findButtonByLabel(container, "MCP")).toBeUndefined();
     expect(findButtonByLabel(container, "Settings")).toBeTruthy();
     expect(findButtonByLabel(container, "Saves")).toBeTruthy();
     expect(findButtonByLabel(container, "Debug")).toBeUndefined();
+    expect(container.querySelector('[data-testid="desktop-sidebar"]')?.className).toContain("w-[28rem]");
+    expect(container.querySelector('[data-testid="desktop-sidebar"]')?.className).toContain("absolute");
     expect(container.querySelector('[data-testid="settings-panel"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="multiplayer-menu"]')).toBeNull();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "local",
+      rendererMode: "tile",
+      muted: false,
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
+    });
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).not.toHaveProperty("remoteVisualMode");
+    const instantButton = findButtonByLabel(container, "Instant Off");
+    expect(instantButton).toBeTruthy();
+    await act(async () => {
+      instantButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(findButtonByLabel(container, "Instant On")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "local",
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
+    });
+
+    const soundButton = findButtonByLabel(container, "Sound On");
+    expect(soundButton).toBeTruthy();
+    await act(async () => {
+      soundButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(findButtonByLabel(container, "Sound Muted")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "local",
+      muted: true,
+    });
+
+    const rendererButton = findButtonByLabel(container, "Show Tile + Text");
+    expect(rendererButton).toBeTruthy();
+    await act(async () => {
+      rendererButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "local",
+      rendererMode: "both",
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
+  });
+
+  it("opens MCP configuration from the desktop panel URL", async () => {
+    window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
+    window.history.replaceState({}, "", "/desktop?panel=mcp");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<PlayPanel variant="desktop" />);
+      await flushPromises();
+    });
+
+    expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeNull();
+    expect(container.textContent).toContain("MCP Streamable HTTP");
+    expect(container.querySelector('[data-testid="desktop-mcp-panel"]')).toBeTruthy();
+    expect(mockDesktopMcpPanelSpy).toHaveBeenCalled();
+
+    const closeButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Close"
+    );
+    expect(closeButton).toBeTruthy();
+
+    await act(async () => {
+      closeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+
+    expect(window.location.pathname).toBe("/desktop");
+    expect(window.location.search).toBe("");
+    expect(container.querySelector('[data-testid="desktop-mcp-panel"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.history.replaceState({}, "", "/desktop");
+  });
+
+  it("keeps desktop animated by default even when stored user settings had instant mode", async () => {
+    window.localStorage.setItem("pokecrystal.desktop.sidebarVisible", "true");
+    window.localStorage.removeItem("pokecrystal.desktop.instantMode");
+    const upsert = jest.fn(async () => ({ error: null }));
+    const maybeSingle = jest.fn(async () => ({
+      data: {
+        user_id: "desktop-user",
+        player_name: "Misty",
+        player_gender: 1,
+        time_of_day: "DAY",
+        sound_enabled: true,
+        instant_mode_enabled: true,
+        brand_theme: "krabby",
+      },
+      error: null,
+    }));
+    const eq = jest.fn(() => ({ maybeSingle }));
+    const select = jest.fn(() => ({ eq }));
+    mockCreateSupabaseBrowserClient.mockReturnValue({
+      auth: {
+        getUser: jest.fn(async () => ({ data: { user: { id: "desktop-user" } } })),
+        onAuthStateChange: jest.fn(() => ({ data: { subscription: { unsubscribe: jest.fn() } } })),
+      },
+      from: jest.fn(() => ({ select, upsert })),
+    } as any);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<PlayPanel variant="desktop" />);
+      await flushPromises();
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(findButtonByLabel(container, "Instant Off")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "local",
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
+    });
 
     await act(async () => {
       root.unmount();
@@ -370,19 +518,31 @@ describe("PlayPanel controls dialog", () => {
     expect(findButtonByLabel(container, "Show Sidebar")).toBeTruthy();
 
     const initialShowButton = findButtonByLabel(container, "Show Sidebar");
+    const canvasBeforeShow = container.querySelector('[data-testid="game-canvas"]') as HTMLCanvasElement | null;
+    canvasBeforeShow?.focus();
+    expect(initialShowButton?.tabIndex).toBe(-1);
+    const initialPointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(initialShowButton?.dispatchEvent(initialPointerDown)).toBe(false);
+    expect(document.activeElement).toBe(canvasBeforeShow);
     await act(async () => {
       initialShowButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeTruthy();
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("true");
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="game-canvas"]'));
 
     const hideButton = container.querySelector('button[aria-label="Hide sidebar"]') as HTMLButtonElement | null;
     expect(hideButton).toBeTruthy();
+    expect(hideButton?.tabIndex).toBe(-1);
+    const hidePointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(hideButton?.dispatchEvent(hidePointerDown)).toBe(false);
     await act(async () => {
       hideButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeNull();
@@ -390,13 +550,18 @@ describe("PlayPanel controls dialog", () => {
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("false");
 
     const showButton = findButtonByLabel(container, "Show Sidebar");
+    expect(showButton?.tabIndex).toBe(-1);
+    const showPointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    expect(showButton?.dispatchEvent(showPointerDown)).toBe(false);
     await act(async () => {
       showButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeTruthy();
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("true");
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="game-canvas"]'));
 
     await act(async () => {
       root.unmount();
@@ -752,7 +917,7 @@ describe("PlayPanel settings panel", () => {
     mockGameCanvasSpy.mockClear();
   });
 
-  it("toggles instant mode and brand theme in settings panel state", async () => {
+  it("toggles brand theme in settings panel state without exposing removed toggles", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -770,20 +935,25 @@ describe("PlayPanel settings panel", () => {
     });
 
     const lastCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(lastCall?.instantModeEnabled).toBe(false);
+    expect(lastCall).not.toHaveProperty("instantModeEnabled");
+    expect(lastCall).not.toHaveProperty("onInstantModeEnabledChange");
+    expect(lastCall).not.toHaveProperty("soundEnabled");
+    expect(lastCall).not.toHaveProperty("onSoundEnabledChange");
+    expect(lastCall).not.toHaveProperty("playIntroEnabled");
+    expect(lastCall).not.toHaveProperty("onPlayIntroEnabledChange");
     expect(lastCall?.brandTheme).toBe("krabby");
     expect(document.documentElement.getAttribute("data-brand-theme")).toBe("krabby");
     const initialFavicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
     expect(initialFavicon?.href ?? "").toMatch(/\/favicon\.png|^data:image\/png;base64,/);
 
     await act(async () => {
-      (lastCall?.onInstantModeEnabledChange as ((enabled: boolean) => void) | undefined)?.(true);
-      (lastCall?.onBrandThemeChange as ((theme: BrandTheme) => void) | undefined)?.("gligar");
+      (lastCall?.onBrandThemeChange as ((theme: string) => void) | undefined)?.("gligar");
       await flushPromises();
     });
 
     const updatedCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(updatedCall?.instantModeEnabled).toBe(true);
+    expect(updatedCall).not.toHaveProperty("instantModeEnabled");
+    expect(updatedCall).not.toHaveProperty("onInstantModeEnabledChange");
     expect(updatedCall?.brandTheme).toBe("gligar");
     expect(document.documentElement.getAttribute("data-brand-theme")).toBe("gligar");
     const updatedFavicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
@@ -815,7 +985,8 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(true);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     expect(container.querySelector('[data-testid="game-canvas"]')).toBeTruthy();
     const hasStartButton = Array.from(container.querySelectorAll("button")).some(
       (button) => button.textContent?.trim() === "Start Game"
@@ -855,7 +1026,8 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(false);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     const startButton = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.trim() === "Start Game"
     );
@@ -904,13 +1076,9 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(false);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     mockGameCanvasSpy.mockClear();
-
-    await act(async () => {
-      settingsCall?.onPlayIntroEnabledChange?.(false);
-      await flushPromises();
-    });
 
     const postToggleStartButton = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.trim() === "Start Game"

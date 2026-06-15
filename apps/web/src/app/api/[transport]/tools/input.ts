@@ -1105,13 +1105,8 @@ export const moveHandler = async (
 const normalizedButtonValues = ["a", "b", "start", "select", "up", "down", "left", "right"] as const;
 type NormalizedButton = (typeof normalizedButtonValues)[number];
 const normalizedButtonSchema = z.preprocess(
-  (value) => (typeof value === "string" ? value.trim() : value),
-  z
-    .union([
-      ...normalizedButtonValues.map((button) => z.literal(button)),
-      ...normalizedButtonValues.map((button) => z.literal(button.toUpperCase())),
-    ])
-    .transform((button): NormalizedButton => button.toLowerCase() as NormalizedButton)
+  (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+  z.enum(normalizedButtonValues)
 );
 
 export const PressSchema = z.object({

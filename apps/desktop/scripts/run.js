@@ -9,8 +9,8 @@ const {
   findAvailablePort,
   getDesktopUrl,
   resolveDesktopLaunchSessionId,
-  resolveElectronCliPath,
 } = require("./launch-helpers");
+const { buildNativeApp, NATIVE_BINARY } = require("./package");
 
 const ROOT_DIR = path.resolve(__dirname, "../../..");
 const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -49,11 +49,11 @@ const waitForServer = async (targetUrl) => {
 };
 
 let nextProcess = null;
-let electronProcess = null;
+let desktopProcess = null;
 
 const cleanup = () => {
-  if (electronProcess && !electronProcess.killed) {
-    electronProcess.kill();
+  if (desktopProcess && !desktopProcess.killed) {
+    desktopProcess.kill();
   }
   if (nextProcess && !nextProcess.killed) {
     nextProcess.kill("SIGINT");
@@ -94,11 +94,12 @@ const run = async () => {
   ]);
 
   await waitForServer(targetUrl);
+  buildNativeApp();
 
-  electronProcess = runCommand(process.execPath, [resolveElectronCliPath(), path.resolve(__dirname, "../main.js")], {
+  desktopProcess = runCommand(NATIVE_BINARY, [], {
+    cwd: path.resolve(__dirname, ".."),
     env: {
       ...process.env,
-      ELECTRON_RUN_AS_NODE: undefined,
       KRABBY_DESKTOP_URL: targetUrl,
       POKECRYSTAL_NEXT_DIST_DIR: DESKTOP_BUILD_DIST_DIR,
     },
@@ -111,9 +112,9 @@ const run = async () => {
     exitWithCleanup(code ?? 0);
   });
 
-  electronProcess.on("exit", (code) => {
+  desktopProcess.on("exit", (code) => {
     if (code && code !== 0) {
-      console.error(`Electron exited with code ${code}`);
+      console.error(`Zero Native desktop app exited with code ${code}`);
     }
     exitWithCleanup(code ?? 0);
   });

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a self-contained npm workspace TypeScript monorepo. Core game logic lives in `packages/core/src`, ASM-derived content in `packages/assets/src`, exporters in `packages/exporters/src`, CLI/MCP/TUI code in `packages/cli/src`, and agent tooling in `packages/agents/src`. The Next.js app is in `apps/web/src`; Electron packaging is in `apps/electron`. Tests are colocated as `*.test.ts` or `*.test.tsx`, with CLI e2e tests in `packages/cli/src/e2e`.
+This is a self-contained npm workspace TypeScript monorepo. Core game logic lives in `packages/core/src`, ASM-derived content in `packages/assets/src`, exporters in `packages/exporters/src`, CLI/MCP/TUI code in `packages/cli/src`, and agent tooling in `packages/agents/src`. The Next.js app is in `apps/web/src`; Zero Native desktop packaging is in `apps/desktop`. Tests are colocated as `*.test.ts` or `*.test.tsx`, with CLI e2e tests in `packages/cli/src/e2e`.
 
 ## Build, Test, and Development Commands
 

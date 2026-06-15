@@ -1,0 +1,16 @@
+{
+  "name": "@pokecrystal/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero Native desktop host for the PokeCrystal web runtime",
+  "scripts": {
+    "dev": "node scripts/run.js",
+    "build": "node scripts/build.js",
+    "package": "node scripts/package.js",
+    "test": "node --test scripts/*.test.js && zig build test",
+    "clean": "rm -rf dist zig-out .zig-cache"
+  },
+  "devDependencies": {
+    "zero-native": "^0.2.0"
+  }
+}

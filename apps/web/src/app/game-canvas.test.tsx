@@ -16,6 +16,7 @@ type GameStub = {
   unlockAudio: jest.Mock;
   setAudioMuted: jest.Mock;
   setMusicMuted: jest.Mock;
+  playMusic: jest.Mock;
   tick: jest.Mock;
   debugJumpToScene: jest.Mock;
   debugJumpToSpawn: jest.Mock;
@@ -56,6 +57,7 @@ describe("GameCanvas", () => {
     unlockAudio: jest.fn(),
     setAudioMuted: jest.fn(),
     setMusicMuted: jest.fn(),
+    playMusic: jest.fn(),
     tick: jest.fn(),
     debugJumpToScene: jest.fn(),
     debugJumpToSpawn: jest.fn(),
@@ -483,6 +485,183 @@ describe("GameCanvas", () => {
     }
   });
 
+  it("passes remote instant mode through frame requests", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            readOnly
+            sessionId="watch-session-instant"
+            remoteVisualMode="frame"
+            remoteAdvanceFrames={1}
+            remoteInstantMode={false}
+          />
+        );
+        await flushPromises();
+      });
+
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/arena/frame?session_id=watch-session-instant&scale=2&advance=1&instant=0"),
+        expect.objectContaining({ cache: "no-store" })
+      );
+
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            readOnly
+            sessionId="watch-session-instant"
+            remoteVisualMode="frame"
+            remoteAdvanceFrames={0}
+            remoteInstantMode
+          />
+        );
+        await flushPromises();
+      });
+
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/arena/frame?session_id=watch-session-instant&scale=2&advance=0&instant=1"),
+        expect.objectContaining({ cache: "no-store" })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("syncs desktop audio mirror music from remote frame snapshots", async () => {
+    const mirrorGame = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(mirrorGame);
+    globalThis.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        image: "dGVzdA==",
+        width: 160,
+        height: 144,
+        frame: 1,
+        audio: {
+          musicToken: "MUSIC_ROUTE_29",
+          musicRole: "map",
+          musicSource: "route29",
+          musicFrame: 1,
+          fadedVolume: 1,
+          activeChannels: [],
+          recentEvents: [],
+        },
+      }),
+    })) as unknown as typeof globalThis.fetch;
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-audio-session"
+            remoteVisualMode="frame"
+          />
+        );
+        await flushPromises();
+        await flushPromises();
+      });
+
+      expect(mirrorGame.playMusic).toHaveBeenCalledWith("MUSIC_ROUTE_29", "map");
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("posts raw input events for animated desktop MCP mode", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-animated-input"
+            remoteVisualMode="frame"
+            remoteInstantMode={false}
+          />
+        );
+        await flushPromises();
+      });
+
+      const fetchMock = globalThis.fetch as jest.Mock;
+      fetchMock.mockClear();
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code: "ArrowDown",
+            key: "ArrowDown",
+          })
+        );
+        await flushPromises();
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/arena/input",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            session_id: "desktop-animated-input",
+            key: "ArrowDown",
+            direction: "down",
+            button: null,
+            is_press: true,
+            instant: false,
+          }),
+        })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("sizes remote frame canvases from the returned PNG dimensions", async () => {
     globalThis.fetch = jest.fn(async () => ({
       ok: true,
@@ -565,6 +744,67 @@ describe("GameCanvas", () => {
         root.unmount();
       });
       container.remove();
+    }
+  });
+
+  it("accepts mapped keyboard controls in server mode after a button takes focus", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    const sidebarButton = document.createElement("button");
+    sidebarButton.type = "button";
+    sidebarButton.textContent = "Sidebar action";
+    document.body.appendChild(sidebarButton);
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-shared-session"
+            remoteVisualMode="frame"
+          />
+        );
+        await flushPromises();
+      });
+
+      const fetchMock = globalThis.fetch as jest.Mock;
+      fetchMock.mockClear();
+      sidebarButton.focus();
+
+      await act(async () => {
+        sidebarButton.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code: "ArrowDown",
+            key: "ArrowDown",
+          })
+        );
+        await flushPromises();
+        await flushPromises();
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/mcp/tools?session_id=desktop-shared-session"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "move", arguments: { direction: "down" } }),
+        })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      sidebarButton.remove();
     }
   });
 
@@ -1257,6 +1497,92 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
+  it("accepts key events while a sidebar button has focus", async () => {
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const sidebarButton = document.createElement("button");
+    sidebarButton.textContent = "Saves";
+    document.body.appendChild(sidebarButton);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    sidebarButton.focus();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", bubbles: true }));
+    });
+
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+    sidebarButton.remove();
+    container.remove();
+  });
+
+  it("clears held controls when focus moves through the sidebar and back to the canvas", async () => {
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const sidebarButton = document.createElement("button");
+    sidebarButton.textContent = "Saves";
+    document.body.appendChild(sidebarButton);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement | null;
+    canvas?.focus();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true }));
+    });
+    const firstKeydownCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keydown");
+    expect(firstKeydownCalls).toHaveLength(1);
+
+    act(() => {
+      sidebarButton.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      sidebarButton.focus();
+      canvas?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true }));
+    });
+
+    const keydownCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keydown");
+    const keyupCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keyup");
+    expect(keyupCalls).toHaveLength(1);
+    expect(keyupCalls[0][0]).toMatchObject({
+      direction: "right",
+      is_press: false,
+    });
+    expect(keydownCalls).toHaveLength(2);
+    expect(keydownCalls[1][0]).toMatchObject({
+      direction: "right",
+      is_press: true,
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    sidebarButton.remove();
+    container.remove();
+  });
+
   it("accepts key events without canvas focus while Unown modal input is active", async () => {
     const game = buildGameStub();
     game.getGameState.mockReturnValue({
@@ -1293,6 +1619,170 @@ describe("GameCanvas", () => {
       root.unmount();
     });
     input.remove();
+    container.remove();
+  });
+
+  it("mirrors MCP recent events into the native local game", async () => {
+    jest.useFakeTimers();
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+    const mcpResponses = [
+      { total: 1, events: [{ action: "mcp:move:down" }] },
+      { total: 2, events: [{ action: "mcp:move:down" }, { action: "mcp:button:a" }] },
+    ];
+    globalThis.fetch = jest.fn(async () => {
+      const payload = mcpResponses.shift() ?? { total: 2, events: [] };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: {
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        }),
+      };
+    }) as unknown as typeof globalThis.fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <GameCanvas
+          runtimeMode="local"
+          mcpActionMirrorSessionId="ultimate-run"
+          mcpActionMirrorPollMs={150}
+        />
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+    expect(game.postEvent).not.toHaveBeenCalled();
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/tools?session_id=ultimate-run"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "recent_events", arguments: { limit: 20 } }),
+      })
+    );
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    }));
+
+    await act(async () => {
+      jest.advanceTimersByTime(60);
+      await flushPromises();
+    });
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keyup",
+      button: "a",
+      is_press: false,
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("forwards native local input to MCP without echoing it back into the game", async () => {
+    jest.useFakeTimers();
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+    const recentEventResponses = [
+      { total: 0, events: [] },
+      { total: 1, events: [{ action: "press:a:1" }] },
+    ];
+    globalThis.fetch = jest.fn(async (_url, init) => {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) as { name?: string } : {};
+      if (body.name === "recent_events") {
+        const payload = recentEventResponses.shift() ?? { total: 1, events: [] };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(payload) }],
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: {
+            content: [{ type: "text", text: JSON.stringify({ action: { ok: true, changed: true } }) }],
+          },
+        }),
+      };
+    }) as unknown as typeof globalThis.fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <GameCanvas
+          runtimeMode="local"
+          mcpActionMirrorSessionId="ultimate-run"
+          mcpActionMirrorPollMs={150}
+        />
+      );
+      await flushPromises();
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement | null;
+    canvas?.focus();
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", bubbles: true }));
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/tools?session_id=ultimate-run"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "press", arguments: { button: "a" } }),
+      })
+    );
+    expect(game.postEvent).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+
+    expect(game.postEvent).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.unmount();
+    });
     container.remove();
   });
 
@@ -1335,7 +1825,7 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
-  it("ignores duplicate held control keydowns even when Electron does not mark them as repeats", async () => {
+  it("ignores duplicate held control keydowns even when the native shell does not mark them as repeats", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);
 
@@ -1375,7 +1865,47 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
-  it("clears stuck held keyboard controls when the Electron window blurs", async () => {
+  it("turns a title-screen canvas tap into a confirm press for desktop shells", async () => {
+    const game = buildGameStub();
+    game.getState.mockReturnValue("title");
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement | null;
+    expect(canvas).toBeTruthy();
+
+    act(() => {
+      canvas?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+
+    expect(game.unlockAudio).toHaveBeenCalled();
+    expect(game.postEvent).toHaveBeenCalledTimes(2);
+    expect(game.postEvent.mock.calls[0][0]).toMatchObject({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    });
+    expect(game.postEvent.mock.calls[1][0]).toMatchObject({
+      type: "keyup",
+      button: "a",
+      is_press: false,
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("clears stuck held keyboard controls when the native window blurs", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);
     const inputStateSpy = jest.fn();

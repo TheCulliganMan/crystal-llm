@@ -2,7 +2,6 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { SettingsPanel } from "./settings-panel";
-import { PlayerGender, TimeOfDay } from "@pokecrystal/core/core/enums";
 
 describe("SettingsPanel", () => {
   beforeAll(() => {
@@ -22,13 +21,8 @@ describe("SettingsPanel", () => {
     await act(async () => {
       root.render(
         <SettingsPanel
-          playerGender={PlayerGender.MALE}
-          timeOfDay={TimeOfDay.DAY}
           playerName="Ryan"
-          soundEnabled={false}
-          instantModeEnabled={false}
           brandTheme="krabby"
-          playIntroEnabled={false}
           onBrandThemeChange={onBrandThemeChange}
         />
       );
@@ -59,13 +53,8 @@ describe("SettingsPanel", () => {
     await act(async () => {
       root.render(
         <SettingsPanel
-          playerGender={PlayerGender.MALE}
-          timeOfDay={TimeOfDay.DAY}
           playerName="Ryan"
-          soundEnabled={false}
-          instantModeEnabled={false}
           brandTheme="krabby"
-          playIntroEnabled={false}
         />
       );
     });
@@ -94,37 +83,26 @@ describe("SettingsPanel", () => {
     container.remove();
   });
 
-  it("updates skip to play toggle", async () => {
+  it("does not render toggle controls or reset player name", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
-    const onPlayIntroEnabledChange = jest.fn();
 
     await act(async () => {
       root.render(
         <SettingsPanel
-          playerGender={PlayerGender.MALE}
-          timeOfDay={TimeOfDay.DAY}
           playerName="Ryan"
-          soundEnabled={false}
-          instantModeEnabled={false}
           brandTheme="krabby"
-          playIntroEnabled={false}
-          onPlayIntroEnabledChange={onPlayIntroEnabledChange}
         />
       );
     });
 
-    const onButton = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.getAttribute("aria-label") === "Skip to play on"
-    );
-    expect(onButton).toBeTruthy();
-
-    await act(async () => {
-      onButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(onPlayIntroEnabledChange).toHaveBeenCalledWith(true);
+    expect(container.textContent).not.toContain("Player Gender");
+    expect(container.textContent).not.toContain("Time of Day");
+    expect(container.textContent).not.toContain("Sound");
+    expect(container.textContent).not.toContain("Instant Mode");
+    expect(container.textContent).not.toContain("Skip to play");
+    expect(container.textContent).not.toContain("Reset player name");
 
     await act(async () => {
       root.unmount();

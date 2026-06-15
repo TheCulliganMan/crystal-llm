@@ -1,9 +1,14 @@
 import {
+  compileAsmAudioProgramToPcmJson,
   pcmBytesToInt16,
   pcmClipToBytes,
   renderPcmClip,
+  renderPcmClipFromJson,
 } from "@pokecrystal/core/audio-export/pcm-clip";
 import type { ParsedMusicData } from "@pokecrystal/core/audio-export/parsers";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const waveSamples = { 0: new Array(32).fill(0) };
 
@@ -93,5 +98,44 @@ describe("PcmClip rendering", () => {
     expect(clip.ownedChannels).toEqual([5]);
     expect(clip.priorityClass).toBe("priority");
     expect(clip.loopStartSample).toBeNull();
+  });
+
+  it("compiles ASM to structured JSON before rendering PCM", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-pcm-json-"));
+    const audioRoot = path.join(tempRoot, "audio");
+    fs.mkdirSync(audioRoot, { recursive: true });
+    try {
+      fs.writeFileSync(
+        path.join(audioRoot, "sfx.asm"),
+        [
+          "Sfx_TestSynth:",
+          "\tchannel_count 1",
+          "\tchannel 5, Sfx_TestSynth_Ch5",
+          "",
+          "Sfx_TestSynth_Ch5:",
+          "\tduty_cycle_pattern 0, 1, 2, 3",
+          "\tsquare_note 4, 15, 2, 1792",
+          "\tsound_ret",
+        ].join("\n"),
+      );
+      fs.writeFileSync(path.join(audioRoot, "sfx_crystal.asm"), "");
+      fs.writeFileSync(path.join(audioRoot, "cries.asm"), "");
+      fs.writeFileSync(path.join(audioRoot, "drumkits.asm"), "");
+      fs.writeFileSync(path.join(audioRoot, "wave_samples.asm"), "");
+
+      const audioJson = compileAsmAudioProgramToPcmJson(audioRoot, "sfx", "testsynth", "SFX_TEST_SYNTH");
+
+      expect(audioJson).toEqual(expect.any(String));
+      expect(audioJson).toContain('"format":"pokecrystal.audio-program.json"');
+      expect(audioJson).toContain('"command":"square_note"');
+      expect(audioJson).not.toContain("Sfx_TestSynth:\\n\\tchannel_count");
+
+      const clip = renderPcmClipFromJson(audioJson ?? "");
+      expect(clip.sampleRate).toBe(44_100);
+      expect(clip.ownedChannels).toEqual([5]);
+      expect(clip.pcm.length).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -7,8 +7,9 @@ import { Readable } from "node:stream";
 import {
   pcmClipToBytes,
   pcmClipToManifest,
-  renderPcmClipFromAsm,
-  renderPcmMusicStemsFromAsm,
+  compileAsmAudioProgramToPcmJson,
+  renderPcmClipFromJson,
+  renderPcmMusicStemsFromJson,
   type PcmClip,
   type PcmMusicTrackManifest,
 } from "@pokecrystal/core/audio-export/pcm-clip";
@@ -29,6 +30,7 @@ const DIRECT_CONTENT_TYPES: Record<string, string> = {
 const SYNTHESIZED_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const synthesizedPcmClipCache = new Map<string, PcmClip>();
 const synthesizedPcmMusicStemCache = new Map<string, PcmClip[]>();
+const audioProgramJsonCache = new Map<string, string>();
 
 type BundledAudioFile = {
   root: string;
@@ -99,7 +101,8 @@ const loadPcmMusicStems = (audioRoot: string, stem: string, token: string): PcmC
   if (cached) {
     return cached;
   }
-  const rendered = renderPcmMusicStemsFromAsm(audioRoot, stem, token);
+  const audioJson = loadAudioProgramJson(audioRoot, "music", stem, token);
+  const rendered = audioJson ? renderPcmMusicStemsFromJson(audioJson) : null;
   if (!rendered) {
     return null;
   }
@@ -118,12 +121,32 @@ const loadPcmClip = (
   if (cached) {
     return cached;
   }
-  const rendered = renderPcmClipFromAsm(audioRoot, kind, stem, token);
+  const audioJson = loadAudioProgramJson(audioRoot, kind, stem, token);
+  const rendered = audioJson ? renderPcmClipFromJson(audioJson) : null;
   if (!rendered) {
     return null;
   }
   synthesizedPcmClipCache.set(cacheKey, rendered);
   return rendered;
+};
+
+const loadAudioProgramJson = (
+  audioRoot: string,
+  kind: "music" | "sfx" | "cry",
+  stem: string,
+  token: string,
+): string | null => {
+  const cacheKey = `${kind}:${audioRoot}:${stem}`;
+  const cached = audioProgramJsonCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const audioJson = compileAsmAudioProgramToPcmJson(audioRoot, kind, stem, token);
+  if (!audioJson) {
+    return null;
+  }
+  audioProgramJsonCache.set(cacheKey, audioJson);
+  return audioJson;
 };
 
 function buildPcmMusicManifest(stem: string, token: string, clips: PcmClip[]): PcmMusicTrackManifest | null {
