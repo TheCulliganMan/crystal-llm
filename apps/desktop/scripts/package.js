@@ -11,6 +11,7 @@ const {
   ROOT_DIR,
   resolveZeroNativeCliPath,
 } = require("./launch-helpers");
+const { patchZeroNativeMenu } = require("./patch-zero-native-menu");
 
 const WEB_DIR = path.resolve(DESKTOP_DIR, "../web");
 const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -333,6 +334,7 @@ const stageDesktopResources = () => {
 };
 
 const buildNativeApp = () => {
+  patchZeroNativeMenu();
   runSync("zig", ["build"], {
     cwd: DESKTOP_DIR,
     env: withLocalBinPath(),

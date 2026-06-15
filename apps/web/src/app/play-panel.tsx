@@ -14,11 +14,13 @@ import { faFloppyDisk } from "@fortawesome/free-solid-svg-icons/faFloppyDisk";
 import { faGamepad } from "@fortawesome/free-solid-svg-icons/faGamepad";
 import { faGear } from "@fortawesome/free-solid-svg-icons/faGear";
 import { faPlay } from "@fortawesome/free-solid-svg-icons/faPlay";
+import { faPlug } from "@fortawesome/free-solid-svg-icons/faPlug";
 import { faUsers } from "@fortawesome/free-solid-svg-icons/faUsers";
 import { GameCanvas } from "./game-canvas";
 import { VirtualGamepad } from "./virtual-gamepad";
 import { GuestSavePanel } from "./guest-save-panel";
 import { SettingsPanel } from "./settings-panel";
+import { DesktopMcpPanel } from "./desktop-mcp-panel";
 import { VisualDebugPanel } from "./visual-debug-panel";
 import { KeybindingsEditor } from "./keybindings-editor";
 import type { BrandTheme } from "./settings-panel";
@@ -47,6 +49,7 @@ import {
   getNextRendererMode,
   getRendererModeActionLabel,
 } from "./renderer-mode";
+import { PRIMARY_MCP_SESSION_ID } from "./mcp/session-id";
 import { computeFullscreenCanvasLayout } from "./play-layout";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
@@ -141,7 +144,7 @@ const toPresenceDirection = (value: unknown): "up" | "down" | "left" | "right" =
 };
 
 type ControlTone = "neutral" | "accent" | "ember";
-type UtilityPanelView = "multiplayer" | "settings" | "saves" | "debug";
+type UtilityPanelView = "multiplayer" | "settings" | "mcp" | "saves" | "debug";
 export type PlayPanelProps = {
   variant?: "default" | "desktop";
 };
@@ -233,11 +236,12 @@ const CONTROL_TIPS = [
 const UTILITY_PANEL_OPTIONS: Array<{ view: UtilityPanelView; label: string; icon: IconDefinition }> = [
   { view: "multiplayer", label: "Lobby", icon: faUsers },
   { view: "settings", label: "Settings", icon: faGear },
+  { view: "mcp", label: "MCP", icon: faPlug },
   { view: "saves", label: "Saves", icon: faFloppyDisk },
   { view: "debug", label: "Debug", icon: faBug },
 ];
 const DESKTOP_UTILITY_PANEL_OPTIONS = UTILITY_PANEL_OPTIONS.filter(
-  (option) => option.view !== "multiplayer" && option.view !== "debug"
+  (option) => option.view !== "multiplayer" && option.view !== "debug" && option.view !== "mcp"
 );
 const MODAL_MAX_HEIGHT = "calc(min(100vh, 92vh) - 1.5rem)";
 const MODAL_BODY_MAX_HEIGHT = "calc(100% - 5.5rem)";
@@ -1397,6 +1401,40 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const utilityPanelOptions = isDesktopVariant ? DESKTOP_UTILITY_PANEL_OPTIONS : UTILITY_PANEL_OPTIONS;
 
   useEffect(() => {
+    if (!isDesktopVariant || typeof window === "undefined") {
+      return;
+    }
+    const panel = new URL(window.location.href).searchParams.get("panel");
+    if (panel === "settings" || panel === "saves" || panel === "mcp") {
+      openUtilityPanel(panel);
+    }
+  }, [isDesktopVariant, openUtilityPanel]);
+
+  useEffect(() => {
+    if (!isDesktopVariant || typeof window === "undefined") {
+      return;
+    }
+    const handleMenuCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{ command?: unknown }>).detail;
+      const command = typeof detail?.command === "string" ? detail.command : "";
+      if (command === "settings") {
+        window.location.assign("/desktop?panel=settings");
+      } else if (command === "saves") {
+        window.location.assign("/desktop?panel=saves");
+      } else if (command === "mcp") {
+        window.location.assign("/mcp");
+      } else if (command === "copy-mcp-url" && navigator.clipboard) {
+        const url = new URL(`/api/mcp?session_id=${encodeURIComponent(PRIMARY_MCP_SESSION_ID)}`, window.location.origin);
+        void navigator.clipboard.writeText(url.toString());
+      }
+    };
+    window.addEventListener("zero-native:menu-command", handleMenuCommand as EventListener);
+    return () => {
+      window.removeEventListener("zero-native:menu-command", handleMenuCommand as EventListener);
+    };
+  }, [isDesktopVariant, openUtilityPanel]);
+
+  useEffect(() => {
     if (isDesktopVariant && (utilityPanelView === "multiplayer" || utilityPanelView === "debug")) {
       setUtilityPanelView("settings");
     }
@@ -1406,6 +1444,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     switch (utilityPanelView) {
       case "multiplayer":
         return "Multiplayer Lobby";
+      case "mcp":
+        return "MCP Streamable HTTP";
       case "saves":
         return "Local Save Snapshots";
       case "debug":
@@ -1821,6 +1861,9 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     if (utilityPanelView === "saves") {
       return <GuestSavePanel onLoadSave={handleLoadSave} />;
     }
+    if (utilityPanelView === "mcp") {
+      return <DesktopMcpPanel />;
+    }
     if (utilityPanelView === "debug") {
       return <VisualDebugPanel game={gameRef.current} />;
     }
@@ -1992,6 +2035,33 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               </div>
             </div>
           </aside>
+        ) : null}
+        {utilityPanelOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3"
+            style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="flex w-full max-w-3xl flex-col rounded border border-base-300 bg-base-100 text-base-content shadow-2xl"
+              style={MODAL_DIALOG_STYLE}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-base-300 px-4 py-3">
+                <h2 className="text-lg font-semibold">{utilityPanelTitle}</h2>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline rounded normal-case"
+                  onClick={() => setUtilityPanelOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-4" style={{ maxHeight: MODAL_BODY_MAX_HEIGHT }}>
+                {desktopPanelContent}
+              </div>
+            </div>
+          </div>
         ) : null}
       </div>
     );
@@ -2416,6 +2486,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   onBrandThemeChange={applyBrandTheme}
                 />
               ) : null}
+              {utilityPanelView === "mcp" ? <DesktopMcpPanel /> : null}
               {utilityPanelView === "saves" ? <GuestSavePanel onLoadSave={handleLoadSave} /> : null}
               {utilityPanelView === "debug" ? <VisualDebugPanel game={gameRef.current} /> : null}
             </div>

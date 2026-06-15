@@ -9,6 +9,7 @@ import { MANUAL_SAVE_SLOT } from "@pokecrystal/core/core/save-slots";
 let consoleWarnSpy: jest.SpyInstance;
 let consoleErrorSpy: jest.SpyInstance;
 const mockSettingsPanelSpy = jest.fn();
+const mockDesktopMcpPanelSpy = jest.fn();
 const mockMultiplayerMenuSpy = jest.fn();
 const mockGameCanvasSpy = jest.fn();
 const mockGuestSavePanelSpy = jest.fn();
@@ -35,6 +36,13 @@ jest.mock("./settings-panel", () => ({
   SettingsPanel: (props: Record<string, unknown>) => {
     mockSettingsPanelSpy(props);
     return <div data-testid="settings-panel" />;
+  },
+}));
+
+jest.mock("./desktop-mcp-panel", () => ({
+  DesktopMcpPanel: (props: Record<string, unknown>) => {
+    mockDesktopMcpPanelSpy(props);
+    return <div data-testid="desktop-mcp-panel" />;
   },
 }));
 
@@ -268,6 +276,7 @@ describe("PlayPanel controls dialog", () => {
 
   beforeEach(() => {
     mockSettingsPanelSpy.mockClear();
+    mockDesktopMcpPanelSpy.mockClear();
     mockMultiplayerMenuSpy.mockClear();
     mockGameCanvasSpy.mockClear();
     mockGuestSavePanelSpy.mockClear();
@@ -340,6 +349,7 @@ describe("PlayPanel controls dialog", () => {
     });
 
     expect(findButtonByLabel(container, "Lobby")).toBeUndefined();
+    expect(findButtonByLabel(container, "MCP")).toBeUndefined();
     expect(findButtonByLabel(container, "Settings")).toBeTruthy();
     expect(findButtonByLabel(container, "Saves")).toBeTruthy();
     expect(findButtonByLabel(container, "Debug")).toBeUndefined();
@@ -351,6 +361,30 @@ describe("PlayPanel controls dialog", () => {
     });
     container.remove();
     window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
+  });
+
+  it("opens MCP configuration from the desktop panel URL", async () => {
+    window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
+    window.history.replaceState({}, "", "/desktop?panel=mcp");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<PlayPanel variant="desktop" />);
+      await flushPromises();
+    });
+
+    expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeNull();
+    expect(container.textContent).toContain("MCP Streamable HTTP");
+    expect(container.querySelector('[data-testid="desktop-mcp-panel"]')).toBeTruthy();
+    expect(mockDesktopMcpPanelSpy).toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.history.replaceState({}, "", "/desktop");
   });
 
   it("hides and restores the desktop variant sidebar", async () => {
