@@ -114,6 +114,11 @@ type GameCanvasProps = {
 type MirroredMcpInput =
   | { kind: "move"; value: "up" | "down" | "left" | "right" }
   | { kind: "button"; value: "a" | "b" | "start" | "select" };
+type MirroredMcpButton = Extract<MirroredMcpInput, { kind: "button" }>["value"];
+
+type PostKeyboardEventOptions = {
+  mirrorToMcp?: boolean;
+};
 
 type SyntheticRepeatPolicyArgs = {
   key: string | number | null;
@@ -1296,7 +1301,53 @@ export const GameCanvas = React.memo(({
       );
       return isUnownModalActive || isOverworldCaptureActive;
     };
-    const postKeyboardEvent = (type: string | number, key: string, code: string): void => {
+    const pendingLocalMcpEchoInputs: MirroredMcpInput[] = [];
+    const mirrorNativeInputToMcp = (event: GameEngineEvent): void => {
+      if (isServerMode || readOnly || !mcpActionMirrorSessionId) {
+        return;
+      }
+      const isPress = event.is_press ?? event.type === gameEngine.KEYDOWN;
+      if (!isPress) {
+        return;
+      }
+      const direction = normalizeRepeatDirection(
+        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null)
+      );
+      const button = normalizeMcpMirrorButton(
+        event.button ?? mapKeyToButton(event.code ?? event.key ?? null)
+      );
+      const input: MirroredMcpInput | null =
+        direction ? { kind: "move", value: direction } :
+          button ? { kind: "button", value: button } :
+            null;
+      if (!input) {
+        return;
+      }
+      pendingLocalMcpEchoInputs.push(input);
+      const toolName = input.kind === "move" ? "move" : "press";
+      const args = input.kind === "move" ? { direction: input.value } : { button: input.value };
+      void callRemoteTool(toolName, args).catch((error) => {
+        const index = pendingLocalMcpEchoInputs.findIndex((pending) => isSameMirroredMcpInput(pending, input));
+        if (index >= 0) {
+          pendingLocalMcpEchoInputs.splice(index, 1);
+        }
+        logger.debug("[game-canvas] native MCP input mirror failed", error);
+      });
+    };
+    const consumePendingLocalMcpEcho = (input: MirroredMcpInput): boolean => {
+      const index = pendingLocalMcpEchoInputs.findIndex((pending) => isSameMirroredMcpInput(pending, input));
+      if (index < 0) {
+        return false;
+      }
+      pendingLocalMcpEchoInputs.splice(index, 1);
+      return true;
+    };
+    const postKeyboardEvent = (
+      type: string | number,
+      key: string,
+      code: string,
+      options: PostKeyboardEventOptions = {}
+    ): void => {
       const lookupKey = code || key;
       const direction = mapKeyToDirection(lookupKey) ?? mapKeyToDirection(key);
       const button = mapKeyToButton(lookupKey) ?? mapKeyToButton(key);
@@ -1308,6 +1359,9 @@ export const GameCanvas = React.memo(({
         is_press: type === gameEngine.KEYDOWN,
       });
       postEvent?.(engineEvent);
+      if (options.mirrorToMcp !== false) {
+        mirrorNativeInputToMcp(engineEvent);
+      }
     };
     let mcpMirrorTimer: number | null = null;
     const mcpMirrorReleaseTimers: number[] = [];
@@ -1336,10 +1390,10 @@ export const GameCanvas = React.memo(({
             key === "Enter" ? "Enter" :
               key === "Backspace" ? "Backspace" :
                 key;
-      postKeyboardEvent(gameEngine.KEYDOWN, keyValue, key);
+      postKeyboardEvent(gameEngine.KEYDOWN, keyValue, key, { mirrorToMcp: false });
       const holdMs = input.kind === "move" ? 180 : 60;
       const timerId = window.setTimeout(() => {
-        postKeyboardEvent(gameEngine.KEYUP, keyValue, key);
+        postKeyboardEvent(gameEngine.KEYUP, keyValue, key, { mirrorToMcp: false });
       }, holdMs);
       mcpMirrorReleaseTimers.push(timerId);
     };
@@ -1381,7 +1435,7 @@ export const GameCanvas = React.memo(({
           continue;
         }
         const input = parseMirroredMcpAction(event.action);
-        if (input) {
+        if (input && !consumePendingLocalMcpEcho(input)) {
           replayMirroredMcpInput(input);
         }
       }
@@ -1522,7 +1576,9 @@ export const GameCanvas = React.memo(({
         } else {
           heldGamepadControls.delete(control);
         }
-        postEvent?.(buildGamepadEvent(control, isPressed));
+        const event = buildGamepadEvent(control, isPressed);
+        postEvent?.(event);
+        mirrorNativeInputToMcp(event);
       }
       if (changed) {
         emitInputState();
@@ -1896,6 +1952,17 @@ const parseMirroredMcpAction = (action: string): MirroredMcpInput | null => {
   }
   return null;
 };
+
+const normalizeMcpMirrorButton = (value: string | null | undefined): MirroredMcpButton | null => {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "a" || normalized === "b" || normalized === "start" || normalized === "select") {
+    return normalized;
+  }
+  return null;
+};
+
+const isSameMirroredMcpInput = (left: MirroredMcpInput, right: MirroredMcpInput): boolean =>
+  left.kind === right.kind && left.value === right.value;
 
 const buildSnapshotLinesFromText = (text: string): SnapshotLine[] => {
   const lines = text.split(/\r?\n/);
