@@ -1235,9 +1235,13 @@ export const GameCanvas = React.memo(({
         pressedKeys,
       });
     };
+    let releaseHeldKeyboardControl = (_keyValue: string | number): void => {};
     const clearHeldKeyboardInput = () => {
       if (heldKeys.size === 0 && repeatFramesByKey.size === 0) {
         return;
+      }
+      for (const keyValue of heldKeys) {
+        releaseHeldKeyboardControl(keyValue);
       }
       heldKeys.clear();
       repeatFramesByKey.clear();
@@ -1373,6 +1377,10 @@ export const GameCanvas = React.memo(({
       if (options.mirrorToMcp !== false) {
         mirrorNativeInputToMcp(engineEvent);
       }
+    };
+    releaseHeldKeyboardControl = (keyValue: string | number): void => {
+      const keyToken = String(keyValue);
+      postKeyboardEvent(gameEngine.KEYUP, keyToken, keyToken, { mirrorToMcp: false });
     };
     let mcpMirrorTimer: number | null = null;
     const mcpMirrorReleaseTimers: number[] = [];

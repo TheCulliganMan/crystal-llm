@@ -1564,6 +1564,12 @@ describe("GameCanvas", () => {
     });
 
     const keydownCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keydown");
+    const keyupCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keyup");
+    expect(keyupCalls).toHaveLength(1);
+    expect(keyupCalls[0][0]).toMatchObject({
+      direction: "right",
+      is_press: false,
+    });
     expect(keydownCalls).toHaveLength(2);
     expect(keydownCalls[1][0]).toMatchObject({
       direction: "right",
