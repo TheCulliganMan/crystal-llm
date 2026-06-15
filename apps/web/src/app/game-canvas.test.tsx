@@ -600,6 +600,68 @@ describe("GameCanvas", () => {
     }
   });
 
+  it("posts raw input events for animated desktop MCP mode", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-animated-input"
+            remoteVisualMode="frame"
+            remoteInstantMode={false}
+          />
+        );
+        await flushPromises();
+      });
+
+      const fetchMock = globalThis.fetch as jest.Mock;
+      fetchMock.mockClear();
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code: "ArrowDown",
+            key: "ArrowDown",
+          })
+        );
+        await flushPromises();
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/arena/input",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            session_id: "desktop-animated-input",
+            key: "ArrowDown",
+            direction: "down",
+            button: null,
+            is_press: true,
+            instant: false,
+          }),
+        })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("sizes remote frame canvases from the returned PNG dimensions", async () => {
     globalThis.fetch = jest.fn(async () => ({
       ok: true,

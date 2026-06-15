@@ -782,14 +782,57 @@ export const GameCanvas = React.memo(({
       return task;
     };
 
+    const postRemoteInputEvent = (
+      event: GameEngineEvent,
+      isPress: boolean,
+      direction: string | null,
+      button: string | null
+    ): void => {
+      const sessionId = ensureSessionId();
+      if (!sessionId || !remoteActiveRef.current) {
+        return;
+      }
+      const key = String(event.code ?? event.key ?? direction ?? button ?? "");
+      if (!key) {
+        return;
+      }
+      void fetch("/api/arena/input", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(PUBLIC_SNAPSHOT_TOKEN ? { "x-mcp-token": PUBLIC_SNAPSHOT_TOKEN } : {}),
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          key,
+          direction,
+          button,
+          is_press: isPress,
+          instant: remoteInstantMode ?? false,
+        }),
+        cache: "no-store",
+      }).catch((error) => {
+        if (remoteActiveRef.current) {
+          logger.debug("[game-canvas] remote input event failed", error);
+        }
+      });
+    };
+
     const enqueueRemoteInput = (event: GameEngineEvent): void => {
       const sessionId = ensureSessionId();
       if (!sessionId || !remoteActiveRef.current) {
         return;
       }
       const isPress = event.is_press ?? event.type === gameEngine.KEYDOWN;
+      const direction =
+        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
+      const button =
+        event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
+      if (remoteInstantMode === false) {
+        postRemoteInputEvent(event, isPress, direction, button);
+        return;
+      }
       if (!isPress) {
-        const direction = event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
         if (direction) {
           const timerId = remoteDirectionTimers.get(direction);
           if (timerId !== undefined) {
@@ -799,10 +842,6 @@ export const GameCanvas = React.memo(({
         }
         return;
       }
-      const direction =
-        event.direction ?? mapKeyToDirection(event.code ?? event.key ?? null);
-      const button =
-        event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
       if (direction) {
         for (const [heldDirection, timerId] of remoteDirectionTimers.entries()) {
           if (heldDirection !== direction) {

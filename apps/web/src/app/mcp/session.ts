@@ -3872,6 +3872,23 @@ class McpGameSession {
     });
   }
 
+  async postInputEvent(input: {
+    key: string;
+    direction?: string | null;
+    button?: string | null;
+    isPress: boolean;
+  }): Promise<void> {
+    await this.ensureReady();
+    const event = new gameEngine.event.Event(input.isPress ? gameEngine.KEYDOWN : gameEngine.KEYUP, {
+      key: input.key,
+      code: input.key,
+      direction: input.direction ?? null,
+      button: input.button ?? null,
+      is_press: input.isPress,
+    });
+    this.getGame().postEvent(event);
+  }
+
   private scheduleTextInput(text: string): void {
     const key = /^[a-z]$/i.test(text) ? `Key${text.toUpperCase()}` : text;
     this.scheduledEvents.push({
