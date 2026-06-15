@@ -67,7 +67,6 @@ const stageDesktopResources = () => {
   fs.rmSync(DESKTOP_RESOURCES_DIR, { recursive: true, force: true });
   fs.mkdirSync(DESKTOP_RESOURCES_DIR, { recursive: true });
 
-  fs.cpSync(DESKTOP_HTML_PATH, path.join(DESKTOP_RESOURCES_DIR, "index.html"));
   fs.cpSync(path.join(WEB_BUILD_DIR, "static"), path.join(DESKTOP_RESOURCES_DIR, "_next", "static"), {
     recursive: true,
   });
@@ -78,7 +77,23 @@ const stageDesktopResources = () => {
       return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
     },
   });
+  fs.cpSync(path.join(WEB_DIR, "assets"), path.join(DESKTOP_RESOURCES_DIR, "assets"), {
+    recursive: true,
+    filter: (source) => {
+      const relative = path.relative(path.join(WEB_DIR, "assets"), source);
+      return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
+    },
+  });
+  fs.cpSync(DESKTOP_HTML_PATH, path.join(DESKTOP_RESOURCES_DIR, "index.html"));
   fs.cpSync(path.join(DESKTOP_DIR, "assets", "icon.png"), path.join(DESKTOP_RESOURCES_DIR, "icon.png"));
+
+  const stagedHtml = fs.readFileSync(path.join(DESKTOP_RESOURCES_DIR, "index.html"), "utf8");
+  if (!stagedHtml.includes("/_next/static/") || stagedHtml.includes("../dist/index.js")) {
+    throw new Error("Staged desktop index.html is not the prerendered Next /desktop page.");
+  }
+  if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "assets", "data", "pokegear_landmarks.json"))) {
+    throw new Error("Staged desktop resources are missing generated runtime assets.");
+  }
 };
 
 const buildNativeApp = () => {
@@ -97,6 +112,7 @@ const ensureBuilderArtifacts = () => {
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Info.plist"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw-desktop"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "index.html"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "assets", "data", "pokegear_landmarks.json"),
   ];
 
   for (const expectedFile of expectedBundleFiles) {
