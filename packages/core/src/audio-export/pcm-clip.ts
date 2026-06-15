@@ -60,6 +60,15 @@ export type PcmRenderContext = {
   waveInstrumentMap?: Record<number, number>;
 };
 
+export type PcmJsonAudioProgram = {
+  format: "pokecrystal.audio-program.json";
+  version: 1;
+  kind: PcmClipKind;
+  token: string;
+  musicData: ParsedMusicData;
+  context: PcmRenderContext;
+};
+
 type RenderClipOptions = {
   kind: PcmClipKind;
   token: string;
@@ -218,25 +227,73 @@ export function loadPcmRenderContext(audioRoot: string): PcmRenderContext {
   };
 }
 
-export function renderPcmClipFromAsm(
+export function compileAsmAudioProgramToPcmJson(
   audioRoot: string,
   kind: AsmAudioProgramKind,
   stem: string,
   token: string,
-): PcmClip | null {
+): string | null {
   const program = buildAsmAudioProgram(audioRoot, kind, stem);
   if (!program) {
     return null;
   }
   const musicData = new AsmAudioParser(program.source).parse();
   const context = loadPcmRenderContext(audioRoot);
-  return renderPcmClip({
+  const payload: PcmJsonAudioProgram = {
+    format: "pokecrystal.audio-program.json",
+    version: 1,
     kind: kind === "cry" ? "cry" : kind,
     token,
     musicData,
     context,
-    priorityClass: inferPcmPriorityClass(token, kind),
+  };
+  return JSON.stringify(payload);
+}
+
+const parsePcmJsonAudioProgram = (jsonText: string): PcmJsonAudioProgram => {
+  const payload = JSON.parse(jsonText) as Partial<PcmJsonAudioProgram>;
+  if (
+    payload.format !== "pokecrystal.audio-program.json" ||
+    payload.version !== 1 ||
+    (payload.kind !== "music" && payload.kind !== "sfx" && payload.kind !== "cry") ||
+    typeof payload.token !== "string" ||
+    !payload.musicData ||
+    !payload.context
+  ) {
+    throw new Error("Invalid PCM audio program JSON");
+  }
+  return payload as PcmJsonAudioProgram;
+};
+
+export function renderPcmClipFromJson(jsonText: string, options?: { soloChannel?: number | null; ownedChannels?: number[] }): PcmClip {
+  const payload = parsePcmJsonAudioProgram(jsonText);
+  return renderPcmClip({
+    kind: payload.kind,
+    token: payload.token,
+    musicData: payload.musicData,
+    context: payload.context,
+    soloChannel: options?.soloChannel,
+    ownedChannels: options?.ownedChannels,
+    priorityClass: inferPcmPriorityClass(payload.token, payload.kind),
   });
+}
+
+export function renderPcmMusicStemsFromJson(jsonText: string): PcmClip[] {
+  const payload = parsePcmJsonAudioProgram(jsonText);
+  if (payload.kind !== "music") {
+    throw new Error("PCM music stems require a music audio program JSON");
+  }
+  return renderPcmMusicStems(payload.token, payload.musicData, payload.context);
+}
+
+export function renderPcmClipFromAsm(
+  audioRoot: string,
+  kind: AsmAudioProgramKind,
+  stem: string,
+  token: string,
+): PcmClip | null {
+  const jsonText = compileAsmAudioProgramToPcmJson(audioRoot, kind, stem, token);
+  return jsonText ? renderPcmClipFromJson(jsonText) : null;
 }
 
 export function renderPcmMusicStemsFromAsm(
@@ -244,11 +301,6 @@ export function renderPcmMusicStemsFromAsm(
   stem: string,
   token: string,
 ): PcmClip[] | null {
-  const program = buildAsmAudioProgram(audioRoot, "music", stem);
-  if (!program) {
-    return null;
-  }
-  const musicData = new AsmAudioParser(program.source).parse();
-  const context = loadPcmRenderContext(audioRoot);
-  return renderPcmMusicStems(token, musicData, context);
+  const jsonText = compileAsmAudioProgramToPcmJson(audioRoot, "music", stem, token);
+  return jsonText ? renderPcmMusicStemsFromJson(jsonText) : null;
 }

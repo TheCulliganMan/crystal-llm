@@ -53,12 +53,13 @@ export type TuiPcmClip = {
 };
 
 type PcmToolchain = {
-  renderPcmClipFromAsm: (
+  compileAsmAudioProgramToPcmJson: (
     audioRoot: string,
     kind: "music" | "sfx" | "cry",
     stem: string,
     token: string,
-  ) => TuiPcmClip | null;
+  ) => string | null;
+  renderPcmClipFromJson: (jsonText: string) => TuiPcmClip;
   getDisassemblyRoot: () => string;
 };
 
@@ -71,11 +72,15 @@ const loadPcmToolchain = (): PcmToolchain => {
   // Dynamic require keeps the CLI package build decoupled from core source rootDir rules.
   // The published CLI depends on @pokecrystal/core at runtime.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pcm = require("@pokecrystal/core/audio-export/pcm-clip") as Pick<PcmToolchain, "renderPcmClipFromAsm">;
+  const pcm = require("@pokecrystal/core/audio-export/pcm-clip") as Pick<
+    PcmToolchain,
+    "compileAsmAudioProgramToPcmJson" | "renderPcmClipFromJson"
+  >;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const paths = require("@pokecrystal/core/core/paths") as Pick<PcmToolchain, "getDisassemblyRoot">;
   cachedPcmToolchain = {
-    renderPcmClipFromAsm: pcm.renderPcmClipFromAsm,
+    compileAsmAudioProgramToPcmJson: pcm.compileAsmAudioProgramToPcmJson,
+    renderPcmClipFromJson: pcm.renderPcmClipFromJson,
     getDisassemblyRoot: paths.getDisassemblyRoot,
   };
   return cachedPcmToolchain;
@@ -342,12 +347,13 @@ const createPcmClipResolver = (): ((event: TuiAudioPlaybackEvent) => TuiPcmClip 
     try {
       const toolchain = loadPcmToolchain();
       const audioRoot = path.join(toolchain.getDisassemblyRoot(), "audio");
-      const clip = toolchain.renderPcmClipFromAsm(
+      const audioJson = toolchain.compileAsmAudioProgramToPcmJson(
         audioRoot,
         parsed.kind,
         parsed.stem,
         event.token,
       );
+      const clip = audioJson ? toolchain.renderPcmClipFromJson(audioJson) : null;
       cache.set(cacheKey, clip);
       return clip;
     } catch {
