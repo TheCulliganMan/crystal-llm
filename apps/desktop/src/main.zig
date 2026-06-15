@@ -13,7 +13,7 @@ const App = struct {
             .name = "krabbyclaw-desktop",
             .source = zero_native.WebViewSource.assets(.{
                 .root_path = "dist/resources",
-                .entry = "index.html",
+                .entry = "desktop/index.html",
                 .origin = "zero://app",
                 .spa_fallback = false,
             }),
@@ -31,7 +31,7 @@ const App = struct {
         }
         return zero_native.WebViewSource.assets(.{
             .root_path = "dist/resources",
-            .entry = "index.html",
+            .entry = "desktop/index.html",
             .origin = "zero://app",
             .spa_fallback = false,
         });

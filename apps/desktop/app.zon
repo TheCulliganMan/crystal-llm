@@ -9,7 +9,7 @@
     .capabilities = .{ "webview" },
     .frontend = .{
         .dist = "dist/resources",
-        .entry = "index.html",
+        .entry = "desktop/index.html",
         .spa_fallback = false,
         .dev = .{
             .url = "http://127.0.0.1:3000/desktop",

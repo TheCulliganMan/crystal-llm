@@ -16,6 +16,12 @@ const WEB_DIR = path.resolve(DESKTOP_DIR, "../web");
 const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
 const WEB_BUILD_DIR = path.join(WEB_DIR, DESKTOP_BUILD_DIST_DIR);
 const DESKTOP_HTML_PATH = path.join(WEB_BUILD_DIR, "server", "app", "desktop.html");
+const DESKTOP_ENTRY_HTML = `\
+<script>
+if (location.pathname !== "/desktop") {
+  history.replaceState(null, "", "/desktop" + location.search + location.hash);
+}
+</script>`;
 const NATIVE_BINARY = path.join(DESKTOP_DIR, "zig-out", "bin", process.platform === "win32" ? "krabbyclaw-desktop.exe" : "krabbyclaw-desktop");
 
 const withLocalBinPath = (env = process.env) => ({
@@ -84,12 +90,20 @@ const stageDesktopResources = () => {
       return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
     },
   });
-  fs.cpSync(DESKTOP_HTML_PATH, path.join(DESKTOP_RESOURCES_DIR, "index.html"));
+  const desktopHtml = fs
+    .readFileSync(DESKTOP_HTML_PATH, "utf8")
+    .replace("<head>", `<head>${DESKTOP_ENTRY_HTML}`);
+  fs.mkdirSync(path.join(DESKTOP_RESOURCES_DIR, "desktop"), { recursive: true });
+  fs.writeFileSync(path.join(DESKTOP_RESOURCES_DIR, "desktop", "index.html"), desktopHtml);
+  fs.writeFileSync(path.join(DESKTOP_RESOURCES_DIR, "index.html"), desktopHtml);
   fs.cpSync(path.join(DESKTOP_DIR, "assets", "icon.png"), path.join(DESKTOP_RESOURCES_DIR, "icon.png"));
 
-  const stagedHtml = fs.readFileSync(path.join(DESKTOP_RESOURCES_DIR, "index.html"), "utf8");
+  const stagedHtml = fs.readFileSync(path.join(DESKTOP_RESOURCES_DIR, "desktop", "index.html"), "utf8");
   if (!stagedHtml.includes("/_next/static/") || stagedHtml.includes("../dist/index.js")) {
     throw new Error("Staged desktop index.html is not the prerendered Next /desktop page.");
+  }
+  if (!stagedHtml.includes('history.replaceState(null, "", "/desktop"')) {
+    throw new Error("Staged desktop index.html is missing the packaged route normalization script.");
   }
   if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "assets", "data", "pokegear_landmarks.json"))) {
     throw new Error("Staged desktop resources are missing generated runtime assets.");
@@ -111,7 +125,7 @@ const ensureBuilderArtifacts = () => {
   const expectedBundleFiles = [
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Info.plist"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", "krabbyclaw-desktop"),
-    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "index.html"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop", "index.html"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "assets", "data", "pokegear_landmarks.json"),
   ];
 
