@@ -16,6 +16,7 @@ type GameStub = {
   unlockAudio: jest.Mock;
   setAudioMuted: jest.Mock;
   setMusicMuted: jest.Mock;
+  playMusic: jest.Mock;
   tick: jest.Mock;
   debugJumpToScene: jest.Mock;
   debugJumpToSpawn: jest.Mock;
@@ -56,6 +57,7 @@ describe("GameCanvas", () => {
     unlockAudio: jest.fn(),
     setAudioMuted: jest.fn(),
     setMusicMuted: jest.fn(),
+    playMusic: jest.fn(),
     tick: jest.fn(),
     debugJumpToScene: jest.fn(),
     debugJumpToSpawn: jest.fn(),
@@ -534,6 +536,62 @@ describe("GameCanvas", () => {
         expect.stringContaining("/api/arena/frame?session_id=watch-session-instant&scale=2&advance=0&instant=1"),
         expect.objectContaining({ cache: "no-store" })
       );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("syncs desktop audio mirror music from remote frame snapshots", async () => {
+    const mirrorGame = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(mirrorGame);
+    globalThis.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        image: "dGVzdA==",
+        width: 160,
+        height: 144,
+        frame: 1,
+        audio: {
+          musicToken: "MUSIC_ROUTE_29",
+          musicRole: "map",
+          musicSource: "route29",
+          musicFrame: 1,
+          fadedVolume: 1,
+          activeChannels: [],
+          recentEvents: [],
+        },
+      }),
+    })) as unknown as typeof globalThis.fetch;
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-audio-session"
+            remoteVisualMode="frame"
+          />
+        );
+        await flushPromises();
+        await flushPromises();
+      });
+
+      expect(mirrorGame.playMusic).toHaveBeenCalledWith("MUSIC_ROUTE_29", "map");
     } finally {
       await act(async () => {
         root.unmount();

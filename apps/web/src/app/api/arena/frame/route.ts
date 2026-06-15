@@ -116,6 +116,7 @@ export async function GET(request: Request) {
       await session.ensureReady();
     }
     const image = await session.observeTilemapImage({ scale });
+    const audio = session.getAudioPlaybackSnapshot?.();
     return NextResponse.json(
       {
         ok: true,
@@ -123,6 +124,7 @@ export async function GET(request: Request) {
         width: image.width,
         height: image.height,
         frame: session.getFrameCount(),
+        audio,
       },
       { headers: noStoreHeaders }
     );

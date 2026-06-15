@@ -13,6 +13,7 @@ import type { GameEngineEvent } from "@pokecrystal/core/ui/game-engine";
 import type { TextSnapshot, TextUI } from "@pokecrystal/core/ui/text-ui";
 import type { SnapshotLine } from "@pokecrystal/core/ui/text-snapshot-render";
 import { buildTextSnapshotLayout, MAX_TEXT_RENDER_CHARS } from "@pokecrystal/core/ui/text-snapshot-render";
+import type { AudioPlaybackSnapshot } from "@pokecrystal/core/engine/systems/audio";
 import { callMcpTool, type McpToolResult } from "./mcp-client";
 import { PRIMARY_MCP_SESSION_ID } from "@/app/mcp/session-id";
 import logger from "@pokecrystal/core/core/logger";
@@ -488,6 +489,7 @@ export const GameCanvas = React.memo(({
   const remoteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const remoteActiveRef = useRef(false);
   const remoteFrameRefreshRef = useRef<(() => void) | null>(null);
+  const remoteAudioMusicTokenRef = useRef<string | null>(null);
   const lastRemoteFrameRefreshKeyRef = useRef(remoteFrameRefreshKey);
   const remoteDirectionTimersRef = useRef<Map<string, number>>(new Map());
   const initialMutedRef = useRef(muted ?? false);
@@ -873,6 +875,7 @@ export const GameCanvas = React.memo(({
           mirrorStopped = true;
           remoteAudioMirrorGameRef.current?.destroy();
           remoteAudioMirrorGameRef.current = null;
+          remoteAudioMusicTokenRef.current = null;
         };
       }
 
@@ -891,6 +894,14 @@ export const GameCanvas = React.memo(({
                 scale: remoteFrameScale,
                 advanceFrames: remoteAdvanceFrames,
                 instantMode: remoteInstantMode,
+                onAudioSnapshot: (audio) => {
+                  const token = audio?.musicToken ?? null;
+                  if (!token || token === remoteAudioMusicTokenRef.current) {
+                    return;
+                  }
+                  remoteAudioMusicTokenRef.current = token;
+                  remoteAudioMirrorGameRef.current?.playMusic(token, audio?.musicRole ?? "map");
+                },
                 onError: handleRemoteError,
               });
           remoteFrameRefreshRef.current = loop.refresh;
@@ -1671,6 +1682,7 @@ type FrameResponse = {
   width?: number;
   height?: number;
   frame?: number;
+  audio?: AudioPlaybackSnapshot;
   error?: string;
 };
 
@@ -1681,6 +1693,7 @@ type RemoteFrameRenderOptions = {
   scale: number;
   advanceFrames: number;
   instantMode?: boolean;
+  onAudioSnapshot?: (audio: AudioPlaybackSnapshot | undefined) => void;
   onError?: (error: unknown) => void;
 };
 
@@ -1835,7 +1848,7 @@ const drawFrameImageToCanvas = async (
 };
 
 const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: () => void; refresh: () => void } => {
-  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, instantMode, onError } = options;
+  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, instantMode, onAudioSnapshot, onError } = options;
   if (typeof window === "undefined" || !tileCanvas) {
     return { stop: () => undefined, refresh: () => undefined };
   }
@@ -1867,6 +1880,7 @@ const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: 
         width: payload.width,
         height: payload.height,
       });
+      onAudioSnapshot?.(payload.audio);
     } catch (error) {
       onError?.(error);
     } finally {

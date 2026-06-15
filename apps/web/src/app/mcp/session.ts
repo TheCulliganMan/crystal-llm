@@ -3141,6 +3141,10 @@ class McpGameSession {
     });
   }
 
+  getAudioPlaybackSnapshot(): AudioPlaybackSnapshot | undefined {
+    return this.game?.getAudioPlaybackSnapshot?.();
+  }
+
   async recentEvents(limit = 10): Promise<McpRecentEventsSnapshot> {
     await this.ensureReady();
     const now = Date.now();

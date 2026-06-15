@@ -31,6 +31,10 @@ describe("arena frame API", () => {
       height: 144,
     }));
     const getFrameCount = jest.fn(() => 42);
+    const getAudioPlaybackSnapshot = jest.fn(() => ({
+      musicToken: "MUSIC_NEW_BARK_TOWN",
+      musicRole: "map",
+    }));
     const reset = jest.fn();
     mockGetMcpSession.mockReturnValue({
       ensureReady,
@@ -38,6 +42,7 @@ describe("arena frame API", () => {
       setInstantMode,
       observeTilemapImage,
       getFrameCount,
+      getAudioPlaybackSnapshot,
       reset,
     });
 
@@ -53,6 +58,10 @@ describe("arena frame API", () => {
       width: 160,
         height: 144,
         frame: 42,
+        audio: {
+          musicToken: "MUSIC_NEW_BARK_TOWN",
+          musicRole: "map",
+        },
       });
     expect(mockGetMcpSession).toHaveBeenCalledWith("test-session");
     expect(observeTilemapImage).toHaveBeenCalledWith({ scale: 3 });
