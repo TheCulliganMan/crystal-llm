@@ -38,7 +38,6 @@ import { LinkCableEmulator } from "@pokecrystal/core/multiplayer/link-cable";
 import { TradeManager } from "@pokecrystal/core/multiplayer/trade-manager";
 import type { RemoteOverworldPlayer } from "@pokecrystal/core/types/overworld";
 import type { Pokemon } from "@pokecrystal/core/core/models";
-import { GB_FRAME_DURATION_MS } from "@pokecrystal/core/core/gb-timing";
 import { PlayerGender, TimeOfDay } from "@pokecrystal/core/core/enums";
 import { canonicaliseTimeOfDay, DAY_HOUR, MORN_HOUR, NITE_HOUR } from "@pokecrystal/core/engine/systems/time";
 import { GameButton } from "@pokecrystal/core/input/config";
@@ -109,8 +108,6 @@ const RENDERER_MODE_LAPTOP_QUERY = "(min-width: 1200px)";
 const PLACEHOLDER_SCALE = 2;
 const PLACEHOLDER_WIDTH = 160 * PLACEHOLDER_SCALE;
 const PLACEHOLDER_HEIGHT = 144 * PLACEHOLDER_SCALE;
-const DESKTOP_ANIMATED_REMOTE_REFRESH_MS = Math.max(16, Math.round(GB_FRAME_DURATION_MS));
-const DESKTOP_INSTANT_REMOTE_REFRESH_MS = 100;
 
 const formatKeyLabel = (value: string): string => {
   if (value.startsWith("Key") && value.length > 3) {
@@ -1981,15 +1978,9 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   newGame={shouldStartFromTitleScreen}
                   preloadMode="auto"
                   rendererMode={rendererMode}
-                  runtimeMode="server"
-                  remoteVisualMode="frame"
-                  remoteInstantMode={instantModeEnabled}
-                  remoteAdvanceFrames={instantModeEnabled ? 0 : 1}
-                  remoteRefreshMs={
-                    instantModeEnabled
-                      ? DESKTOP_INSTANT_REMOTE_REFRESH_MS
-                      : DESKTOP_ANIMATED_REMOTE_REFRESH_MS
-                  }
+                  runtimeMode="local"
+                  mcpActionMirrorSessionId={PRIMARY_MCP_SESSION_ID}
+                  mcpActionMirrorPollMs={150}
                   canvasClassName="playui-screen-canvas block h-auto w-full bg-black outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   canvasStyle={{ maxWidth: "100%", maxHeight: "100%" }}
                   onInputStateChange={handleInputStateChange}

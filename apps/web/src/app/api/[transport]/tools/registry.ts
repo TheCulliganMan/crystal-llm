@@ -16,6 +16,8 @@ import {
   pressHandler,
   RecentEventsSchema,
   recentEventsHandler,
+  StatusSchema,
+  statusHandler,
   TypeTextSchema,
   typeTextHandler,
 } from "./input";
@@ -86,6 +88,14 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
       "Render the full current overworld route/city/interior as an agent-readable schematic. Returns JSON grid rows by default; pass include_image=true for an annotated image/png, or image_style=tiles for high-fidelity metatile art. Does not inspect arbitrary maps or choose routes.",
     inputSchema: withTrainingMetadata(RouteRenderSchema),
     handler: routeRenderHandler,
+  },
+  {
+    name: "status",
+    title: "Status",
+    description:
+      "Return compact structured JSON for current mode, map, position, movement availability, surface state, party summary, and active audio.",
+    inputSchema: withTrainingMetadata(StatusSchema),
+    handler: statusHandler,
   },
   {
     name: "move",

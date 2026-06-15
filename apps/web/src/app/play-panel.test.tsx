@@ -357,14 +357,13 @@ describe("PlayPanel controls dialog", () => {
     expect(container.querySelector('[data-testid="settings-panel"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="multiplayer-menu"]')).toBeNull();
     expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
-      runtimeMode: "server",
-      remoteVisualMode: "frame",
+      runtimeMode: "local",
       rendererMode: "tile",
       muted: false,
-      remoteInstantMode: false,
-      remoteAdvanceFrames: 1,
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
     });
-    expect(typeof mockGameCanvasSpy.mock.calls.at(-1)?.[0]?.remoteRefreshMs).toBe("number");
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).not.toHaveProperty("remoteVisualMode");
     const instantButton = findButtonByLabel(container, "Instant Off");
     expect(instantButton).toBeTruthy();
     await act(async () => {
@@ -373,11 +372,9 @@ describe("PlayPanel controls dialog", () => {
     });
     expect(findButtonByLabel(container, "Instant On")).toBeTruthy();
     expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
-      runtimeMode: "server",
-      remoteVisualMode: "frame",
-      remoteInstantMode: true,
-      remoteAdvanceFrames: 0,
-      remoteRefreshMs: 100,
+      runtimeMode: "local",
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
     });
 
     const soundButton = findButtonByLabel(container, "Sound On");
@@ -388,8 +385,7 @@ describe("PlayPanel controls dialog", () => {
     });
     expect(findButtonByLabel(container, "Sound Muted")).toBeTruthy();
     expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
-      runtimeMode: "server",
-      remoteVisualMode: "frame",
+      runtimeMode: "local",
       muted: true,
     });
 
@@ -400,8 +396,7 @@ describe("PlayPanel controls dialog", () => {
       await flushPromises();
     });
     expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
-      runtimeMode: "server",
-      remoteVisualMode: "frame",
+      runtimeMode: "local",
       rendererMode: "both",
     });
 
@@ -488,10 +483,9 @@ describe("PlayPanel controls dialog", () => {
 
     expect(findButtonByLabel(container, "Instant Off")).toBeTruthy();
     expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
-      runtimeMode: "server",
-      remoteVisualMode: "frame",
-      remoteInstantMode: false,
-      remoteAdvanceFrames: 1,
+      runtimeMode: "local",
+      mcpActionMirrorSessionId: "ultimate-run",
+      mcpActionMirrorPollMs: 150,
     });
 
     await act(async () => {

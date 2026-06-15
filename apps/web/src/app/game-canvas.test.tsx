@@ -1536,6 +1536,83 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
+  it("mirrors MCP recent events into the native local game", async () => {
+    jest.useFakeTimers();
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+    const mcpResponses = [
+      { total: 1, events: [{ action: "mcp:move:down" }] },
+      { total: 2, events: [{ action: "mcp:move:down" }, { action: "mcp:button:a" }] },
+    ];
+    globalThis.fetch = jest.fn(async () => {
+      const payload = mcpResponses.shift() ?? { total: 2, events: [] };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: {
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        }),
+      };
+    }) as unknown as typeof globalThis.fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <GameCanvas
+          runtimeMode="local"
+          mcpActionMirrorSessionId="ultimate-run"
+          mcpActionMirrorPollMs={150}
+        />
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+    expect(game.postEvent).not.toHaveBeenCalled();
+
+    await act(async () => {
+      jest.advanceTimersByTime(150);
+      await flushPromises();
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/tools?session_id=ultimate-run"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "recent_events", arguments: { limit: 20 } }),
+      })
+    );
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    }));
+
+    await act(async () => {
+      jest.advanceTimersByTime(60);
+      await flushPromises();
+    });
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keyup",
+      button: "a",
+      is_press: false,
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it("ignores repeated control keydown events so held-input ordering stays deterministic", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);

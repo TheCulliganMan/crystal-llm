@@ -107,7 +107,13 @@ type GameCanvasProps = {
   remoteAdvanceFrames?: number;
   remoteInstantMode?: boolean;
   remoteFrameRefreshKey?: number;
+  mcpActionMirrorSessionId?: string;
+  mcpActionMirrorPollMs?: number;
 };
+
+type MirroredMcpInput =
+  | { kind: "move"; value: "up" | "down" | "left" | "right" }
+  | { kind: "button"; value: "a" | "b" | "start" | "select" };
 
 type SyntheticRepeatPolicyArgs = {
   key: string | number | null;
@@ -476,6 +482,8 @@ export const GameCanvas = React.memo(({
   remoteAdvanceFrames = MCP_ADVANCE_FRAMES,
   remoteInstantMode,
   remoteFrameRefreshKey = 0,
+  mcpActionMirrorSessionId,
+  mcpActionMirrorPollMs = 150,
 }: GameCanvasProps) => {
   const canvasShellRef = useRef<HTMLDivElement>(null);
   const tileCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -1301,6 +1309,102 @@ export const GameCanvas = React.memo(({
       });
       postEvent?.(engineEvent);
     };
+    let mcpMirrorTimer: number | null = null;
+    const mcpMirrorReleaseTimers: number[] = [];
+    const mcpMirrorLastTotalRef = { current: null as number | null };
+    const replayMirroredMcpInput = (input: MirroredMcpInput): void => {
+      if (!mounted || readOnly || isServerMode || !gameRef.current) {
+        return;
+      }
+      const key =
+        input.kind === "move"
+          ? ({
+              up: "ArrowUp",
+              down: "ArrowDown",
+              left: "ArrowLeft",
+              right: "ArrowRight",
+            } as const)[input.value]
+          : ({
+              a: "KeyZ",
+              b: "KeyX",
+              start: "Enter",
+              select: "Backspace",
+            } as const)[input.value];
+      const keyValue =
+        key === "KeyZ" ? "z" :
+          key === "KeyX" ? "x" :
+            key === "Enter" ? "Enter" :
+              key === "Backspace" ? "Backspace" :
+                key;
+      postKeyboardEvent(gameEngine.KEYDOWN, keyValue, key);
+      const holdMs = input.kind === "move" ? 180 : 60;
+      const timerId = window.setTimeout(() => {
+        postKeyboardEvent(gameEngine.KEYUP, keyValue, key);
+      }, holdMs);
+      mcpMirrorReleaseTimers.push(timerId);
+    };
+    const pollMcpActionMirror = async (): Promise<void> => {
+      if (!mounted || readOnly || isServerMode || !mcpActionMirrorSessionId || !gameRef.current) {
+        return;
+      }
+      const origin = typeof window !== "undefined" ? window.location.origin : undefined;
+      const result = await callMcpTool("recent_events", { limit: 20 }, {
+        baseUrl: withSessionId(MCP_BASE_URL, mcpActionMirrorSessionId, origin),
+      });
+      const text = extractTextBlock(result);
+      if (!text) {
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        return;
+      }
+      const eventPayload = payload as {
+        total?: unknown;
+        events?: Array<{ action?: unknown }>;
+      };
+      const total = typeof eventPayload.total === "number" ? eventPayload.total : null;
+      const events = Array.isArray(eventPayload.events) ? eventPayload.events : [];
+      if (total === null) {
+        return;
+      }
+      const previousTotal = mcpMirrorLastTotalRef.current;
+      mcpMirrorLastTotalRef.current = total;
+      if (previousTotal === null || total <= previousTotal) {
+        return;
+      }
+      const newCount = Math.min(total - previousTotal, events.length);
+      for (const event of events.slice(events.length - newCount)) {
+        if (typeof event.action !== "string") {
+          continue;
+        }
+        const input = parseMirroredMcpAction(event.action);
+        if (input) {
+          replayMirroredMcpInput(input);
+        }
+      }
+    };
+    if (
+      !isServerMode &&
+      !readOnly &&
+      mcpActionMirrorSessionId &&
+      typeof window !== "undefined"
+    ) {
+      const poll = () => {
+        void pollMcpActionMirror().catch((error) => {
+          if (mounted) {
+            logger.debug("[game-canvas] MCP action mirror failed", error);
+          }
+        });
+      };
+      poll();
+      mcpMirrorTimer = window.setInterval(
+        poll,
+        Math.max(50, Math.floor(mcpActionMirrorPollMs))
+      );
+    }
     const postCanvasConfirmTap = (): void => {
       const game = gameRef.current;
       if (!game || game.getState() !== "title") {
@@ -1471,6 +1575,12 @@ export const GameCanvas = React.memo(({
       mounted = false;
       remoteActiveRef.current = false;
       remoteFrameRefreshRef.current = null;
+      if (mcpMirrorTimer !== null) {
+        window.clearInterval(mcpMirrorTimer);
+      }
+      for (const timerId of mcpMirrorReleaseTimers) {
+        window.clearTimeout(timerId);
+      }
       cleanupRemoteAudioMirror?.();
       cleanupRenderLoop?.();
       for (const timerId of remoteDirectionTimers.values()) {
@@ -1527,6 +1637,8 @@ export const GameCanvas = React.memo(({
     remoteVisualMode,
     runtimeMode,
     sessionId,
+    mcpActionMirrorPollMs,
+    mcpActionMirrorSessionId,
   ]);
 
   useEffect(() => {
@@ -1762,6 +1874,24 @@ const extractTextBlock = (result: McpToolResult | null | undefined): string | nu
   for (const block of content) {
     if (block?.type === "text" && typeof block.text === "string") {
       return block.text;
+    }
+  }
+  return null;
+};
+
+const parseMirroredMcpAction = (action: string): MirroredMcpInput | null => {
+  const parts = action.toLowerCase().split(":").filter(Boolean);
+  for (let index = parts.length - 2; index >= 0; index -= 1) {
+    const kind = parts[index];
+    const value = parts[index + 1];
+    if (kind === "move" && (value === "up" || value === "down" || value === "left" || value === "right")) {
+      return { kind, value };
+    }
+    if (kind === "button" && (value === "a" || value === "b" || value === "start" || value === "select")) {
+      return { kind, value };
+    }
+    if (kind === "press" && (value === "a" || value === "b" || value === "start" || value === "select")) {
+      return { kind: "button", value };
     }
   }
   return null;
