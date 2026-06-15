@@ -356,7 +356,22 @@ describe("PlayPanel controls dialog", () => {
     expect(container.querySelector('[data-testid="desktop-sidebar"]')?.className).toContain("w-[28rem]");
     expect(container.querySelector('[data-testid="settings-panel"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="multiplayer-menu"]')).toBeNull();
-    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({ runtimeMode: "server" });
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "server",
+      remoteVisualMode: "frame",
+      rendererMode: "tile",
+    });
+    const rendererButton = findButtonByLabel(container, "Show Tile + Text");
+    expect(rendererButton).toBeTruthy();
+    await act(async () => {
+      rendererButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "server",
+      remoteVisualMode: "frame",
+      rendererMode: "both",
+    });
 
     await act(async () => {
       root.unmount();

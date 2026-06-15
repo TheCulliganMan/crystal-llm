@@ -1185,6 +1185,9 @@ export const GameCanvas = React.memo(({
       if (isInputTarget(document.activeElement)) {
         return true;
       }
+      if (isServerMode) {
+        return true;
+      }
       const game = gameRef.current;
       const state = game?.getGameState?.();
       const isUnownModalActive = Boolean(state?.wram?.wUnownState);

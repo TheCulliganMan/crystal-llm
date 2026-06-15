@@ -568,6 +568,67 @@ describe("GameCanvas", () => {
     }
   });
 
+  it("accepts mapped keyboard controls in server mode after a button takes focus", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    const sidebarButton = document.createElement("button");
+    sidebarButton.type = "button";
+    sidebarButton.textContent = "Sidebar action";
+    document.body.appendChild(sidebarButton);
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            sessionId="desktop-shared-session"
+            remoteVisualMode="frame"
+          />
+        );
+        await flushPromises();
+      });
+
+      const fetchMock = globalThis.fetch as jest.Mock;
+      fetchMock.mockClear();
+      sidebarButton.focus();
+
+      await act(async () => {
+        sidebarButton.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code: "ArrowDown",
+            key: "ArrowDown",
+          })
+        );
+        await flushPromises();
+        await flushPromises();
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/mcp/tools?session_id=desktop-shared-session"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "move", arguments: { direction: "down" } }),
+        })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      sidebarButton.remove();
+    }
+  });
+
   it("refreshes a remote frame immediately when the realtime refresh key changes", async () => {
     const drawImage = jest.fn();
     HTMLCanvasElement.prototype.getContext = jest.fn(() => ({

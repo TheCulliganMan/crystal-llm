@@ -1958,6 +1958,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   preloadMode="auto"
                   rendererMode={rendererMode}
                   runtimeMode="server"
+                  remoteVisualMode="frame"
                   canvasClassName="playui-screen-canvas block h-auto w-full bg-black outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   canvasStyle={{ maxWidth: "100%", maxHeight: "100%" }}
                   onInputStateChange={handleInputStateChange}
