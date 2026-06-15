@@ -256,6 +256,7 @@ const MODAL_DIALOG_STYLE = {
 const PLAY_SESSION_STORAGE_KEY = "pokecrystal.play.session";
 const PLAY_INTRO_STORAGE_KEY = "pokecrystal.play.playIntro";
 const DESKTOP_SIDEBAR_VISIBLE_STORAGE_KEY = "pokecrystal.desktop.sidebarVisible";
+const DESKTOP_INSTANT_MODE_STORAGE_KEY = "pokecrystal.desktop.instantMode";
 const CORE_ASSET_PROGRESS_CAP = 0.75;
 const CORE_DATA_PROGRESS_CAP = 0.95;
 const LOADING_STALL_THRESHOLD_MS = 3500;
@@ -382,6 +383,21 @@ const getStoredDesktopSidebarVisible = (): boolean => {
     }
   } catch {
     // Ignore storage failures and keep the desktop tools collapsed by default.
+  }
+  return false;
+};
+
+const getStoredDesktopInstantModeEnabled = (): boolean => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    const stored = window.localStorage.getItem(DESKTOP_INSTANT_MODE_STORAGE_KEY);
+    if (stored === "true" || stored === "false") {
+      return stored === "true";
+    }
+  } catch {
+    // Ignore storage failures and keep animated desktop playback by default.
   }
   return false;
 };
@@ -527,7 +543,9 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const defaultSoundEnabled = isDesktopVariant;
   const [soundEnabled, setSoundEnabled] = useState<boolean>(defaultSoundEnabled);
   const soundEnabledRef = useRef(defaultSoundEnabled);
-  const [instantModeEnabled, setInstantModeEnabled] = useState<boolean>(false);
+  const [instantModeEnabled, setInstantModeEnabled] = useState<boolean>(
+    isDesktopVariant ? getStoredDesktopInstantModeEnabled : false
+  );
   const [brandTheme, setBrandTheme] = useState<BrandTheme>("krabby");
   const [playIntroEnabled, setPlayIntroEnabled] = useState<boolean>(getStoredPlayIntroEnabled);
   const [keyboardButtons, setKeyboardButtons] = useState<string[]>([]);
@@ -1027,13 +1045,20 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const toggleInstantModeEnabled = useCallback(() => {
     setInstantModeEnabled((current) => {
       const next = !current;
+      if (isDesktopVariant && typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(DESKTOP_INSTANT_MODE_STORAGE_KEY, String(next));
+        } catch {
+          // Ignore storage failures; the visible toggle state still updates.
+        }
+      }
       const gameState = gameRef.current?.getGameState?.();
       if (gameState?.wram) {
         gameState.wram.instant_mode = next;
       }
       return next;
     });
-  }, []);
+  }, [isDesktopVariant]);
 
   const handleLoadSave = useCallback(() => {
     if (secureMode && typeof window !== "undefined") {
@@ -1653,7 +1678,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           setTimeOfDay(stored.time_of_day);
           soundEnabledRef.current = stored.sound_enabled;
           setSoundEnabled(stored.sound_enabled);
-          setInstantModeEnabled(stored.instant_mode_enabled);
+          const nextInstantMode = isDesktopVariant
+            ? getStoredDesktopInstantModeEnabled()
+            : stored.instant_mode_enabled;
+          setInstantModeEnabled(nextInstantMode);
           setBrandTheme(stored.brand_theme);
           const game = gameRef.current;
           game?.setPlayerName(nextName);
@@ -1661,7 +1689,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           game?.setTimeOfDay(stored.time_of_day);
           game?.setAudioMuted(!stored.sound_enabled);
           if (game) {
-            game.getGameState().wram.instant_mode = stored.instant_mode_enabled;
+            game.getGameState().wram.instant_mode = nextInstantMode;
           }
         }
       } catch {
@@ -1675,7 +1703,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     return () => {
       cancelled = true;
     };
-  }, [supabaseUserId]);
+  }, [isDesktopVariant, supabaseUserId]);
 
   useEffect(() => {
     const supabase = supabaseClientRef.current;

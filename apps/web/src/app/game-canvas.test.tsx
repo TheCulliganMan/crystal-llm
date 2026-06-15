@@ -483,6 +483,65 @@ describe("GameCanvas", () => {
     }
   });
 
+  it("passes remote instant mode through frame requests", async () => {
+    HTMLCanvasElement.prototype.getContext = jest.fn(() => ({
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      imageSmoothingEnabled: false,
+    })) as typeof HTMLCanvasElement.prototype.getContext;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            readOnly
+            sessionId="watch-session-instant"
+            remoteVisualMode="frame"
+            remoteAdvanceFrames={1}
+            remoteInstantMode={false}
+          />
+        );
+        await flushPromises();
+      });
+
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/arena/frame?session_id=watch-session-instant&scale=2&advance=1&instant=0"),
+        expect.objectContaining({ cache: "no-store" })
+      );
+
+      await act(async () => {
+        root.render(
+          <GameCanvas
+            rendererMode="tile"
+            runtimeMode="server"
+            readOnly
+            sessionId="watch-session-instant"
+            remoteVisualMode="frame"
+            remoteAdvanceFrames={0}
+            remoteInstantMode
+          />
+        );
+        await flushPromises();
+      });
+
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/arena/frame?session_id=watch-session-instant&scale=2&advance=0&instant=1"),
+        expect.objectContaining({ cache: "no-store" })
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("sizes remote frame canvases from the returned PNG dimensions", async () => {
     globalThis.fetch = jest.fn(async () => ({
       ok: true,

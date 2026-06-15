@@ -450,6 +450,57 @@ describe("PlayPanel controls dialog", () => {
     window.history.replaceState({}, "", "/desktop");
   });
 
+  it("keeps desktop animated by default even when stored user settings had instant mode", async () => {
+    window.localStorage.setItem("pokecrystal.desktop.sidebarVisible", "true");
+    window.localStorage.removeItem("pokecrystal.desktop.instantMode");
+    const upsert = jest.fn(async () => ({ error: null }));
+    const maybeSingle = jest.fn(async () => ({
+      data: {
+        user_id: "desktop-user",
+        player_name: "Misty",
+        player_gender: 1,
+        time_of_day: "DAY",
+        sound_enabled: true,
+        instant_mode_enabled: true,
+        brand_theme: "krabby",
+      },
+      error: null,
+    }));
+    const eq = jest.fn(() => ({ maybeSingle }));
+    const select = jest.fn(() => ({ eq }));
+    mockCreateSupabaseBrowserClient.mockReturnValue({
+      auth: {
+        getUser: jest.fn(async () => ({ data: { user: { id: "desktop-user" } } })),
+        onAuthStateChange: jest.fn(() => ({ data: { subscription: { unsubscribe: jest.fn() } } })),
+      },
+      from: jest.fn(() => ({ select, upsert })),
+    } as any);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<PlayPanel variant="desktop" />);
+      await flushPromises();
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(findButtonByLabel(container, "Instant Off")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "server",
+      remoteVisualMode: "frame",
+      remoteInstantMode: false,
+      remoteAdvanceFrames: 1,
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
+  });
+
   it("hides and restores the desktop variant sidebar", async () => {
     window.localStorage.removeItem("pokecrystal.desktop.sidebarVisible");
     const container = document.createElement("div");

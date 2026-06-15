@@ -480,6 +480,7 @@ export const GameCanvas = React.memo(({
   const tileCanvasRef = useRef<HTMLCanvasElement>(null);
   const textCanvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<Game | null>(null);
+  const remoteAudioMirrorGameRef = useRef<Game | null>(null);
   const textUiRef = useRef<TextUI | null>(null);
   const textBitmapFontRef = useRef<CompactBitmapFont | null>(null);
   const textRenderBenchmarkRef = useRef<MutableTextRenderBenchmark>(createTextRenderBenchmark());
@@ -732,6 +733,7 @@ export const GameCanvas = React.memo(({
 
     let mounted = true;
     let cleanupRenderLoop: (() => void) | null = null;
+    let cleanupRemoteAudioMirror: (() => void) | null = null;
     let postEvent: ((event: GameEngineEvent) => void) | null = null;
     const remoteDirectionTimers = remoteDirectionTimersRef.current;
 
@@ -795,6 +797,7 @@ export const GameCanvas = React.memo(({
       const button =
         event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
       if (direction) {
+        remoteAudioMirrorGameRef.current?.postEvent(event as InstanceType<typeof gameEngine.event.Event>);
         for (const [heldDirection, timerId] of remoteDirectionTimers.entries()) {
           if (heldDirection !== direction) {
             window.clearInterval(timerId);
@@ -822,6 +825,7 @@ export const GameCanvas = React.memo(({
       if (!button) {
         return;
       }
+      remoteAudioMirrorGameRef.current?.postEvent(event as InstanceType<typeof gameEngine.event.Event>);
       void callRemoteTool("press", { button }).catch((error) => {
         if (remoteActiveRef.current) {
           logger.debug("[game-canvas] remote input failed", error);
@@ -837,6 +841,37 @@ export const GameCanvas = React.memo(({
       const sessionId = ensureSessionId();
       postEvent = readOnly ? null : enqueueRemoteInput;
       onPostEventReady?.(postEvent);
+
+      if (!readOnly && typeof document !== "undefined") {
+        let mirrorStopped = false;
+        const mirrorCanvas = document.createElement("canvas");
+        mirrorCanvas.width = TILE_CANVAS_WIDTH;
+        mirrorCanvas.height = TILE_CANVAS_HEIGHT;
+        const { ui: mirrorUi } = buildUi(mirrorCanvas, { rendererMode: "tile", scale: 1 });
+        void Game.create(mirrorUi, {
+          loadSlot: MANUAL_SAVE_SLOT,
+          muted: muted ?? false,
+          playIntro: false,
+          newGame: false,
+          preloadMode,
+        }).then((game) => {
+          if (mirrorStopped) {
+            game.destroy();
+            return;
+          }
+          game.setAudioMuted(muted ?? false);
+          game.setMusicMuted(musicMuted);
+          game.start();
+          remoteAudioMirrorGameRef.current = game;
+        }).catch((error) => {
+          logger.debug("[game-canvas] remote audio mirror failed", error);
+        });
+        cleanupRemoteAudioMirror = () => {
+          mirrorStopped = true;
+          remoteAudioMirrorGameRef.current?.destroy();
+          remoteAudioMirrorGameRef.current = null;
+        };
+      }
 
       const handleRemoteError = (error: unknown) => {
         if (mounted) {
@@ -1383,6 +1418,7 @@ export const GameCanvas = React.memo(({
       mounted = false;
       remoteActiveRef.current = false;
       remoteFrameRefreshRef.current = null;
+      cleanupRemoteAudioMirror?.();
       cleanupRenderLoop?.();
       for (const timerId of remoteDirectionTimers.values()) {
         window.clearInterval(timerId);
@@ -1442,10 +1478,12 @@ export const GameCanvas = React.memo(({
 
   useEffect(() => {
     gameRef.current?.setAudioMuted(muted ?? false);
+    remoteAudioMirrorGameRef.current?.setAudioMuted(muted ?? false);
   }, [muted]);
 
   useEffect(() => {
     gameRef.current?.setMusicMuted(musicMuted);
+    remoteAudioMirrorGameRef.current?.setMusicMuted(musicMuted);
   }, [musicMuted]);
 
   useEffect(() => {
