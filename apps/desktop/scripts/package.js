@@ -124,6 +124,15 @@ const stageStandaloneServer = () => {
   });
   copyWithoutHeavyWebAssets(path.join(WEB_DIR, "public"), path.join(standaloneWebDir, "public"));
   copyWithoutHeavyWebAssets(path.join(WEB_DIR, "assets"), path.join(standaloneWebDir, "assets"));
+
+  const disassemblyTarget = path.join(standaloneTarget, "vendor", "pokecrystal");
+  fs.mkdirSync(disassemblyTarget, { recursive: true });
+  fs.cpSync(path.join(ROOT_DIR, "vendor", "pokecrystal", "audio"), path.join(disassemblyTarget, "audio"), {
+    recursive: true,
+  });
+  fs.cpSync(path.join(ROOT_DIR, "vendor", "pokecrystal", "constants"), path.join(disassemblyTarget, "constants"), {
+    recursive: true,
+  });
 };
 
 const stageBundledNodeRuntime = () => {
@@ -155,6 +164,7 @@ const port = 37631;
 const nodePath = join(resourceRoot, "node", "bin", "node");
 const serverPath = join(resourceRoot, "web-standalone", "apps", "web", "server.js");
 const serverCwd = dirname(serverPath);
+const disassemblyRoot = join(resourceRoot, "web-standalone", "vendor", "pokecrystal");
 let serverProcess = null;
 let nativeProcess = null;
 
@@ -249,6 +259,7 @@ try {
       PORT: String(port),
       NODE_ENV: "production",
       POKECRYSTAL_NEXT_DIST_DIR: ".next-desktop",
+      POKECRYSTAL_DISASSEMBLY_ROOT: disassemblyRoot,
       POKECRYSTAL_REQUIRE_SESSION_SECRET: "false",
       POKECRYSTAL_IDENTITY_SECRET: process.env.POKECRYSTAL_IDENTITY_SECRET || "krabbyclaw-desktop-local-identity-secret",
       POKECRYSTAL_SESSION_SECRET: process.env.POKECRYSTAL_SESSION_SECRET || "krabbyclaw-desktop-local-session-secret",
@@ -316,6 +327,9 @@ const stageDesktopResources = () => {
   if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "web-standalone", "apps", "web", "server.js"))) {
     throw new Error("Staged desktop resources are missing the Next standalone server.");
   }
+  if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "web-standalone", "vendor", "pokecrystal", "audio", "sfx.asm"))) {
+    throw new Error("Staged desktop resources are missing disassembly audio sources.");
+  }
 };
 
 const buildNativeApp = () => {
@@ -337,6 +351,7 @@ const ensureBuilderArtifacts = () => {
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop-launcher.mjs"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "node", "bin", "node"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "web-standalone", "apps", "web", "server.js"),
+    path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "web-standalone", "vendor", "pokecrystal", "audio", "sfx.asm"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "desktop", "index.html"),
     path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "assets", "data", "pokegear_landmarks.json"),
   ];

@@ -7,7 +7,7 @@
     "dev": "node scripts/run.js",
     "build": "node scripts/build.js",
     "package": "node scripts/package.js",
-    "test": "zig build test",
+    "test": "node --test scripts/*.test.js && zig build test",
     "clean": "rm -rf dist zig-out .zig-cache"
   },
   "devDependencies": {
