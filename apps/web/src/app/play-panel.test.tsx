@@ -2,7 +2,6 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { PlayPanel } from "./play-panel";
-import type { BrandTheme } from "./settings-panel";
 import { useMultiplayerStore } from "@pokecrystal/core/multiplayer/multiplayer-store";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { MANUAL_SAVE_SLOT } from "@pokecrystal/core/core/save-slots";
@@ -752,7 +751,7 @@ describe("PlayPanel settings panel", () => {
     mockGameCanvasSpy.mockClear();
   });
 
-  it("toggles instant mode and brand theme in settings panel state", async () => {
+  it("toggles brand theme in settings panel state without exposing removed toggles", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -770,20 +769,25 @@ describe("PlayPanel settings panel", () => {
     });
 
     const lastCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(lastCall?.instantModeEnabled).toBe(false);
+    expect(lastCall).not.toHaveProperty("instantModeEnabled");
+    expect(lastCall).not.toHaveProperty("onInstantModeEnabledChange");
+    expect(lastCall).not.toHaveProperty("soundEnabled");
+    expect(lastCall).not.toHaveProperty("onSoundEnabledChange");
+    expect(lastCall).not.toHaveProperty("playIntroEnabled");
+    expect(lastCall).not.toHaveProperty("onPlayIntroEnabledChange");
     expect(lastCall?.brandTheme).toBe("krabby");
     expect(document.documentElement.getAttribute("data-brand-theme")).toBe("krabby");
     const initialFavicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
     expect(initialFavicon?.href ?? "").toMatch(/\/favicon\.png|^data:image\/png;base64,/);
 
     await act(async () => {
-      (lastCall?.onInstantModeEnabledChange as ((enabled: boolean) => void) | undefined)?.(true);
-      (lastCall?.onBrandThemeChange as ((theme: BrandTheme) => void) | undefined)?.("gligar");
+      (lastCall?.onBrandThemeChange as ((theme: string) => void) | undefined)?.("gligar");
       await flushPromises();
     });
 
     const updatedCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(updatedCall?.instantModeEnabled).toBe(true);
+    expect(updatedCall).not.toHaveProperty("instantModeEnabled");
+    expect(updatedCall).not.toHaveProperty("onInstantModeEnabledChange");
     expect(updatedCall?.brandTheme).toBe("gligar");
     expect(document.documentElement.getAttribute("data-brand-theme")).toBe("gligar");
     const updatedFavicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
@@ -815,7 +819,8 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(true);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     expect(container.querySelector('[data-testid="game-canvas"]')).toBeTruthy();
     const hasStartButton = Array.from(container.querySelectorAll("button")).some(
       (button) => button.textContent?.trim() === "Start Game"
@@ -855,7 +860,8 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(false);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     const startButton = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.trim() === "Start Game"
     );
@@ -904,13 +910,9 @@ describe("PlayPanel settings panel", () => {
     });
 
     const settingsCall = mockSettingsPanelSpy.mock.calls.at(-1)?.[0];
-    expect(settingsCall?.playIntroEnabled).toBe(false);
+    expect(settingsCall).not.toHaveProperty("playIntroEnabled");
+    expect(settingsCall).not.toHaveProperty("onPlayIntroEnabledChange");
     mockGameCanvasSpy.mockClear();
-
-    await act(async () => {
-      settingsCall?.onPlayIntroEnabledChange?.(false);
-      await flushPromises();
-    });
 
     const postToggleStartButton = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.trim() === "Start Game"

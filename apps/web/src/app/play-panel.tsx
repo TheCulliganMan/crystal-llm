@@ -1055,21 +1055,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     requestStart();
   }, [requestStart, secureMode, isDesktopVariant, shouldStartFromTitleScreen, startToken]);
 
-  const applyGender = useCallback((value: PlayerGender) => {
-    playerGenderRef.current = value;
-    setPlayerGender(value);
-    gameRef.current?.setPlayerGender(value);
-  }, []);
-
   const applyName = useCallback((value: string) => {
     playerNameRef.current = value;
     setPlayerName(value);
     gameRef.current?.setPlayerName(value);
-  }, []);
-
-  const applyTimeOfDay = useCallback((value: TimeOfDay) => {
-    setTimeOfDay(value);
-    gameRef.current?.setTimeOfDay(value);
   }, []);
 
   const applyDayOfWeek = useCallback((value: number) => {
@@ -1077,34 +1066,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     gameRef.current?.setDayOfWeek(value);
   }, []);
 
-  const applySoundEnabled = useCallback((enabled: boolean) => {
-    soundEnabledRef.current = enabled;
-    setSoundEnabled(enabled);
-    gameRef.current?.setAudioMuted(!enabled);
-  }, []);
-
-  const applyInstantModeEnabled = useCallback((enabled: boolean) => {
-    setInstantModeEnabled(enabled);
-    const game = gameRef.current;
-    if (game) {
-      game.getGameState().wram.instant_mode = enabled;
-    }
-  }, []);
-
   const applyBrandTheme = useCallback((value: BrandTheme) => {
     setBrandTheme(value);
-  }, []);
-
-  const applySkipToPlayEnabled = useCallback((enabled: boolean) => {
-    setPlayIntroEnabled(!enabled);
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      window.localStorage.setItem(PLAY_INTRO_STORAGE_KEY, String(!enabled));
-    } catch {
-      // ignore
-    }
   }, []);
 
   const toggleRendererMode = useCallback(() => {
@@ -1863,21 +1826,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     }
     return (
       <SettingsPanel
-        playerGender={playerGender}
-        onPlayerGenderChange={applyGender}
-        timeOfDay={timeOfDay}
-        onTimeOfDayChange={applyTimeOfDay}
         playerName={playerName}
         onPlayerNameChange={applyName}
-        soundEnabled={soundEnabled}
-        onSoundEnabledChange={applySoundEnabled}
-        instantModeEnabled={instantModeEnabled}
-        onInstantModeEnabledChange={applyInstantModeEnabled}
         brandTheme={brandTheme}
         onBrandThemeChange={applyBrandTheme}
-        playIntroEnabled={skipToPlayEnabled}
-        onPlayIntroEnabledChange={applySkipToPlayEnabled}
-        showBootModeControl={!isDesktopVariant}
       />
     );
   }, [
@@ -1902,21 +1854,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     incomingRequest,
     interactionStatus,
     handleLoadSave,
-    playerGender,
-    applyGender,
-    timeOfDay,
-    applyTimeOfDay,
     playerName,
     applyName,
-    soundEnabled,
-    applySoundEnabled,
-    instantModeEnabled,
-    applyInstantModeEnabled,
     brandTheme,
     applyBrandTheme,
-    isDesktopVariant,
-    skipToPlayEnabled,
-    applySkipToPlayEnabled,
   ]);
 
   if (isDesktopVariant) {
@@ -2469,20 +2410,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               ) : null}
               {utilityPanelView === "settings" ? (
                 <SettingsPanel
-                  playerGender={playerGender}
-                  onPlayerGenderChange={applyGender}
-                  timeOfDay={timeOfDay}
-                  onTimeOfDayChange={applyTimeOfDay}
                   playerName={playerName}
                   onPlayerNameChange={applyName}
-                  soundEnabled={soundEnabled}
-                  onSoundEnabledChange={applySoundEnabled}
-                  instantModeEnabled={instantModeEnabled}
-                  onInstantModeEnabledChange={applyInstantModeEnabled}
                   brandTheme={brandTheme}
                   onBrandThemeChange={applyBrandTheme}
-                  playIntroEnabled={skipToPlayEnabled}
-                  onPlayIntroEnabledChange={applySkipToPlayEnabled}
                 />
               ) : null}
               {utilityPanelView === "saves" ? <GuestSavePanel onLoadSave={handleLoadSave} /> : null}
