@@ -1558,11 +1558,15 @@ export const GameCanvas = React.memo(({
       if (!readOnly) {
         gameRef.current?.unlockAudio();
       }
+      const target = event.target as Element | null;
+      if (!isInputTarget(target)) {
+        clearHeldKeyboardInput();
+      }
       if (shouldIgnorePointerEvent(event)) {
         return;
       }
-      const target = event.target as Element | null;
       const targetCanvas = isInputTarget(target) ? (target as HTMLCanvasElement) : primaryCanvas;
+      clearHeldKeyboardInput();
       targetCanvas?.focus({ preventScroll: true });
       if (isInputTarget(target)) {
         postCanvasConfirmTap();

@@ -1531,6 +1531,52 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
+  it("clears held controls when focus moves through the sidebar and back to the canvas", async () => {
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const sidebarButton = document.createElement("button");
+    sidebarButton.textContent = "Saves";
+    document.body.appendChild(sidebarButton);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement | null;
+    canvas?.focus();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true }));
+    });
+    const firstKeydownCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keydown");
+    expect(firstKeydownCalls).toHaveLength(1);
+
+    act(() => {
+      sidebarButton.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      sidebarButton.focus();
+      canvas?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true }));
+    });
+
+    const keydownCalls = game.postEvent.mock.calls.filter(([event]) => event?.type === "keydown");
+    expect(keydownCalls).toHaveLength(2);
+    expect(keydownCalls[1][0]).toMatchObject({
+      direction: "right",
+      is_press: true,
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    sidebarButton.remove();
+    container.remove();
+  });
+
   it("accepts key events without canvas focus while Unown modal input is active", async () => {
     const game = buildGameStub();
     game.getGameState.mockReturnValue({
