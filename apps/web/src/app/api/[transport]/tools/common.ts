@@ -58,6 +58,10 @@ const SESSION_MODE_HEADER_KEYS = [
   "x-pokecrystal-session-mode",
   "x-mcp-session-mode",
 ];
+const INSTANT_MODE_HEADER_KEYS = [
+  "x-pokecrystal-instant-mode",
+  "x-mcp-instant-mode",
+];
 const TRAINING_STRING_LIMIT = 4_000;
 const TRAINING_OBJECT_KEYS_LIMIT = 40;
 const TRAINING_ARRAY_LIMIT = 20;
@@ -239,10 +243,32 @@ export const resolveSessionMode = (
   return undefined;
 };
 
+export const resolveInstantMode = (extra?: McpToolExtra): boolean | undefined => {
+  for (const key of INSTANT_MODE_HEADER_KEYS) {
+    const value = readHeaderValue(extra?.requestInfo?.headers, key);
+    if (!value) {
+      continue;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "on") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "off") {
+      return false;
+    }
+  }
+  return undefined;
+};
+
 export const loadSession = async (sessionId?: string, extra?: McpToolExtra) => {
   const { getMcpSession } = await import("@/app/mcp/session");
   const normalizedSessionId = normalizeSessionId(sessionId);
   const session = getMcpSession(normalizedSessionId);
+  const instantMode = resolveInstantMode(extra);
+  const sessionWithInstantMode = session as { setInstantMode?: (enabled: boolean) => void };
+  if (instantMode !== undefined) {
+    sessionWithInstantMode.setInstantMode?.(instantMode);
+  }
   const sessionMode = resolveSessionMode(extra);
   const sessionWithMode = session as { setInteractiveMode?: (interactive: boolean) => void };
   sessionWithMode.setInteractiveMode?.(sessionMode === "interactive");

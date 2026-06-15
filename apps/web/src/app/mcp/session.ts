@@ -1782,9 +1782,8 @@ class McpGameSession {
 
   public setInteractiveMode(interactive: boolean): void {
     this.interactiveMode = interactive;
-    // Interactive CLI play should behave like distinct button taps, not the longer
-    // MCP automation holds that can make battle menus double-handle a confirm.
-    this.holdFrames = 1;
+    const settings = getSettings();
+    this.holdFrames = this.isInstantMode() ? 1 : settings.mcpHoldFrames;
     this.applyInputModeToGameState(this.game?.getGameState?.());
   }
 
@@ -3987,7 +3986,7 @@ class McpGameSession {
       );
     }
     this.game = await this.gamePromise;
-    this.holdFrames = 1;
+    this.holdFrames = this.isInstantMode() ? 1 : settings.mcpHoldFrames;
     const identityProfile = await loadIdentityPlayProfile(identityContext?.playerId);
     const gameState = (
       this.game as {

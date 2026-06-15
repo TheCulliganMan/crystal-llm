@@ -769,7 +769,12 @@ export const GameCanvas = React.memo(({
       const origin = typeof window !== "undefined" ? window.location.origin : undefined;
       const url = sessionId ? withSessionId(MCP_BASE_URL, sessionId, origin) : MCP_BASE_URL;
       const task = remoteQueueRef.current.then(() =>
-        callMcpTool(name, args, { baseUrl: url })
+        callMcpTool(name, args, {
+          baseUrl: url,
+          headers: remoteInstantMode === undefined
+            ? undefined
+            : { "x-pokecrystal-instant-mode": remoteInstantMode ? "1" : "0" },
+        })
       );
       remoteQueueRef.current = task.catch(() => null);
       return task;
@@ -797,7 +802,6 @@ export const GameCanvas = React.memo(({
       const button =
         event.button ?? mapKeyToButton(event.code ?? event.key ?? null);
       if (direction) {
-        remoteAudioMirrorGameRef.current?.postEvent(event as InstanceType<typeof gameEngine.event.Event>);
         for (const [heldDirection, timerId] of remoteDirectionTimers.entries()) {
           if (heldDirection !== direction) {
             window.clearInterval(timerId);
@@ -825,7 +829,6 @@ export const GameCanvas = React.memo(({
       if (!button) {
         return;
       }
-      remoteAudioMirrorGameRef.current?.postEvent(event as InstanceType<typeof gameEngine.event.Event>);
       void callRemoteTool("press", { button }).catch((error) => {
         if (remoteActiveRef.current) {
           logger.debug("[game-canvas] remote input failed", error);
