@@ -147,7 +147,7 @@ const resourceRoot = dirname(fileURLToPath(import.meta.url));
 const nativeBinary = process.argv[2];
 const nativeArgs = process.argv.slice(3);
 const host = "127.0.0.1";
-const startPort = 37631;
+const port = 37631;
 const nodePath = join(resourceRoot, "node", "bin", "node");
 const serverPath = join(resourceRoot, "web-standalone", "apps", "web", "server.js");
 const serverCwd = dirname(serverPath);
@@ -162,13 +162,10 @@ const isPortAvailable = (port) =>
     server.listen({ host, port }, () => server.close(() => resolve(true)));
   });
 
-const findPort = async () => {
-  for (let port = startPort; port < startPort + 50; port += 1) {
-    if (await isPortAvailable(port)) {
-      return port;
-    }
+const assertPortAvailable = async () => {
+  if (!(await isPortAvailable(port))) {
+    throw new Error(\`Desktop server port \${port} is already in use.\`);
   }
-  throw new Error("No available desktop server port.");
 };
 
 const waitForServer = (url, deadlineMs = 20000) =>
@@ -237,8 +234,8 @@ try {
     process.exit(await runNative({ ...process.env, KRABBY_DESKTOP_URL: externalUrl, ZERO_NATIVE_FRONTEND_URL: externalUrl }));
   }
 
-  const port = await findPort();
   const url = \`http://\${host}:\${port}/desktop\`;
+  await assertPortAvailable();
   serverProcess = spawn(nodePath, [serverPath], {
     cwd: serverCwd,
     stdio: "ignore",
