@@ -566,6 +566,23 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const supabaseClientRef = useRef(createSupabaseBrowserClient());
   const hydratedSupabaseSettingsRef = useRef(false);
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+  const focusDesktopGameCanvas = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const focus = () => {
+      const container = canvasContainerRef.current;
+      const focusTarget = container?.querySelector("canvas");
+      if (focusTarget instanceof HTMLCanvasElement) {
+        focusTarget.focus({ preventScroll: true });
+      }
+    };
+    focus();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(focus);
+    }
+    window.setTimeout(focus, 0);
+  }, []);
   const applyDesktopSidebarVisible = useCallback((visible: boolean) => {
     setDesktopSidebarVisible(visible);
     if (typeof window === "undefined") {
@@ -576,7 +593,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     } catch {
       // Ignore storage failures; the in-memory state is enough for this session.
     }
-  }, []);
+    focusDesktopGameCanvas();
+  }, [focusDesktopGameCanvas]);
   const refreshOnlineCounts = useCallback(() => {
     const mp = useMultiplayerStore.getState();
     const frontendCount = Math.max(0, Math.trunc(frontendPlayerCountRef.current));

@@ -22,7 +22,7 @@ const mockWebRtcConnections: any[] = [];
 jest.mock("./game-canvas", () => ({
   GameCanvas: (props: Record<string, unknown>) => {
     mockGameCanvasSpy(props);
-    return <div data-testid="game-canvas" />;
+    return <canvas data-testid="game-canvas" tabIndex={0} />;
   },
 }));
 
@@ -176,6 +176,12 @@ jest.mock("@pokecrystal/core/multiplayer/trade-manager", () => ({
 
 const flushPromises = async (): Promise<void> => {
   await Promise.resolve();
+};
+
+const flushTimers = async (): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
 };
 
 const findButtonByLabel = (container: HTMLElement, label: string): HTMLButtonElement | undefined =>
@@ -514,16 +520,19 @@ describe("PlayPanel controls dialog", () => {
     await act(async () => {
       initialShowButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeTruthy();
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("true");
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="game-canvas"]'));
 
     const hideButton = container.querySelector('button[aria-label="Hide sidebar"]') as HTMLButtonElement | null;
     expect(hideButton).toBeTruthy();
     await act(async () => {
       hideButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeNull();
@@ -534,10 +543,12 @@ describe("PlayPanel controls dialog", () => {
     await act(async () => {
       showButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flushPromises();
+      await flushTimers();
     });
 
     expect(container.querySelector('[data-testid="desktop-sidebar"]')).toBeTruthy();
     expect(window.localStorage.getItem("pokecrystal.desktop.sidebarVisible")).toBe("true");
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="game-canvas"]'));
 
     await act(async () => {
       root.unmount();
