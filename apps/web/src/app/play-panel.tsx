@@ -1398,6 +1398,16 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     setUtilityPanelView(view);
     setUtilityPanelOpen(true);
   }, []);
+  const closeUtilityPanel = useCallback(() => {
+    setUtilityPanelOpen(false);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (url.pathname === "/desktop" && url.searchParams.has("panel")) {
+      window.history.replaceState({}, "", "/desktop");
+    }
+  }, []);
   const utilityPanelOptions = isDesktopVariant ? DESKTOP_UTILITY_PANEL_OPTIONS : UTILITY_PANEL_OPTIONS;
 
   useEffect(() => {
@@ -1422,7 +1432,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
       } else if (command === "saves") {
         window.location.assign("/desktop?panel=saves");
       } else if (command === "mcp") {
-        window.location.assign("/mcp");
+        window.location.assign("/desktop?panel=mcp");
       } else if (command === "copy-mcp-url" && navigator.clipboard) {
         const url = new URL(`/api/mcp?session_id=${encodeURIComponent(PRIMARY_MCP_SESSION_ID)}`, window.location.origin);
         void navigator.clipboard.writeText(url.toString());
@@ -2052,7 +2062,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                 <button
                   type="button"
                   className="btn btn-sm btn-outline rounded normal-case"
-                  onClick={() => setUtilityPanelOpen(false)}
+                  onClick={closeUtilityPanel}
                 >
                   Close
                 </button>
@@ -2437,7 +2447,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                 <button
                   type="button"
                   className="btn btn-xs btn-ghost join-item min-w-16 rounded-md border-0 normal-case sm:btn-sm"
-                  onClick={() => setUtilityPanelOpen(false)}
+                  onClick={closeUtilityPanel}
                 >
                   Close
                 </button>

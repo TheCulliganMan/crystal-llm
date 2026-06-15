@@ -30,6 +30,6 @@ test("desktop build patches Zero Native macOS menu for MCP configuration", () =>
   assert.match(menuPatchScript, /MCP Streamable HTTP/);
   assert.match(menuPatchScript, /window\.location\.assign/);
   assert.match(menuPatchScript, /openKrabbyclawMcp/);
-  assert.match(menuPatchScript, /\/mcp/);
+  assert.match(menuPatchScript, /\/desktop\?panel=mcp/);
   assert.match(menuPatchScript, /\/desktop\?panel=saves/);
 });

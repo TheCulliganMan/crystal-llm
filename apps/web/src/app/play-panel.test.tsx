@@ -380,6 +380,20 @@ describe("PlayPanel controls dialog", () => {
     expect(container.querySelector('[data-testid="desktop-mcp-panel"]')).toBeTruthy();
     expect(mockDesktopMcpPanelSpy).toHaveBeenCalled();
 
+    const closeButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Close"
+    );
+    expect(closeButton).toBeTruthy();
+
+    await act(async () => {
+      closeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+
+    expect(window.location.pathname).toBe("/desktop");
+    expect(window.location.search).toBe("");
+    expect(container.querySelector('[data-testid="desktop-mcp-panel"]')).toBeNull();
+
     await act(async () => {
       root.unmount();
     });

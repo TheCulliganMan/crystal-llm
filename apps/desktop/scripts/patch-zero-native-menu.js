@@ -104,7 +104,7 @@ const appkitPatchedPreferences = `- (void)openKrabbyclawPath:(NSString *)path {
 
 - (void)openKrabbyclawMcp:(id)sender {
     (void)sender;
-    [self openKrabbyclawPath:@"/mcp"];
+    [self openKrabbyclawPath:@"/desktop?panel=mcp"];
 }
 
 - (void)openKrabbyclawSaves:(id)sender {
@@ -116,6 +116,10 @@ const appkitPatchedPreferences = `- (void)openKrabbyclawPath:(NSString *)path {
     (void)sender;
     [self emitKrabbyclawMenuCommand:@"sidebar"];
 }`;
+const appkitOldPathPreferences = appkitPatchedPreferences.replace(
+  '[self openKrabbyclawPath:@"/desktop?panel=mcp"];',
+  '[self openKrabbyclawPath:@"/mcp"];'
+);
 
 const cefOriginalViewMenu = `    [viewMenu addItem:[self menuItem:@"Reload" action:@selector(reload:) key:@"r" modifiers:NSEventModifierFlagCommand]];
 }`;
@@ -172,7 +176,7 @@ const cefPatchedPreferences = `- (uint64_t)activeKrabbyclawWindowId {
 
 - (void)openKrabbyclawMcp:(id)sender {
     (void)sender;
-    [self openKrabbyclawPath:@"/mcp"];
+    [self openKrabbyclawPath:@"/desktop?panel=mcp"];
 }
 
 - (void)openKrabbyclawSaves:(id)sender {
@@ -184,12 +188,17 @@ const cefPatchedPreferences = `- (uint64_t)activeKrabbyclawWindowId {
     (void)sender;
     [self emitKrabbyclawMenuCommand:@"sidebar"];
 }`;
+const cefOldPathPreferences = cefPatchedPreferences.replace(
+  '[self openKrabbyclawPath:@"/desktop?panel=mcp"];',
+  '[self openKrabbyclawPath:@"/mcp"];'
+);
 
 const patchZeroNativeMenu = () => {
   patchFile("src/platform/macos/appkit_host.m", [
     [{ before: appkitOriginalFileMenu, after: appkitPatchedFileMenu }],
     [{ before: appkitOriginalViewMenu, after: appkitPatchedViewMenu }],
     [
+      { before: appkitOldPathPreferences, after: appkitPatchedPreferences },
       { before: appkitOldEventPreferences, after: appkitPatchedPreferences },
       { before: appkitOriginalPreferences, after: appkitPatchedPreferences },
     ],
@@ -198,6 +207,7 @@ const patchZeroNativeMenu = () => {
     [{ before: appkitOriginalFileMenu, after: appkitPatchedFileMenu }],
     [{ before: cefOriginalViewMenu, after: cefPatchedViewMenu }],
     [
+      { before: cefOldPathPreferences, after: cefPatchedPreferences },
       { before: cefOldEventPreferences, after: cefPatchedPreferences },
       { before: cefOriginalPreferences, after: cefPatchedPreferences },
     ],

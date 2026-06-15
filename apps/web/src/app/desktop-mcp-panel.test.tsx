@@ -36,9 +36,11 @@ describe("DesktopMcpPanel", () => {
     const endpointPath = `/api/mcp?session_id=${encodeURIComponent(PRIMARY_MCP_SESSION_ID)}`;
     expect(container.textContent).toContain("Existing MCP Server");
     expect(container.textContent).toContain("Streamable HTTP Endpoint");
+    expect(container.textContent).toContain(window.location.origin);
     expect(container.textContent).toContain(endpointPath);
     expect(container.textContent).toContain("No separate server is created here.");
     expect(container.textContent).toContain('"transport": "streamable-http"');
+    expect(container.textContent).not.toContain("<desktop-port>");
     expect(container.textContent).not.toContain("Direct MCP Input");
 
     const copyButton = Array.from(container.querySelectorAll("button")).find(

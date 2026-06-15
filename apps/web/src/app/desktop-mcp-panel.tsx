@@ -32,13 +32,10 @@ export const DesktopMcpPanel = React.memo(() => {
     () => `${origin}/api/mcp?session_id=${encodeURIComponent(PRIMARY_MCP_SESSION_ID)}`,
     [origin]
   );
-  const displayUrl = streamableHttpUrl.startsWith("/")
-    ? streamableHttpUrl
-    : streamableHttpUrl.replace(/^https?:\/\/127\.0\.0\.1(?::\d+)?/, "http://127.0.0.1:<desktop-port>");
   const configSnippet = `{
   "mcpServers": {
     "krabbyclaw": {
-      "url": "${displayUrl}",
+      "url": "${streamableHttpUrl}",
       "transport": "streamable-http"
     }
   }
@@ -64,12 +61,15 @@ export const DesktopMcpPanel = React.memo(() => {
         <p className="mt-2 text-xs text-base-content/70">
           This uses the app&apos;s existing `/api/mcp` Streamable HTTP transport. No separate server is created here.
         </p>
+        <p className="mt-2 text-xs text-base-content/70">
+          Current desktop origin: <span className="font-mono">{origin || "loading..."}</span>
+        </p>
       </div>
 
       <div className="space-y-2 rounded border border-base-300 bg-base-100 p-3">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">Endpoint</p>
         <code className="block overflow-x-auto rounded bg-base-200 p-2 text-[0.7rem] leading-relaxed">
-          {displayUrl}
+          {streamableHttpUrl}
         </code>
         <div className="grid grid-cols-2 gap-2">
           <button type="button" className="btn btn-sm btn-primary rounded normal-case" onClick={handleCopy}>
@@ -83,6 +83,9 @@ export const DesktopMcpPanel = React.memo(() => {
 
       <div className="space-y-2 rounded border border-base-300 bg-base-100 p-3">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-base-content/60">Client Config</p>
+        <p className="text-xs text-base-content/70">
+          Use this URL in any Streamable HTTP MCP client. The port is whatever the desktop app started locally.
+        </p>
         <pre className="overflow-x-auto rounded bg-base-200 p-2 text-[0.7rem] leading-relaxed">
           <code>{configSnippet}</code>
         </pre>
