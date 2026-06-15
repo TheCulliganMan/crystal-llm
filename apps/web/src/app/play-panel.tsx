@@ -1012,6 +1012,15 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     postEventRef.current?.(event);
   }, []);
 
+  const toggleSoundEnabled = useCallback(() => {
+    setSoundEnabled((current) => {
+      const next = !current;
+      soundEnabledRef.current = next;
+      gameRef.current?.setAudioMuted(!next);
+      return next;
+    });
+  }, []);
+
   const handleLoadSave = useCallback(() => {
     if (secureMode && typeof window !== "undefined") {
       try {
@@ -2011,6 +2020,14 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" className="btn btn-sm btn-primary rounded normal-case" onClick={toggleRendererMode}>
                   {rendererActionLabel}
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm rounded normal-case ${soundEnabled ? "btn-outline" : "btn-warning"}`}
+                  onClick={toggleSoundEnabled}
+                  aria-pressed={soundEnabled}
+                >
+                  {soundEnabled ? "Sound On" : "Sound Muted"}
                 </button>
                 {fullscreenAvailable ? (
                   <button

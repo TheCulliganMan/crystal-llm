@@ -360,7 +360,21 @@ describe("PlayPanel controls dialog", () => {
       runtimeMode: "server",
       remoteVisualMode: "frame",
       rendererMode: "tile",
+      muted: false,
     });
+    const soundButton = findButtonByLabel(container, "Sound On");
+    expect(soundButton).toBeTruthy();
+    await act(async () => {
+      soundButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(findButtonByLabel(container, "Sound Muted")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "server",
+      remoteVisualMode: "frame",
+      muted: true,
+    });
+
     const rendererButton = findButtonByLabel(container, "Show Tile + Text");
     expect(rendererButton).toBeTruthy();
     await act(async () => {
