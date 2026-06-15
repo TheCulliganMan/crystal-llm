@@ -582,6 +582,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
       window.requestAnimationFrame(focus);
     }
     window.setTimeout(focus, 0);
+    window.setTimeout(focus, 50);
+    window.setTimeout(focus, 150);
   }, []);
   const applyDesktopSidebarVisible = useCallback((visible: boolean) => {
     setDesktopSidebarVisible(visible);
@@ -609,6 +611,12 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     event.currentTarget.blur();
     applyDesktopSidebarVisible(false);
   }, [applyDesktopSidebarVisible]);
+  useEffect(() => {
+    if (!isDesktopVariant) {
+      return;
+    }
+    focusDesktopGameCanvas();
+  }, [desktopSidebarVisible, focusDesktopGameCanvas, isDesktopVariant]);
   const refreshOnlineCounts = useCallback(() => {
     const mp = useMultiplayerStore.getState();
     const frontendCount = Math.max(0, Math.trunc(frontendPlayerCountRef.current));
@@ -1968,7 +1976,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
 
   if (isDesktopVariant) {
     return (
-      <div className="flex h-full min-h-0 w-full overflow-hidden bg-black text-white">
+      <div className="relative flex h-full min-h-0 w-full overflow-hidden bg-black text-white">
         <main className="relative flex min-w-0 flex-1 flex-col p-3">
           {!desktopSidebarVisible ? (
             <button
@@ -2040,7 +2048,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           <aside
             id="desktop-sidebar"
             data-testid="desktop-sidebar"
-            className="flex w-[28rem] max-w-[42vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
+            className="absolute inset-y-0 right-0 z-20 flex w-[28rem] max-w-[42vw] flex-col overflow-hidden border-l border-white/10 bg-[#101010] shadow-2xl"
           >
             <div className="border-b border-white/10 p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
