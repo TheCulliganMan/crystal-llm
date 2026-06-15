@@ -361,7 +361,25 @@ describe("PlayPanel controls dialog", () => {
       remoteVisualMode: "frame",
       rendererMode: "tile",
       muted: false,
+      remoteInstantMode: false,
+      remoteAdvanceFrames: 1,
     });
+    expect(typeof mockGameCanvasSpy.mock.calls.at(-1)?.[0]?.remoteRefreshMs).toBe("number");
+    const instantButton = findButtonByLabel(container, "Instant Off");
+    expect(instantButton).toBeTruthy();
+    await act(async () => {
+      instantButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+    });
+    expect(findButtonByLabel(container, "Instant On")).toBeTruthy();
+    expect(mockGameCanvasSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      runtimeMode: "server",
+      remoteVisualMode: "frame",
+      remoteInstantMode: true,
+      remoteAdvanceFrames: 0,
+      remoteRefreshMs: 100,
+    });
+
     const soundButton = findButtonByLabel(container, "Sound On");
     expect(soundButton).toBeTruthy();
     await act(async () => {

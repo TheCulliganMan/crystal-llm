@@ -104,6 +104,7 @@ type GameCanvasProps = {
   remoteRefreshMs?: number;
   remoteFrameScale?: number;
   remoteAdvanceFrames?: number;
+  remoteInstantMode?: boolean;
   remoteFrameRefreshKey?: number;
 };
 
@@ -472,6 +473,7 @@ export const GameCanvas = React.memo(({
   remoteRefreshMs = MCP_POLL_MS,
   remoteFrameScale = 2,
   remoteAdvanceFrames = MCP_ADVANCE_FRAMES,
+  remoteInstantMode,
   remoteFrameRefreshKey = 0,
 }: GameCanvasProps) => {
   const canvasShellRef = useRef<HTMLDivElement>(null);
@@ -850,6 +852,7 @@ export const GameCanvas = React.memo(({
                 refreshMs: remoteRefreshMs,
                 scale: remoteFrameScale,
                 advanceFrames: remoteAdvanceFrames,
+                instantMode: remoteInstantMode,
                 onError: handleRemoteError,
               });
           remoteFrameRefreshRef.current = loop.refresh;
@@ -1430,6 +1433,7 @@ export const GameCanvas = React.memo(({
     playIntro,
     remoteAdvanceFrames,
     remoteFrameScale,
+    remoteInstantMode,
     remoteRefreshMs,
     remoteVisualMode,
     runtimeMode,
@@ -1635,6 +1639,7 @@ type RemoteFrameRenderOptions = {
   refreshMs: number;
   scale: number;
   advanceFrames: number;
+  instantMode?: boolean;
   onError?: (error: unknown) => void;
 };
 
@@ -1643,11 +1648,19 @@ const PUBLIC_SNAPSHOT_TOKEN =
   process.env.NEXT_PUBLIC_ARENA_SNAPSHOT_TOKEN?.trim() ??
   "";
 
-const buildArenaFrameUrl = (sessionId: string, scale: number, advanceFrames: number): string => {
+const buildArenaFrameUrl = (
+  sessionId: string,
+  scale: number,
+  advanceFrames: number,
+  instantMode?: boolean
+): string => {
   const params = new URLSearchParams();
   params.set("session_id", sessionId);
   params.set("scale", String(Math.min(8, Math.max(1, Math.floor(scale)))));
   params.set("advance", String(Math.max(0, Math.floor(advanceFrames))));
+  if (instantMode !== undefined) {
+    params.set("instant", instantMode ? "1" : "0");
+  }
   return `/api/arena/frame?${params.toString()}`;
 };
 
@@ -1781,7 +1794,7 @@ const drawFrameImageToCanvas = async (
 };
 
 const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: () => void; refresh: () => void } => {
-  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, onError } = options;
+  const { tileCanvas, sessionId, refreshMs, scale, advanceFrames, instantMode, onError } = options;
   if (typeof window === "undefined" || !tileCanvas) {
     return { stop: () => undefined, refresh: () => undefined };
   }
@@ -1798,7 +1811,7 @@ const startRemoteFrameRenderLoop = (options: RemoteFrameRenderOptions): { stop: 
     }
     inflight = true;
     try {
-      const response = await fetch(buildArenaFrameUrl(sessionId, scale, advanceFrames), {
+      const response = await fetch(buildArenaFrameUrl(sessionId, scale, advanceFrames, instantMode), {
         cache: "no-store",
         headers: PUBLIC_SNAPSHOT_TOKEN ? { "x-mcp-token": PUBLIC_SNAPSHOT_TOKEN } : undefined,
       });

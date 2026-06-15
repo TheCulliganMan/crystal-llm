@@ -1715,15 +1715,18 @@ class McpGameSession {
   private lastActionResult: ActionResult | null = null;
   private ready = false;
   private interactiveMode = false;
+  private instantMode: boolean;
 
   constructor(options?: {
     sessionId?: string;
     maxActionsPerCall?: number;
     maxFramesPerCall?: number;
+    instantMode?: boolean;
   }) {
     this.sessionId = options?.sessionId ?? PRIMARY_MCP_SESSION_ID;
     const settings = getSettings();
-    const instantMode = DEFAULT_MCP_INSTANT_MODE;
+    const instantMode = options?.instantMode ?? DEFAULT_MCP_INSTANT_MODE;
+    this.instantMode = instantMode;
     const renderUi = new DomCanvasUI(160, 144, 1);
     const textUi = new TextUI(160, 144, 1, null, true, null, true);
     const composite = new CompositeUI(
@@ -1744,7 +1747,14 @@ class McpGameSession {
   }
 
   private isInstantMode(): boolean {
-    return DEFAULT_MCP_INSTANT_MODE;
+    return this.instantMode;
+  }
+
+  public setInstantMode(enabled: boolean): void {
+    this.instantMode = enabled;
+    const settings = getSettings();
+    this.holdFrames = enabled ? 1 : settings.mcpHoldFrames;
+    this.applyInputModeToGameState(this.game?.getGameState?.());
   }
 
   private applyInputModeToGameState(

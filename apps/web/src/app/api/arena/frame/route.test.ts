@@ -24,6 +24,7 @@ describe("arena frame API", () => {
   it("returns a tilemap frame payload and advances frames by default", async () => {
     const ensureReady = jest.fn(async () => undefined);
     const advanceFrames = jest.fn(async () => undefined);
+    const setInstantMode = jest.fn();
     const observeTilemapImage = jest.fn(async () => ({
       data: "dGVzdA==",
       width: 160,
@@ -34,6 +35,7 @@ describe("arena frame API", () => {
     mockGetMcpSession.mockReturnValue({
       ensureReady,
       advanceFrames,
+      setInstantMode,
       observeTilemapImage,
       getFrameCount,
       reset,
@@ -56,6 +58,35 @@ describe("arena frame API", () => {
     expect(observeTilemapImage).toHaveBeenCalledWith({ scale: 3 });
     expect(advanceFrames).not.toHaveBeenCalled();
     expect(ensureReady).toHaveBeenCalled();
+    expect(setInstantMode).not.toHaveBeenCalled();
+  });
+
+  it("applies the requested instant mode before advancing remote frames", async () => {
+    const ensureReady = jest.fn(async () => undefined);
+    const advanceFrames = jest.fn(async () => undefined);
+    const setInstantMode = jest.fn();
+    const observeTilemapImage = jest.fn(async () => ({
+      data: "dGVzdA==",
+      width: 160,
+      height: 144,
+    }));
+    const getFrameCount = jest.fn(() => 43);
+    mockGetMcpSession.mockReturnValue({
+      ensureReady,
+      advanceFrames,
+      setInstantMode,
+      observeTilemapImage,
+      getFrameCount,
+    });
+
+    const { GET } = await loadRoute();
+    const response = await GET(
+      new Request("http://localhost/api/arena/frame?session_id=test-session&advance=1&instant=0")
+    );
+    expect(response.status).toBe(200);
+    expect(setInstantMode).toHaveBeenCalledWith(false);
+    expect(advanceFrames).toHaveBeenCalledWith(1);
+    expect(ensureReady).not.toHaveBeenCalled();
   });
 
   it("uses ensureReady when advance=0", async () => {
