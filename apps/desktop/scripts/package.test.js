@@ -18,3 +18,7 @@ test("desktop launcher points the bundled server at the packaged disassembly roo
   assert.match(packageScript, /const disassemblyRoot = join\(resourceRoot, "web-standalone", "vendor", "pokecrystal"\)/);
   assert.match(packageScript, /POKECRYSTAL_DISASSEMBLY_ROOT: disassemblyRoot/);
 });
+
+test("desktop package skips generated audio test fixtures", () => {
+  assert.match(packageScript, /part === "__tests__"/);
+});

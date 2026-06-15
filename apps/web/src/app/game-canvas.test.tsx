@@ -1375,6 +1375,46 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
+  it("turns a title-screen canvas tap into a confirm press for desktop shells", async () => {
+    const game = buildGameStub();
+    game.getState.mockReturnValue("title");
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement | null;
+    expect(canvas).toBeTruthy();
+
+    act(() => {
+      canvas?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+
+    expect(game.unlockAudio).toHaveBeenCalled();
+    expect(game.postEvent).toHaveBeenCalledTimes(2);
+    expect(game.postEvent.mock.calls[0][0]).toMatchObject({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    });
+    expect(game.postEvent.mock.calls[1][0]).toMatchObject({
+      type: "keyup",
+      button: "a",
+      is_press: false,
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it("clears stuck held keyboard controls when the native window blurs", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);

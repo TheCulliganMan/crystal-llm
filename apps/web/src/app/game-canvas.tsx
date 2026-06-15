@@ -1207,6 +1207,14 @@ export const GameCanvas = React.memo(({
       });
       postEvent?.(engineEvent);
     };
+    const postCanvasConfirmTap = (): void => {
+      const game = gameRef.current;
+      if (!game || game.getState() !== "title") {
+        return;
+      }
+      postKeyboardEvent(gameEngine.KEYDOWN, "z", "KeyZ");
+      postKeyboardEvent(gameEngine.KEYUP, "z", "KeyZ");
+    };
     const stepHeldControlRepeats = (framesToAdvance: number): void => {
       if (framesToAdvance <= 0 || !canAcceptKeyboardInput()) {
         return;
@@ -1293,6 +1301,9 @@ export const GameCanvas = React.memo(({
       const target = event.target as Element | null;
       const targetCanvas = isInputTarget(target) ? (target as HTMLCanvasElement) : primaryCanvas;
       targetCanvas?.focus({ preventScroll: true });
+      if (isInputTarget(target)) {
+        postCanvasConfirmTap();
+      }
     };
     window.addEventListener("pointerdown", handlePointerDown, { capture: true });
 
