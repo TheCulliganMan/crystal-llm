@@ -127,8 +127,12 @@ const stageStandaloneServer = () => {
 };
 
 const stageBundledNodeRuntime = () => {
+  ensureBundledNodeRuntime();
+};
+
+const copyBundledNodeRuntimeToPackage = () => {
   const nodeBinary = ensureBundledNodeRuntime();
-  const target = path.join(DESKTOP_RESOURCES_DIR, "node", "bin", path.basename(nodeBinary));
+  const target = path.join(DESKTOP_PACKAGE_DIR, "Contents", "Resources", "dist", "resources", "node", "bin", path.basename(nodeBinary));
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(nodeBinary, target);
   fs.chmodSync(target, 0o755);
@@ -312,9 +316,6 @@ const stageDesktopResources = () => {
   if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "web-standalone", "apps", "web", "server.js"))) {
     throw new Error("Staged desktop resources are missing the Next standalone server.");
   }
-  if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "node", "bin", "node"))) {
-    throw new Error("Staged desktop resources are missing the bundled Node runtime.");
-  }
 };
 
 const buildNativeApp = () => {
@@ -386,6 +387,7 @@ const packageDesktopApp = () => {
   const packagedNativeBinary = path.join(DESKTOP_PACKAGE_DIR, "Contents", "MacOS", PACKAGED_NATIVE_BINARY_NAME);
   fs.copyFileSync(NATIVE_BINARY, packagedNativeBinary);
   fs.chmodSync(packagedNativeBinary, 0o755);
+  copyBundledNodeRuntimeToPackage();
 
   ensureBuilderArtifacts();
 };
