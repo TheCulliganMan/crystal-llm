@@ -16,6 +16,7 @@ const WEB_DIR = path.resolve(DESKTOP_DIR, "../web");
 const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
 const WEB_BUILD_DIR = path.join(WEB_DIR, DESKTOP_BUILD_DIST_DIR);
 const DESKTOP_HTML_PATH = path.join(WEB_BUILD_DIR, "server", "app", "desktop.html");
+const DESKTOP_STANDALONE_DIR = path.join(WEB_BUILD_DIR, "standalone");
 const DESKTOP_ENTRY_HTML = `\
 <script>
 if (location.pathname !== "/desktop") {
@@ -23,6 +24,17 @@ if (location.pathname !== "/desktop") {
 }
 </script>`;
 const NATIVE_BINARY = path.join(DESKTOP_DIR, "zig-out", "bin", process.platform === "win32" ? "krabbyclaw-desktop.exe" : "krabbyclaw-desktop");
+const PACKAGED_NATIVE_BINARY_NAME = process.platform === "win32" ? "krabbyclaw-native.exe" : "krabbyclaw-native";
+const LAUNCHER_BINARY = path.join(DESKTOP_DIR, "dist", "bin", process.platform === "win32" ? "krabbyclaw-desktop.cmd" : "krabbyclaw-desktop");
+const NODE_VERSION = "24.1.0";
+const NODE_PLATFORM = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : null;
+const NODE_ARCH = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64" : null;
+const BUNDLED_NODE_DIR = NODE_PLATFORM && NODE_ARCH
+  ? path.join(ROOT_DIR, ".node", `node-v${NODE_VERSION}-${NODE_PLATFORM}-${NODE_ARCH}`)
+  : null;
+const BUNDLED_NODE_BINARY = BUNDLED_NODE_DIR
+  ? path.join(BUNDLED_NODE_DIR, "bin", process.platform === "win32" ? "node.exe" : "node")
+  : null;
 
 const withLocalBinPath = (env = process.env) => ({
   ...env,
@@ -61,8 +73,208 @@ const ensureDesktopWebBuild = () => {
     env: {
       ...process.env,
       POKECRYSTAL_NEXT_DIST_DIR: DESKTOP_BUILD_DIST_DIR,
+      POKECRYSTAL_NEXT_OUTPUT: "standalone",
     },
   });
+};
+
+const ensureBundledNodeRuntime = () => {
+  if (!BUNDLED_NODE_DIR || !BUNDLED_NODE_BINARY) {
+    throw new Error(`Unsupported packaged Node runtime target: ${process.platform}/${process.arch}.`);
+  }
+  if (fs.existsSync(BUNDLED_NODE_BINARY)) {
+    return BUNDLED_NODE_BINARY;
+  }
+
+  const archiveName = `node-v${NODE_VERSION}-${NODE_PLATFORM}-${NODE_ARCH}.tar.gz`;
+  const archiveUrl = `https://nodejs.org/dist/v${NODE_VERSION}/${archiveName}`;
+  const archivePath = path.join(ROOT_DIR, ".node", archiveName);
+  fs.mkdirSync(path.dirname(archivePath), { recursive: true });
+  runSync("curl", ["-fsSL", archiveUrl, "-o", archivePath]);
+  runSync("tar", ["-xzf", archivePath, "-C", path.dirname(BUNDLED_NODE_DIR)]);
+
+  if (!fs.existsSync(BUNDLED_NODE_BINARY)) {
+    throw new Error(`Node runtime download did not create ${BUNDLED_NODE_BINARY}.`);
+  }
+  return BUNDLED_NODE_BINARY;
+};
+
+const copyWithoutHeavyWebAssets = (source, destination) => {
+  fs.cpSync(source, destination, {
+    recursive: true,
+    filter: (entry) => {
+      const relative = path.relative(source, entry);
+      return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
+    },
+  });
+};
+
+const stageStandaloneServer = () => {
+  if (!fs.existsSync(DESKTOP_STANDALONE_DIR)) {
+    throw new Error(`Expected Next standalone server at ${DESKTOP_STANDALONE_DIR}.`);
+  }
+
+  const standaloneTarget = path.join(DESKTOP_RESOURCES_DIR, "web-standalone");
+  fs.cpSync(DESKTOP_STANDALONE_DIR, standaloneTarget, { recursive: true });
+
+  const standaloneWebDir = path.join(standaloneTarget, "apps", "web");
+  fs.mkdirSync(path.join(standaloneWebDir, DESKTOP_BUILD_DIST_DIR), { recursive: true });
+  fs.cpSync(path.join(WEB_BUILD_DIR, "static"), path.join(standaloneWebDir, DESKTOP_BUILD_DIST_DIR, "static"), {
+    recursive: true,
+  });
+  copyWithoutHeavyWebAssets(path.join(WEB_DIR, "public"), path.join(standaloneWebDir, "public"));
+  copyWithoutHeavyWebAssets(path.join(WEB_DIR, "assets"), path.join(standaloneWebDir, "assets"));
+};
+
+const stageBundledNodeRuntime = () => {
+  const nodeBinary = ensureBundledNodeRuntime();
+  const target = path.join(DESKTOP_RESOURCES_DIR, "node", "bin", path.basename(nodeBinary));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(nodeBinary, target);
+  fs.chmodSync(target, 0o755);
+};
+
+const writeDesktopLauncherScript = () => {
+  const launcherPath = path.join(DESKTOP_RESOURCES_DIR, "desktop-launcher.mjs");
+  fs.writeFileSync(launcherPath, `\
+import http from "node:http";
+import net from "node:net";
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const resourceRoot = dirname(fileURLToPath(import.meta.url));
+const nativeBinary = process.argv[2];
+const nativeArgs = process.argv.slice(3);
+const host = "127.0.0.1";
+const startPort = 37631;
+const nodePath = join(resourceRoot, "node", "bin", "node");
+const serverPath = join(resourceRoot, "web-standalone", "apps", "web", "server.js");
+const serverCwd = dirname(serverPath);
+let serverProcess = null;
+let nativeProcess = null;
+
+const isPortAvailable = (port) =>
+  new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", () => resolve(false));
+    server.listen({ host, port }, () => server.close(() => resolve(true)));
+  });
+
+const findPort = async () => {
+  for (let port = startPort; port < startPort + 50; port += 1) {
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+  throw new Error("No available desktop server port.");
+};
+
+const waitForServer = (url, deadlineMs = 20000) =>
+  new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const retry = () => {
+      if (Date.now() - startedAt > deadlineMs) {
+        reject(new Error(\`Desktop server did not become ready at \${url}.\`));
+        return;
+      }
+      setTimeout(poll, 150);
+    };
+    const poll = () => {
+      const request = http.get(url, (response) => {
+        response.resume();
+        if (response.statusCode && response.statusCode < 500) {
+          resolve();
+          return;
+        }
+        retry();
+      });
+      request.on("error", retry);
+      request.setTimeout(1000, () => {
+        request.destroy();
+        retry();
+      });
+    };
+    poll();
+  });
+
+const shutdown = () => {
+  if (nativeProcess && !nativeProcess.killed) {
+    nativeProcess.kill();
+  }
+  if (serverProcess && !serverProcess.killed) {
+    serverProcess.kill();
+  }
+};
+
+process.on("SIGINT", () => {
+  shutdown();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  shutdown();
+  process.exit(143);
+});
+
+const runNative = (env) =>
+  new Promise((resolve, reject) => {
+    nativeProcess = spawn(nativeBinary, nativeArgs, { stdio: "inherit", env });
+    nativeProcess.on("error", reject);
+    nativeProcess.on("exit", (code, signal) => {
+      shutdown();
+      if (signal) {
+        process.kill(process.pid, signal);
+        return;
+      }
+      resolve(code ?? 0);
+    });
+  });
+
+try {
+  const externalUrl = process.env.KRABBY_DESKTOP_URL || process.env.ZERO_NATIVE_FRONTEND_URL;
+  if (externalUrl) {
+    process.exit(await runNative({ ...process.env, KRABBY_DESKTOP_URL: externalUrl, ZERO_NATIVE_FRONTEND_URL: externalUrl }));
+  }
+
+  const port = await findPort();
+  const url = \`http://\${host}:\${port}/desktop\`;
+  serverProcess = spawn(nodePath, [serverPath], {
+    cwd: serverCwd,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOSTNAME: host,
+      PORT: String(port),
+      NODE_ENV: "production",
+      POKECRYSTAL_NEXT_DIST_DIR: ".next-desktop",
+      POKECRYSTAL_REQUIRE_SESSION_SECRET: "false",
+      POKECRYSTAL_IDENTITY_SECRET: process.env.POKECRYSTAL_IDENTITY_SECRET || "krabbyclaw-desktop-local-identity-secret",
+      POKECRYSTAL_SESSION_SECRET: process.env.POKECRYSTAL_SESSION_SECRET || "krabbyclaw-desktop-local-session-secret",
+    },
+  });
+  serverProcess.on("error", (error) => {
+    throw error;
+  });
+  await waitForServer(url);
+  process.exit(await runNative({ ...process.env, KRABBY_DESKTOP_URL: url, ZERO_NATIVE_FRONTEND_URL: url }));
+} catch (error) {
+  shutdown();
+  console.error(error);
+  process.exit(1);
+}
+`);
+};
+
+const writeAppExecutableLauncher = () => {
+  fs.mkdirSync(path.dirname(LAUNCHER_BINARY), { recursive: true });
+  fs.writeFileSync(LAUNCHER_BINARY, `\
+#!/bin/sh
+set -eu
+macos_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$macos_dir/../Resources/dist/resources/node/bin/node" "$macos_dir/../Resources/dist/resources/desktop-launcher.mjs" "$macos_dir/${PACKAGED_NATIVE_BINARY_NAME}" "$@"
+`);
+  fs.chmodSync(LAUNCHER_BINARY, 0o755);
 };
 
 const stageDesktopResources = () => {
@@ -73,23 +285,15 @@ const stageDesktopResources = () => {
   fs.rmSync(DESKTOP_RESOURCES_DIR, { recursive: true, force: true });
   fs.mkdirSync(DESKTOP_RESOURCES_DIR, { recursive: true });
 
+  stageStandaloneServer();
+  stageBundledNodeRuntime();
+  writeDesktopLauncherScript();
+
   fs.cpSync(path.join(WEB_BUILD_DIR, "static"), path.join(DESKTOP_RESOURCES_DIR, "_next", "static"), {
     recursive: true,
   });
-  fs.cpSync(path.join(WEB_DIR, "public"), DESKTOP_RESOURCES_DIR, {
-    recursive: true,
-    filter: (source) => {
-      const relative = path.relative(path.join(WEB_DIR, "public"), source);
-      return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
-    },
-  });
-  fs.cpSync(path.join(WEB_DIR, "assets"), path.join(DESKTOP_RESOURCES_DIR, "assets"), {
-    recursive: true,
-    filter: (source) => {
-      const relative = path.relative(path.join(WEB_DIR, "assets"), source);
-      return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg");
-    },
-  });
+  copyWithoutHeavyWebAssets(path.join(WEB_DIR, "public"), DESKTOP_RESOURCES_DIR);
+  copyWithoutHeavyWebAssets(path.join(WEB_DIR, "assets"), path.join(DESKTOP_RESOURCES_DIR, "assets"));
   const desktopHtml = fs
     .readFileSync(DESKTOP_HTML_PATH, "utf8")
     .replace("<head>", `<head>${DESKTOP_ENTRY_HTML}`);
@@ -107,6 +311,12 @@ const stageDesktopResources = () => {
   }
   if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "assets", "data", "pokegear_landmarks.json"))) {
     throw new Error("Staged desktop resources are missing generated runtime assets.");
+  }
+  if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "web-standalone", "apps", "web", "server.js"))) {
+    throw new Error("Staged desktop resources are missing the Next standalone server.");
+  }
+  if (!fs.existsSync(path.join(DESKTOP_RESOURCES_DIR, "node", "bin", "node"))) {
+    throw new Error("Staged desktop resources are missing the bundled Node runtime.");
   }
 };
 
