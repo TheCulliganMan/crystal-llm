@@ -15,7 +15,7 @@ const App = struct {
                 .root_path = "dist/resources",
                 .entry = "index.html",
                 .origin = "zero://app",
-                .spa_fallback = true,
+                .spa_fallback = false,
             }),
             .source_fn = source,
         };
@@ -33,7 +33,7 @@ const App = struct {
             .root_path = "dist/resources",
             .entry = "index.html",
             .origin = "zero://app",
-            .spa_fallback = true,
+            .spa_fallback = false,
         });
     }
 };

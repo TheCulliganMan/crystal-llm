@@ -10,7 +10,7 @@
     .frontend = .{
         .dist = "dist/resources",
         .entry = "index.html",
-        .spa_fallback = true,
+        .spa_fallback = false,
         .dev = .{
             .url = "http://127.0.0.1:3000/desktop",
             .command = .{ "npm", "run", "dev", "--workspace", "@pokecrystal/web" },
