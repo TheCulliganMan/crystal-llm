@@ -1251,6 +1251,14 @@ export const GameCanvas = React.memo(({
       const tag = target.tagName;
       return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     };
+    const isTextEntryElement = (element: Element | null): boolean => {
+      const target = element as HTMLElement | null;
+      if (!target) {
+        return false;
+      }
+      const tag = target.tagName;
+      return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    };
     const shouldIgnorePointerEvent = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target) {
@@ -1290,6 +1298,9 @@ export const GameCanvas = React.memo(({
         return true;
       }
       if (isServerMode) {
+        return true;
+      }
+      if (!isTextEntryElement(document.activeElement)) {
         return true;
       }
       const game = gameRef.current;

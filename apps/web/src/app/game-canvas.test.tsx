@@ -1497,6 +1497,40 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
+  it("accepts key events while a sidebar button has focus", async () => {
+    const game = buildGameStub();
+    (Game.create as jest.Mock).mockResolvedValueOnce(game);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const sidebarButton = document.createElement("button");
+    sidebarButton.textContent = "Saves";
+    document.body.appendChild(sidebarButton);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<GameCanvas runtimeMode="local" />);
+      await flushPromises();
+    });
+
+    sidebarButton.focus();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", bubbles: true }));
+    });
+
+    expect(game.postEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "keydown",
+      button: "a",
+      is_press: true,
+    }));
+
+    await act(async () => {
+      root.unmount();
+    });
+    sidebarButton.remove();
+    container.remove();
+  });
+
   it("accepts key events without canvas focus while Unown modal input is active", async () => {
     const game = buildGameStub();
     game.getGameState.mockReturnValue({
