@@ -2264,8 +2264,9 @@ class McpGameSession {
       !afterSignal.promptReason &&
       !afterSignal.dialogueText.trim() &&
       overworldInteractionAheadBeforePress !== undefined &&
-      this.runConfirmedScriptedInteraction(game, overworldInteractionAheadBeforePress);
+      await this.runConfirmedScriptedInteraction(game, overworldInteractionAheadBeforePress);
     if (fallbackScriptedInteractionStarted) {
+      await Promise.resolve();
       this.stepFrames(1);
       this.settleMovementLock(game, null);
       changed = before !== this.buildStateFingerprint(game);
@@ -5354,10 +5355,10 @@ class McpGameSession {
     this.setMcpOverworldFacing(game, interactionLane.lane.facing);
   }
 
-  private runConfirmedScriptedInteraction(
+  private async runConfirmedScriptedInteraction(
     game: Game,
     target: NonNullable<McpStatusSnapshot["interaction_target"]>
-  ): boolean {
+  ): Promise<boolean> {
     if (!target.script) {
       return false;
     }
@@ -5440,6 +5441,7 @@ class McpGameSession {
     } else {
       runner.run(scriptName);
     }
+    await Promise.resolve();
     return true;
   }
 
