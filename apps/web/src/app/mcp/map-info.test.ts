@@ -179,6 +179,50 @@ describe("buildMapInfoSnapshot", () => {
     }
   );
 
+  it("attaches the Mahogany Pokecenter nurse script to the real healer hotspot", async () => {
+    const loader = new DataLoader();
+    loader.load_map_attributes();
+    loader.load_map_dimensions();
+    loader.load_npc_data();
+
+    const mapName = "MahoganyPokecenter1F";
+    const attributes = loader.map_attributes.get(mapName);
+    const dimensions = attributes?.map_constant
+      ? loader.map_dimensions.get(attributes.map_constant)
+      : undefined;
+    expect(attributes?.tileset_name).toBe("pokecenter");
+    expect(dimensions).toBeTruthy();
+
+    const map = new OverworldMap(mapName, dimensions!.width, dimensions!.height, attributes!.blocks_label);
+    const tileset = new OverworldTileset(attributes!.tileset_name, "day");
+    await tileset.ready;
+
+    const snapshot = buildMapInfoSnapshot({
+      map: mapName,
+      mapGroup: 2,
+      mapNumber: 3,
+      playerCoords: { x: 7, y: 7 },
+      facing: "up",
+      dataLoader: loader,
+      overworld: {
+        TILES_PER_COLLISION: 2,
+        _map_events: { warps: [], bg_events: [], coord_events: [] },
+        map,
+        tileset,
+        current_map_name: mapName,
+        npcs: [],
+      },
+    });
+
+    const healer = snapshot.hotspots.find((hotspot) => hotspot.type === "heal");
+    expect(healer).toEqual(expect.objectContaining({
+      coords: { x: 7, y: 3 },
+      script: "MahoganyPokecenter1FNurseScript",
+      object_index: 1,
+    }));
+    expect(healer?.approach_tiles).toContainEqual({ coords: { x: 7, y: 7 }, facing: "up" });
+  });
+
   it("does not classify outdoor Pokecenter signs or entrances as direct heal interactions", () => {
     const snapshot = buildMapInfoSnapshot({
       map: "GoldenrodCity",

@@ -1152,6 +1152,151 @@ describe("McpGameSession interactive battle presses", () => {
     expect(action.result.changed).toBe(true);
   });
 
+  it("retries Mahogany healer hotspots from exported map-info script metadata when live NPC lookup misses", async () => {
+    const session = getMcpSession("press-mahogany-healer-hotspot-script-retry");
+    const sessionAny = session as unknown as {
+      ensureReady: jest.Mock;
+      observeText: jest.Mock;
+      actionLimiter: { consume: jest.Mock };
+      holdFrames: number;
+      lastSnapshot: { viewport?: string[]; prompt?: string[] | null; dialogue?: string[] | null; menu?: string[] | null } | null;
+      scheduleKeyPress: jest.Mock;
+      stepFrames: jest.Mock;
+      requestAutosave: jest.Mock;
+      game: {
+        getGameState: () => { wram: { player_x: number; player_y: number; last_talked: number } };
+        getMapName: () => string;
+        isMenuOpen: () => boolean;
+        isBattleActive: () => boolean;
+        getOverworld: () => {
+          current_map_name: string;
+          player_direction: string;
+          script_runner: {
+            is_busy?: boolean;
+            run: jest.Mock;
+            last_interaction_object_index?: number | null;
+          };
+          player_movement_locked: () => boolean;
+          script_tasks_active: () => boolean;
+          get_facing_tile_coords: () => [number, number];
+          _counter_adjusted_tile: (x: number, y: number) => [number, number];
+          _npc_on_tile: () => null;
+          _nearest_npc_covering_subtile: () => null;
+          _bg_event_at: () => null;
+          _play_interaction_sound: jest.Mock;
+        };
+      };
+      getGame: jest.Mock;
+      buildSnapshotMapInfo: jest.Mock;
+      captureSceneSignal: jest.Mock;
+      buildStateFingerprint: jest.Mock;
+    };
+
+    sessionAny.ensureReady = jest.fn().mockResolvedValue(undefined);
+    sessionAny.observeText = jest.fn().mockReturnValue("OVERWORLD");
+    sessionAny.actionLimiter = { consume: jest.fn() };
+    sessionAny.holdFrames = 1;
+    sessionAny.requestAutosave = jest.fn().mockResolvedValue(undefined);
+    sessionAny.lastSnapshot = { viewport: ["counter"], prompt: null, dialogue: null, menu: null };
+    const wram = { player_x: 7, player_y: 7, last_talked: 0 };
+    const scriptRunner = {
+      is_busy: false,
+      run: jest.fn(() => {
+        sessionAny.lastSnapshot = {
+          viewport: ["nurse"],
+          dialogue: ["We can heal your POKEMON."],
+          prompt: null,
+          menu: null,
+        };
+      }),
+      last_interaction_object_index: null as number | null,
+    };
+    const overworld = {
+      current_map_name: "MahoganyPokecenter1F",
+      player_direction: "up",
+      script_runner: scriptRunner,
+      player_movement_locked: () => false,
+      script_tasks_active: () => false,
+      get_facing_tile_coords: () => [7, 5] as [number, number],
+      _counter_adjusted_tile: () => [7, 3] as [number, number],
+      _npc_on_tile: () => null,
+      _nearest_npc_covering_subtile: () => null,
+      _bg_event_at: () => null,
+      _play_interaction_sound: jest.fn(),
+    };
+    const game = {
+      getGameState: () => ({ wram }),
+      getMapName: () => "MahoganyPokecenter1F",
+      isMenuOpen: () => false,
+      isBattleActive: () => false,
+      getOverworld: () => overworld,
+    };
+    sessionAny.game = game;
+    sessionAny.getGame = jest.fn(() => game);
+    sessionAny.buildSnapshotMapInfo = jest.fn(() => ({
+      map: "MahoganyPokecenter1F",
+      map_id: "2:3",
+      coord_stride: 2,
+      player: { coords: { x: 7, y: 7 }, facing: "up" },
+      warps: [],
+      hotspots: [
+        {
+          id: "npc-1",
+          type: "heal",
+          label: "Healer",
+          coords: { x: 7, y: 3 },
+          visible: true,
+          interactable: true,
+          token: "H",
+          script: "MahoganyPokecenter1FNurseScript",
+          object_index: 1,
+          approach_tiles: [
+            { coords: { x: 9, y: 3 }, facing: "left" },
+            { coords: { x: 7, y: 7 }, facing: "up" },
+          ],
+        },
+        {
+          id: "npc-3",
+          type: "hazard",
+          label: "Trainer",
+          coords: { x: 5, y: 7 },
+          visible: true,
+          interactable: true,
+          token: "X",
+          approach_tiles: [{ coords: { x: 7, y: 7 }, facing: "left" }],
+        },
+      ],
+    }));
+    sessionAny.scheduleKeyPress = jest.fn();
+    sessionAny.stepFrames = jest.fn();
+    const blankOverworld = {
+      mode: "overworld",
+      menu: false,
+      promptReason: null,
+      dialogueText: "",
+      viewportText: "",
+      menuText: "",
+      promptText: "",
+      markerText: "",
+    };
+    sessionAny.captureSceneSignal = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length
+        ? { ...blankOverworld, dialogueText: sessionAny.lastSnapshot.dialogue.join("\n") }
+        : blankOverworld
+    );
+    sessionAny.buildStateFingerprint = jest.fn(() =>
+      sessionAny.lastSnapshot?.dialogue?.length ? "dialogue" : "before"
+    );
+
+    const action = await session.press("a", 1);
+
+    expect(scriptRunner.run).toHaveBeenCalledWith("MahoganyPokecenter1FNurseScript");
+    expect(wram.last_talked).toBe(1);
+    expect(scriptRunner.last_interaction_object_index).toBe(1);
+    expect(action.result.events).toContain("confirmed_heal_interaction_retried");
+    expect(action.result.changed).toBe(true);
+  });
+
   it("retries confirmed PC background-event scripts when a stale hardware press only changes the viewport", async () => {
     const session = getMcpSession("press-pc-bg-event-viewport-only-retry");
     const sessionAny = session as unknown as {

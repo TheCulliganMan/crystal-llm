@@ -43,6 +43,8 @@ export type McpMapHotspot = {
   approach_tiles?: McpMapApproachTile[];
   token?: string;
   spoiler_masked?: boolean;
+  script?: string;
+  object_index?: number;
 };
 
 export type McpMapInfoSnapshot = {
@@ -71,6 +73,7 @@ export type OverworldMapInfoSource = {
 
 type DataLoaderLike = {
   map_events?: Map<string, { bg_events?: unknown[]; coord_events?: unknown[] }>;
+  npc_data?: Map<string, unknown[]>;
 };
 
 type EventFlags = Record<string, boolean | undefined> | null | undefined;
@@ -388,6 +391,7 @@ const buildBgHotspots = (
       interactable: true,
       token: classified.token,
       spoiler_masked: classified.spoiler_masked || undefined,
+      script: toStringOrNull(event.script) ?? undefined,
     }];
   });
 };
@@ -430,6 +434,8 @@ const buildNpcHotspots = (npcs: unknown[]): McpMapHotspot[] => {
       interactable: true,
       token: classified.token,
       spoiler_masked: classified.spoiler_masked || undefined,
+      script: toStringOrNull(event.script) ?? undefined,
+      object_index: toNumberOrNull(npc.objectIndex) ?? undefined,
     }];
   });
 };
@@ -481,10 +487,67 @@ const buildBlueprintNpcHotspots = (
       interactable: true,
       token: classified.token,
       spoiler_masked: classified.spoiler_masked || undefined,
+      script: toStringOrNull(event.script) ?? undefined,
+      object_index: objectIndex,
     });
   }
 
   return [...byIndex.values()].sort((a, b) => a.id.localeCompare(b.id));
+};
+
+const buildDataLoaderNpcHotspots = (
+  dataLoader: DataLoaderLike | null | undefined,
+  mapName: string | null | undefined,
+  stride: number,
+  offset: number,
+  eventFlags: EventFlags
+): McpMapHotspot[] => {
+  if (!dataLoader?.npc_data || !mapName) {
+    return [];
+  }
+  const events = dataLoader.npc_data.get(mapName);
+  if (!Array.isArray(events)) {
+    return [];
+  }
+  return events.flatMap((rawEvent, index) => {
+    const event = typeof rawEvent === "object" && rawEvent !== null
+      ? (rawEvent as Record<string, unknown>)
+      : null;
+    if (!event) {
+      return [];
+    }
+    const eventFlag = toStringOrNull(event.event_flag);
+    if (eventFlag && eventFlags?.[eventFlag]) {
+      return [];
+    }
+    const x = toNumberOrNull(event.x);
+    const y = toNumberOrNull(event.y);
+    if (x === null || y === null) {
+      return [];
+    }
+    const sourceTokens = [
+      toStringOrNull(event.script),
+      toStringOrNull(event.object_identifier),
+      toStringOrNull(event.label),
+      toStringOrNull(event.object_type),
+      toStringOrNull(event.sprite),
+    ]
+      .filter(Boolean)
+      .map((entry) => normalizeName(entry));
+    const classified = classifyNpcHotspot(sourceTokens);
+    return [{
+      id: `npc-${index + 1}`,
+      type: classified.type,
+      label: classified.label,
+      coords: { x: x * stride + offset, y: y * stride + offset },
+      visible: true,
+      interactable: true,
+      token: classified.token,
+      spoiler_masked: classified.spoiler_masked || undefined,
+      script: toStringOrNull(event.script) ?? undefined,
+      object_index: index + 1,
+    }];
+  });
 };
 
 const APPROACH_DIRECTIONS: ReadonlyArray<{
@@ -717,11 +780,12 @@ export const buildMapInfoSnapshot = (params: {
   );
   const liveNpcHotspots = buildNpcHotspots(Array.isArray(overworld.npcs) ? overworld.npcs : []);
   const fallbackNpcHotspots = buildBlueprintNpcHotspots(overworld, stride, offset, eventFlags);
+  const dataLoaderNpcHotspots = buildDataLoaderNpcHotspots(dataLoader, map, stride, offset, eventFlags);
   const npcHotspots = [...liveNpcHotspots];
   const npcHotspotKeys = new Set(
     liveNpcHotspots.map((hotspot) => `${hotspot.coords.x},${hotspot.coords.y}:${hotspot.label}`)
   );
-  for (const hotspot of fallbackNpcHotspots) {
+  for (const hotspot of [...fallbackNpcHotspots, ...dataLoaderNpcHotspots]) {
     const key = `${hotspot.coords.x},${hotspot.coords.y}:${hotspot.label}`;
     if (!npcHotspotKeys.has(key)) {
       npcHotspots.push(hotspot);

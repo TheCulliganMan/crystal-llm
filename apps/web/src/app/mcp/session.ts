@@ -5549,6 +5549,8 @@ class McpGameSession {
         hotspot.coords.x === interactionTile.x &&
         hotspot.coords.y === interactionTile.y
       ) ?? null;
+    const hotspotScript = String(hotspotAtInteractionTile?.script ?? "").trim();
+    const hotspotObjectIndex = Number(hotspotAtInteractionTile?.object_index ?? 0);
     if (npc && !npc.walking && !npc.jumping && npcScript) {
       return {
         x: interactionTile.x,
@@ -5580,7 +5582,7 @@ class McpGameSession {
             Number.parseInt(hotspotAtInteractionTile.id.slice(4), 10)
           )
         : undefined;
-    if (blueprintTarget?.script) {
+    if (blueprintTarget?.script || hotspotScript) {
       return {
         x: interactionTile.x,
         y: interactionTile.y,
@@ -5588,7 +5590,8 @@ class McpGameSession {
         label: hotspotAtInteractionTile?.label,
         token: hotspotAtInteractionTile?.token,
         hotspot_type: hotspotAtInteractionTile?.type,
-        script: blueprintTarget.script,
+        script: blueprintTarget?.script ?? hotspotScript,
+        object_index: blueprintTarget?.objectIndex ?? (hotspotObjectIndex > 0 ? hotspotObjectIndex : undefined),
       };
     }
     const bgEvent =
@@ -5719,6 +5722,8 @@ class McpGameSession {
             mapDetails?.coord_stride
           )
         : undefined;
+    const hotspotScript = String(hotspotAtInteractionTile.script ?? "").trim();
+    const hotspotObjectIndex = Number(hotspotAtInteractionTile.object_index ?? 0);
     return {
       x: interactionTile.x,
       y: interactionTile.y,
@@ -5726,8 +5731,8 @@ class McpGameSession {
       label: hotspotAtInteractionTile.label,
       token: hotspotAtInteractionTile.token,
       hotspot_type: hotspotAtInteractionTile.type,
-      script: blueprintTarget?.script,
-      object_index: blueprintTarget?.objectIndex,
+      script: blueprintTarget?.script ?? (hotspotScript || undefined),
+      object_index: blueprintTarget?.objectIndex ?? (hotspotObjectIndex > 0 ? hotspotObjectIndex : undefined),
     };
   }
 
