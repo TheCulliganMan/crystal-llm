@@ -1,6 +1,6 @@
 {
   "name": "@pokecrystal/assets",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ASM-derived assets and content loaders for the PokeCrystal TypeScript runtime",
   "license": "ISC",
   "type": "commonjs",
