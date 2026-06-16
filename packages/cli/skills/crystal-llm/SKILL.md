@@ -145,6 +145,10 @@ Use `poke route` for:
 - Route branches
 - Larger spatial context
 
+When using a full-map route render, reduce it to the player’s connected floor before choosing a warp, staircase, door, NPC, or item. Do not chase a warp just because it appears in the map-level `warps` list or hotspot list; first prove there is an open floor path from the current player tile to an approach tile.
+
+Scan route renders for open gaps before declaring a route blocked. Read the visible floor as continuous horizontal and vertical lanes: find where `.` floor runs through breaks in `#`, counter, wall, sign, or ledge bands, then route through those gaps. In mazes and partitioned rooms, the useful move is often to follow the connected lane to its extreme, turn through the gap, and continue along the next open lane. If a chosen coordinate target conflicts with an obvious connected floor gap, trust the connected floor gap and re-observe after reaching the next bend, blocker, or transition.
+
 Use `poke route --tiles` when tile-level interpretation matters.
 
 Use image capture only when needed:
@@ -179,9 +183,10 @@ Use this loop for manual and autonomous gameplay.
 4. Call `poke observe` before terrain, menu, battle, and dialogue decisions.
 5. If in dialogue, menu, battle, prompt, or naming screen, read the surface before pressing inputs. Preserve the meaning of important text before clearing it.
 6. Move one tile at a time near trees, ledges, fences, grass pockets, NPCs, route branches, water, holes, stairs, and warps.
-7. If the same move fails twice, treat the tactic as wrong. Observe, identify why it failed, and choose a different lane or interaction.
-8. Use `poke events` after surprising movement, map transitions, story dialogue, NPC movement, tool errors, or unexpected UI state.
-9. Write a lesson when a route assumption, UI trap, memory problem, or harness failure affected the run.
+7. Verify movement from live context, not only top-level wrapper fields. When `poke status` is returning `null`, `poke move` may show top-level `moved:false` even while embedded `moveText[].context.coords`, `recentEvents.summary`, or a follow-up `poke observe` proves movement or a map transition occurred. Conversely, movement commands in menus can report `ok`, `changed`, or `effect:moved` while `focus` is `menu` and overworld coordinates are unchanged. Trust `focus`/`mode`, `canMove`, embedded coordinates, recent events, and follow-up observe.
+8. If the same move fails twice, treat the tactic as wrong. Observe, identify why it failed, and choose a different lane or interaction.
+9. Use `poke events` after surprising movement, map transitions, story dialogue, NPC movement, tool errors, or unexpected UI state.
+10. Write a lesson when a route assumption, UI trap, memory problem, or harness failure affected the run.
 
 Dialogue is gameplay evidence. Do not treat it as noise.
 

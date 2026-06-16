@@ -20,6 +20,8 @@ Do not inspect ROM/source files, map/event files, save internals, emulator memor
 - Treat dialogue, NPC movement, rewards, and blocker changes as story-state evidence. Do not mash through text without preserving what it means.
 - Treat destination direction as intent, not immediate input.
 - Pathfind from the current live topology. Use the full observed map when the viewport is too small, then identify connected floor, chokepoints, branch ends, trainers/NPCs, item pockets, and warps for this map only.
+- Before choosing a staircase, door, warp, item, or NPC from a full-map render, identify the player’s connected component. A listed warp/hotspot elsewhere on the same map is not reachable evidence if walls, counters, ledges, or partition rows separate it from the current floor component.
+- Scan for open gaps before declaring a route blocked or choosing a distant coordinate target. Read route rows and columns as connected floor lanes; look for breaks in wall/counter/ledge bands where `.` floor continues through. In mazes and partitioned rooms, prefer connected-lane reasoning: follow the open lane to its extreme, turn through the visible gap, continue along the next open lane, and observe at each bend, blocker, or transition.
 - Do not generalize a map shape from one area to another. A shape clue is local evidence, not a reusable route model.
 - In dungeons and story areas, keep pushing through reachable branches until the objective ledger has a real capstone or survival state forces a retreat. Do not stop after a partial room, first trainer, or convenient warp.
 - Warps are leads, not completion proof. Completion requires a story-state change, blocker change, reward/key text, boss/trainer clear, or verified access to the next objective.
