@@ -5,6 +5,9 @@ import { transformSync } from "@babel/core";
 import type { CliOptions, ToolResult } from "./types";
 
 type McpToolDefinition = {
+  name?: string;
+  title?: string;
+  description?: string;
   inputSchema: {
     safeParse: (input: unknown) =>
       | { success: true; data: Record<string, unknown> }
@@ -17,6 +20,7 @@ type McpToolDefinition = {
 };
 
 type LocalRuntimeModules = {
+  MCP_TOOL_DEFINITIONS: McpToolDefinition[];
   getMcpToolDefinition: (name: string) => McpToolDefinition | undefined;
   buildSessionSecret: (sessionId: string, playerId: string) => string;
 };
@@ -163,12 +167,18 @@ const loadRuntimeModules = (): LocalRuntimeModules => {
   const registryPath = path.join(webSrcRoot, "app", "api", "[transport]", "tools", "registry.ts");
   const sessionGuardsPath = path.join(webSrcRoot, "app", "mcp", "session-guards.ts");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getMcpToolDefinition } = require(registryPath) as Pick<LocalRuntimeModules, "getMcpToolDefinition">;
+  const { MCP_TOOL_DEFINITIONS, getMcpToolDefinition } = require(registryPath) as Pick<
+    LocalRuntimeModules,
+    "MCP_TOOL_DEFINITIONS" | "getMcpToolDefinition"
+  >;
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { buildSessionSecret } = require(sessionGuardsPath) as Pick<LocalRuntimeModules, "buildSessionSecret">;
-  cachedRuntime = { getMcpToolDefinition, buildSessionSecret };
+  cachedRuntime = { MCP_TOOL_DEFINITIONS, getMcpToolDefinition, buildSessionSecret };
   return cachedRuntime;
 };
+
+export const getLocalMcpToolDefinitions = (): McpToolDefinition[] =>
+  loadRuntimeModules().MCP_TOOL_DEFINITIONS;
 
 const buildHeaders = (
   options: Pick<CliOptions, "sessionId" | "sessionMode" | "token" | "sessionSecret">
