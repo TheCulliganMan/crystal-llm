@@ -3,6 +3,8 @@
 Terminal and native desktop Pokemon Crystal runtime for live play and LLM
 gameplay experiments.
 
+![Battle](img/battle.png)
+
 ## Start
 
 Install once:
@@ -22,6 +24,20 @@ Start the native desktop app:
 ```bash
 npm run start:desktop
 ```
+
+## Screenshots
+
+![TUI bedroom](img/bedroom.png)
+
+![Overworld](img/overworld.png)
+
+![Desktop app](img/desktop.png)
+
+![Agent view](img/agent-view.png)
+
+![Full text rendering](img/full-text-rendering.png)
+
+![Lugia](img/lugia.png)
 
 ## Controls
 
