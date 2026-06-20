@@ -63,6 +63,7 @@ const ensureRuntimeAssets = () => {
   }
   ensureDisassembly();
   console.log("[start] generating runtime assets...");
+  runChecked(nodeCommand, [path.join(repoRoot, "apps", "web", "scripts", "prepare-public.js")]);
   runChecked(npmCommand, ["run", "export:core"]);
   runChecked(nodeCommand, [path.join(repoRoot, "apps", "web", "scripts", "prepare-public.js")]);
 };
