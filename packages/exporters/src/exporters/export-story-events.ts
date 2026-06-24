@@ -157,7 +157,29 @@ const expandGoldenrodSwitchDoorMacroScripts = (
       || stripInlineComment(line).trim().startsWith(".CloseDoor{d:n}:"));
     const state = labelLine?.includes(".OpenDoor") ? "OPEN" : labelLine?.includes(".CloseDoor") ? "CLOSED" : null;
     if (!state) {
-      expanded.push(rawLine, ...body, "endr");
+      doors.forEach((doorParts, doorIndex) => {
+        const doorNumber = doorIndex + 1;
+        for (const bodyLine of body) {
+          const bodyStripped = stripInlineComment(bodyLine).trim();
+          if (bodyStripped === "changeugdoor n, OPEN") {
+            for (const part of doorParts) {
+              expanded.push(`\tchangeblock ${part.x}, ${part.y}, ${part.open}`);
+            }
+            continue;
+          }
+          if (bodyStripped === "changeugdoor n, CLOSED") {
+            for (const part of doorParts) {
+              expanded.push(`\tchangeblock ${part.x}, ${part.y}, ${part.closed}`);
+            }
+            continue;
+          }
+          expanded.push(
+            bodyLine
+              .replaceAll("{d:n}", String(doorNumber))
+              .replace(/\bn\b/g, String(doorNumber))
+          );
+        }
+      });
       continue;
     }
     const eventCommand = state === "OPEN" ? "setevent" : "clearevent";
@@ -189,6 +211,21 @@ export function parseAsmFile(filePath: string): StoryScripts {
   const localScriptsData = new Map<string, StoryCommand[]>();
   const conditionalStack: ConditionalState[] = [];
 
+  const startLocalScript = (scriptName: string): void => {
+    const encoded = currentScriptName ? `${scriptName}@${currentScriptName}` : scriptName;
+    const body = currentLocalScript?.length === 0 ? currentLocalScript : [];
+    currentLocalScript = body;
+    localScriptsData.set(encoded, body);
+    if (currentScriptName) {
+      localScriptsByParent.set(currentScriptName, [
+        ...(localScriptsByParent.get(currentScriptName) ?? []),
+        encoded,
+      ]);
+    } else {
+      scripts[scriptName] = body;
+    }
+  };
+
   for (const rawLine of lines) {
     const lineStripped = rawLine.trim();
     const line = rawLine.replace(/\r$/, "");
@@ -213,18 +250,7 @@ export function parseAsmFile(filePath: string): StoryScripts {
     if (labelMatch?.groups?.name) {
       const scriptName = labelMatch.groups.name;
       if (scriptName.startsWith(".")) {
-        if (currentScriptName) {
-          currentLocalScript = [];
-          const encoded = `${scriptName}@${currentScriptName}`;
-          localScriptsData.set(encoded, currentLocalScript);
-          localScriptsByParent.set(currentScriptName, [
-            ...(localScriptsByParent.get(currentScriptName) ?? []),
-            encoded,
-          ]);
-        } else {
-          currentLocalScript = [];
-          scripts[scriptName] = currentLocalScript;
-        }
+        startLocalScript(scriptName);
       } else {
         currentScriptName = scriptName;
         currentScript = [];
@@ -236,16 +262,7 @@ export function parseAsmFile(filePath: string): StoryScripts {
     }
 
     if (localLabelMatch?.groups?.name) {
-      const scriptName = localLabelMatch.groups.name;
-      const encoded = currentScriptName ? `${scriptName}@${currentScriptName}` : scriptName;
-      currentLocalScript = [];
-      localScriptsData.set(encoded, currentLocalScript);
-      if (currentScriptName) {
-        localScriptsByParent.set(currentScriptName, [
-          ...(localScriptsByParent.get(currentScriptName) ?? []),
-          encoded,
-        ]);
-      }
+      startLocalScript(localLabelMatch.groups.name);
       continue;
     }
 
@@ -257,11 +274,13 @@ export function parseAsmFile(filePath: string): StoryScripts {
           ? { command, args: argsSource }
           : { command, args: splitAsmArgs(argsSource) };
 
-      if (currentScript) {
-        currentScript.push(commandDict);
+      const activeScript: StoryCommand[] | null = currentScript;
+      const activeLocalScript = currentLocalScript as StoryCommand[] | null;
+      if (activeScript) {
+        activeScript.push(commandDict);
       }
-      if (currentLocalScript) {
-        currentLocalScript.push(commandDict);
+      if (activeLocalScript) {
+        activeLocalScript.push(commandDict);
       }
       continue;
     }

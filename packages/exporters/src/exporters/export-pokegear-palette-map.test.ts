@@ -55,6 +55,19 @@ describe("exportPokegearPaletteMap", () => {
     );
   });
 
+  it("rejects case-changed palette tokens instead of normalizing them", () => {
+    jest.spyOn(fs, "readFileSync").mockReturnValue([
+      "; gfx/pokegear/town_map.png",
+      "\ttownmappals border",
+      "; gfx/pokegear/pokegear.png",
+      "\ttownmappals POI",
+    ].join("\n"));
+
+    expect(() => exportPokegearPaletteMap()).toThrow(
+      "Unknown Pokégear town map palette token 'border'"
+    );
+  });
+
   it("throws when a required section is missing", () => {
     jest.spyOn(fs, "readFileSync").mockReturnValue([
       "; gfx/pokegear/town_map.png",

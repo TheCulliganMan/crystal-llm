@@ -4,6 +4,7 @@ import { Item as ItemType, ItemSchema } from "@pokecrystal/core/core/models";
 
 type ItemSeed = {
     name: string;
+    asm_name?: string;
     price: number;
     effect: ItemEffect;
     param: number;
@@ -38,7 +39,7 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.REPEL]: { name: "REPEL", price: 350, effect: ItemEffect.REPEL, param: 100, pocket: ItemPocket.ITEM, description: "Repels wild POKéMON for 100 steps." },
     [Item.MAX_ELIXER]: { name: "MAX ELIXER", price: 0, effect: ItemEffect.RESTORE_PP, param: 99, pocket: ItemPocket.ITEM, description: "Fully restores PP of one POKéMON." },
     [Item.FIRE_STONE]: { name: "FIRE STONE", price: 0, effect: ItemEffect.EVO_STONE, param: 0, pocket: ItemPocket.ITEM, description: "Evolves certain POKéMON." },
-    [Item.THUNDER_STONE]: { name: "THUNDERSTONE", price: 0, effect: ItemEffect.EVO_STONE, param: 0, pocket: ItemPocket.ITEM, description: "Evolves certain POKéMON." },
+    [Item.THUNDER_STONE]: { name: "THUNDERSTONE", asm_name: "THUNDERSTONE", price: 0, effect: ItemEffect.EVO_STONE, param: 0, pocket: ItemPocket.ITEM, description: "Evolves certain POKéMON." },
     [Item.WATER_STONE]: { name: "WATER STONE", price: 0, effect: ItemEffect.EVO_STONE, param: 0, pocket: ItemPocket.ITEM, description: "Evolves certain POKéMON." },
     [Item.HP_UP]: { name: "HP UP", price: 9800, effect: ItemEffect.VITAMIN, param: 0, pocket: ItemPocket.ITEM, description: "Raises the HP of one POKéMON." },
     [Item.PROTEIN]: { name: "PROTEIN", price: 9800, effect: ItemEffect.VITAMIN, param: 0, pocket: ItemPocket.ITEM, description: "Raises ATTACK of one POKéMON." },
@@ -75,14 +76,14 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.SILVER_WING]: { name: "SILVER WING", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A strange silver-colored feather." },
     [Item.SUPER_ROD]: { name: "SUPER ROD", price: 0, effect: ItemEffect.SUPER_ROD, param: 0, pocket: ItemPocket.KEY_ITEM, description: "An awesome fishing rod. Use by water." },
     [Item.RED_SCALE]: { name: "RED SCALE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A scale from the red GYARADOS." },
-    [Item.SECRET_POTION]: { name: "SECRETPOTION", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A secret medicine for sick POKéMON." },
+    [Item.SECRET_POTION]: { name: "SECRETPOTION", asm_name: "SECRETPOTION", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A secret medicine for sick POKéMON." },
     [Item.S_S_TICKET]: { name: "S.S. TICKET", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A ticket for the S.S. AQUA." },
     [Item.MYSTERY_EGG]: { name: "MYSTERY EGG", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "An EGG obtained from Mr. POKéMON." },
     [Item.CLEAR_BELL]: { name: "CLEAR BELL", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A clear bell." },
     [Item.SILVER_WING_2]: { name: "SILVER WING", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A strange silver-colored feather." },
     [Item.GOLD_LEAF]: { name: "GOLD LEAF", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A strange gold-colored leaf." },
-    [Item.SLOWPOKE_TAIL]: { name: "SLOWPOKETAIL", price: 9800, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A very tasty tail. Sell high." },
-    [Item.BRIGHT_POWDER]: { name: "BRIGHTPOWDER", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that lowers the foe's accuracy." },
+    [Item.SLOWPOKE_TAIL]: { name: "SLOWPOKETAIL", asm_name: "SLOWPOKETAIL", price: 9800, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A very tasty tail. Sell high." },
+    [Item.BRIGHT_POWDER]: { name: "BRIGHTPOWDER", asm_name: "BRIGHTPOWDER", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that lowers the foe's accuracy." },
     [Item.QUICK_CLAW]: { name: "QUICK CLAW", price: 0, effect: ItemEffect.NONE, param: 60, pocket: ItemPocket.ITEM, description: "A hold item that occasionally allows the first strike.", held_effect: "HELD_QUICK_CLAW" },
     [Item.AMULET_COIN]: { name: "AMULET COIN", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that doubles battle money." },
     [Item.EVERSTONE]: { name: "EVERSTONE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that prevents evolution." },
@@ -90,7 +91,7 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.EGG_TICKET]: { name: "EGG TICKET", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A ticket for an EGG." },
     [Item.CARD_KEY]: { name: "CARD KEY", price: 0, effect: ItemEffect.CARD_KEY, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A keycard that opens doors in the RADIO TOWER." },
     [Item.BASEMENT_KEY]: { name: "BASEMENT KEY", price: 0, effect: ItemEffect.BASEMENT_KEY, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A key that opens doors in the GOLDENROD TUNNEL." },
-    [Item.SQUIRT_BOTTLE]: { name: "SQUIRTBOTTLE", price: 0, effect: ItemEffect.SQUIRTBOTTLE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A bottle for watering plants." },
+    [Item.SQUIRT_BOTTLE]: { name: "SQUIRTBOTTLE", asm_name: "SQUIRTBOTTLE", price: 0, effect: ItemEffect.SQUIRTBOTTLE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A bottle for watering plants." },
     [Item.BLUE_CARD]: { name: "BLUE CARD", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "Card to save points.", held_effect: "HELD_NONE" },
     [Item.KINGS_ROCK]: { name: "KING'S ROCK", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that may cause flinching." },
     [Item.BERRY]: { name: "BERRY", price: 0, effect: ItemEffect.RESTORE_HP, param: 10, pocket: ItemPocket.ITEM, description: "A hold item that restores HP by 10." },
@@ -98,17 +99,17 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.MIRACLE_SEED]: { name: "MIRACLE SEED", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts GRASS-type moves." },
     [Item.THICK_CLUB]: { name: "THICK CLUB", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that raises CUBONE's ATTACK." },
     [Item.BLACK_BELT]: { name: "BLACKBELT", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts FIGHTING-type moves." },
-    [Item.BLACK_GLASSES]: { name: "BLACKGLASSES", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts DARK-type moves." },
-    [Item.NEVER_MELT_ICE]: { name: "NEVERMELTICE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts ICE-type moves." },
+    [Item.BLACK_GLASSES]: { name: "BLACKGLASSES", asm_name: "BLACKGLASSES", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts DARK-type moves." },
+    [Item.NEVER_MELT_ICE]: { name: "NEVERMELTICE", asm_name: "NEVERMELTICE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts ICE-type moves." },
     [Item.PINK_BOW]: { name: "PINK BOW", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts NORMAL-type moves." },
     [Item.POISON_BARB]: { name: "POISON BARB", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts POISON-type moves." },
     [Item.SOFT_SAND]: { name: "SOFT SAND", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts GROUND-type moves." },
     [Item.SPELL_TAG]: { name: "SPELL TAG", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts GHOST-type moves." },
-    [Item.TWISTED_SPOON]: { name: "TWISTEDSPOON", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts PSYCHIC-type moves." },
+    [Item.TWISTED_SPOON]: { name: "TWISTEDSPOON", asm_name: "TWISTEDSPOON", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts PSYCHIC-type moves." },
     [Item.METAL_COAT]: { name: "METAL COAT", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts STEEL-type moves." },
     [Item.DRAGON_FANG]: { name: "DRAGON FANG", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts DRAGON-type moves.", held_effect: "HELD_DRAGON_BOOST" },
     [Item.LEFTOVERS]: { name: "LEFTOVERS", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that gradually restores HP." },
-    [Item.MYSTERY_BERRY]: { name: "MYSTERYBERRY", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that restores PP." },
+    [Item.MYSTERY_BERRY]: { name: "MYSTERYBERRY", asm_name: "MYSTERYBERRY", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that restores PP." },
     [Item.DRAGON_SCALE]: { name: "DRAGON SCALE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item for SEADRA." },
     [Item.BERSERK_GENE]: { name: "BERSERK GENE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that sharply boosts ATTACK but causes confusion.", held_effect: "HELD_ATTACK_UP" },
     [Item.SACRED_ASH]: { name: "SACRED ASH", price: 0, effect: ItemEffect.SACRED_ASH, param: 0, pocket: ItemPocket.ITEM, description: "Fully revives all fainted POKéMON." },
@@ -126,8 +127,8 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.POLKADOT_BOW]: { name: "POLKADOT BOW", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts NORMAL-type moves." },
     [Item.UP_GRADE]: { name: "UP-GRADE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item for PORYGON." },
     [Item.BERRY_JUICE]: { name: "BERRY JUICE", price: 100, effect: ItemEffect.RESTORE_HP, param: 20, pocket: ItemPocket.ITEM, description: "A hold item that restores HP by 20." },
-    [Item.PRZCURE_BERRY]: { name: "PRZCUREBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals paralysis.", held_effect: "HELD_HEAL_PARALYZE" },
-    [Item.PSNCURE_BERRY]: { name: "PSNCUREBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals poison.", held_effect: "HELD_HEAL_POISON" },
+    [Item.PRZCURE_BERRY]: { name: "PRZCUREBERRY", asm_name: "PRZCUREBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals paralysis.", held_effect: "HELD_HEAL_PARALYZE" },
+    [Item.PSNCURE_BERRY]: { name: "PSNCUREBERRY", asm_name: "PSNCUREBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals poison.", held_effect: "HELD_HEAL_POISON" },
     [Item.ICE_BERRY]: { name: "ICE BERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that defrosts.", held_effect: "HELD_HEAL_FREEZE" },
     [Item.MINT_BERRY]: { name: "MINT BERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that awakens.", held_effect: "HELD_HEAL_SLEEP" },
     [Item.BURNT_BERRY]: { name: "BURNT BERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals a burn.", held_effect: "HELD_HEAL_BURN" },
@@ -135,7 +136,7 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.CHARCOAL]: { name: "CHARCOAL", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts FIRE-type moves." },
     [Item.HARD_STONE]: { name: "HARD STONE", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts ROCK-type moves." },
     [Item.MAGNET]: { name: "MAGNET", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that boosts ELECTRIC-type moves." },
-    [Item.MIRACLE_BERRY]: { name: "MIRACLEBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals all status problems.", held_effect: "HELD_HEAL_STATUS" },
+    [Item.MIRACLE_BERRY]: { name: "MIRACLEBERRY", asm_name: "MIRACLEBERRY", price: 0, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that heals all status problems.", held_effect: "HELD_HEAL_STATUS" },
     [Item.LUCKY_PUNCH]: { name: "LUCKY PUNCH", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that raises CHANSEY's critical hit ratio." },
     [Item.METAL_POWDER_2]: { name: "METAL POWDER", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that raises DITTO's DEFENSE." },
     [Item.STICK]: { name: "STICK", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that raises FARFETCH'D's critical hit ratio." },
@@ -158,7 +159,7 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.MIRAGE_MAIL]: { name: "MIRAGE MAIL", price: 50, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "POKéMON-held mail." },
     [Item.BIG_MUSHROOM]: { name: "BIG MUSHROOM", price: 5000, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A rare mushroom. Sell high.", held_effect: "HELD_NONE" },
     [Item.BIG_PEARL]: { name: "BIG PEARL", price: 7500, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A big, beautiful pearl. Sell high.", held_effect: "HELD_NONE" },
-    [Item.BLACKBELT_I]: { name: "BLACKBELT I", price: 100, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "No description available.", held_effect: "HELD_FIGHTING_BOOST" },
+    [Item.BLACKBELT_I]: { name: "BLACKBELT I", price: 100, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "Boosts fighting-type moves. (HOLD)", held_effect: "HELD_FIGHTING_BOOST" },
     [Item.BLK_APRICORN]: { name: "BLK APRICORN", price: 200, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A black APRICORN.", held_effect: "HELD_NONE" },
     [Item.BLU_APRICORN]: { name: "BLU APRICORN", price: 200, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A blue APRICORN.", held_effect: "HELD_NONE" },
     [Item.ELIXER]: { name: "ELIXER", price: 3000, effect: ItemEffect.RESTORE_PP, param: 10, pocket: ItemPocket.ITEM, description: "Restores PP of all moves by 10.", held_effect: "HELD_NONE" },
@@ -250,6 +251,10 @@ export const items: ItemType[] = Object.entries(itemData).map(([script_name, dat
     ...ItemSchema.parse(data),
     script_name: script_name as Item,
 }));
+
+export const itemEffectsByAsmName = new Map(
+    Object.entries(itemData).map(([script_name, data]) => [data.asm_name ?? script_name, String(data.effect)])
+);
 
 export function loadAllItems(): Record<string, ItemType> {
     const itemMap: Record<string, ItemType> = {};

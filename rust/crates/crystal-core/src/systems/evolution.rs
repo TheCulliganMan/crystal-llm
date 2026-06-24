@@ -1,0 +1,953 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::models::pokemon::StatExperience;
+use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
+use crate::systems::learnsets::{LearnsetEntry, SpeciesLearnsets, level_up_moves_for_species};
+use crate::world::encounters::TimeOfDay;
+
+pub const HAPPINESS_TO_EVOLVE: u8 = 220;
+pub const TRADE_ANY_ITEM: &str = "-1";
+pub const EVERSTONE_ITEM_ID: &str = "EVERSTONE";
+
+pub const METHOD_LEVEL: &str = "LEVEL";
+pub const METHOD_ITEM: &str = "ITEM";
+pub const METHOD_HAPPINESS: &str = "HAPPINESS";
+pub const METHOD_TRADE: &str = "TRADE";
+pub const METHOD_STAT: &str = "STAT";
+
+pub const HAPPINESS_ANYTIME: &str = "TR_ANYTIME";
+pub const HAPPINESS_MORNDAY: &str = "TR_MORNDAY";
+pub const HAPPINESS_NITE: &str = "TR_NITE";
+
+pub const STAT_ATK_GT_DEF: &str = "ATK_GT_DEF";
+pub const STAT_ATK_LT_DEF: &str = "ATK_LT_DEF";
+pub const STAT_ATK_EQ_DEF: &str = "ATK_EQ_DEF";
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvolutionTable(pub BTreeMap<String, Vec<EvolutionEntry>>);
+
+impl EvolutionTable {
+    pub fn entries_for(&self, species_id: &str) -> Result<&[EvolutionEntry], EvolutionError> {
+        self.0.get(species_id).map(Vec::as_slice).ok_or_else(|| {
+            EvolutionError::MissingEvolutionData {
+                species_id: species_id.to_string(),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolutionEntry {
+    pub method: String,
+    pub species: String,
+    #[serde(deserialize_with = "required_nullable_u8")]
+    pub level: Option<u8>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub item: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub held_item: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub happiness: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub stat_ratio: Option<String>,
+}
+
+fn required_nullable_u8<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u8>::deserialize(deserializer)
+}
+
+fn required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+impl EvolutionEntry {
+    pub fn level(species: impl Into<String>, level: u8) -> Self {
+        Self {
+            method: METHOD_LEVEL.to_string(),
+            species: species.into(),
+            level: Some(level),
+            item: None,
+            held_item: None,
+            happiness: None,
+            stat_ratio: None,
+        }
+    }
+
+    pub fn item(species: impl Into<String>, item: impl Into<String>) -> Self {
+        Self {
+            method: METHOD_ITEM.to_string(),
+            species: species.into(),
+            level: None,
+            item: Some(item.into()),
+            held_item: None,
+            happiness: None,
+            stat_ratio: None,
+        }
+    }
+
+    pub fn happiness(species: impl Into<String>, window: impl Into<String>) -> Self {
+        Self {
+            method: METHOD_HAPPINESS.to_string(),
+            species: species.into(),
+            level: None,
+            item: None,
+            held_item: None,
+            happiness: Some(window.into()),
+            stat_ratio: None,
+        }
+    }
+
+    pub fn trade(species: impl Into<String>, held_item: Option<impl Into<String>>) -> Self {
+        Self {
+            method: METHOD_TRADE.to_string(),
+            species: species.into(),
+            level: None,
+            item: None,
+            held_item: held_item.map(Into::into),
+            happiness: None,
+            stat_ratio: None,
+        }
+    }
+
+    pub fn stat(species: impl Into<String>, level: u8, ratio: impl Into<String>) -> Self {
+        Self {
+            method: METHOD_STAT.to_string(),
+            species: species.into(),
+            level: Some(level),
+            item: None,
+            held_item: None,
+            happiness: None,
+            stat_ratio: Some(ratio.into()),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    #[default]
+    None,
+    Link,
+    TimeCapsule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvolutionContext<'a> {
+    pub species: &'a BTreeMap<String, PokemonSpecies>,
+    pub moves: &'a BTreeMap<String, Move>,
+    pub learnsets: &'a SpeciesLearnsets,
+    pub time_of_day: TimeOfDay,
+    pub current_item: Option<&'a str>,
+    pub force_evolution: bool,
+    pub link_mode: LinkMode,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EvolutionReport {
+    pub target_species: Option<String>,
+    pub events: Vec<EvolutionEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvolutionEvent {
+    Text(&'static str),
+    ItemConsumed(String),
+    MoveLearned(String),
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EvolutionError {
+    #[error("evolution requires a Pokemon species id")]
+    MissingSpeciesId,
+    #[error("missing evolution table entry for species {species_id}")]
+    MissingEvolutionData { species_id: String },
+    #[error("missing level-up learnset for species {species_id}")]
+    MissingLearnset { species_id: String },
+    #[error("evolution target species {species_id} was not loaded")]
+    MissingTargetSpecies { species_id: String },
+    #[error("item evolution for {species_id} is missing required item")]
+    MissingRequiredItem { species_id: String },
+    #[error("level evolution for {species_id} is missing required level")]
+    MissingRequiredLevel { species_id: String },
+    #[error("happiness evolution for {species_id} is missing required window")]
+    MissingHappinessWindow { species_id: String },
+    #[error("stat evolution for {species_id} is missing required ratio")]
+    MissingStatRatio { species_id: String },
+    #[error("unknown happiness window {window} for {species_id}")]
+    UnknownHappinessWindow { species_id: String, window: String },
+    #[error("unknown stat ratio {ratio} for {species_id}")]
+    UnknownStatRatio { species_id: String, ratio: String },
+    #[error("unknown evolution method {method} for {species_id}")]
+    UnknownMethod { species_id: String, method: String },
+    #[error("missing move data for evolution move {move_id}")]
+    MissingMoveData { move_id: String },
+}
+
+pub fn find_evolution_candidate<'a>(
+    pokemon: &Pokemon,
+    table: &'a EvolutionTable,
+    context: &EvolutionContext<'_>,
+) -> Result<Option<&'a EvolutionEntry>, EvolutionError> {
+    let species_id = pokemon.species.id.as_str();
+    if species_id.is_empty() {
+        return Err(EvolutionError::MissingSpeciesId);
+    }
+
+    for entry in table.entries_for(species_id)? {
+        match entry.method.as_str() {
+            METHOD_ITEM => {
+                if !context.force_evolution || context.link_mode != LinkMode::None {
+                    continue;
+                }
+                let required =
+                    entry
+                        .item
+                        .as_deref()
+                        .ok_or_else(|| EvolutionError::MissingRequiredItem {
+                            species_id: species_id.to_string(),
+                        })?;
+                if Some(required) == context.current_item {
+                    return Ok(Some(entry));
+                }
+            }
+            METHOD_LEVEL => {
+                let required_level =
+                    entry
+                        .level
+                        .ok_or_else(|| EvolutionError::MissingRequiredLevel {
+                            species_id: species_id.to_string(),
+                        })?;
+                if context.force_evolution
+                    || required_level > pokemon.level
+                    || is_holding_everstone(pokemon)
+                {
+                    continue;
+                }
+                return Ok(Some(entry));
+            }
+            METHOD_HAPPINESS => {
+                if context.force_evolution
+                    || pokemon.happiness < HAPPINESS_TO_EVOLVE
+                    || is_holding_everstone(pokemon)
+                {
+                    continue;
+                }
+                let window = entry.happiness.as_deref().ok_or_else(|| {
+                    EvolutionError::MissingHappinessWindow {
+                        species_id: species_id.to_string(),
+                    }
+                })?;
+                match window {
+                    HAPPINESS_ANYTIME => return Ok(Some(entry)),
+                    HAPPINESS_MORNDAY if context.time_of_day != TimeOfDay::Night => {
+                        return Ok(Some(entry));
+                    }
+                    HAPPINESS_MORNDAY => {}
+                    HAPPINESS_NITE if context.time_of_day == TimeOfDay::Night => {
+                        return Ok(Some(entry));
+                    }
+                    HAPPINESS_NITE => {}
+                    _ => {
+                        return Err(EvolutionError::UnknownHappinessWindow {
+                            species_id: species_id.to_string(),
+                            window: window.to_string(),
+                        });
+                    }
+                }
+            }
+            METHOD_STAT => {
+                let required_level =
+                    entry
+                        .level
+                        .ok_or_else(|| EvolutionError::MissingRequiredLevel {
+                            species_id: species_id.to_string(),
+                        })?;
+                if context.force_evolution
+                    || required_level > pokemon.level
+                    || is_holding_everstone(pokemon)
+                {
+                    continue;
+                }
+                let ratio = entry.stat_ratio.as_deref().ok_or_else(|| {
+                    EvolutionError::MissingStatRatio {
+                        species_id: species_id.to_string(),
+                    }
+                })?;
+                let matches_ratio = match ratio {
+                    STAT_ATK_GT_DEF => pokemon.attack > pokemon.defense,
+                    STAT_ATK_LT_DEF => pokemon.attack < pokemon.defense,
+                    STAT_ATK_EQ_DEF => pokemon.attack == pokemon.defense,
+                    _ => {
+                        return Err(EvolutionError::UnknownStatRatio {
+                            species_id: species_id.to_string(),
+                            ratio: ratio.to_string(),
+                        });
+                    }
+                };
+                if matches_ratio {
+                    return Ok(Some(entry));
+                }
+            }
+            METHOD_TRADE => {
+                if context.link_mode == LinkMode::None || is_holding_everstone(pokemon) {
+                    continue;
+                }
+                let Some(required) = entry.held_item.as_deref() else {
+                    return Ok(Some(entry));
+                };
+                if required == TRADE_ANY_ITEM {
+                    return Ok(Some(entry));
+                }
+                if context.link_mode == LinkMode::TimeCapsule {
+                    continue;
+                }
+                if pokemon.item.as_deref() == Some(required) {
+                    return Ok(Some(entry));
+                }
+            }
+            method => {
+                return Err(EvolutionError::UnknownMethod {
+                    species_id: species_id.to_string(),
+                    method: method.to_string(),
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub fn evolve_pokemon(
+    pokemon: &mut Pokemon,
+    entry: &EvolutionEntry,
+    context: &EvolutionContext<'_>,
+    include_intro: bool,
+) -> Result<EvolutionReport, EvolutionError> {
+    let target_species = context.species.get(&entry.species).ok_or_else(|| {
+        EvolutionError::MissingTargetSpecies {
+            species_id: entry.species.clone(),
+        }
+    })?;
+
+    let mut events = Vec::new();
+    if include_intro {
+        events.push(EvolutionEvent::Text("EvolvingText"));
+    }
+
+    let old_species_id = pokemon.species.id.clone();
+    let old_max_hp = pokemon.max_hp;
+    let old_hp = pokemon.hp;
+    if pokemon.nickname == old_species_id {
+        pokemon.nickname = target_species.id.clone();
+    }
+    pokemon.species = target_species.clone();
+    refresh_evolved_stats(pokemon, old_max_hp, old_hp);
+    events.push(EvolutionEvent::Text("EvolvedIntoText"));
+
+    if entry.method == METHOD_TRADE {
+        if let Some(required) = entry.held_item.as_deref() {
+            if required != TRADE_ANY_ITEM {
+                pokemon.item = None;
+                events.push(EvolutionEvent::ItemConsumed(required.to_string()));
+            }
+        }
+    }
+
+    for learned in learn_evolution_moves(pokemon, context)? {
+        events.push(EvolutionEvent::MoveLearned(learned.name));
+    }
+
+    Ok(EvolutionReport {
+        target_species: Some(target_species.id.clone()),
+        events,
+    })
+}
+
+pub fn check_and_evolve(
+    pokemon: &mut Pokemon,
+    table: &EvolutionTable,
+    context: &EvolutionContext<'_>,
+    include_intro: bool,
+) -> Result<EvolutionReport, EvolutionError> {
+    let Some(entry) = find_evolution_candidate(pokemon, table, context)? else {
+        return Ok(EvolutionReport::default());
+    };
+    evolve_pokemon(pokemon, entry, context, include_intro)
+}
+
+fn refresh_evolved_stats(pokemon: &mut Pokemon, old_max_hp: u16, old_hp: u16) {
+    let stats = calculate_stats(
+        &pokemon.species,
+        pokemon.level,
+        pokemon.dvs,
+        StatExperience {
+            hp: pokemon.hp_exp,
+            attack: pokemon.attack_exp,
+            defense: pokemon.defense_exp,
+            speed: pokemon.speed_exp,
+            special: pokemon.special_exp,
+        },
+    );
+    pokemon.max_hp = stats.max_hp;
+    pokemon.attack = stats.attack;
+    pokemon.defense = stats.defense;
+    pokemon.speed = stats.speed;
+    pokemon.special_attack = stats.special_attack;
+    pokemon.special_defense = stats.special_defense;
+
+    let hp_delta = i32::from(stats.max_hp) - i32::from(old_max_hp);
+    pokemon.hp = (i32::from(old_hp) + hp_delta).clamp(0, i32::from(stats.max_hp)) as u16;
+}
+
+fn learn_evolution_moves(
+    pokemon: &mut Pokemon,
+    context: &EvolutionContext<'_>,
+) -> Result<Vec<LearnedMove>, EvolutionError> {
+    if pokemon.level == 0 {
+        return Ok(Vec::new());
+    }
+    let mut current = pokemon.moves.clone();
+    let mut learned = Vec::new();
+    for LearnsetEntry(learn_level, move_name) in
+        level_up_moves_for_species(context.learnsets, &pokemon.species.id).map_err(|_| {
+            EvolutionError::MissingLearnset {
+                species_id: pokemon.species.id.clone(),
+            }
+        })?
+    {
+        if *learn_level != pokemon.level
+            || current.iter().any(|known| known.name == *move_name)
+            || current.len() >= 4
+        {
+            continue;
+        }
+        let move_data =
+            context
+                .moves
+                .get(move_name)
+                .ok_or_else(|| EvolutionError::MissingMoveData {
+                    move_id: move_name.clone(),
+                })?;
+        let entry = LearnedMove {
+            name: move_name.clone(),
+            current_pp: move_data.pp,
+        };
+        current.push(entry.clone());
+        learned.push(entry);
+    }
+    pokemon.moves = current;
+    Ok(learned)
+}
+
+fn is_holding_everstone(pokemon: &Pokemon) -> bool {
+    pokemon.item.as_deref() == Some(EVERSTONE_ITEM_ID)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{BaseStats, Dv, GrowthRate, PokemonType};
+
+    fn species(id: &str, hp: u16, attack: u16, defense: u16) -> PokemonSpecies {
+        let mut species =
+            PokemonSpecies::new_for_tests(id, BaseStats::new(hp, attack, defense, 45, 65, 65));
+        species.growth_rate = GrowthRate::MediumFast;
+        species.type1 = PokemonType::Normal;
+        species.type2 = PokemonType::Normal;
+        species
+    }
+
+    fn pokemon(id: &str, level: u8) -> Pokemon {
+        Pokemon::new_for_tests(
+            species(id, 40, 40, 40),
+            level,
+            Dv::from_non_hp(10, 10, 10, 10),
+        )
+    }
+
+    fn move_data(name: &str, pp: u8) -> Move {
+        Move {
+            name: name.to_string(),
+            move_type: PokemonType::Normal,
+            power: 40,
+            accuracy: 100,
+            pp,
+            effect: "NORMAL_HIT".to_string(),
+            effect_chance: 0,
+            stat: None,
+            amount: None,
+        }
+    }
+
+    fn context<'a>(
+        species: &'a BTreeMap<String, PokemonSpecies>,
+        moves: &'a BTreeMap<String, Move>,
+        learnsets: &'a SpeciesLearnsets,
+    ) -> EvolutionContext<'a> {
+        EvolutionContext {
+            species,
+            moves,
+            learnsets,
+            time_of_day: TimeOfDay::Day,
+            current_item: None,
+            force_evolution: false,
+            link_mode: LinkMode::None,
+        }
+    }
+
+    #[test]
+    fn level_evolution_updates_species_stats_hp_and_nickname_exactly() {
+        let mut species_map = BTreeMap::new();
+        species_map.insert("BULBASAUR".to_string(), species("BULBASAUR", 40, 40, 40));
+        species_map.insert("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60));
+        let moves = BTreeMap::new();
+        let learnsets = [("IVYSAUR".to_string(), Vec::new())].into_iter().collect();
+        let table = EvolutionTable(
+            [(
+                "BULBASAUR".to_string(),
+                vec![EvolutionEntry::level("IVYSAUR", 16)],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut pokemon = pokemon("BULBASAUR", 16);
+        pokemon.hp = pokemon.max_hp - 3;
+        let old_max_hp = pokemon.max_hp;
+        let report = check_and_evolve(
+            &mut pokemon,
+            &table,
+            &context(&species_map, &moves, &learnsets),
+            true,
+        )
+        .expect("evolve");
+
+        assert_eq!(report.target_species, Some("IVYSAUR".to_string()));
+        assert_eq!(pokemon.species.id, "IVYSAUR");
+        assert_eq!(pokemon.nickname, "IVYSAUR");
+        assert_eq!(pokemon.hp, pokemon.max_hp - 3);
+        assert!(pokemon.max_hp > old_max_hp);
+        assert_eq!(
+            report.events,
+            vec![
+                EvolutionEvent::Text("EvolvingText"),
+                EvolutionEvent::Text("EvolvedIntoText"),
+            ]
+        );
+    }
+
+    #[test]
+    fn level_evolution_is_blocked_by_exact_everstone_only() {
+        let species_map = [("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60))]
+            .into_iter()
+            .collect();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let table = EvolutionTable(
+            [(
+                "BULBASAUR".to_string(),
+                vec![EvolutionEntry::level("IVYSAUR", 16)],
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut blocked = pokemon("BULBASAUR", 16);
+        blocked.item = Some("EVERSTONE".to_string());
+        assert_eq!(
+            find_evolution_candidate(&blocked, &table, &context(&species_map, &moves, &learnsets))
+                .expect("candidate"),
+            None
+        );
+
+        let mut exact_only = pokemon("BULBASAUR", 16);
+        exact_only.item = Some("everstone".to_string());
+        assert_eq!(
+            find_evolution_candidate(
+                &exact_only,
+                &table,
+                &context(&species_map, &moves, &learnsets)
+            )
+            .expect("candidate")
+            .map(|entry| entry.species.as_str()),
+            Some("IVYSAUR")
+        );
+    }
+
+    #[test]
+    fn item_happiness_stat_and_trade_evolutions_use_exact_context() {
+        let species_map: BTreeMap<_, _> = [
+            ("RAICHU".to_string(), species("RAICHU", 60, 60, 60)),
+            ("ESPEON".to_string(), species("ESPEON", 65, 65, 55)),
+            ("UMBREON".to_string(), species("UMBREON", 65, 55, 65)),
+            ("HITMONLEE".to_string(), species("HITMONLEE", 50, 80, 40)),
+            ("STEELIX".to_string(), species("STEELIX", 75, 85, 200)),
+        ]
+        .into_iter()
+        .collect();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let table = EvolutionTable(
+            [
+                (
+                    "PIKACHU".to_string(),
+                    vec![EvolutionEntry::item("RAICHU", "THUNDERSTONE")],
+                ),
+                (
+                    "EEVEE".to_string(),
+                    vec![
+                        EvolutionEntry::happiness("ESPEON", HAPPINESS_MORNDAY),
+                        EvolutionEntry::happiness("UMBREON", HAPPINESS_NITE),
+                    ],
+                ),
+                (
+                    "TYROGUE".to_string(),
+                    vec![EvolutionEntry::stat("HITMONLEE", 20, STAT_ATK_GT_DEF)],
+                ),
+                (
+                    "ONIX".to_string(),
+                    vec![EvolutionEntry::trade("STEELIX", Some("METAL_COAT"))],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut item_context = context(&species_map, &moves, &learnsets);
+        item_context.current_item = Some("THUNDERSTONE");
+        item_context.force_evolution = true;
+        assert_eq!(
+            find_evolution_candidate(&pokemon("PIKACHU", 20), &table, &item_context)
+                .expect("item")
+                .map(|entry| entry.species.as_str()),
+            Some("RAICHU")
+        );
+
+        let mut eevee = pokemon("EEVEE", 20);
+        eevee.happiness = HAPPINESS_TO_EVOLVE;
+        let mut night_context = context(&species_map, &moves, &learnsets);
+        night_context.time_of_day = TimeOfDay::Night;
+        assert_eq!(
+            find_evolution_candidate(&eevee, &table, &night_context)
+                .expect("night")
+                .map(|entry| entry.species.as_str()),
+            Some("UMBREON")
+        );
+
+        let mut tyrogue = pokemon("TYROGUE", 20);
+        tyrogue.attack = 20;
+        tyrogue.defense = 10;
+        assert_eq!(
+            find_evolution_candidate(&tyrogue, &table, &context(&species_map, &moves, &learnsets))
+                .expect("stat")
+                .map(|entry| entry.species.as_str()),
+            Some("HITMONLEE")
+        );
+
+        let mut onix = pokemon("ONIX", 30);
+        onix.item = Some("METAL_COAT".to_string());
+        let mut link_context = context(&species_map, &moves, &learnsets);
+        link_context.link_mode = LinkMode::Link;
+        assert_eq!(
+            find_evolution_candidate(&onix, &table, &link_context)
+                .expect("trade")
+                .map(|entry| entry.species.as_str()),
+            Some("STEELIX")
+        );
+    }
+
+    #[test]
+    fn trade_evolution_removes_required_item_and_learns_current_level_moves() {
+        let species_map: BTreeMap<_, _> =
+            [("STEELIX".to_string(), species("STEELIX", 75, 85, 200))]
+                .into_iter()
+                .collect();
+        let moves = [("IRON_TAIL".to_string(), move_data("IRON_TAIL", 15))]
+            .into_iter()
+            .collect();
+        let learnsets = [(
+            "STEELIX".to_string(),
+            vec![LearnsetEntry(30, "IRON_TAIL".to_string())],
+        )]
+        .into_iter()
+        .collect();
+        let entry = EvolutionEntry::trade("STEELIX", Some("METAL_COAT"));
+        let mut context = context(&species_map, &moves, &learnsets);
+        context.link_mode = LinkMode::Link;
+        let mut onix = pokemon("ONIX", 30);
+        onix.item = Some("METAL_COAT".to_string());
+
+        let report = evolve_pokemon(&mut onix, &entry, &context, false).expect("evolve");
+
+        assert_eq!(onix.item, None);
+        assert_eq!(
+            onix.moves,
+            vec![LearnedMove {
+                name: "IRON_TAIL".to_string(),
+                current_pp: 15,
+            }]
+        );
+        assert_eq!(
+            report.events,
+            vec![
+                EvolutionEvent::Text("EvolvedIntoText"),
+                EvolutionEvent::ItemConsumed("METAL_COAT".to_string()),
+                EvolutionEvent::MoveLearned("IRON_TAIL".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn evolution_requires_explicit_learnset_for_target_species() {
+        let species_map: BTreeMap<_, _> = [("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60))]
+            .into_iter()
+            .collect();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let entry = EvolutionEntry::level("IVYSAUR", 16);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut pokemon = pokemon("BULBASAUR", 16);
+
+        assert_eq!(
+            evolve_pokemon(&mut pokemon, &entry, &context, false),
+            Err(EvolutionError::MissingLearnset {
+                species_id: "IVYSAUR".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_evolution_table_entry_is_error_not_empty_default() {
+        let species_map = BTreeMap::new();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let table = EvolutionTable::default();
+        let context = context(&species_map, &moves, &learnsets);
+
+        assert_eq!(
+            find_evolution_candidate(&pokemon("FINAL_MON", 50), &table, &context),
+            Err(EvolutionError::MissingEvolutionData {
+                species_id: "FINAL_MON".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn evolution_data_is_exact_not_case_or_alias_coerced() {
+        let species_map = [("RAICHU".to_string(), species("RAICHU", 60, 60, 60))]
+            .into_iter()
+            .collect();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let table = EvolutionTable(
+            [(
+                "PIKACHU".to_string(),
+                vec![EvolutionEntry::item("RAICHU", "THUNDERSTONE")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut context = context(&species_map, &moves, &learnsets);
+        context.current_item = Some("thunderstone");
+        context.force_evolution = true;
+
+        assert_eq!(
+            find_evolution_candidate(&pokemon("PIKACHU", 20), &table, &context).expect("candidate"),
+            None
+        );
+    }
+
+    fn evolution_entry_json() -> serde_json::Value {
+        serde_json::json!({
+            "method":"LEVEL",
+            "species":"IVYSAUR",
+            "level":16,
+            "item":null,
+            "held_item":null,
+            "happiness":null,
+            "stat_ratio":null
+        })
+    }
+
+    #[test]
+    fn evolution_json_requires_explicit_nullable_method_fields() {
+        let mut missing_item = evolution_entry_json();
+        missing_item
+            .as_object_mut()
+            .expect("evolution object")
+            .remove("item");
+        let error = serde_json::from_value::<EvolutionEntry>(missing_item)
+            .expect_err("missing item must not deserialize as None")
+            .to_string();
+        assert!(error.contains("missing field `item`"), "{error}");
+
+        let mut missing_level = evolution_entry_json();
+        missing_level
+            .as_object_mut()
+            .expect("evolution object")
+            .remove("level");
+        let error = serde_json::from_value::<EvolutionEntry>(missing_level)
+            .expect_err("missing level must not deserialize as None")
+            .to_string();
+        assert!(error.contains("missing field `level`"), "{error}");
+    }
+
+    #[test]
+    fn unknown_evolution_facts_are_errors_not_fallbacks() {
+        let species_map = BTreeMap::new();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let context = context(&species_map, &moves, &learnsets);
+        let mut pokemon = pokemon("EEVEE", 20);
+        pokemon.happiness = HAPPINESS_TO_EVOLVE;
+
+        let bad_window = EvolutionTable(
+            [(
+                "EEVEE".to_string(),
+                vec![EvolutionEntry::happiness("ESPEON", "MORNINGISH")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon, &bad_window, &context),
+            Err(EvolutionError::UnknownHappinessWindow {
+                species_id: "EEVEE".to_string(),
+                window: "MORNINGISH".to_string(),
+            })
+        );
+
+        let bad_method = EvolutionTable(
+            [(
+                "EEVEE".to_string(),
+                vec![EvolutionEntry {
+                    method: "MOON_PHASE".to_string(),
+                    species: "UMBREON".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon, &bad_method, &context),
+            Err(EvolutionError::UnknownMethod {
+                species_id: "EEVEE".to_string(),
+                method: "MOON_PHASE".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_evolution_requirements_are_errors_not_defaulted() {
+        let species_map = BTreeMap::new();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let context = context(&species_map, &moves, &learnsets);
+
+        let missing_level = EvolutionTable(
+            [(
+                "BULBASAUR".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_LEVEL.to_string(),
+                    species: "IVYSAUR".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon("BULBASAUR", 16), &missing_level, &context),
+            Err(EvolutionError::MissingRequiredLevel {
+                species_id: "BULBASAUR".to_string(),
+            })
+        );
+
+        let mut eevee = pokemon("EEVEE", 20);
+        eevee.happiness = HAPPINESS_TO_EVOLVE;
+        let missing_window = EvolutionTable(
+            [(
+                "EEVEE".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_HAPPINESS.to_string(),
+                    species: "ESPEON".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&eevee, &missing_window, &context),
+            Err(EvolutionError::MissingHappinessWindow {
+                species_id: "EEVEE".to_string(),
+            })
+        );
+
+        let missing_stat_level = EvolutionTable(
+            [(
+                "TYROGUE".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_STAT.to_string(),
+                    species: "HITMONLEE".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: Some(STAT_ATK_GT_DEF.to_string()),
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon("TYROGUE", 20), &missing_stat_level, &context),
+            Err(EvolutionError::MissingRequiredLevel {
+                species_id: "TYROGUE".to_string(),
+            })
+        );
+
+        let missing_ratio = EvolutionTable(
+            [(
+                "TYROGUE".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_STAT.to_string(),
+                    species: "HITMONLEE".to_string(),
+                    level: Some(20),
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon("TYROGUE", 20), &missing_ratio, &context),
+            Err(EvolutionError::MissingStatRatio {
+                species_id: "TYROGUE".to_string(),
+            })
+        );
+    }
+}

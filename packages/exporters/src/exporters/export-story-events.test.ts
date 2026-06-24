@@ -107,6 +107,38 @@ AzaleaTownRivalBattleScript:
     });
   });
 
+  it("preserves consecutive local labels as aliases for the same commands", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
+    const asmSource = path.join(tmpDir, "IlexForest.asm");
+    fs.writeFileSync(
+      asmSource,
+      `IlexForestFarfetchdScript:
+\tifequal UP, .Position8_Up
+\tifequal LEFT, .Position8_Left
+\tend
+
+.Position8_Up:
+.Position8_Left:
+\tapplymovement ILEXFOREST_FARFETCHD, MovementData_Farfetched_Pos8_Pos2
+\tend
+`,
+      "utf8"
+    );
+
+    const scripts = parseAsmFile(asmSource);
+
+    expect(scripts[".Position8_Up@IlexForestFarfetchdScript"]).toEqual([
+      {
+        command: "applymovement",
+        args: ["ILEXFOREST_FARFETCHD", "MovementData_Farfetched_Pos8_Pos2"],
+      },
+      { command: "end", args: [] },
+    ]);
+    expect(scripts[".Position8_Left@IlexForestFarfetchdScript"]).toBe(
+      scripts[".Position8_Up@IlexForestFarfetchdScript"]
+    );
+  });
+
   it("expands Goldenrod underground switch door macros into local scripts", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
     const asmSource = path.join(tmpDir, "GoldenrodUndergroundSwitchRoomEntrances.asm");
@@ -154,6 +186,45 @@ endr
       { command: "changeblock", args: ["12", "8", "$3d"] },
       { command: "clearevent", args: ["EVENT_DOOR_2_OPEN"] },
       { command: "end", args: [] },
+    ]);
+  });
+
+  it("expands Goldenrod underground switch callback door loops", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
+    const asmSource = path.join(tmpDir, "GoldenrodUndergroundSwitchRoomEntrances.asm");
+    fs.writeFileSync(
+      asmSource,
+      `DEF ugdoor_n = 0
+
+MACRO ugdoor_def
+ENDM
+
+\tugdoor_def 16,  6,    $3e,  $2d
+\tugdoor_def 12,  6,    $3f,  $2a, 12,  8,    $3d,  $2d
+
+GoldenrodUndergroundSwitchRoomEntrancesUpdateDoorPositionsCallback:
+for n, 1, ugdoor_n + 1
+\tcheckevent EVENT_DOOR_{d:n}_OPEN
+\tiffalse .door_{d:n}_closed
+\tchangeugdoor n, OPEN
+.door_{d:n}_closed
+endr
+\tendcallback
+`,
+      "utf8"
+    );
+
+    const scripts = parseAsmFile(asmSource);
+
+    expect(scripts.GoldenrodUndergroundSwitchRoomEntrancesUpdateDoorPositionsCallback).toEqual([
+      { command: "checkevent", args: ["EVENT_DOOR_1_OPEN"] },
+      { command: "iffalse", args: [".door_1_closed"] },
+      { command: "changeblock", args: ["16", "6", "$2d"] },
+      { command: "checkevent", args: ["EVENT_DOOR_2_OPEN"] },
+      { command: "iffalse", args: [".door_2_closed"] },
+      { command: "changeblock", args: ["12", "6", "$2a"] },
+      { command: "changeblock", args: ["12", "8", "$2d"] },
+      { command: "endcallback", args: [] },
     ]);
   });
 });

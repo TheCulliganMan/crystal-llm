@@ -1,0 +1,477 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::models::Item;
+use crate::state::{EventFlagError, GameState};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldItemPickup {
+    pub item_id: String,
+    pub quantity: u16,
+    pub event_flag: String,
+    pub source: FieldItemSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptFieldPickup {
+    pub command: String,
+    pub item_id: Option<String>,
+    pub quantity: u16,
+    pub event_flag: Option<String>,
+    pub fruit_tree_id: Option<String>,
+    pub source_script: String,
+    pub command_index: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FruitTreeCatalog(pub BTreeMap<String, String>);
+
+impl ScriptFieldPickup {
+    pub fn to_field_item_pickup(&self) -> Result<FieldItemPickup, FieldItemError> {
+        let source = match self.command.as_str() {
+            "itemball" => FieldItemSource::ItemBall,
+            "hiddenitem" => FieldItemSource::HiddenItem,
+            "fruittree" => return Err(FieldItemError::FruitTreeRequiresCatalog),
+            other => {
+                return Err(FieldItemError::UnknownScriptPickupCommand {
+                    command: other.to_string(),
+                });
+            }
+        };
+        Ok(FieldItemPickup {
+            item_id: self
+                .item_id
+                .clone()
+                .ok_or_else(|| FieldItemError::MalformedScriptPickup {
+                    command: self.command.clone(),
+                    reason: "missing item_id".to_string(),
+                })?,
+            quantity: self.quantity,
+            event_flag: self.event_flag.clone().ok_or_else(|| {
+                FieldItemError::MalformedScriptPickup {
+                    command: self.command.clone(),
+                    reason: "missing event_flag".to_string(),
+                }
+            })?,
+            source,
+        })
+    }
+
+    pub fn to_fruit_tree_pickup(
+        &self,
+        fruit_trees: &FruitTreeCatalog,
+    ) -> Result<FieldItemPickup, FieldItemError> {
+        if self.command != "fruittree" {
+            return Err(FieldItemError::UnexpectedFruitTreeCommand {
+                command: self.command.clone(),
+            });
+        }
+        if self.item_id.is_some() || self.event_flag.is_some() {
+            return Err(FieldItemError::MalformedScriptPickup {
+                command: self.command.clone(),
+                reason: "fruittree must not inline item_id or event_flag".to_string(),
+            });
+        }
+        let fruit_tree_id =
+            self.fruit_tree_id
+                .as_ref()
+                .ok_or_else(|| FieldItemError::MalformedScriptPickup {
+                    command: self.command.clone(),
+                    reason: "missing fruit_tree_id".to_string(),
+                })?;
+        let item_id = fruit_trees.0.get(fruit_tree_id).cloned().ok_or_else(|| {
+            FieldItemError::UnknownFruitTree {
+                fruit_tree_id: fruit_tree_id.clone(),
+            }
+        })?;
+        Ok(FieldItemPickup {
+            item_id,
+            quantity: 1,
+            event_flag: fruit_tree_collected_flag(fruit_tree_id),
+            source: FieldItemSource::FruitTree,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldItemSource {
+    ItemBall,
+    HiddenItem,
+    FruitTree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldItemPickupOutcome {
+    Collected {
+        item_id: String,
+        quantity: u16,
+        event_flag: String,
+        source: FieldItemSource,
+    },
+    AlreadyCollected {
+        event_flag: String,
+        source: FieldItemSource,
+    },
+    BagFull {
+        item_id: String,
+        quantity: u16,
+        event_flag: String,
+        source: FieldItemSource,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FieldItemError {
+    UnknownItem { item_id: String },
+    UnknownFruitTree { fruit_tree_id: String },
+    UnknownScriptPickupCommand { command: String },
+    UnexpectedFruitTreeCommand { command: String },
+    FruitTreeRequiresCatalog,
+    MalformedScriptPickup { command: String, reason: String },
+    InvalidQuantity,
+    InvalidCollectibleFlag { event_flag: String },
+    Flag { error: EventFlagError },
+    Bag { error: String },
+}
+
+pub fn pickup_script_field_item(
+    state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
+    fruit_trees: &FruitTreeCatalog,
+    pickup: ScriptFieldPickup,
+) -> Result<FieldItemPickupOutcome, FieldItemError> {
+    let pickup = if pickup.command == "fruittree" {
+        pickup.to_fruit_tree_pickup(fruit_trees)?
+    } else {
+        pickup.to_field_item_pickup()?
+    };
+    pickup_field_item(state, item_catalog, pickup)
+}
+
+pub fn pickup_field_item(
+    state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
+    pickup: FieldItemPickup,
+) -> Result<FieldItemPickupOutcome, FieldItemError> {
+    if pickup.quantity == 0 {
+        return Err(FieldItemError::InvalidQuantity);
+    }
+    validate_collectible_flag(&pickup.event_flag)?;
+    if state
+        .flags
+        .is_event_flag_set(&pickup.event_flag)
+        .map_err(|error| FieldItemError::Flag { error })?
+    {
+        return Ok(FieldItemPickupOutcome::AlreadyCollected {
+            event_flag: pickup.event_flag,
+            source: pickup.source,
+        });
+    }
+
+    let item = item_catalog
+        .get(&pickup.item_id)
+        .ok_or_else(|| FieldItemError::UnknownItem {
+            item_id: pickup.item_id.clone(),
+        })?;
+    let added = state
+        .bag
+        .add_item(item, pickup.quantity)
+        .map_err(|error| FieldItemError::Bag { error })?;
+    if !added {
+        return Ok(FieldItemPickupOutcome::BagFull {
+            item_id: pickup.item_id,
+            quantity: pickup.quantity,
+            event_flag: pickup.event_flag,
+            source: pickup.source,
+        });
+    }
+
+    state
+        .flags
+        .set_event_flag(&pickup.event_flag, true)
+        .map_err(|error| FieldItemError::Flag { error })?;
+    Ok(FieldItemPickupOutcome::Collected {
+        item_id: pickup.item_id,
+        quantity: pickup.quantity,
+        event_flag: pickup.event_flag,
+        source: pickup.source,
+    })
+}
+
+pub fn fruit_tree_collected_flag(fruit_tree_id: &str) -> String {
+    format!("{fruit_tree_id}_COLLECTED")
+}
+
+fn validate_collectible_flag(event_flag: &str) -> Result<(), FieldItemError> {
+    if event_flag.is_empty() || event_flag == "-1" || event_flag == "0" {
+        return Err(FieldItemError::InvalidCollectibleFlag {
+            event_flag: event_flag.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ItemPocket, MAX_ITEM_STACK};
+
+    fn item(id: &str, pocket: ItemPocket) -> Item {
+        Item {
+            name: id.replace('_', " "),
+            description: String::new(),
+            effect: "NONE".to_string(),
+            price: 0,
+            held_effect: "HELD_NONE".to_string(),
+            parameter: 0,
+            property: String::new(),
+            pocket,
+            field_menu: String::new(),
+            battle_menu: String::new(),
+            script_name: id.to_string(),
+            consumable: false,
+            tmhm_index: None,
+        }
+    }
+
+    fn catalog(items: Vec<Item>) -> BTreeMap<String, Item> {
+        items
+            .into_iter()
+            .map(|item| (item.script_name.clone(), item))
+            .collect()
+    }
+
+    fn pickup(item_id: &str, event_flag: &str, source: FieldItemSource) -> FieldItemPickup {
+        FieldItemPickup {
+            item_id: item_id.to_string(),
+            quantity: 1,
+            event_flag: event_flag.to_string(),
+            source,
+        }
+    }
+
+    fn script_pickup(command: &str) -> ScriptFieldPickup {
+        ScriptFieldPickup {
+            command: command.to_string(),
+            item_id: None,
+            quantity: 1,
+            event_flag: None,
+            fruit_tree_id: None,
+            source_script: "FieldScript".to_string(),
+            command_index: 2,
+        }
+    }
+
+    #[test]
+    fn itemball_pickup_adds_exact_item_and_sets_exact_event_flag() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+
+        let outcome = pickup_field_item(
+            &mut state,
+            &items,
+            pickup(
+                "ANTIDOTE",
+                "EVENT_ROUTE_29_POTION",
+                FieldItemSource::ItemBall,
+            ),
+        )
+        .expect("pickup succeeds");
+
+        assert_eq!(
+            outcome,
+            FieldItemPickupOutcome::Collected {
+                item_id: "ANTIDOTE".to_string(),
+                quantity: 1,
+                event_flag: "EVENT_ROUTE_29_POTION".to_string(),
+                source: FieldItemSource::ItemBall,
+            }
+        );
+        assert_eq!(state.bag.items["ANTIDOTE"], 1);
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_ROUTE_29_POTION"),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn hidden_item_pickup_does_not_add_item_twice() {
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_GOT_HIDDEN_ANTIDOTE", true)
+            .expect("set preexisting flag");
+        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+
+        let outcome = pickup_field_item(
+            &mut state,
+            &items,
+            pickup(
+                "ANTIDOTE",
+                "EVENT_GOT_HIDDEN_ANTIDOTE",
+                FieldItemSource::HiddenItem,
+            ),
+        )
+        .expect("already collected");
+
+        assert_eq!(
+            outcome,
+            FieldItemPickupOutcome::AlreadyCollected {
+                event_flag: "EVENT_GOT_HIDDEN_ANTIDOTE".to_string(),
+                source: FieldItemSource::HiddenItem,
+            }
+        );
+        assert!(state.bag.items.is_empty());
+    }
+
+    #[test]
+    fn full_bag_does_not_set_collection_flag() {
+        let mut state = GameState::default();
+        let antidote = item("ANTIDOTE", ItemPocket::Item);
+        state
+            .bag
+            .add_item(&antidote, MAX_ITEM_STACK)
+            .expect("fill stack");
+        let items = catalog(vec![antidote]);
+
+        let outcome = pickup_field_item(
+            &mut state,
+            &items,
+            pickup(
+                "ANTIDOTE",
+                "EVENT_GOT_HIDDEN_ANTIDOTE",
+                FieldItemSource::HiddenItem,
+            ),
+        )
+        .expect("bag full");
+
+        assert_eq!(
+            outcome,
+            FieldItemPickupOutcome::BagFull {
+                item_id: "ANTIDOTE".to_string(),
+                quantity: 1,
+                event_flag: "EVENT_GOT_HIDDEN_ANTIDOTE".to_string(),
+                source: FieldItemSource::HiddenItem,
+            }
+        );
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_GOT_HIDDEN_ANTIDOTE"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn pickup_requires_exact_catalog_item_id_without_case_coercion() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+
+        assert_eq!(
+            pickup_field_item(
+                &mut state,
+                &items,
+                pickup(
+                    "antidote",
+                    "EVENT_GOT_HIDDEN_ANTIDOTE",
+                    FieldItemSource::HiddenItem,
+                ),
+            ),
+            Err(FieldItemError::UnknownItem {
+                item_id: "antidote".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn pickup_rejects_unhideable_event_flags() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+
+        assert_eq!(
+            pickup_field_item(
+                &mut state,
+                &items,
+                pickup("ANTIDOTE", "-1", FieldItemSource::ItemBall),
+            ),
+            Err(FieldItemError::InvalidCollectibleFlag {
+                event_flag: "-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn script_pickup_conversion_errors_instead_of_dropping_unknown_commands() {
+        let pickup = script_pickup("giveitem");
+
+        assert_eq!(
+            pickup.to_field_item_pickup(),
+            Err(FieldItemError::UnknownScriptPickupCommand {
+                command: "giveitem".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn fruit_tree_pickup_uses_exact_catalog_item_and_collected_flag() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("BERRY", ItemPocket::Item)]);
+        let fruit_trees = FruitTreeCatalog(
+            [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut pickup = script_pickup("fruittree");
+        pickup.fruit_tree_id = Some("FRUITTREE_ROUTE_29".to_string());
+
+        let outcome = pickup_script_field_item(&mut state, &items, &fruit_trees, pickup)
+            .expect("fruit tree pickup");
+
+        assert_eq!(
+            outcome,
+            FieldItemPickupOutcome::Collected {
+                item_id: "BERRY".to_string(),
+                quantity: 1,
+                event_flag: "FRUITTREE_ROUTE_29_COLLECTED".to_string(),
+                source: FieldItemSource::FruitTree,
+            }
+        );
+        assert_eq!(state.bag.items["BERRY"], 1);
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("FRUITTREE_ROUTE_29_COLLECTED"),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn fruit_tree_pickup_rejects_unknown_or_case_changed_tree_id_without_item_fallback() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("BERRY", ItemPocket::Item)]);
+        let fruit_trees = FruitTreeCatalog(
+            [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut pickup = script_pickup("fruittree");
+        pickup.fruit_tree_id = Some("fruittree_route_29".to_string());
+
+        assert_eq!(
+            pickup_script_field_item(&mut state, &items, &fruit_trees, pickup),
+            Err(FieldItemError::UnknownFruitTree {
+                fruit_tree_id: "fruittree_route_29".to_string(),
+            })
+        );
+        assert!(state.bag.items.is_empty());
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("fruittree_route_29_COLLECTED"),
+            Ok(false)
+        );
+    }
+}

@@ -107,16 +107,39 @@ describe("core exporters integration", () => {
 
     const items = JSON.parse(fs.readFileSync(path.join(dataDir, "items.json"), "utf8")) as Array<{
       name?: string;
+      script_name?: string;
+      effect?: string;
       pocket?: string;
       description?: string;
+      tmhm_index: number | null;
     }>;
     expect(items).toHaveLength(256);
     expect(items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           name: "POKEGEAR",
+          effect: "NONE",
           pocket: "KEY_ITEM",
           description: expect.stringContaining("map"),
+          tmhm_index: null,
+        }),
+      ])
+    );
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "TM41",
+          script_name: "TM_THUNDERPUNCH",
+          effect: "NONE",
+          pocket: "TM_HM",
+          tmhm_index: 40,
+        }),
+        expect.objectContaining({
+          name: "HM03",
+          script_name: "HM_SURF",
+          effect: "NONE",
+          pocket: "TM_HM",
+          tmhm_index: 52,
         }),
       ])
     );
@@ -131,8 +154,8 @@ describe("core exporters integration", () => {
     expect(fleeMons.sometimes).toContain("MAGNEMITE");
 
     const marts = JSON.parse(fs.readFileSync(path.join(dataDir, "marts.json"), "utf8")) as Record<string, string[]>;
-    expect(marts.MartCherrygrove).toEqual(["POTION", "ANTIDOTE", "PARLYZ_HEAL", "AWAKENING"]);
-    expect(marts.MartGoldenrod5F4).toEqual(
+    expect(marts.MART_CHERRYGROVE).toEqual(["POTION", "ANTIDOTE", "PARLYZ_HEAL", "AWAKENING"]);
+    expect(marts.MART_GOLDENROD_5F_4).toEqual(
       expect.arrayContaining(["TM_THUNDERPUNCH", "TM_HEADBUTT", "TM_ROCK_SMASH"])
     );
 
@@ -174,7 +197,7 @@ describe("core exporters integration", () => {
     expect(wildEncounters).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          map_name: "ROUTE_29",
+          map_name: "Route29",
           grass_rates: expect.any(Object),
           grass: expect.any(Object),
           water: expect.any(Object),
@@ -255,12 +278,12 @@ describe("core exporters integration", () => {
         expect.objectContaining({
           id: 1,
           constant: "LANDMARK_NEW_BARK_TOWN",
-          name: "New Bark Town",
+          name: "NEW BARK TOWN",
           region: "JOHTO",
         }),
         expect.objectContaining({
           constant: "LANDMARK_PALLET_TOWN",
-          name: "Pallet Town",
+          name: "PALLET TOWN",
           region: "KANTO",
         }),
       ])
@@ -296,23 +319,23 @@ describe("core exporters integration", () => {
       }>;
     };
     const corePack = contentPackIndex.packs.find((pack) => pack.id === "core-modular");
-    const route29Pack = contentPackIndex.packs.find((pack) => pack.id === "module-route-route_29");
+    const route29Pack = contentPackIndex.packs.find((pack) => pack.id === "module-route-Route29");
     expect(corePack).toEqual(
       expect.objectContaining({
         enabled: true,
         priority: -100,
         files: expect.objectContaining({
-          maps: expect.arrayContaining(["content-packs/core-modular/maps/route29.json"]),
+          maps: expect.arrayContaining(["content-packs/core-modular/maps/Route29.json"]),
           map_attributes: expect.arrayContaining([
-            "content-packs/core-modular/map_attributes/route29.json",
+            "content-packs/core-modular/map_attributes/Route29.json",
           ]),
           map_dimensions: expect.arrayContaining([
-            "content-packs/core-modular/map_dimensions/route_29.json",
+            "content-packs/core-modular/map_dimensions/ROUTE_29.json",
           ]),
           wild_encounters: expect.arrayContaining([
-            "content-packs/core-modular/wild_encounters/route_29.json",
+            "content-packs/core-modular/wild_encounters/Route29.json",
           ]),
-          npcs: expect.arrayContaining(["content-packs/core-modular/npcs/route29.json"]),
+          npcs: expect.arrayContaining(["content-packs/core-modular/npcs/Route29.json"]),
         }),
       })
     );
@@ -320,8 +343,8 @@ describe("core exporters integration", () => {
       expect.objectContaining({
         enabled: false,
         files: expect.objectContaining({
-          maps: ["content-packs/core-modular/maps/route29.json"],
-          map_attributes: ["content-packs/core-modular/map_attributes/route29.json"],
+          maps: ["content-packs/core-modular/maps/Route29.json"],
+          map_attributes: ["content-packs/core-modular/map_attributes/Route29.json"],
         }),
       })
     );
@@ -330,7 +353,7 @@ describe("core exporters integration", () => {
     )).toBe(true);
 
     const route29Map = JSON.parse(
-      fs.readFileSync(path.join(dataDir, "content-packs", "core-modular", "maps", "route29.json"), "utf8")
+      fs.readFileSync(path.join(dataDir, "content-packs", "core-modular", "maps", "Route29.json"), "utf8")
     ) as Record<string, unknown>;
     expect(Array.isArray(route29Map)).toBe(false);
     expect(route29Map.Route29_MapScripts).toEqual(expect.any(Array));
@@ -360,6 +383,7 @@ describe("core exporters integration", () => {
       "trainers",
       "pokedex",
       "phone_scripts",
+      "audio",
     ];
     for (const category of requiredCoreCategories) {
       expect(corePack?.files[category]?.length ?? 0).toBeGreaterThan(0);
@@ -371,6 +395,12 @@ describe("core exporters integration", () => {
           ? path.join(dataDir, relativePath)
           : path.join(dataDir, relativePath);
         expect(fs.existsSync(targetPath)).toBe(true);
+        if (category === "audio") {
+          const bytes = fs.readFileSync(targetPath);
+          expect(relativePath.endsWith(".mid")).toBe(true);
+          expect(bytes.subarray(0, 4).toString("ascii")).toBe("MThd");
+          continue;
+        }
         if (category !== "map_blocks") {
           expect(fs.readFileSync(targetPath, "utf8").trim()).not.toBe("");
         }

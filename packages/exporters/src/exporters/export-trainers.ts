@@ -266,10 +266,12 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
   return trainers;
 }
 
-export function exportTrainers(pokemonData?: PokemonSpecies[]): Trainer[] {
+export function exportTrainers(pokemonData: PokemonSpecies[]): Trainer[] {
+  if (!pokemonData.length) {
+    throw new Error("exportTrainers requires explicit pokemonData from the current core export.");
+  }
   const trainerPath = path.join(getDisassemblyRoot(), "data", "trainers", "parties.asm");
-  const pokemonList = pokemonData ?? JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(getDisassemblyRoot())), "src", "pokecrystal-ts", "assets", "data", "pokemon_data.json"), "utf8"));
-  const pokemonSpeciesMap = Object.fromEntries((pokemonList as PokemonSpecies[]).map((pokemon) => [pokemon.id, pokemon]));
+  const pokemonSpeciesMap = Object.fromEntries(pokemonData.map((pokemon) => [pokemon.id, pokemon]));
   const trainers = parseTrainers(trainerPath, pokemonSpeciesMap);
   writeJsonToTargets("trainers.json", trainers, { indent: 2 });
   return trainers;

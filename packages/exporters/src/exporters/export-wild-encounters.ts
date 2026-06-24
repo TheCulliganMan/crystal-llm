@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import type { WildEncounter, WildEncounterData, WildEncounterTable } from "@pokecrystal/assets/content/wild-encounter-data";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
+import { mapConstantToName } from "@pokecrystal/core/engine/world/maps";
 import { writeJsonToTargets } from "./asm-utils";
 
 function emptyTable(): WildEncounterTable {
@@ -20,7 +21,7 @@ export function parseWildEncounters(filePath: string): WildEncounterData[] {
   for (const block of blocks) {
     const lines = block.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.trim());
     if (lines.length === 0) continue;
-    const mapName = lines[0].trim();
+    const mapName = mapConstantToName(lines[0].trim());
     const isWater = path.basename(filePath).includes("water");
     const rateLine = lines[1] ?? "";
     const rates = [...rateLine.matchAll(/(\d+)\s+percent/g)].map((match) => Number.parseInt(match[1], 10));
@@ -99,10 +100,16 @@ export function mergeWildEncounterData(collections: Iterable<Iterable<WildEncoun
         merged.set(entry.map_name, entry);
         continue;
       }
+      if ((entry.grass_rates !== null || hasEncounters(entry.grass)) && (existing.grass_rates !== null || hasEncounters(existing.grass))) {
+        throw new Error(`Duplicate grass wild encounter data for ${entry.map_name}.`);
+      }
+      if ((entry.water_rate !== null || hasEncounters(entry.water)) && (existing.water_rate !== null || hasEncounters(existing.water))) {
+        throw new Error(`Duplicate water wild encounter data for ${entry.map_name}.`);
+      }
       merged.set(entry.map_name, {
         map_name: entry.map_name,
-        grass_rates: entry.grass_rates ?? existing.grass_rates ?? null,
-        water_rate: entry.water_rate ?? existing.water_rate ?? null,
+        grass_rates: entry.grass_rates ?? existing.grass_rates,
+        water_rate: entry.water_rate ?? existing.water_rate,
         grass: hasEncounters(entry.grass) ? entry.grass : existing.grass,
         water: hasEncounters(entry.water) ? entry.water : existing.water,
       });
@@ -114,11 +121,15 @@ export function mergeWildEncounterData(collections: Iterable<Iterable<WildEncoun
 export function exportWildEncounters(): WildEncounterData[] {
   const root = path.join(getDisassemblyRoot(), "data", "wild");
   const collections = ["johto_grass.asm", "johto_water.asm", "kanto_grass.asm", "kanto_water.asm"]
-    .map((name) => path.join(root, name))
-    .filter((filePath) => fs.existsSync(filePath))
+    .map((name) => {
+      const filePath = path.join(root, name);
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`Missing required wild encounter source ${filePath}.`);
+      }
+      return filePath;
+    })
     .map((filePath) => parseWildEncounters(filePath));
   const merged = mergeWildEncounterData(collections);
   writeJsonToTargets("wild_encounters.json", merged, { indent: 2 });
   return merged;
 }
-

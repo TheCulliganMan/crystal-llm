@@ -1,127 +1,111 @@
 import fs from "fs";
+import os from "os";
+import path from "path";
 import { exportPokegearLandmarks } from "./export-pokegear-landmarks";
 
-const mockWriteJsonToTargets = jest.fn();
-const mockParseMapDefinitions = jest.fn();
-
-jest.mock("./asm-utils", () => {
-  const actual = jest.requireActual("./asm-utils");
-  return {
-    ...actual,
-    writeJsonToTargets: (...args: unknown[]) => mockWriteJsonToTargets(...args),
-  };
-});
-
-jest.mock("./export-map-attributes", () => ({
-  parseMapDefinitions: (...args: unknown[]) => mockParseMapDefinitions(...args),
-}));
+let mockDisassemblyRoot = "";
+let mockAssetsRoot = "";
 
 jest.mock("@pokecrystal/core/core/paths", () => ({
-  getDisassemblyRoot: () => "/mock/pokecrystal",
+  getDisassemblyRoot: () => mockDisassemblyRoot,
+  getAssetsRoot: () => mockAssetsRoot,
 }));
 
-const installLandmarkFiles = ({
-  constants,
-  landmarks,
-}: {
-  constants: string;
-  landmarks: string;
-}): void => {
-  jest.spyOn(fs, "readFileSync").mockImplementation((filePath) => {
-    const pathValue = String(filePath);
-    if (pathValue.endsWith("constants/landmark_constants.asm")) {
-      return constants;
-    }
-    if (pathValue.endsWith("data/maps/landmarks.asm")) {
-      return landmarks;
-    }
-    throw new Error(`Unexpected read ${pathValue}`);
-  });
+const writeFile = (filePath: string, content: string): void => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
 };
 
 describe("exportPokegearLandmarks", () => {
+  let tempDir: string;
+
   beforeEach(() => {
-    mockWriteJsonToTargets.mockReset();
-    mockParseMapDefinitions.mockReset();
-    jest.restoreAllMocks();
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-landmarks-export-"));
+    mockDisassemblyRoot = path.join(tempDir, "vendor");
+    mockAssetsRoot = path.join(tempDir, "assets");
+
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "landmark_constants.asm"),
+      [
+        "\tconst LANDMARK_NEW_BARK_TOWN",
+        "\tDEF KANTO_LANDMARK EQU const_value",
+        "\tconst LANDMARK_PALLET_TOWN",
+        "\tDEF OTHER_LANDMARK EQU const_value",
+        "\tDEF NUM_LANDMARKS EQU const_value",
+        "",
+      ].join("\n")
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "maps", "maps.asm"),
+      [
+        "\tmap NewBarkTown, TILESET_JOHTO, TOWN, LANDMARK_NEW_BARK_TOWN, MUSIC_NEW_BARK_TOWN, FALSE, PALETTE_AUTO, FISHGROUP_SHORE",
+        "",
+      ].join("\n")
+    );
   });
 
-  it("parses constants, rows, decoded names, regions, and map mappings", () => {
-    installLandmarkFiles({
-      constants: [
-        "const LANDMARK_NEW_BARK_TOWN",
-        "DEF KANTO_LANDMARK EQU const_value",
-        "const LANDMARK_PALLET_TOWN",
-        "DEF OTHER_LANDMARK EQU const_value",
-        "const LANDMARK_SPECIAL",
-        "DEF NUM_LANDMARKS EQU const_value",
-      ].join("\n"),
-      landmarks: [
-        "NewBarkName: db \"NEW<BSP>BARK TOWN@\"",
-        "PalletName: db \"PALLET TOWN@\"",
-        "SpecialName: db \"#MON LEAGUE@\"",
-        "\tlandmark 1, 2, NewBarkName",
-        "\tlandmark 3, 4, PalletName",
-        "\tlandmark 5, 6, SpecialName",
-      ].join("\n"),
-    });
-    mockParseMapDefinitions.mockReturnValue({
-      PlayersHouse2F: { location: "LANDMARK_NEW_BARK_TOWN" },
-      PalletTown: { location: "LANDMARK_PALLET_TOWN" },
-      DebugMap: {},
-    });
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
 
-    const payload = exportPokegearLandmarks();
+  it("exports landmark names from explicit labels", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "maps", "landmarks.asm"),
+      [
+        'NewBarkTownName: db "NEW<BSP>BARK TOWN@";',
+        'PalletTownName: db "PALLET TOWN@";',
+        "\tlandmark 12, 24, NewBarkTownName",
+        "\tlandmark 64, 80, PalletTownName",
+        "",
+      ].join("\n")
+    );
 
-    expect(payload.landmarks).toEqual([
+    const result = exportPokegearLandmarks();
+
+    expect(result.landmarks).toEqual([
       expect.objectContaining({
         id: 0,
         constant: "LANDMARK_NEW_BARK_TOWN",
         label: "NEW_BARK_TOWN",
-        name: "New Bark Town",
-        x: 9,
-        y: 18,
+        name: "NEW BARK TOWN",
+        x: 20,
+        y: 40,
         region: "JOHTO",
       }),
       expect.objectContaining({
         id: 1,
         constant: "LANDMARK_PALLET_TOWN",
-        name: "Pallet Town",
-        x: 11,
-        y: 20,
+        label: "PALLET_TOWN",
+        name: "PALLET TOWN",
+        x: 72,
+        y: 96,
         region: "KANTO",
       }),
-      expect.objectContaining({
-        id: 2,
-        constant: "LANDMARK_SPECIAL",
-        name: "Pokemon League",
-        x: 13,
-        y: 22,
-        region: "JOHTO",
-      }),
     ]);
-    expect(payload.map_to_landmark).toEqual({
-      PlayersHouse2F: "LANDMARK_NEW_BARK_TOWN",
-      PalletTown: "LANDMARK_PALLET_TOWN",
+    expect(result.map_to_landmark).toEqual({
+      NewBarkTown: "LANDMARK_NEW_BARK_TOWN",
     });
-    expect(mockWriteJsonToTargets).toHaveBeenCalledWith("pokegear_landmarks.json", payload);
+  });
+
+  it("rejects missing landmark name labels instead of inventing names from constants", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "maps", "landmarks.asm"),
+      [
+        'NewBarkTownName: db "NEW BARK@";',
+        "\tlandmark 12, 24, NewBarkTownName",
+        "\tlandmark 64, 80, PalletTownName",
+        "",
+      ].join("\n")
+    );
+
+    expect(() => exportPokegearLandmarks()).toThrow("Missing landmark name label 'PalletTownName' for LANDMARK_PALLET_TOWN");
   });
 
   it("throws when constants and landmark rows disagree", () => {
-    installLandmarkFiles({
-      constants: [
-        "const LANDMARK_NEW_BARK_TOWN",
-        "DEF KANTO_LANDMARK EQU const_value",
-        "const LANDMARK_PALLET_TOWN",
-        "DEF OTHER_LANDMARK EQU const_value",
-        "DEF NUM_LANDMARKS EQU const_value",
-      ].join("\n"),
-      landmarks: [
-        "NewBarkName: db \"NEW BARK TOWN@\"",
-        "\tlandmark 1, 2, NewBarkName",
-      ].join("\n"),
-    });
-    mockParseMapDefinitions.mockReturnValue({});
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "maps", "landmarks.asm"),
+      ['NewBarkTownName: db "NEW BARK TOWN@";', "\tlandmark 12, 24, NewBarkTownName", ""].join("\n")
+    );
 
     expect(() => exportPokegearLandmarks()).toThrow("Landmark table length mismatch");
   });

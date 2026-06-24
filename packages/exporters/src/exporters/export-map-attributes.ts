@@ -29,11 +29,29 @@ function requireMappingValue<T>(mapping: Record<string, T | undefined>, key: str
   return value;
 }
 
-function parseMapPhoneFlag(token: string): number {
-  const normalized = token.trim().toUpperCase();
-  if (normalized === "TRUE") return 1;
-  if (normalized === "FALSE") return 0;
-  return Number.parseInt(normalized, 10);
+function requireExistingKey<T>(mapping: Record<string, T>, key: string, kind: string): T {
+  if (!Object.prototype.hasOwnProperty.call(mapping, key)) {
+    throw new Error(`Missing ${kind} for '${key}'.`);
+  }
+  return mapping[key];
+}
+
+function requireStringField(mapping: Record<string, string | boolean>, key: string, mapName: string): string {
+  const value = mapping[key];
+  if (typeof value !== "string" || !value) {
+    throw new Error(`Missing ${key} for map '${mapName}'.`);
+  }
+  return value;
+}
+
+export function parseMapPhoneFlag(token: string): number {
+  const value = token.trim();
+  if (value === "TRUE") return 1;
+  if (value === "FALSE") return 0;
+  if (/^[+-]?\d+$/.test(value)) {
+    return Number.parseInt(value, 10);
+  }
+  throw new Error(`Unknown map phone flag token '${token}'.`);
 }
 
 export function mapNameToConstant(name: string): string {
@@ -57,15 +75,17 @@ export function parseMapDefinitions(): Record<string, Record<string, string | bo
     const line = stripAsmComment(rawLine);
     if (!line || !line.startsWith("map ")) continue;
     const parts = line.split(",").map((part) => part.trim());
-    if (parts.length < 8) continue;
     const nameTokens = parts[0].split(/\s+/);
-    if (nameTokens.length < 2) continue;
-    definitions[nameTokens[1]] = {
+    const mapName = nameTokens[1];
+    if (!mapName || parts.length !== 8 || parts.some((part) => !part)) {
+      throw new Error(`Malformed map definition in ${mapsPath}: ${rawLine.trimEnd()}`);
+    }
+    definitions[mapName] = {
       tileset_constant: parts[1],
       environment: parts[2],
       location: parts[3],
       music: parts[4],
-      phone_flag: parts[5].toUpperCase() === "TRUE",
+      phone_flag: parseMapPhoneFlag(parts[5]) === 1,
       palette: parts[6],
       fishing_group: parts[7],
     };
@@ -73,9 +93,20 @@ export function parseMapDefinitions(): Record<string, Record<string, string | bo
   return definitions;
 }
 
-export function parseMapConstants(): Record<string, { group_constant: string | null; width: number; height: number }> {
+const parseMapConstantDimension = (token: string | undefined, mapConstant: string, dimension: "width" | "height"): number => {
+  const value = token?.trim();
+  if (!value) {
+    throw new Error(`Missing ${dimension} for map_const '${mapConstant}'.`);
+  }
+  if (!/^[+-]?\d+$/.test(value)) {
+    throw new Error(`Invalid ${dimension} '${value}' for map_const '${mapConstant}'.`);
+  }
+  return Number.parseInt(value, 10);
+};
+
+export function parseMapConstants(): Record<string, { group_constant: string; width: number; height: number }> {
   const constantsPath = path.join(getDisassemblyRoot(), "constants", "map_constants.asm");
-  const metadata: Record<string, { group_constant: string | null; width: number; height: number }> = {};
+  const metadata: Record<string, { group_constant: string; width: number; height: number }> = {};
   let currentGroup: string | null = null;
 
   for (const rawLine of fs.readFileSync(constantsPath, "utf8").split(/\r?\n/)) {
@@ -88,10 +119,16 @@ export function parseMapConstants(): Record<string, { group_constant: string | n
     if (!line.startsWith("map_const ")) continue;
     const segments = line.split(",").map((segment) => segment.trim());
     const mapConstant = segments[0].split(/\s+/)[1];
+    if (!mapConstant) {
+      throw new Error(`Malformed map_const row in ${constantsPath}: ${line}`);
+    }
+    if (!currentGroup) {
+      throw new Error(`map_const '${mapConstant}' appears before a newgroup declaration.`);
+    }
     metadata[mapConstant] = {
       group_constant: currentGroup,
-      width: Number.parseInt(segments[1] ?? "0", 10),
-      height: Number.parseInt((segments[2] ?? "0").trim(), 10),
+      width: parseMapConstantDimension(segments[1], mapConstant, "width"),
+      height: parseMapConstantDimension(segments[2], mapConstant, "height"),
     };
   }
   return metadata;
@@ -119,10 +156,11 @@ function loadMapPaletteValues(): [Record<string, number>, Record<string, string 
     const cleaned = stripAsmComment(rawLine);
     if (!cleaned || !cleaned.startsWith("map")) continue;
     const parts = cleaned.split(",").map((part) => part.trim());
-    if (parts.length < 8) continue;
     const tokens = parts[0].split(/\s+/);
-    if (tokens.length < 2) continue;
     const mapName = tokens[1];
+    if (!mapName || parts.length !== 8 || parts.some((part) => !part)) {
+      throw new Error(`Malformed map definition in ${mapsPath}: ${rawLine.trimEnd()}`);
+    }
     const phoneFlag = parseMapPhoneFlag(parts[5]);
     const paletteToken = parts[6];
     const paletteValue = PALETTE_CONSTANTS[paletteToken];
@@ -142,11 +180,23 @@ function parseConnections(lines: string[], index: number, connectionFlags: strin
   let i = 0;
   while (i < numConnections && index + i < lines.length) {
     const line = lines[index + i].trim();
-    if (!line.startsWith("connection")) break;
+    if (!line.startsWith("connection")) {
+      throw new Error(`Expected ${numConnections} connection rows after map_attributes, found ${i}.`);
+    }
     const parts = line.split(",").map((part) => part.trim());
+    if (parts.length < 4) {
+      throw new Error(`Malformed connection row: ${line}`);
+    }
+    const direction = parts[0].split(/\s+/)[1];
+    if (!direction || !parts[1]) {
+      throw new Error(`Malformed connection row: ${line}`);
+    }
     const offset = parts.length > 4 ? Number.parseInt(parts[3], 10) - Number.parseInt(parts[4], 10) : Number.parseInt(parts[3], 10);
+    if (!Number.isFinite(offset)) {
+      throw new Error(`Invalid connection offset in row: ${line}`);
+    }
     connections.push({
-      direction: parts[0].split(/\s+/)[1],
+      direction,
       target_map: parts[1],
       offset,
     });
@@ -176,13 +226,16 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
     }
     const parts = line.split(",").map((part) => part.trim());
     const mapName = parts[0].split(/\s+/)[1];
+    if (!mapName || parts.length < 4 || parts.some((part) => !part)) {
+      throw new Error(`Malformed map_attributes row in ${attributesPath}: ${line}`);
+    }
     const tilesetName = requireMappingValue(mapToTilesetMap, mapName, `tileset mapping for map '${mapName}'`);
     const mapConstant = mapNameToConstant(mapName);
     const mapMeta = requireMappingValue(mapDefinitions, mapName, `map definition for '${mapName}'`);
     const constantMeta = requireMappingValue(mapConstantsMeta, mapConstant, `map constant metadata for '${mapConstant}'`);
     const dimensionEntry = requireMappingValue(mapDimensions, mapConstant, `dimension entry for '${mapConstant}'`);
     const borderBlock = parseAsmNumber(parts[2]);
-    const connectionFlags = parts[3] ?? "0";
+    const connectionFlags = parts[3];
     const [connections, newIndex] = parseConnections(lines, index + 1, connectionFlags);
     index = newIndex;
 
@@ -192,14 +245,14 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
       width: dimensionEntry.width,
       height: dimensionEntry.height,
       connections,
-      time_of_day: timeOfDayData[mapName] ?? null,
-      phone_service: paletteData[mapName],
+      time_of_day: requireExistingKey(timeOfDayData, mapName, `time-of-day palette for map '${mapName}'`),
+      phone_service: requireMappingValue(paletteData, mapName, `phone service palette byte for map '${mapName}'`),
       phone_flag: Boolean(mapMeta.phone_flag),
-      environment: String(mapMeta.environment ?? ""),
-      location: String(mapMeta.location ?? ""),
-      music: String(mapMeta.music ?? ""),
-      palette: String(mapMeta.palette ?? ""),
-      fishing_group: String(mapMeta.fishing_group ?? ""),
+      environment: requireStringField(mapMeta, "environment", mapName),
+      location: requireStringField(mapMeta, "location", mapName),
+      music: requireStringField(mapMeta, "music", mapName),
+      palette: requireStringField(mapMeta, "palette", mapName),
+      fishing_group: requireStringField(mapMeta, "fishing_group", mapName),
       map_constant: mapConstant,
       map_group_constant: constantMeta.group_constant,
       blocks_label: `${mapName}_Blocks`,
@@ -212,4 +265,3 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
   writeJsonToTargets("map_attributes.json", mapAttributes, { indent: 4 });
   return mapAttributes;
 }
-

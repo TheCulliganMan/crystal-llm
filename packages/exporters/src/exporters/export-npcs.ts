@@ -16,17 +16,6 @@ const TIME_OF_DAY_VALUES: Record<string, number> = {
   DARKNESS: 8,
 };
 
-const DEFAULT_CONSTANT_VALUES: Record<string, number> = {
-  PAL_NPC_RED: 8,
-  PAL_NPC_BLUE: 9,
-  PAL_NPC_GREEN: 10,
-  PAL_NPC_BROWN: 11,
-  PAL_NPC_PINK: 12,
-  PAL_NPC_EMOTE: 13,
-  PAL_NPC_TREE: 14,
-  PAL_NPC_ROCK: 15,
-};
-
 const parseConstDefValue = (value: string | undefined): number => {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) {
@@ -37,6 +26,19 @@ const parseConstDefValue = (value: string | undefined): number => {
     return parseAsmNumber(shiftMatch[1]) << parseAsmNumber(shiftMatch[2]);
   }
   return parseAsmNumber(trimmed);
+};
+
+const isAsmNumberToken = (value: string): boolean => /^[+-]?(?:\d+|\$[0-9A-Fa-f]+|%[01]+)$/.test(value.trim());
+
+const parseRequiredAsmNumber = (token: string, expression: string): number => {
+  if (!isAsmNumberToken(token)) {
+    throw new Error(`Unknown numeric expression token '${token}' in '${expression}'.`);
+  }
+  const parsed = parseAsmNumber(token);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric expression token '${token}' in '${expression}'.`);
+  }
+  return parsed;
 };
 
 export function parseNumericExpression(
@@ -53,16 +55,16 @@ export function parseNumericExpression(
     .filter(Boolean)
     .reduce((total, token) => {
       const mapped = constants[token] ?? TIME_OF_DAY_VALUES[token];
-      return total | (mapped ?? parseAsmNumber(token));
+      return total | (mapped ?? parseRequiredAsmNumber(token, trimmed));
     }, 0);
 }
 
 export function parseNpcConstants(constantsFilePath: string): Record<string, number> {
   if (!fs.existsSync(constantsFilePath)) {
-    return { ...DEFAULT_CONSTANT_VALUES };
+    throw new Error(`Missing NPC constants file ${constantsFilePath}.`);
   }
 
-  const values: Record<string, number> = { ...DEFAULT_CONSTANT_VALUES };
+  const values: Record<string, number> = {};
   let nextValue = 0;
   for (const rawLine of fs.readFileSync(constantsFilePath, "utf8").split(/\r?\n/)) {
     const line = stripAsmComment(rawLine);
@@ -166,9 +168,7 @@ export function parseNpcData(mapsDir: string, constants: Record<string, number>)
   for (const entry of fs.readdirSync(mapsDir).filter((name) => name.endsWith(".asm")).sort()) {
     const mapName = path.basename(entry, ".asm");
     const events = parseNpcDataFromMapFile(mapName, path.join(mapsDir, entry), constants);
-    if (events.length > 0) {
-      data[mapName] = events;
-    }
+    data[mapName] = events;
   }
   return data;
 }

@@ -19,16 +19,8 @@ interface LandmarkConstant {
   constant: string;
 }
 
-const toTitleCase = (value: string): string =>
-  value
-    .toLowerCase()
-    .replace(/\b[a-z]/g, (char) => char.toUpperCase())
-    .replace(/\bMt\./g, "Mt.")
-    .replace(/\bLav\b/g, "Lav")
-    .replace(/\bOf\b/g, "of");
-
 const decodeLandmarkName = (value: string): string => {
-  const normalized = value
+  return value
     .replace(/^"/, "")
     .replace(/@.*$/, "")
     .replace(/<BSP>/g, "\n")
@@ -37,7 +29,6 @@ const decodeLandmarkName = (value: string): string => {
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join(" ")
     .trim();
-  return toTitleCase(normalized);
 };
 
 const parseLandmarkConstants = (
@@ -150,11 +141,15 @@ export function exportPokegearLandmarks(): PokegearLandmarksPayload {
   const landmarks = constants.map((entry, index) => {
     const row = rows[index];
     const label = entry.constant.replace(/^LANDMARK_/, "");
+    const name = namesByLabel[row.nameLabel];
+    if (name === undefined) {
+      throw new Error(`Missing landmark name label '${row.nameLabel}' for ${entry.constant}.`);
+    }
     return {
       id: entry.id,
       constant: entry.constant,
       label,
-      name: namesByLabel[row.nameLabel] ?? toTitleCase(label.replace(/_/g, " ")),
+      name,
       x: row.x,
       y: row.y,
       region: getRegion(entry.id, kantoStart, otherStart),

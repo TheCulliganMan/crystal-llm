@@ -57,6 +57,16 @@ describe("export-npcs", () => {
     expect(parseNumericExpression("MORN | DAY")).toBe(3);
   });
 
+  it("rejects unknown symbolic numeric tokens instead of coercing them to zero", () => {
+    expect(() => parseNumericExpression("PAL_NPC_BLUE | UNKNOWN_TOKEN", { PAL_NPC_BLUE: 9 })).toThrow(
+      "Unknown numeric expression token 'UNKNOWN_TOKEN' in 'PAL_NPC_BLUE | UNKNOWN_TOKEN'"
+    );
+  });
+
+  it("rejects malformed numeric tokens instead of exporting NaN-coerced values", () => {
+    expect(() => parseNumericExpression("$ZZ")).toThrow("Unknown numeric expression token '$ZZ' in '$ZZ'");
+  });
+
   it("parses NPC palette constants from const_def expressions", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
     const constantsPath = path.join(tempDir, "sprite_data_constants.asm");
@@ -78,6 +88,38 @@ describe("export-npcs", () => {
           PAL_NPC_BLUE: 9,
           PAL_NPC_GREEN: 10,
         })
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("only exports NPC constants present in the ASM constants file", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
+    const constantsPath = path.join(tempDir, "sprite_data_constants.asm");
+    try {
+      fs.writeFileSync(constantsPath, ["	const_def 1 << 3", "	const PAL_NPC_RED", ""].join("\n"));
+
+      expect(parseNpcConstants(constantsPath)).toEqual({
+        PAL_NPC_RED: 8,
+      });
+      expect(parseNpcConstants(constantsPath)).not.toHaveProperty("PAL_NPC_BLUE");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects case-changed NPC constants instead of normalizing labels", () => {
+    expect(() => parseNumericExpression("pal_npc_blue", { PAL_NPC_BLUE: 9 })).toThrow(
+      "Unknown numeric expression token 'pal_npc_blue' in 'pal_npc_blue'"
+    );
+  });
+
+  it("requires the NPC constants file instead of using built-in fallback constants", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
+    try {
+      expect(() => parseNpcConstants(path.join(tempDir, "missing.asm"))).toThrow(
+        `Missing NPC constants file ${path.join(tempDir, "missing.asm")}.`
       );
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -112,7 +154,7 @@ describe("export-npcs", () => {
     }
   });
 
-  it("omits maps without object_event rows from modular NPC data", () => {
+  it("exports explicit empty NPC arrays for maps without object_event rows", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
     try {
       fs.writeFileSync(
@@ -133,6 +175,7 @@ describe("export-npcs", () => {
       );
 
       expect(parseNpcData(tempDir, { PAL_NPC_RED: 8 })).toEqual({
+        EmptyMap: [],
         Route1: [
           expect.objectContaining({
             x: 3,

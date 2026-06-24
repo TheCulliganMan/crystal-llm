@@ -303,7 +303,7 @@ const writePokemonNormalGbcpalFromPalettes = (
   ], true);
 };
 
-const syncRawGraphicsFallbacks = (target: string): void => {
+const syncGeneratedRawGraphics = (target: string): void => {
   for (const relativeDir of [
     "battle",
     "battle_anims",
@@ -357,5 +357,5 @@ export function exportGraphicsAssets(): void {
     dereference: false,
     filter: (sourcePath) => path.basename(sourcePath) !== ".DS_Store",
   });
-  syncRawGraphicsFallbacks(target);
+  syncGeneratedRawGraphics(target);
 }

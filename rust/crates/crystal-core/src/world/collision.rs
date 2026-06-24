@@ -1,0 +1,645 @@
+use serde::{Deserialize, Serialize};
+
+use super::map::{
+    Direction, METATILE_WIDTH, OverworldMapData, TilePosition, determine_quadrant_index,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Terrain {
+    Land,
+    Water,
+    Wall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerTraversalState {
+    Walk,
+    Surf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollisionAttributes {
+    pub value: u8,
+    pub terrain: Terrain,
+    pub talk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetatileCollision {
+    pub collision: [u8; 4],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TilesetCollision {
+    pub metatiles: Vec<MetatileCollision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollisionSample {
+    pub permission: u8,
+    pub metatile_id: u16,
+    pub quadrant: usize,
+    pub tile: TilePosition,
+}
+
+pub mod permissions {
+    pub const FLOOR: u8 = 0x00;
+    pub const WALL: u8 = 0x07;
+    pub const TALL_GRASS: u8 = 0x18;
+    pub const PIT: u8 = 0x60;
+    pub const PIT_68: u8 = 0x68;
+    pub const WARP_CARPET_DOWN: u8 = 0x70;
+    pub const DOOR: u8 = 0x71;
+    pub const LADDER: u8 = 0x72;
+    pub const STAIRCASE_73: u8 = 0x73;
+    pub const CAVE_74: u8 = 0x74;
+    pub const DOOR_75: u8 = 0x75;
+    pub const WARP_CARPET_LEFT: u8 = 0x76;
+    pub const WARP_77: u8 = 0x77;
+    pub const WARP_CARPET_UP: u8 = 0x78;
+    pub const DOOR_79: u8 = 0x79;
+    pub const STAIRCASE: u8 = 0x7a;
+    pub const CAVE: u8 = 0x7b;
+    pub const WARP_PANEL: u8 = 0x7c;
+    pub const DOOR_7D: u8 = 0x7d;
+    pub const WARP_CARPET_RIGHT: u8 = 0x7e;
+    pub const WARP_7F: u8 = 0x7f;
+    pub const COUNTER: u8 = 0x90;
+    pub const BOOKSHELF: u8 = 0x91;
+    pub const PC: u8 = 0x93;
+    pub const RADIO: u8 = 0x94;
+    pub const TOWN_MAP: u8 = 0x95;
+    pub const MART_SHELF: u8 = 0x96;
+    pub const TV: u8 = 0x97;
+    pub const COUNTER_98: u8 = 0x98;
+    pub const WINDOW: u8 = 0x9d;
+    pub const INCENSE_BURNER: u8 = 0x9f;
+    pub const WATER: u8 = 0x29;
+    pub const WHIRLPOOL: u8 = 0x24;
+    pub const WHIRLPOOL_2C: u8 = 0x2c;
+    pub const WATERFALL_RIGHT: u8 = 0x30;
+    pub const WATERFALL_LEFT: u8 = 0x31;
+    pub const WATERFALL_UP: u8 = 0x32;
+    pub const WATERFALL: u8 = 0x33;
+    pub const CURRENT_DOWN: u8 = 0x3b;
+    pub const HOP_RIGHT: u8 = 0xa0;
+    pub const HOP_LEFT: u8 = 0xa1;
+    pub const HOP_UP: u8 = 0xa2;
+    pub const HOP_DOWN: u8 = 0xa3;
+    pub const HOP_DOWN_RIGHT: u8 = 0xa4;
+    pub const HOP_DOWN_LEFT: u8 = 0xa5;
+    pub const HOP_UP_RIGHT: u8 = 0xa6;
+    pub const HOP_UP_LEFT: u8 = 0xa7;
+    pub const RIGHT_WALL: u8 = 0xb0;
+    pub const LEFT_WALL: u8 = 0xb1;
+    pub const UP_WALL: u8 = 0xb2;
+    pub const DOWN_WALL: u8 = 0xb3;
+    pub const DOWN_RIGHT_WALL: u8 = 0xb4;
+    pub const DOWN_LEFT_WALL: u8 = 0xb5;
+    pub const UP_RIGHT_WALL: u8 = 0xb6;
+    pub const UP_LEFT_WALL: u8 = 0xb7;
+    pub const RIGHT_BUOY: u8 = 0xc0;
+    pub const LEFT_BUOY: u8 = 0xc1;
+    pub const UP_BUOY: u8 = 0xc2;
+    pub const DOWN_BUOY: u8 = 0xc3;
+}
+
+pub fn is_warp_permission(permission: u8) -> bool {
+    permission == permissions::PIT
+        || permission == permissions::PIT_68
+        || (permission & 0xf0) == permissions::WARP_CARPET_DOWN
+}
+
+pub fn describe_collision(permission: u8) -> CollisionAttributes {
+    CollisionAttributes {
+        value: permission,
+        terrain: match permission {
+            permissions::WALL
+            | permissions::RIGHT_WALL
+            | permissions::LEFT_WALL
+            | permissions::UP_WALL
+            | permissions::DOWN_WALL
+            | permissions::DOWN_RIGHT_WALL
+            | permissions::DOWN_LEFT_WALL
+            | permissions::UP_RIGHT_WALL
+            | permissions::UP_LEFT_WALL => Terrain::Wall,
+            permissions::WATER
+            | permissions::WHIRLPOOL
+            | permissions::WHIRLPOOL_2C
+            | permissions::WATERFALL
+            | permissions::WATERFALL_RIGHT
+            | permissions::WATERFALL_LEFT
+            | permissions::WATERFALL_UP
+            | permissions::CURRENT_DOWN
+            | permissions::RIGHT_BUOY
+            | permissions::LEFT_BUOY
+            | permissions::UP_BUOY
+            | permissions::DOWN_BUOY => Terrain::Water,
+            _ => Terrain::Land,
+        },
+        talk: permission >= 0x90,
+    }
+}
+
+pub fn sample_collision(
+    map: &OverworldMapData,
+    tileset: &TilesetCollision,
+    tile: TilePosition,
+) -> Option<CollisionSample> {
+    if tile.x < 0 || tile.y < 0 {
+        return None;
+    }
+    let metatile_x = tile.x / METATILE_WIDTH;
+    let metatile_y = tile.y / METATILE_WIDTH;
+    let metatile_id = map.metatile_at(metatile_x, metatile_y)?;
+    let metatile = tileset.metatiles.get(metatile_id as usize)?;
+    let quadrant = determine_quadrant_index(tile.x, tile.y)?;
+    Some(CollisionSample {
+        permission: metatile.collision[quadrant],
+        metatile_id,
+        quadrant,
+        tile,
+    })
+}
+
+pub fn is_direction_blocked(permission: u8, facing: Direction) -> bool {
+    let hi = permission & 0xf0;
+    if hi != (permissions::RIGHT_WALL & 0xf0) && hi != (permissions::RIGHT_BUOY & 0xf0) {
+        return false;
+    }
+    let low = permission & 0x07;
+    match facing {
+        Direction::Down => [
+            permissions::UP_WALL,
+            permissions::UP_RIGHT_WALL,
+            permissions::UP_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Up => [
+            permissions::DOWN_WALL,
+            permissions::DOWN_RIGHT_WALL,
+            permissions::DOWN_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Left => [
+            permissions::RIGHT_WALL,
+            permissions::DOWN_RIGHT_WALL,
+            permissions::UP_RIGHT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Right => [
+            permissions::LEFT_WALL,
+            permissions::DOWN_LEFT_WALL,
+            permissions::UP_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+    }
+}
+
+pub fn allows_ledge_direction(permission: u8, facing: Direction) -> bool {
+    if (permission & 0xf0) != (permissions::HOP_DOWN & 0xf0) {
+        return false;
+    }
+    let low = permission & 0x0f;
+    match facing {
+        Direction::Down => [
+            permissions::HOP_DOWN,
+            permissions::HOP_DOWN_RIGHT,
+            permissions::HOP_DOWN_LEFT,
+        ]
+        .iter()
+        .any(|value| (*value & 0x0f) == low),
+        Direction::Up => [
+            permissions::HOP_UP,
+            permissions::HOP_UP_RIGHT,
+            permissions::HOP_UP_LEFT,
+        ]
+        .iter()
+        .any(|value| (*value & 0x0f) == low),
+        Direction::Left => [
+            permissions::HOP_LEFT,
+            permissions::HOP_DOWN_LEFT,
+            permissions::HOP_UP_LEFT,
+        ]
+        .iter()
+        .any(|value| (*value & 0x0f) == low),
+        Direction::Right => [
+            permissions::HOP_RIGHT,
+            permissions::HOP_DOWN_RIGHT,
+            permissions::HOP_UP_RIGHT,
+        ]
+        .iter()
+        .any(|value| (*value & 0x0f) == low),
+    }
+}
+
+pub fn ledge_complement_quadrant(quadrant: usize, facing: Direction) -> Option<usize> {
+    match (facing, quadrant) {
+        (Direction::Down, 2) => Some(0),
+        (Direction::Down, 3) => Some(1),
+        (Direction::Up, 0) => Some(2),
+        (Direction::Up, 1) => Some(3),
+        (Direction::Left, 0) => Some(1),
+        (Direction::Left, 2) => Some(3),
+        (Direction::Right, 1) => Some(0),
+        (Direction::Right, 3) => Some(2),
+        _ => None,
+    }
+}
+
+pub fn collect_collision_samples(
+    map: &OverworldMapData,
+    tileset: &TilesetCollision,
+    tile: TilePosition,
+    stride: i16,
+) -> Vec<CollisionSample> {
+    let stride = stride.max(1);
+    let (width, height) = map.tile_bounds();
+    let mut samples = Vec::with_capacity((stride * stride) as usize);
+    for dx in 0..stride {
+        for dy in 0..stride {
+            let sample_tile = TilePosition {
+                x: tile.x - dx,
+                y: tile.y - dy,
+            };
+            if sample_tile.x < 0
+                || sample_tile.y < 0
+                || sample_tile.x >= width as i16
+                || sample_tile.y >= height as i16
+            {
+                return Vec::new();
+            }
+            let Some(sample) = sample_collision(map, tileset, sample_tile) else {
+                return Vec::new();
+            };
+            samples.push(sample);
+        }
+    }
+    samples
+}
+
+pub fn front_face_samples(samples: &[CollisionSample], facing: Direction) -> Vec<CollisionSample> {
+    let Some(first) = samples.first().copied() else {
+        return Vec::new();
+    };
+    let front_coord = match facing {
+        Direction::Down => samples
+            .iter()
+            .map(|sample| sample.tile.y)
+            .max()
+            .unwrap_or(first.tile.y),
+        Direction::Up => samples
+            .iter()
+            .map(|sample| sample.tile.y)
+            .min()
+            .unwrap_or(first.tile.y),
+        Direction::Right => samples
+            .iter()
+            .map(|sample| sample.tile.x)
+            .max()
+            .unwrap_or(first.tile.x),
+        Direction::Left => samples
+            .iter()
+            .map(|sample| sample.tile.x)
+            .min()
+            .unwrap_or(first.tile.x),
+    };
+    samples
+        .iter()
+        .copied()
+        .filter(|sample| match facing {
+            Direction::Down | Direction::Up => sample.tile.y == front_coord,
+            Direction::Left | Direction::Right => sample.tile.x == front_coord,
+        })
+        .collect()
+}
+
+pub fn is_ledge_face(
+    samples: &[CollisionSample],
+    facing: Direction,
+    tileset: &TilesetCollision,
+) -> bool {
+    let front = front_face_samples(samples, facing);
+    !front.is_empty()
+        && front
+            .iter()
+            .all(|sample| sample_supports_ledge(*sample, facing, tileset))
+}
+
+pub fn can_jump_ledge(
+    map: &OverworldMapData,
+    tileset: &TilesetCollision,
+    tile: TilePosition,
+    facing: Direction,
+    stride: i16,
+) -> bool {
+    let samples = collect_collision_samples(map, tileset, tile, stride);
+    is_ledge_face(&samples, facing, tileset)
+}
+
+fn sample_supports_ledge(
+    sample: CollisionSample,
+    facing: Direction,
+    tileset: &TilesetCollision,
+) -> bool {
+    if allows_ledge_direction(sample.permission, facing) {
+        return true;
+    }
+    if sample.permission != permissions::WALL {
+        return false;
+    }
+    let Some(complement) = ledge_complement_quadrant(sample.quadrant, facing) else {
+        return false;
+    };
+    tileset
+        .metatiles
+        .get(sample.metatile_id as usize)
+        .and_then(|metatile| metatile.collision.get(complement))
+        .copied()
+        .map(|permission| allows_ledge_direction(permission, facing))
+        .unwrap_or(false)
+}
+
+pub fn is_permission_passable(
+    permission: u8,
+    facing: Direction,
+    traversal_state: PlayerTraversalState,
+) -> bool {
+    if is_warp_permission(permission) {
+        return true;
+    }
+    if is_direction_blocked(permission, facing) {
+        return false;
+    }
+    let attributes = describe_collision(permission);
+    match traversal_state {
+        PlayerTraversalState::Walk => attributes.terrain == Terrain::Land,
+        PlayerTraversalState::Surf => {
+            attributes.terrain != Terrain::Wall
+                && permission != permissions::WHIRLPOOL
+                && permission != permissions::WHIRLPOOL_2C
+                && !matches!(
+                    permission,
+                    permissions::WATERFALL
+                        | permissions::WATERFALL_RIGHT
+                        | permissions::WATERFALL_LEFT
+                        | permissions::WATERFALL_UP
+                )
+        }
+    }
+}
+
+pub fn can_enter_tile(
+    map: &OverworldMapData,
+    tileset: &TilesetCollision,
+    tile: TilePosition,
+    facing: Direction,
+    traversal_state: PlayerTraversalState,
+) -> bool {
+    sample_collision(map, tileset, tile)
+        .map(|sample| is_permission_passable(sample.permission, facing, traversal_state))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::MapAttributes;
+
+    fn attributes_for_test(width: u16, height: u16) -> MapAttributes {
+        MapAttributes {
+            tileset_name: "test".to_string(),
+            border_block: 0,
+            width,
+            height,
+            connections: Vec::new(),
+            time_of_day: None,
+            phone_service: 0,
+            phone_flag: false,
+            environment: None,
+            location: None,
+            music: None,
+            palette: None,
+            fishing_group: None,
+            map_constant: None,
+            map_group_constant: None,
+            blocks_label: None,
+            map_scripts_label: None,
+            map_events_label: None,
+            connection_flags: None,
+        }
+    }
+
+    fn test_map() -> OverworldMapData {
+        OverworldMapData::from_attributes("test", &attributes_for_test(2, 1), vec![0, 1])
+    }
+
+    fn test_tileset() -> TilesetCollision {
+        TilesetCollision {
+            metatiles: vec![
+                MetatileCollision {
+                    collision: [
+                        permissions::FLOOR,
+                        permissions::FLOOR,
+                        permissions::WATER,
+                        permissions::WALL,
+                    ],
+                },
+                MetatileCollision {
+                    collision: [
+                        permissions::UP_WALL,
+                        permissions::FLOOR,
+                        permissions::WHIRLPOOL,
+                        permissions::WATER,
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn samples_collision_by_metatile_and_quadrant() {
+        let sample = sample_collision(&test_map(), &test_tileset(), TilePosition::new(0, 1))
+            .expect("collision sample");
+        assert_eq!(sample.metatile_id, 0);
+        assert_eq!(sample.quadrant, 2);
+        assert_eq!(sample.permission, permissions::WATER);
+
+        let sample = sample_collision(&test_map(), &test_tileset(), TilePosition::new(2, 0))
+            .expect("collision sample");
+        assert_eq!(sample.metatile_id, 1);
+        assert_eq!(sample.quadrant, 0);
+        assert_eq!(sample.permission, permissions::UP_WALL);
+    }
+
+    #[test]
+    fn passability_respects_walk_surf_wall_and_whirlpool_rules() {
+        assert!(is_permission_passable(
+            permissions::FLOOR,
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+        assert!(!is_permission_passable(
+            permissions::WATER,
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+        assert!(is_permission_passable(
+            permissions::WATER,
+            Direction::Down,
+            PlayerTraversalState::Surf
+        ));
+        assert!(!is_permission_passable(
+            permissions::WHIRLPOOL,
+            Direction::Down,
+            PlayerTraversalState::Surf
+        ));
+        assert!(is_permission_passable(
+            permissions::DOOR,
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+        assert!(is_permission_passable(
+            permissions::WARP_CARPET_RIGHT,
+            Direction::Right,
+            PlayerTraversalState::Walk
+        ));
+    }
+
+    #[test]
+    fn directional_walls_block_entry_from_matching_direction() {
+        assert!(is_direction_blocked(permissions::UP_WALL, Direction::Down));
+        assert!(!is_direction_blocked(permissions::UP_WALL, Direction::Up));
+        assert!(is_direction_blocked(
+            permissions::RIGHT_WALL,
+            Direction::Left
+        ));
+    }
+
+    #[test]
+    fn can_enter_tile_samples_and_rejects_out_of_bounds() {
+        assert!(can_enter_tile(
+            &test_map(),
+            &test_tileset(),
+            TilePosition::new(0, 0),
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+        assert!(!can_enter_tile(
+            &test_map(),
+            &test_tileset(),
+            TilePosition::new(1, 1),
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+        assert!(!can_enter_tile(
+            &test_map(),
+            &test_tileset(),
+            TilePosition::new(99, 99),
+            Direction::Down,
+            PlayerTraversalState::Walk
+        ));
+    }
+
+    #[test]
+    fn ledge_direction_bits_match_collision_permissions() {
+        assert!(allows_ledge_direction(
+            permissions::HOP_DOWN_RIGHT,
+            Direction::Down
+        ));
+        assert!(allows_ledge_direction(
+            permissions::HOP_DOWN_RIGHT,
+            Direction::Right
+        ));
+        assert!(!allows_ledge_direction(
+            permissions::HOP_DOWN_RIGHT,
+            Direction::Up
+        ));
+        assert!(!allows_ledge_direction(permissions::WALL, Direction::Down));
+    }
+
+    #[test]
+    fn ledge_complements_match_metatile_quadrants() {
+        assert_eq!(ledge_complement_quadrant(2, Direction::Down), Some(0));
+        assert_eq!(ledge_complement_quadrant(1, Direction::Up), Some(3));
+        assert_eq!(ledge_complement_quadrant(0, Direction::Left), Some(1));
+        assert_eq!(ledge_complement_quadrant(3, Direction::Right), Some(2));
+        assert_eq!(ledge_complement_quadrant(0, Direction::Down), None);
+    }
+
+    #[test]
+    fn collects_collision_samples_for_stride_footprint() {
+        let samples =
+            collect_collision_samples(&test_map(), &test_tileset(), TilePosition::new(1, 1), 2);
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples.iter().map(|sample| sample.tile).collect::<Vec<_>>(),
+            vec![
+                TilePosition::new(1, 1),
+                TilePosition::new(1, 0),
+                TilePosition::new(0, 1),
+                TilePosition::new(0, 0),
+            ]
+        );
+        assert!(
+            collect_collision_samples(&test_map(), &test_tileset(), TilePosition::new(0, 0), 2)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn front_face_samples_select_forward_edge() {
+        let samples =
+            collect_collision_samples(&test_map(), &test_tileset(), TilePosition::new(1, 1), 2);
+
+        assert_eq!(
+            front_face_samples(&samples, Direction::Down)
+                .iter()
+                .map(|sample| sample.tile)
+                .collect::<Vec<_>>(),
+            vec![TilePosition::new(1, 1), TilePosition::new(0, 1)]
+        );
+        assert_eq!(
+            front_face_samples(&samples, Direction::Right)
+                .iter()
+                .map(|sample| sample.tile)
+                .collect::<Vec<_>>(),
+            vec![TilePosition::new(1, 1), TilePosition::new(1, 0)]
+        );
+    }
+
+    #[test]
+    fn ledge_face_accepts_direct_and_wall_complement_permissions() {
+        let map = OverworldMapData::from_attributes("ledge", &attributes_for_test(1, 1), vec![0]);
+        let tileset = TilesetCollision {
+            metatiles: vec![MetatileCollision {
+                collision: [
+                    permissions::FLOOR,
+                    permissions::HOP_DOWN,
+                    permissions::HOP_DOWN,
+                    permissions::WALL,
+                ],
+            }],
+        };
+        let samples = collect_collision_samples(&map, &tileset, TilePosition::new(1, 1), 2);
+
+        assert!(is_ledge_face(&samples, Direction::Down, &tileset));
+        assert!(!is_ledge_face(&samples, Direction::Up, &tileset));
+        assert!(can_jump_ledge(
+            &map,
+            &tileset,
+            TilePosition::new(1, 1),
+            Direction::Down,
+            2,
+        ));
+    }
+}

@@ -3,7 +3,6 @@ import path from "path";
 import type { Move } from "@pokecrystal/core/core/models/move";
 import type { PokemonSpecies } from "@pokecrystal/core/core/models/pokemon";
 import { EggGroup, GenderRatio, GrowthRate, PokemonType, Stat } from "@pokecrystal/core/core/enums/pokemon";
-import { MoveEffect } from "@pokecrystal/core/core/enums";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { stripAsmComment, writeJsonToTargets } from "./asm-utils";
 
@@ -40,8 +39,11 @@ export function parsePokemonConstants(constantsFilePath: string): Record<string,
   return idMap;
 }
 
-function enumKeyOrDefault<T extends Record<string, unknown>>(mapping: T, key: string, fallback: keyof T): keyof T {
-  return (mapping[key as keyof T] !== undefined ? (key as keyof T) : fallback);
+function enumKeyOrThrow<T extends Record<string, unknown>>(mapping: T, key: string, label: string, filePath: string): keyof T {
+  if (mapping[key as keyof T] === undefined) {
+    throw new Error(`Unknown ${label} ${key} in ${filePath}`);
+  }
+  return key as keyof T;
 }
 
 export function parseBaseStats(filePath: string, idMap: Record<string, number>, weight = 0): PokemonSpecies {
@@ -65,17 +67,20 @@ export function parseBaseStats(filePath: string, idMap: Record<string, number>, 
   const tmhmMatch = content.match(/tmhm\s+([A-Z_ ,]+)/);
   const tmhmLearnset = tmhmMatch ? tmhmMatch[1].split(",").map((part) => part.trim()).filter(Boolean) : [];
 
-  const type1 = enumKeyOrDefault(PokemonType, typeMatch[1], "NORMAL");
-  const type2 = enumKeyOrDefault(PokemonType, typeMatch[2], "NORMAL");
-  const genderRatio = enumKeyOrDefault(GenderRatio, genderRatioMatch[1], "GENDER_UNKNOWN");
-  const growthRate = enumKeyOrDefault(GrowthRate, growthRateMatch[1], "GROWTH_MEDIUM_FAST");
-  const eggGroup1 = enumKeyOrDefault(EggGroup, eggGroupsMatch[1], "EGG_NONE");
-  const eggGroup2 = enumKeyOrDefault(EggGroup, eggGroupsMatch[2], "EGG_NONE");
+  const type1 = enumKeyOrThrow(PokemonType, typeMatch[1], "Pokemon type", filePath);
+  const type2 = enumKeyOrThrow(PokemonType, typeMatch[2], "Pokemon type", filePath);
+  const genderRatio = enumKeyOrThrow(GenderRatio, genderRatioMatch[1], "gender ratio", filePath);
+  const growthRate = enumKeyOrThrow(GrowthRate, growthRateMatch[1], "growth rate", filePath);
+  const eggGroup1 = enumKeyOrThrow(EggGroup, eggGroupsMatch[1], "egg group", filePath);
+  const eggGroup2 = enumKeyOrThrow(EggGroup, eggGroupsMatch[2], "egg group", filePath);
+  const intId = idMap[speciesId];
+  if (intId === undefined) {
+    throw new Error(`Missing numeric species id for ${speciesId} in ${filePath}`);
+  }
 
   return {
-    evolutions: null,
     id: speciesId,
-    int_id: idMap[speciesId] ?? 0,
+    int_id: intId,
     base_stats: {
       hp: Number.parseInt(statsMatch[1], 10),
       attack: Number.parseInt(statsMatch[2], 10),
@@ -103,7 +108,7 @@ export function parseBaseStats(filePath: string, idMap: Record<string, number>, 
     front_pic: 0,
     back_pic: 0,
     weight,
-  };
+  } as PokemonSpecies;
 }
 
 export function loadAllPokemonData(baseStatsPath: string, idMap: Record<string, number>): PokemonSpecies[] {
@@ -115,42 +120,17 @@ export function loadAllPokemonData(baseStatsPath: string, idMap: Record<string, 
     }
     const filePath = path.join(baseStatsPath, `${pokemonName.toLowerCase()}.asm`);
     if (fs.existsSync(filePath)) {
-      try {
-        let weight = 0;
-        const dexEntryPath = path.join(dexEntriesDir, `${pokemonName.toLowerCase()}.asm`);
-        if (fs.existsSync(dexEntryPath)) {
-          const content = fs.readFileSync(dexEntryPath, "utf8");
-          const weightMatch = content.match(/dw\s+\d+,\s*(\d+)\s*;\s*height, weight/);
-          if (weightMatch) weight = Number.parseInt(weightMatch[1], 10);
-        }
-        allPokemonData.push(parseBaseStats(filePath, idMap, weight));
-      } catch {
-        allPokemonData.push({
-          evolutions: null,
-          id: pokemonName,
-          int_id: intId,
-          base_stats: { hp: 1, attack: 1, defense: 1, speed: 1, special_attack: 1, special_defense: 1 },
-          type1: "NORMAL",
-          type2: "NORMAL",
-          catch_rate: 0,
-          base_exp: 0,
-          item1: null,
-          item2: null,
-          gender_ratio: GenderRatio.GENDER_F50,
-          unknown1: 0,
-          step_cycles_to_hatch: 0,
-          unknown2: 0,
-          growth_rate: "GROWTH_MEDIUM_FAST",
-          egg_group1: "EGG_NONE",
-          egg_group2: "EGG_NONE",
-          tmhm_learnset: [],
-          ability: "NONE",
-          pic_size: 0,
-          front_pic: 0,
-          back_pic: 0,
-          weight: 0,
-        });
+      const dexEntryPath = path.join(dexEntriesDir, `${pokemonName.toLowerCase()}.asm`);
+      if (!fs.existsSync(dexEntryPath)) {
+        throw new Error(`Missing dex entry for ${pokemonName} at ${dexEntryPath}`);
       }
+      const content = fs.readFileSync(dexEntryPath, "utf8");
+      const weightMatch = content.match(/dw\s+\d+,\s*(\d+)\s*;\s*height, weight/);
+      if (!weightMatch) {
+        throw new Error(`Could not find dex weight for ${pokemonName} in ${dexEntryPath}`);
+      }
+      const weight = Number.parseInt(weightMatch[1], 10);
+      allPokemonData.push(parseBaseStats(filePath, idMap, weight));
     }
   }
   return allPokemonData.sort((a, b) => a.int_id - b.int_id);
@@ -180,38 +160,35 @@ export function updateEnumsFileContent(enumsContent: string, newEnumStr: string)
 export function parseMoves(movesFilePath: string): Record<string, Move> {
   const movesMap: Record<string, Move> = {};
   const content = fs.readFileSync(movesFilePath, "utf8");
-  for (const rawLine of content.split(/\r?\n/)) {
+  for (const [lineIndex, rawLine] of content.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line.startsWith("move")) continue;
     const parts = line.split(",").map((part) => part.trim());
+    if (parts.length < 7) {
+      throw new Error(`Could not parse move row ${lineIndex + 1} in ${movesFilePath}: ${line}`);
+    }
     const name = parts[0].replace("move ", "");
     let effect = parts[1].replace("EFFECT_", "");
-    if (effect === "CONVERSION2") effect = "CONVERSION";
     let stat: Move["stat"] = null;
     let amount: Move["amount"] = null;
     const statChangeMatch = effect.match(/^([A-Z_]+)_(UP|DOWN)_?(\d)?_?(HIT)?$/);
     if (statChangeMatch) {
       const [, statKey, direction, amountStr, isHit] = statChangeMatch;
-      if (STAT_MAPPING[statKey]) {
-        stat = STAT_MAPPING[statKey];
+      const statName = STAT_MAPPING[statKey];
+      if (statName) {
+        stat = statName;
         amount = amountStr ? Number.parseInt(amountStr, 10) : 1;
         if (direction === "DOWN" && amount !== null) amount *= -1;
-        let newEffect = `STAT_${direction}${isHit ? "_HIT" : ""}`;
-        if (MoveEffect[newEffect as keyof typeof MoveEffect] !== undefined) {
-          effect = newEffect;
-        } else if (isHit && MoveEffect[`${statKey}_${direction}_HIT` as keyof typeof MoveEffect] !== undefined) {
-          effect = `${statKey}_${direction}_HIT`;
-        }
+        effect = `${statName}_${direction}${amountStr ?? ""}${isHit ? "_HIT" : ""}`;
       }
     }
-    const effectEnum = MoveEffect[effect as keyof typeof MoveEffect] ?? MoveEffect.NORMAL_HIT;
     movesMap[name] = {
       name: name as Move["name"],
       type: parts[3] as Move["type"],
       power: Number.parseInt(parts[2], 10),
       accuracy: Number.parseInt(parts[4].replace(" percent", ""), 10),
       pp: Number.parseInt(parts[5], 10),
-      effect: effectEnum,
+      effect: effect as Move["effect"],
       effect_chance: Number.parseInt(parts[6].replace(" percent", ""), 10),
       stat,
       amount,
@@ -220,12 +197,22 @@ export function parseMoves(movesFilePath: string): Record<string, Move> {
   return movesMap;
 }
 
-const normalizeSpeciesKey = (value: string): string => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+function asmLabelForSpeciesId(speciesId: string): string {
+  return speciesId
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
 
 const buildSpeciesLabelMap = (idMap: Record<string, number>): Map<string, string> => {
   const labels = new Map<string, string>();
   for (const species of Object.keys(idMap)) {
-    labels.set(normalizeSpeciesKey(species), species);
+    const label = asmLabelForSpeciesId(species);
+    if (labels.has(label)) {
+      throw new Error(`Duplicate ASM species label '${label}' from pokemon constants.`);
+    }
+    labels.set(label, species);
   }
   return labels;
 };
@@ -235,12 +222,12 @@ const speciesFromEvosAttacksLabel = (
   speciesLabels: Map<string, string>
 ): string | null => {
   const rawSpecies = label.replace(/EvosAttacks$/, "");
-  return speciesLabels.get(normalizeSpeciesKey(rawSpecies)) ?? null;
+  return speciesLabels.get(rawSpecies) ?? null;
 };
 
 const speciesFromEggMovesLabel = (label: string, speciesLabels: Map<string, string>): string | null => {
   const rawSpecies = label.replace(/EggMoves$/, "");
-  return speciesLabels.get(normalizeSpeciesKey(rawSpecies)) ?? null;
+  return speciesLabels.get(rawSpecies) ?? null;
 };
 
 export function parseLearnsets(
@@ -262,9 +249,10 @@ export function parseLearnsets(
     if (labelMatch) {
       currentSpecies = speciesFromEvosAttacksLabel(labelMatch[1], speciesLabels);
       readingLearnset = false;
-      if (currentSpecies) {
-        learnsets[currentSpecies] = [];
+      if (!currentSpecies) {
+        throw new Error(`Unknown or case-changed learnset species label '${labelMatch[1]}'.`);
       }
+      learnsets[currentSpecies] = [];
       continue;
     }
     if (!currentSpecies || !line.startsWith("db")) {
@@ -285,13 +273,14 @@ export function parseLearnsets(
     }
     const parts = payload.split(",").map((part) => part.trim()).filter(Boolean);
     if (parts.length < 2) {
-      continue;
+      throw new Error(`Malformed level-up move row in ${evosAttacksFilePath}: ${line}`);
     }
     const level = Number.parseInt(parts[0], 10);
     const move = parts[1];
-    if (Number.isFinite(level) && move) {
-      learnsets[currentSpecies].push([level, move]);
+    if (!Number.isFinite(level) || !move) {
+      throw new Error(`Malformed level-up move row in ${evosAttacksFilePath}: ${line}`);
     }
+    learnsets[currentSpecies].push([level, move]);
   }
 
   return Object.fromEntries(
@@ -321,10 +310,15 @@ export function parseEggMoves(eggMovesFilePath: string, idMap: Record<string, nu
     }
     const labelMatch = line.match(/^([A-Za-z0-9_]+EggMoves):$/);
     if (labelMatch) {
-      currentSpecies = speciesFromEggMovesLabel(labelMatch[1], speciesLabels);
-      if (currentSpecies) {
-        eggMoves[currentSpecies] = [];
+      if (labelMatch[1] === "NoEggMoves") {
+        currentSpecies = null;
+        continue;
       }
+      currentSpecies = speciesFromEggMovesLabel(labelMatch[1], speciesLabels);
+      if (!currentSpecies) {
+        throw new Error(`Unknown or case-changed egg-move species label '${labelMatch[1]}'.`);
+      }
+      eggMoves[currentSpecies] = [];
       continue;
     }
     if (!currentSpecies || !line.startsWith("db")) {

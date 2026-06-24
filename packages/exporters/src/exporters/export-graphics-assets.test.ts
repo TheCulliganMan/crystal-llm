@@ -42,7 +42,7 @@ describe("exportGraphicsAssets", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("copies graphics, filters .DS_Store, and converts PNG fallbacks to raw bpp files", () => {
+  it("copies graphics, filters .DS_Store, and converts PNG sources to raw bpp files", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "battle"), { recursive: true });
     fs.writeFileSync(path.join(sourceGfx, ".DS_Store"), "ignore");
@@ -62,7 +62,7 @@ describe("exportGraphicsAssets", () => {
     );
   });
 
-  it("encodes battle PNG fallbacks in RGBDS color order", () => {
+  it("encodes battle PNG sources in RGBDS color order", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "battle"), { recursive: true });
     writePng(path.join(sourceGfx, "battle", "levels.png"), 8, 8, (x) => [255, 170, 85, 0, 255, 170, 85, 0][x]);
@@ -76,7 +76,7 @@ describe("exportGraphicsAssets", () => {
     expect(encoded1bpp[0]).toBe(0x33);
   });
 
-  it("exports player backpic PNG fallbacks as 2bpp battle assets", () => {
+  it("exports player backpic PNG sources as 2bpp battle assets", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "player"), { recursive: true });
     writePng(path.join(sourceGfx, "player", "chris_back.png"), 8, 8, (x) => (x < 4 ? 255 : 0));
@@ -87,7 +87,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(0, 2)]).toEqual([0x0f, 0x0f]);
   });
 
-  it("exports battle animation PNG fallbacks as 2bpp graphics", () => {
+  it("exports battle animation PNG sources as 2bpp graphics", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "battle_anims"), { recursive: true });
     writePng(path.join(sourceGfx, "battle_anims", "pokeball.png"), 8, 8, (x) => [255, 170, 85, 0, 255, 170, 85, 0][x]);
@@ -98,7 +98,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(0, 2)]).toEqual([0x55, 0x33]);
   });
 
-  it("exports lava tileset animation PNG fallbacks as 2bpp graphics", () => {
+  it("exports lava tileset animation PNG sources as 2bpp graphics", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "tilesets", "lava"), { recursive: true });
     writePng(path.join(sourceGfx, "tilesets", "lava", "1.png"), 8, 8, (x) => [255, 170, 85, 0][x % 4]);
@@ -109,7 +109,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(0, 2)]).toEqual([0x55, 0x33]);
   });
 
-  it("exports forest tree tileset animation PNG fallbacks as 2bpp graphics", () => {
+  it("exports forest tree tileset animation PNG sources as 2bpp graphics", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "tilesets", "forest-tree"), { recursive: true });
     writePng(path.join(sourceGfx, "tilesets", "forest-tree", "1.png"), 8, 8, (x) => [255, 170, 85, 0][x % 4]);
@@ -120,7 +120,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(0, 2)]).toEqual([0x55, 0x33]);
   });
 
-  it("exports pack menu PNG fallbacks as 2bpp graphics", () => {
+  it("exports pack menu PNG sources as 2bpp graphics", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "pack"), { recursive: true });
     writePng(path.join(sourceGfx, "pack", "pack_menu.png"), 8, 8, (x) => [255, 170, 85, 0, 255, 170, 85, 0][x]);
@@ -131,7 +131,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(0, 2)]).toEqual([0x55, 0x33]);
   });
 
-  it("exports party menu icon and stat tile PNG fallbacks as asm-addressable 2bpp graphics", () => {
+  it("exports party menu icon and stat tile PNG sources as asm-addressable 2bpp graphics", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "icons"), { recursive: true });
     fs.mkdirSync(path.join(sourceGfx, "stats"), { recursive: true });
@@ -154,7 +154,7 @@ describe("exportGraphicsAssets", () => {
     expect(statsTiles.length).toBe(2 * 16);
   });
 
-  it("exports trainer PNG fallbacks as 2bpp graphics and indexed gbcpal palettes", () => {
+  it("exports trainer PNG sources as 2bpp graphics and indexed gbcpal palettes", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "trainers"), { recursive: true });
     writePng(path.join(sourceGfx, "trainers", "cal.png"), 8, 8, (x) => [255, 170, 85, 0, 255, 170, 85, 0][x]);
@@ -170,7 +170,7 @@ describe("exportGraphicsAssets", () => {
     expect(palette.readUInt16LE(6)).toBe(0x0000);
   });
 
-  it("exports pokemon normal gbcpal palettes from front and back PNG fallbacks", () => {
+  it("exports pokemon normal gbcpal palettes from front and back PNG sources", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     const speciesDir = path.join(sourceGfx, "pokemon", "croconaw");
     fs.mkdirSync(speciesDir, { recursive: true });
@@ -238,7 +238,7 @@ describe("exportGraphicsAssets", () => {
     expect([...encoded.slice(14, 16)]).toEqual([0x80, 0x80]);
   });
 
-  it("rejects PNG fallbacks that are not aligned to 8x8 tiles", () => {
+  it("rejects PNG sources that are not aligned to 8x8 tiles", () => {
     const sourceGfx = path.join(mockDisassemblyRoot, "gfx");
     fs.mkdirSync(path.join(sourceGfx, "battle"), { recursive: true });
     writePng(path.join(sourceGfx, "battle", "bad.png"), 7, 8, () => 0);

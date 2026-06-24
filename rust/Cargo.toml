@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/crystal-assets",
+    "crates/crystal-audio",
+    "crates/crystal-bevy",
+    "crates/crystal-core",
+    "crates/crystal-net",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "ISC"
+repository = "https://github.com/TheCulliganMan/crystal-llm"
+rust-version = "1.94"
+
+[workspace.dependencies]
+anyhow = "1"
+bincode = { version = "2", features = ["serde"] }
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

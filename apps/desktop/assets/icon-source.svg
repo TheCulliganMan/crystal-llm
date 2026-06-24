@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="KrabbyClaw icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#152033"/>
+      <stop offset="100%" stop-color="#0b1018"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff9a62"/>
+      <stop offset="55%" stop-color="#ff6a3d"/>
+      <stop offset="100%" stop-color="#e03622"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#bg)"/>
+  <g transform="translate(512 558)">
+    <ellipse cx="0" cy="56" rx="260" ry="202" fill="#09111d" opacity="0.32"/>
+    <path d="M-360 -92 L-474 -182 L-432 -276 L-280 -238 L-244 -142 Z" fill="#ffcf7f"/>
+    <path d="M360 -92 L474 -182 L432 -276 L280 -238 L244 -142 Z" fill="#ffcf7f"/>
+    <path d="M-366 -90 L-500 -194 L-420 -320 L-214 -246 L-246 -120 Z" fill="url(#shell)"/>
+    <path d="M366 -90 L500 -194 L420 -320 L214 -246 L246 -120 Z" fill="url(#shell)"/>
+    <path d="M-282 -148 C-198 -264 -82 -320 0 -320 C82 -320 198 -264 282 -148 L246 34 C188 120 86 174 0 174 C-86 174 -188 120 -246 34 Z" fill="url(#shell)"/>
+    <path d="M-150 -18 C-92 -56 -36 -74 0 -74 C36 -74 92 -56 150 -18" fill="none" stroke="#7c1510" stroke-width="38" stroke-linecap="round"/>
+    <rect x="-154" y="-344" width="46" height="156" rx="23" fill="#ffb06f"/>
+    <rect x="108" y="-344" width="46" height="156" rx="23" fill="#ffb06f"/>
+    <circle cx="-131" cy="-370" r="66" fill="#ffffff"/>
+    <circle cx="131" cy="-370" r="66" fill="#ffffff"/>
+    <circle cx="-131" cy="-370" r="28" fill="#101828"/>
+    <circle cx="131" cy="-370" r="28" fill="#101828"/>
+    <circle cx="-116" cy="-386" r="10" fill="#ffffff" opacity="0.9"/>
+    <circle cx="146" cy="-386" r="10" fill="#ffffff" opacity="0.9"/>
+    <path d="M-254 78 C-362 112 -422 178 -460 264" fill="none" stroke="#ff8f58" stroke-width="44" stroke-linecap="round"/>
+    <path d="M254 78 C362 112 422 178 460 264" fill="none" stroke="#ff8f58" stroke-width="44" stroke-linecap="round"/>
+    <path d="M-168 130 C-252 178 -292 242 -316 320" fill="none" stroke="#ff8f58" stroke-width="34" stroke-linecap="round"/>
+    <path d="M168 130 C252 178 292 242 316 320" fill="none" stroke="#ff8f58" stroke-width="34" stroke-linecap="round"/>
+    <circle cx="-70" cy="-126" r="18" fill="#ffd7bf" opacity="0.7"/>
+    <circle cx="70" cy="-126" r="18" fill="#ffd7bf" opacity="0.7"/>
+    <circle cx="-206" cy="-30" r="22" fill="#ffd7bf" opacity="0.35"/>
+    <circle cx="206" cy="-30" r="22" fill="#ffd7bf" opacity="0.35"/>
+  </g>
+</svg>

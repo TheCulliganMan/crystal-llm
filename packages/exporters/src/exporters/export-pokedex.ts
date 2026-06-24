@@ -9,9 +9,12 @@ const POKEDEX_INCLUDE_RE = /INCLUDE\s+"data\/pokemon\/dex_entries\/(?<name>[^"]+
 const INCHES_TO_METERS = 0.0254;
 const POUNDS_TO_KG = 0.45359237;
 
-function extractTextLiteral(line: string): string {
+function extractTextLiteral(line: string, filePath: string): string {
   const match = line.match(TEXT_LITERAL_RE);
-  return match?.[1] ?? "";
+  if (!match) {
+    throw new Error(`Malformed Pokédex text literal in ${filePath}: ${line}`);
+  }
+  return match[1];
 }
 
 function cleanLine(line: string): string {
@@ -115,22 +118,28 @@ export function parsePokedexEntry(filePath: string): PokedexData {
       continue;
     }
     if (classification === null && command === "db") {
-      const literal = extractTextLiteral(line);
-      if (literal) {
-        classification = cleanLine(literal);
+      const literal = cleanLine(extractTextLiteral(line, filePath));
+      if (!literal) {
+        throw new Error(`Empty Pokédex classification in ${filePath}`);
       }
+      classification = literal;
       continue;
     }
     if (textStarted && (command === "db" || command === "next" || command === "page")) {
-      const literal = extractTextLiteral(line);
-      if (literal) {
-        textLines.push(cleanLine(literal));
+      const literal = cleanLine(extractTextLiteral(line, filePath));
+      if (!literal) {
+        throw new Error(`Empty Pokédex text line in ${filePath}`);
       }
+      textLines.push(literal);
     }
   }
 
   if (classification === null || heightDigits === null || weightDigits === null) {
     throw new Error("Could not parse pokedex entry");
+  }
+  const text = mergeTextLines(textLines);
+  if (!text) {
+    throw new Error(`Could not parse Pokédex text body in ${filePath}`);
   }
 
   return {
@@ -138,7 +147,7 @@ export function parsePokedexEntry(filePath: string): PokedexData {
     classification,
     height: heightToMeters(heightDigits),
     weight: weightToKg(weightDigits),
-    text: mergeTextLines(textLines),
+    text,
   };
 }
 

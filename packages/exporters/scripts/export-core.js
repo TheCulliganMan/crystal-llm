@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const Module = require("node:module");
+const childProcess = require("node:child_process");
 const ts = require("typescript");
 
 const packageRoot = path.resolve(__dirname, "..");
@@ -41,3 +42,27 @@ require.extensions[".ts"] = function registerTs(module, filename) {
 };
 
 require(path.join(packageRoot, "src", "exporters")).exportCoreData();
+
+const packResult = childProcess.spawnSync(
+  "cargo",
+  [
+    "run",
+    "--quiet",
+    "--manifest-path",
+    path.join(repoRoot, "rust", "Cargo.toml"),
+    "-p",
+    "crystal-assets",
+    "--bin",
+    "pack_core",
+    "--",
+    repoRoot,
+    "content-packs/core-modular.crystalpack",
+  ],
+  { cwd: repoRoot, stdio: "inherit" }
+);
+if (packResult.error) {
+  throw packResult.error;
+}
+if (packResult.status !== 0) {
+  process.exit(packResult.status ?? 1);
+}

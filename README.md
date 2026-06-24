@@ -7,7 +7,7 @@ graphics, and built in MCP/Skill support. Aimed at benchmarking local LLMs on a 
 
 ## Setup
 
-Use Node.js `24.x+`, npm `10.5+`, Git, and `ffmpeg`.
+Use Node.js `24.x+`, npm `10.5+`, and Git.
 
 If you use `nvm`:
 
@@ -16,25 +16,27 @@ nvm install 24
 nvm use 24
 ```
 
-On macOS, install `ffmpeg` before generating audio:
+Clone the repo, install dependencies, and start the TUI:
 
 ```bash
-brew install ffmpeg
-```
-
-Then clone both repositories and generate the local runtime assets:
-
-```bash
-git clone https://github.com/OWNER/pokecrystal-python.git
-cd pokecrystal-python
-
-git clone https://github.com/pret/pokecrystal.git vendor/pokecrystal
-
+git clone https://github.com/TheCulliganMan/crystal-llm.git
+cd crystal-llm
 npm install
-npm run export:core
-node apps/web/scripts/prepare-public.js
-npm run build:cli
+npm run start:tui
 ```
+
+`npm run start:tui` builds the CLI and launches the terminal UI with the
+default `cli-play` session. Use `npm run tui` if you want a shorter alias.
+
+Optional: clone the upstream disassembly when you want to regenerate exported
+assets or synthesize audio from local ASM sources:
+
+```bash
+git clone https://github.com/pret/pokecrystal.git vendor/pokecrystal
+```
+
+`ffmpeg` is not required for normal TUI startup. It is only needed for legacy
+MP3 bundle generation with `npm run audio:bundle --workspace @pokecrystal/web`.
 
 ## Docker Server Container
 
@@ -96,8 +98,8 @@ autosave slot. If you want to keep the container but wipe only the save files,
 remove the saved slot inside the running container under `/data` and then restart
 the service.
 
-The audio bundle is optional for launching the TUI, but required if you want the
-browser or CLI audio manifests and MP3 assets:
+The legacy MP3 audio bundle is optional for launching the TUI, but required if
+you want browser or CLI MP3 manifests and assets:
 
 ```bash
 npm run audio:bundle --workspace @pokecrystal/web
@@ -121,11 +123,10 @@ pokecrystal-python/
       maps/
 ```
 
-The generated data and audio commands read from that checkout:
+The generated data commands read from that checkout:
 
 ```bash
 npm run export:core
-npm run audio:bundle --workspace @pokecrystal/web
 node apps/web/scripts/prepare-public.js
 ```
 
@@ -136,16 +137,14 @@ Legacy root-level `pokecrystal_disassembly/` checkouts still work, but new clone
 ```bash
 export POKECRYSTAL_DISASSEMBLY_ROOT=/absolute/path/to/pokecrystal
 npm run export:core
-npm run audio:bundle --workspace @pokecrystal/web
 ```
 
 ## Quick Start: TUI
 
-Build the CLI, then start the terminal UI:
+Start the terminal UI:
 
 ```bash
-npm run build:cli
-node packages/cli/dist/bin/pokecrystal-cli.js play --session-id my-session
+npm run start:tui
 ```
 
 What `play` gives you:

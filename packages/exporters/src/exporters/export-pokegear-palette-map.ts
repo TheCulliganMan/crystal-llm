@@ -30,11 +30,10 @@ export function exportPokegearPaletteMap(): Record<string, string[]> {
     }
 
     for (const token of splitAsmArgs(match[1])) {
-      const normalized = token.toUpperCase();
-      if (!PALETTE_TOKENS.has(normalized)) {
+      if (!PALETTE_TOKENS.has(token)) {
         throw new Error(`Unknown Pokégear town map palette token '${token}' in ${sourcePath}`);
       }
-      payload[currentKey].push(normalized);
+      payload[currentKey].push(token);
     }
   }
 

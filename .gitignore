@@ -197,3 +197,4 @@ pokecrystal-python.code-workspace
 packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db
 packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-shm
 packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-wal
+apps/web/.next-desktop/*
