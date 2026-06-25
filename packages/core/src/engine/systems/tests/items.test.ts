@@ -5,6 +5,19 @@ import { DataLoader } from "../../../core/data-loader";
 import { Item } from "../../../core/models";
 import { items as contentItems } from "@pokecrystal/assets/content/items";
 
+const contentItem = (scriptName: string): Item => {
+  const item = contentItems.find((candidate) => candidate.script_name === scriptName);
+  if (!item) {
+    throw new Error(`Missing test content item ${scriptName}`);
+  }
+  return item;
+};
+
+const testItem = (overrides: Partial<Item>): Item => ({
+  ...contentItem("POTION"),
+  ...overrides,
+});
+
 describe("ItemSystem", () => {
   let gameState: GameState;
   let itemSystem: ItemSystem;
@@ -12,18 +25,8 @@ describe("ItemSystem", () => {
 
   beforeEach(() => {
     gameState = createInitialGameState();
-    // Mock DataLoader with item definitions
     dataLoader = {
-      itemData: new Map<string, Item>([
-        ["POTION", { name: "POTION", pocket: ItemPocket.ITEM, price: 300, description: "Restores HP.", effect: ItemEffect.NONE, parameter: 0, script_name: "POTION", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }],
-        ["BICYCLE", { name: "BICYCLE", pocket: ItemPocket.KEY_ITEM, price: 0, description: "A folding bicycle.", effect: ItemEffect.NONE, parameter: 0, script_name: "BICYCLE", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }],
-        ["POKE_BALL", { name: "POKE_BALL", pocket: ItemPocket.BALL, price: 200, description: "A device for catching wild Pokémon.", effect: ItemEffect.NONE, parameter: 0, script_name: "POKE_BALL", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }],
-        ["TM01", { name: "TM01", pocket: ItemPocket.TM_HM, price: 3000, description: "Teaches a move.", effect: ItemEffect.NONE, parameter: 0, script_name: "TM01", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }],
-        ["HM01", { name: "HM01", pocket: ItemPocket.TM_HM, price: 0, description: "Teaches a move.", effect: ItemEffect.NONE, parameter: 0, script_name: "HM01", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }],
-        // For testing canonicalisation
-        ["GREAT_BALL", { name: "Great Ball", pocket: ItemPocket.BALL, price: 600, description: "A good, high-performance Ball.", effect: ItemEffect.NONE, parameter: 0, script_name: "", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }], // Missing script_name
-        ["MASTER_BALL", { name: "MASTER BALL", pocket: ItemPocket.BALL, price: 0, description: "The best Ball with the ultimate performance.", effect: ItemEffect.NONE, parameter: 0, script_name: "Master Ball", held_effect: "HELD_NONE", property: "", field_menu: "", battle_menu: "" }], // Unformatted script_name
-      ]),
+      itemData: new Map<string, Item>(contentItems.map((item) => [item.script_name, item])),
     } as DataLoader;
     itemSystem = new ItemSystem(gameState, dataLoader);
   });
@@ -34,12 +37,11 @@ describe("ItemSystem", () => {
       expect(() => itemSystem.addItem("POTION", -1)).toThrow("quantity must be a positive integer");
     });
 
-    it("handles item with missing script_name by falling back to name", () => {
-      expect(itemSystem.addItem("Great Ball", 1)).toBe(true);
-      expect(gameState.sram.balls["GREAT_BALL"]).toBe(1);
+    it("rejects display-name aliases instead of coercing them to script names", () => {
+      expect(() => itemSystem.addItem("Great Ball", 1)).toThrow("Unknown item definition: Great Ball");
     });
 
-    it("handles item with unformatted script_name", () => {
+    it("handles exact canonical script names", () => {
         expect(itemSystem.addItem("MASTER_BALL", 1)).toBe(true);
         expect(gameState.sram.balls["MASTER_BALL"]).toBe(1);
     });
@@ -64,11 +66,16 @@ describe("ItemSystem", () => {
 
     it("respects pocket capacity for new items", () => {
         const capacity = POCKET_CAPACITY[ItemPocket.ITEM]!;
-        for (let i = 0; i < capacity; i++) {
-            itemSystem.addItem(`ITEM_${i}`, 1);
+        const itemNames = contentItems
+            .filter((item) => item.pocket === ItemPocket.ITEM && item.script_name !== "POTION")
+            .slice(0, capacity)
+            .map((item) => item.script_name);
+        expect(itemNames).toHaveLength(capacity);
+        for (const itemName of itemNames) {
+            itemSystem.addItem(itemName, 1);
         }
         expect(Object.keys(gameState.sram.items).length).toBe(capacity);
-        expect(itemSystem.addItem("NEW_ITEM", 1)).toBe(false);
+        expect(itemSystem.addItem("POTION", 1)).toBe(false);
     });
 
 
@@ -89,41 +96,27 @@ describe("ItemSystem", () => {
     });
 
     it("adds a TM", () => {
-      expect(itemSystem.addItem("TM01", 1)).toBe(true);
-      expect(itemSystem.hasItem("TM01")).toBe(true);
+      expect(itemSystem.addItem("TM_HM_01", 1)).toBe(true);
+      expect(itemSystem.hasItem("TM_HM_01")).toBe(true);
       expect(gameState.sram.tm_hm[0]).toBe(1);
     });
 
-    it("adds an asm-style item alias without underscore", () => {
-      expect(itemSystem.addItem("PSNCUREBERRY", 1)).toBe(true);
-      expect(gameState.sram.items["PSNCUREBERRY"]).toBe(1);
-      expect(itemSystem.getItemDefinition("PSNCUREBERRY").script_name).toBe("PSNCURE_BERRY");
+    it("rejects collapsed asm-style item aliases without underscore", () => {
+      expect(() => itemSystem.addItem("PSNCUREBERRY", 1)).toThrow("Unknown item definition: PSNCUREBERRY");
     });
 
-    it("adds KEY-like asm item aliases", () => {
-      expect(itemSystem.addItem("BLACKBELT_I", 1)).toBe(true);
-      expect(gameState.sram.items["BLACKBELT_I"]).toBe(1);
+    it("adds exact item script names that look like legacy aliases", () => {
+      expect(itemSystem.addItem("BLACK_BELT", 1)).toBe(true);
+      expect(gameState.sram.items["BLACK_BELT"]).toBe(1);
     });
 
     it("returns false if TM is already present", () => {
-      itemSystem.addItem("TM01", 1);
-      expect(itemSystem.addItem("TM01", 1)).toBe(false);
+      itemSystem.addItem("TM_HM_01", 1);
+      expect(itemSystem.addItem("TM_HM_01", 1)).toBe(false);
     });
 
     it("accepts item objects directly", () => {
-      const potion: Item = {
-        name: "POTION",
-        pocket: ItemPocket.ITEM,
-        price: 300,
-        description: "Restores HP.",
-        effect: ItemEffect.NONE,
-        parameter: 0,
-        script_name: "POTION",
-        held_effect: "HELD_NONE",
-        property: "",
-        field_menu: "",
-        battle_menu: "",
-      };
+      const potion = contentItem("POTION");
 
       expect(itemSystem.addItem(potion, 2)).toBe(true);
       expect(itemSystem.getQuantity(potion)).toBe(2);
@@ -135,35 +128,35 @@ describe("ItemSystem", () => {
         itemData: new Map<string, Item>([
           [
             "CUSTOM_HELD_ITEM",
-            {
+            testItem({
               name: "CUSTOM HELD ITEM",
               pocket: ItemPocket.ITEM,
               price: 500,
               description: "An item with a held effect.",
-              effect: ItemEffect.NONE,
+              effect: "NONE",
               parameter: 0,
               script_name: "CUSTOM_HELD_ITEM",
               held_effect: "HELD_WATER_BOOST",
               property: "",
               field_menu: "",
               battle_menu: "",
-            },
+            }),
           ],
           [
             "CUSTOM_NON_HELD_ITEM",
-            {
+            testItem({
               name: "CUSTOM NON HELD ITEM",
               pocket: ItemPocket.ITEM,
               price: 500,
               description: "An item without a held effect.",
-              effect: ItemEffect.NONE,
+              effect: "NONE",
               parameter: 0,
               script_name: "CUSTOM_NON_HELD_ITEM",
               held_effect: "HELD_NONE",
               property: "",
               field_menu: "",
               battle_menu: "",
-            },
+            }),
           ],
         ]),
       } as DataLoader;
@@ -173,33 +166,66 @@ describe("ItemSystem", () => {
       expect(inventorySystem.getItemDefinition("CUSTOM_HELD_ITEM").held_effect).toBe("HELD_WATER_BOOST");
       expect(inventorySystem.addItem("CUSTOM_NON_HELD_ITEM", 2)).toBe(true);
       expect(inventorySystem.getItemDefinition("CUSTOM_NON_HELD_ITEM").held_effect).toBe("HELD_NONE");
-      expect(inventorySystem.getQuantity("custom held item")).toBe(4);
+      expect(() => inventorySystem.getQuantity("custom held item")).toThrow("Unknown item definition: custom held item");
       expect(inventorySystem.getQuantity("CUSTOM_NON_HELD_ITEM")).toBe(2);
     });
 
-    it("supports TM/HM aliases with canonicalized item keys", () => {
-      expect(itemSystem.addItem("tm 1", 1)).toBe(true);
+    it("supports exact TM/HM item keys", () => {
+      expect(itemSystem.addItem("TM_HM_01", 1)).toBe(true);
       expect(gameState.sram.tm_hm[0]).toBe(1);
-      expect(itemSystem.addItem("TM 1", 1)).toBe(false);
+      expect(itemSystem.addItem("TM_HM_01", 1)).toBe(false);
 
-      expect(itemSystem.addItem("hm 1", 1)).toBe(true);
+      expect(itemSystem.addItem("TM_HM_51", 1)).toBe(true);
       expect(gameState.sram.tm_hm[50]).toBe(1);
     });
 
     it("respects pocket capacity for BALL and KEY_ITEM pockets", () => {
       const ballCapacity = POCKET_CAPACITY[ItemPocket.BALL]!;
-      for (let i = 0; i < ballCapacity; i++) {
-        expect(itemSystem.addItem(`BALL_SLOT_${i}_BALL`, 1)).toBe(true);
+      const ballNames = contentItems
+        .filter((item) => item.pocket === ItemPocket.BALL)
+        .slice(0, ballCapacity)
+        .map((item) => item.script_name);
+      expect(ballNames).toHaveLength(ballCapacity);
+      for (const itemName of ballNames) {
+        expect(itemSystem.addItem(itemName, 1)).toBe(true);
       }
       expect(Object.keys(gameState.sram.balls).length).toBe(ballCapacity);
+      (dataLoader.itemData as Map<string, Item>).set(
+        "SURPLUS_BALL",
+        testItem({
+          name: "SURPLUS BALL",
+          script_name: "SURPLUS_BALL",
+          pocket: ItemPocket.BALL,
+          effect: "POKE_BALL",
+        }),
+      );
       expect(itemSystem.addItem("SURPLUS_BALL", 1)).toBe(false);
 
       const keyCapacity = POCKET_CAPACITY[ItemPocket.KEY_ITEM]!;
-      for (let i = 0; i < keyCapacity; i++) {
-        expect(itemSystem.addItem(`KEY_SLOT_${i}_CARD`, 1)).toBe(true);
+      const keyNames = contentItems
+        .filter((item) => item.pocket === ItemPocket.KEY_ITEM)
+        .slice(0, keyCapacity)
+        .map((item) => item.script_name);
+      for (let index = keyNames.length; index < keyCapacity; index += 1) {
+        const scriptName = `CUSTOM_KEY_${index}`;
+        (dataLoader.itemData as Map<string, Item>).set(
+          scriptName,
+          testItem({
+            name: scriptName.replace(/_/g, " "),
+            script_name: scriptName,
+            pocket: ItemPocket.KEY_ITEM,
+            effect: "NONE",
+            consumable: false,
+          }),
+        );
+        keyNames.push(scriptName);
+      }
+      expect(keyNames).toHaveLength(keyCapacity);
+      for (const itemName of keyNames) {
+        expect(itemSystem.addItem(itemName, 1)).toBe(true);
       }
       expect(Object.keys(gameState.sram.key_items).length).toBe(keyCapacity);
-      expect(itemSystem.addItem("SURPLUS_CARD", 1)).toBe(false);
+      expect(() => itemSystem.addItem("UNKNOWN_CARD", 1)).toThrow("Unknown item definition: UNKNOWN_CARD");
     });
   });
 
@@ -223,28 +249,28 @@ describe("ItemSystem", () => {
     });
 
     it("removes a TM", () => {
-        itemSystem.addItem("TM01", 1);
-        expect(itemSystem.removeItem("TM01", 1)).toBe(true);
-        expect(itemSystem.hasItem("TM01")).toBe(false);
+        itemSystem.addItem("TM_HM_01", 1);
+        expect(itemSystem.removeItem("TM_HM_01", 1)).toBe(true);
+        expect(itemSystem.hasItem("TM_HM_01")).toBe(false);
         expect(gameState.sram.tm_hm[0]).toBe(0);
     });
 
     it("does not remove an HM", () => {
-        itemSystem.addItem("HM01", 1);
-        expect(itemSystem.removeItem("HM01", 1)).toBe(false);
-        expect(itemSystem.hasItem("HM01")).toBe(true);
+        itemSystem.addItem("TM_HM_51", 1);
+        expect(itemSystem.removeItem("TM_HM_51", 1)).toBe(false);
+        expect(itemSystem.hasItem("TM_HM_51")).toBe(true);
     });
 
-    it("removes TMs but not HMs regardless of alias form", () => {
-      expect(itemSystem.removeItem("tm 1", 1)).toBe(false);
+    it("removes TMs but not HMs using exact item keys", () => {
+      expect(itemSystem.removeItem("TM_HM_01", 1)).toBe(false);
 
-      itemSystem.addItem("tm1", 1);
-      expect(itemSystem.removeItem("TM 1", 1)).toBe(true);
-      expect(itemSystem.hasItem("tm 1")).toBe(false);
+      itemSystem.addItem("TM_HM_01", 1);
+      expect(itemSystem.removeItem("TM_HM_01", 1)).toBe(true);
+      expect(itemSystem.hasItem("TM_HM_01")).toBe(false);
 
-      itemSystem.addItem("hm 1", 1);
-      expect(itemSystem.removeItem("HM 1", 1)).toBe(false);
-      expect(itemSystem.hasItem("HM01")).toBe(true);
+      itemSystem.addItem("TM_HM_51", 1);
+      expect(itemSystem.removeItem("TM_HM_51", 1)).toBe(false);
+      expect(itemSystem.hasItem("TM_HM_51")).toBe(true);
     });
 
     it("rejects non-positive quantities", () => {
@@ -264,8 +290,8 @@ describe("ItemSystem", () => {
     });
 
     it("returns 1 for a known TM", () => {
-        itemSystem.addItem("TM01", 1);
-        expect(itemSystem.getQuantity("TM01")).toBe(1);
+        itemSystem.addItem("TM_HM_01", 1);
+        expect(itemSystem.getQuantity("TM_HM_01")).toBe(1);
     });
   });
 
@@ -274,19 +300,18 @@ describe("ItemSystem", () => {
       expect(itemSystem.getItemPocket("POTION")).toBe(ItemPocket.ITEM);
       expect(itemSystem.getItemPocket("POKE_BALL")).toBe(ItemPocket.BALL);
       expect(itemSystem.getItemPocket("BICYCLE")).toBe(ItemPocket.KEY_ITEM);
-      expect(itemSystem.getItemPocket("TM01")).toBe(ItemPocket.TM_HM);
-      expect(itemSystem.getItemPocket("HM01")).toBe(ItemPocket.TM_HM);
+      expect(itemSystem.getItemPocket("TM_HM_01")).toBe(ItemPocket.TM_HM);
+      expect(itemSystem.getItemPocket("TM_HM_51")).toBe(ItemPocket.TM_HM);
     });
 
-    it("infers key-item pockets from suffixes used by asm item names", () => {
-      expect(itemSystem.getItemPocket("TRAINERS_CARD")).toBe(ItemPocket.KEY_ITEM);
-      expect(itemSystem.getItemPocket("RIDE_PASS")).toBe(ItemPocket.KEY_ITEM);
-      expect(itemSystem.getItemPocket("MAGNET_GEAR")).toBe(ItemPocket.KEY_ITEM);
-      expect(itemSystem.getItemPocket("SPECIALTICKET")).toBe(ItemPocket.KEY_ITEM);
-      expect(itemSystem.getItemPocket("ULTRA_BALL")).toBe(ItemPocket.BALL);
+    it("rejects unknown item names instead of inferring pockets from suffixes", () => {
+      expect(() => itemSystem.getItemPocket("TRAINERS_CARD")).toThrow("Unknown item definition: TRAINERS_CARD");
+      expect(() => itemSystem.getItemPocket("RIDE_PASS")).toThrow("Unknown item definition: RIDE_PASS");
+      expect(() => itemSystem.getItemPocket("MAGNET_GEAR")).toThrow("Unknown item definition: MAGNET_GEAR");
+      expect(() => itemSystem.getItemPocket("SPECIALTICKET")).toThrow("Unknown item definition: SPECIALTICKET");
     });
 
-    it("classifies every content key item and common aliases as key items", () => {
+    it("classifies every exact content key item as a key item", () => {
       const contentSystem = new ItemSystem(gameState);
       const keyItems = contentItems.filter((item) => item.pocket === ItemPocket.KEY_ITEM);
 
@@ -319,16 +344,16 @@ describe("ItemSystem", () => {
         expect(contentSystem.getQuantity(keyItem.script_name)).toBe(1);
       }
 
-      expect(contentSystem.getItemPocket("SQUIRTBOTTLE")).toBe(ItemPocket.KEY_ITEM);
-      expect(contentSystem.getItemPocket("S.S. TICKET")).toBe(ItemPocket.KEY_ITEM);
+      expect(() => contentSystem.getItemPocket("SQUIRTBOTTLE")).toThrow("Unknown item definition: SQUIRTBOTTLE");
+      expect(() => contentSystem.getItemPocket("S.S. TICKET")).toThrow("Unknown item definition: S.S. TICKET");
     });
 
-    it("formats display names for canonical, TM, HM, and fallback items", () => {
+    it("formats display names for exact canonical, TM, and HM items", () => {
       expect(itemSystem.getDisplayName("POTION")).toBe("Potion");
       expect(itemSystem.getDisplayName("MASTER_BALL")).toBe("Master Ball");
-      expect(itemSystem.getDisplayName("TM01")).toBe("TM01");
-      expect(itemSystem.getDisplayName("HM01")).toBe("HM01");
-      expect(itemSystem.getDisplayName("mystery_item")).toBe("Mystery Item");
+      expect(itemSystem.getDisplayName("TM_HM_01")).toBe("TM01");
+      expect(itemSystem.getDisplayName("TM_HM_51")).toBe("HM01");
+      expect(() => itemSystem.getDisplayName("mystery_item")).toThrow("Unknown item definition: mystery_item");
     });
 
     it("uses item_data records when provided", () => {
@@ -370,47 +395,45 @@ describe("ItemSystem", () => {
           itemSystem.addItem("POTION", 2);
           itemSystem.addItem("BICYCLE", 1);
           itemSystem.addItem("POKE_BALL", 10);
-          itemSystem.addItem("TM01", 1);
+          itemSystem.addItem("TM_HM_01", 1);
           const allItems = itemSystem.listItems();
           expect(allItems).toEqual({
               "POTION": 2,
               "BICYCLE": 1,
               "POKE_BALL": 10,
-              "TM01": 1,
+              "TM_HM_01": 1,
           });
       });
   });
 
-  describe("fallback item definitions", () => {
-    it("uses bundled content items when no data loader is provided", () => {
-      const fallbackSystem = new ItemSystem(gameState);
-      const potion = fallbackSystem.getItemDefinition("POTION");
+  describe("bundled item definitions", () => {
+    it("uses exact bundled content items when no data loader is provided", () => {
+      const contentSystem = new ItemSystem(gameState);
+      const potion = contentSystem.getItemDefinition("POTION");
       expect(potion.script_name).toBe("POTION");
       expect(potion.effect).toBe(ItemEffect.RESTORE_HP);
     });
 
-    it("hydrates missing loader effects from bundled content data", () => {
+    it("uses loader item effects as authored without hydrating from bundled content data", () => {
       const potion = itemSystem.getItemDefinition("POTION");
       expect(potion.effect).toBe(ItemEffect.RESTORE_HP);
-      expect(potion.parameter).toBe(0);
+      expect(potion.parameter).toBe(20);
     });
 
-    it("hydrates empty itemData Map loaders from bundled content", () => {
+    it("rejects empty itemData Map loaders instead of hydrating bundled content", () => {
       const emptyMapLoader = { itemData: new Map<string, Item>() } as DataLoader;
       const seededSystem = new ItemSystem(gameState, emptyMapLoader);
 
-      const elixer = seededSystem.getItemDefinition("ELIXER");
-      expect(elixer.effect).toBe(ItemEffect.RESTORE_PP);
-      expect((emptyMapLoader.itemData as Map<string, Item>).size).toBeGreaterThan(0);
+      expect(() => seededSystem.getItemDefinition("ELIXER")).toThrow("Unknown item definition: ELIXER");
+      expect((emptyMapLoader.itemData as Map<string, Item>).size).toBe(0);
     });
 
-    it("hydrates empty item_data record loaders from bundled content", () => {
+    it("rejects empty item_data record loaders instead of hydrating bundled content", () => {
       const emptyRecordLoader = { item_data: {} } as DataLoader;
       const seededSystem = new ItemSystem(gameState, emptyRecordLoader);
 
-      const elixer = seededSystem.getItemDefinition("ELIXER");
-      expect(elixer.script_name).toBe("ELIXER");
-      expect((emptyRecordLoader.item_data as Record<string, Item>).ELIXER).toBeDefined();
+      expect(() => seededSystem.getItemDefinition("ELIXER")).toThrow("Unknown item definition: ELIXER");
+      expect((emptyRecordLoader.item_data as Record<string, Item>).ELIXER).toBeUndefined();
     });
 
     it("uses itemData Map entries directly", () => {
@@ -418,7 +441,7 @@ describe("ItemSystem", () => {
         itemData: new Map<string, Item>([
           [
             "CUSTOM_MAP_ITEM",
-            {
+            testItem({
               name: "CUSTOM MAP ITEM",
               pocket: ItemPocket.ITEM,
               price: 420,
@@ -430,7 +453,7 @@ describe("ItemSystem", () => {
               property: "",
               field_menu: "",
               battle_menu: "",
-            },
+            }),
           ],
         ]),
       } as DataLoader;
@@ -445,12 +468,12 @@ describe("ItemSystem", () => {
 
   describe("tm/hm inventory listing", () => {
     it("lists TM/HM entries from the bitflag inventory", () => {
-      itemSystem.addItem("tm1", 1);
-      itemSystem.addItem("hm1", 1);
+      itemSystem.addItem("TM_HM_01", 1);
+      itemSystem.addItem("TM_HM_51", 1);
 
       expect(itemSystem.listItems(ItemPocket.TM_HM)).toEqual({
-        TM01: 1,
-        HM01: 1,
+        TM_HM_01: 1,
+        TM_HM_51: 1,
       });
     });
   });

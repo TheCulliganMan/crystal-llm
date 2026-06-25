@@ -1,6 +1,6 @@
 
 import type { Item, Pokemon } from '../../../core/models';
-import { BattleScene, ItemEffect, ItemPocket, StatusCondition, Stat } from '../../../core/enums';
+import { BattleScene, ItemEffect, StatusCondition, Stat } from '../../../core/enums';
 import { recordPokedexCaught } from '../../../core/pokedex';
 import { GameState } from '../../../core/state';
 import { Event, EventManager } from '../../events/events';
@@ -13,28 +13,6 @@ import { MAX_PC_BOXES } from '../../../core/constants';
 import { BattleContext } from './battle-context';
 
 // ASM: engine/items/item_effects.asm::PokeBallEffect
-const STATUS_KEYWORDS = [
-  'cure',
-  'heals',
-  'heal ',
-  'status',
-  'awakens',
-  'antidote',
-  'defrost',
-  'burned',
-  'paralyzed',
-  'poison',
-  'sleep',
-  'frozen',
-];
-const X_ITEM_NAMES = new Set([
-  'X_ATTACK',
-  'X_DEFEND',
-  'X_SPEED',
-  'X_SPECIAL',
-  'X_ACCURACY',
-]);
-const REVIVE_ITEMS = new Set(['REVIVE', 'MAX_REVIVE', 'REVIVAL_HERB']);
 const STATUS_CLEAR_ALL = new Set(['FULL_HEAL', 'FULL_RESTORE', 'HEAL_POWDER', 'MIRACLEBERRY']);
 const CONFUSION_ITEMS = new Set(['BITTER_BERRY']);
 const STATUS_ITEM_MAP: Record<string, StatusCondition> = {
@@ -61,48 +39,8 @@ const dispatchNoEffect = (eventManager: EventManager | null | undefined): void =
   eventManager?.dispatch(new Event('show_text', { text: NO_EFFECT_TEXT }));
 };
 
-export function effectiveItemEffect(item: Item): ItemEffect {
-  if (item.effect !== ItemEffect.NONE) {
-    return item.effect;
-  }
-  if (item.pocket === ItemPocket.BALL) {
-    return ItemEffect.POKE_BALL;
-  }
-
-  const name = item.script_name;
-  const description = (item.description || '').toLowerCase();
-
-  if (X_ITEM_NAMES.has(name)) {
-    return ItemEffect.X_ITEM;
-  }
-  if (description.includes('full restore') || name === 'FULL_RESTORE') {
-    return ItemEffect.FULL_RESTORE;
-  }
-  if (REVIVE_ITEMS.has(name) || description.includes('revive')) {
-    return ItemEffect.REVIVE;
-  }
-  if (description.includes('restores') && description.includes('pp')) {
-    return ItemEffect.RESTORE_PP;
-  }
-  if (
-    (description.includes('restore') && description.includes('hp')) ||
-    description.includes('self-restore')
-  ) {
-    return ItemEffect.RESTORE_HP;
-  }
-  if (STATUS_KEYWORDS.some((keyword) => description.includes(keyword))) {
-    return ItemEffect.STATUS_HEAL;
-  }
-  if (name === 'GUARD_SPEC') {
-    return ItemEffect.GUARD_SPEC;
-  }
-  if (name === 'DIRE_HIT') {
-    return ItemEffect.DIRE_HIT;
-  }
-  if (name === 'POKE_DOLL') {
-    return ItemEffect.POKE_DOLL;
-  }
-  return ItemEffect.NONE;
+export function effectiveItemEffect(item: Item): string {
+  return item.effect;
 }
 
 export function applyItemEffect(
@@ -146,7 +84,7 @@ export function applyItemEffect(
 }
 
 function handleUnsupportedItemEffect(
-  effect: ItemEffect,
+  effect: string,
   item: Item,
   _eventManager: EventManager | null,
 ): boolean {

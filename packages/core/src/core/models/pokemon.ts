@@ -71,6 +71,7 @@ export type PokemonSpecies = z.infer<typeof PokemonSpeciesSchema>;
 export const LearnedMoveSchema = z.object({
   name: MoveNameSchema,
   current_pp: z.number(),
+  pp_ups: z.number(),
 });
 export type LearnedMove = z.infer<typeof LearnedMoveSchema>;
 
@@ -339,7 +340,7 @@ export function createPokemon(gameState: GameState, species: PokemonSpecies, lev
         for (const move_name of moves) {
             const move_data: Move | undefined = allMoves[move_name];
             const pp = move_data ? move_data.pp : 0;
-            learned.push({ name: move_name, current_pp: pp });
+            learned.push({ name: move_name, current_pp: pp, pp_ups: 0 });
         }
         return learned;
     }

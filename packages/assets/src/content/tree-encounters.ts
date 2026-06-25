@@ -13,7 +13,7 @@ export interface TreeMonSet {
   rare: TreeMonEntry[];
 }
 
-const TREE_MON_SETS: Record<string, TreeMonSet> = {
+export const TREE_MON_SETS: Record<string, TreeMonSet> = {
   TREEMON_SET_CANYON: {
     common: [
       { weight: 50, species: 'SPEAROW', level: 10 },
@@ -131,7 +131,7 @@ const TREE_MON_SETS: Record<string, TreeMonSet> = {
   },
 };
 
-const TREE_MON_MAPS: Record<string, string> = {
+export const TREE_MON_MAPS: Record<string, string> = {
   ROUTE_26: 'TREEMON_SET_KANTO',
   ROUTE_27: 'TREEMON_SET_KANTO',
   ROUTE_28: 'TREEMON_SET_NONE',
@@ -168,7 +168,7 @@ const TREE_MON_MAPS: Record<string, string> = {
   ILEX_FOREST: 'TREEMON_SET_FOREST',
 };
 
-const ROCK_MON_MAPS: Record<string, string> = {
+export const ROCK_MON_MAPS: Record<string, string> = {
   CIANWOOD_CITY: 'TREEMON_SET_ROCK',
   ROUTE_40: 'TREEMON_SET_ROCK',
   DARK_CAVE_VIOLET_ENTRANCE: 'TREEMON_SET_ROCK',

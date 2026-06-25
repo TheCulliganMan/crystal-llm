@@ -905,6 +905,7 @@ describe("DataLoader species loading", () => {
 describe("DataLoader menu asset loading", () => {
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.dontMock("./content-packs");
   });
 
   it("ensures species, move, and item maps are populated for menus", async () => {
@@ -930,6 +931,27 @@ describe("DataLoader menu asset loading", () => {
     expect(speciesMap.get("TOTODILE")?.id).toBe("TOTODILE");
     expect(movesMap.get("TACKLE")?.name).toBe("TACKLE");
     expect(itemsMap.get("POTION")?.name).toBe("POTION");
+  });
+
+  it("preserves definitive modpack move effect strings instead of enum-validating them", async () => {
+    jest.resetModules();
+    jest.doMock("./content-packs", () => {
+      const actual = jest.requireActual("./content-packs");
+      return {
+        ...actual,
+        loadMergedMovesDataSync: jest.fn(() => ({
+          TACKLE: {
+            ...MOVE_FIXTURE,
+            effect: "MODDED_WEATHER",
+          },
+        })),
+      };
+    });
+
+    const { loadAllMoves, movesMap } = await import("./data-loader");
+    loadAllMoves();
+
+    expect(movesMap.get("TACKLE")?.effect).toBe("MODDED_WEATHER");
   });
 
   it("throws when items.json is missing instead of proceeding with an empty item map", async () => {
@@ -1595,6 +1617,57 @@ describe("DataLoader wild encounter loading", () => {
     expect(() => loader.load_wild_encounter_data()).toThrow(
       "ASM-backed wild encounter data is required; merged encounter payload must be an array."
     );
+  });
+
+  it("requires explicit nullable wild encounter fields instead of treating omissions as defaults", async () => {
+    jest.resetModules();
+    jest.doMock("./content-packs", () => {
+      const actual = jest.requireActual("./content-packs");
+      return {
+        ...actual,
+        loadMergedWildEncountersSync: jest.fn(() => [
+          {
+            map_name: "ROUTE_29",
+            grass_rates: { morning: 10, day: 10, night: 10 },
+            grass: { morning: [], day: [], night: [] },
+            water: null,
+          },
+        ]),
+      };
+    });
+
+    const { DataLoader } = await import("./data-loader");
+    const loader = new DataLoader();
+
+    expect(() => loader.load_wild_encounter_data()).toThrow(/water_rate/);
+  });
+
+  it("rejects fallback fields in wild encounter payloads instead of stripping them", async () => {
+    jest.resetModules();
+    jest.doMock("./content-packs", () => {
+      const actual = jest.requireActual("./content-packs");
+      return {
+        ...actual,
+        loadMergedWildEncountersSync: jest.fn(() => [
+          {
+            map_name: "ROUTE_29",
+            grass_rates: { morning: 10, day: 10, night: 10 },
+            water_rate: null,
+            grass: {
+              morning: [{ level: 2, species: "PIDGEY", fallback_species: "RATTATA" }],
+              day: [],
+              night: [],
+            },
+            water: null,
+          },
+        ]),
+      };
+    });
+
+    const { DataLoader } = await import("./data-loader");
+    const loader = new DataLoader();
+
+    expect(() => loader.load_wild_encounter_data()).toThrow(/fallback_species/);
   });
 });
 

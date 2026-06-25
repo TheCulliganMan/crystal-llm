@@ -122,7 +122,7 @@ mod tests {
               "base_reward":4,
               "ai_move_flags":0,
               "ai_item_switch_flags":0,
-              "encounter_music":"",
+              "encounter_music":"MUSIC_YOUNGSTER_ENCOUNTER",
               "ai_layers":[]
             }}"#
         )

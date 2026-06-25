@@ -204,9 +204,7 @@ export function applyMoveEffect(
     }
   }
 
-  const effectHandlers: {
-    [key in MoveEffect] ? : () => void
-  } = {
+  const effectHandlers: Partial<Record<string, () => void>> = {
     [MoveEffect.NORMAL_HIT]: () => {},
     [MoveEffect.SLEEP]: () =>
       _applySleepEffect(attacker, defender, context, eventManager, gameState),

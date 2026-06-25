@@ -8,6 +8,76 @@ import { parseMoves } from "./export-data";
 
 const RIVAL_NAME_PLACEHOLDER = "<RIVAL>";
 
+const TRAINER_ENCOUNTER_MUSIC: Record<string, string> = {
+  FALKNER: "MUSIC_YOUNGSTER_ENCOUNTER",
+  WHITNEY: "MUSIC_LASS_ENCOUNTER",
+  BUGSY: "MUSIC_YOUNGSTER_ENCOUNTER",
+  MORTY: "MUSIC_OFFICER_ENCOUNTER",
+  PRYCE: "MUSIC_OFFICER_ENCOUNTER",
+  JASMINE: "MUSIC_LASS_ENCOUNTER",
+  CHUCK: "MUSIC_OFFICER_ENCOUNTER",
+  CLAIR: "MUSIC_BEAUTY_ENCOUNTER",
+  RIVAL1: "MUSIC_RIVAL_ENCOUNTER",
+  POKEMON_PROF: "MUSIC_HIKER_ENCOUNTER",
+  WILL: "MUSIC_HIKER_ENCOUNTER",
+  CAL: "MUSIC_HIKER_ENCOUNTER",
+  BRUNO: "MUSIC_OFFICER_ENCOUNTER",
+  KAREN: "MUSIC_HIKER_ENCOUNTER",
+  KOGA: "MUSIC_HIKER_ENCOUNTER",
+  CHAMPION: "MUSIC_OFFICER_ENCOUNTER",
+  BROCK: "MUSIC_YOUNGSTER_ENCOUNTER",
+  MISTY: "MUSIC_LASS_ENCOUNTER",
+  LT_SURGE: "MUSIC_OFFICER_ENCOUNTER",
+  SCIENTIST: "MUSIC_ROCKET_ENCOUNTER",
+  ERIKA: "MUSIC_OFFICER_ENCOUNTER",
+  YOUNGSTER: "MUSIC_YOUNGSTER_ENCOUNTER",
+  SCHOOLBOY: "MUSIC_YOUNGSTER_ENCOUNTER",
+  BIRD_KEEPER: "MUSIC_YOUNGSTER_ENCOUNTER",
+  LASS: "MUSIC_LASS_ENCOUNTER",
+  JANINE: "MUSIC_LASS_ENCOUNTER",
+  COOLTRAINERM: "MUSIC_HIKER_ENCOUNTER",
+  COOLTRAINERF: "MUSIC_BEAUTY_ENCOUNTER",
+  BEAUTY: "MUSIC_BEAUTY_ENCOUNTER",
+  POKEMANIAC: "MUSIC_POKEMANIAC_ENCOUNTER",
+  GRUNTM: "MUSIC_ROCKET_ENCOUNTER",
+  GENTLEMAN: "MUSIC_HIKER_ENCOUNTER",
+  SKIER: "MUSIC_BEAUTY_ENCOUNTER",
+  TEACHER: "MUSIC_BEAUTY_ENCOUNTER",
+  SABRINA: "MUSIC_BEAUTY_ENCOUNTER",
+  BUG_CATCHER: "MUSIC_YOUNGSTER_ENCOUNTER",
+  FISHER: "MUSIC_HIKER_ENCOUNTER",
+  SWIMMERM: "MUSIC_HIKER_ENCOUNTER",
+  SWIMMERF: "MUSIC_BEAUTY_ENCOUNTER",
+  SAILOR: "MUSIC_HIKER_ENCOUNTER",
+  SUPER_NERD: "MUSIC_POKEMANIAC_ENCOUNTER",
+  RIVAL2: "MUSIC_RIVAL_ENCOUNTER",
+  GUITARIST: "MUSIC_HIKER_ENCOUNTER",
+  HIKER: "MUSIC_HIKER_ENCOUNTER",
+  BIKER: "MUSIC_HIKER_ENCOUNTER",
+  BLAINE: "MUSIC_OFFICER_ENCOUNTER",
+  BURGLAR: "MUSIC_POKEMANIAC_ENCOUNTER",
+  FIREBREATHER: "MUSIC_HIKER_ENCOUNTER",
+  JUGGLER: "MUSIC_POKEMANIAC_ENCOUNTER",
+  BLACKBELT_T: "MUSIC_HIKER_ENCOUNTER",
+  EXECUTIVEM: "MUSIC_ROCKET_ENCOUNTER",
+  PSYCHIC_T: "MUSIC_YOUNGSTER_ENCOUNTER",
+  PICNICKER: "MUSIC_LASS_ENCOUNTER",
+  CAMPER: "MUSIC_YOUNGSTER_ENCOUNTER",
+  EXECUTIVEF: "MUSIC_ROCKET_ENCOUNTER",
+  SAGE: "MUSIC_SAGE_ENCOUNTER",
+  MEDIUM: "MUSIC_SAGE_ENCOUNTER",
+  BOARDER: "MUSIC_HIKER_ENCOUNTER",
+  POKEFANM: "MUSIC_HIKER_ENCOUNTER",
+  KIMONO_GIRL: "MUSIC_KIMONO_ENCOUNTER",
+  TWINS: "MUSIC_LASS_ENCOUNTER",
+  POKEFANF: "MUSIC_BEAUTY_ENCOUNTER",
+  RED: "MUSIC_HIKER_ENCOUNTER",
+  BLUE: "MUSIC_RIVAL_ENCOUNTER",
+  OFFICER: "MUSIC_HIKER_ENCOUNTER",
+  GRUNTF: "MUSIC_ROCKET_ENCOUNTER",
+  MYSTICALMAN: "MUSIC_HIKER_ENCOUNTER",
+};
+
 function cleanTrainerName(rawName: string): string {
   const normalized = rawName.trim();
   if (normalized === "?" || normalized === "?@") {
@@ -122,11 +192,12 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
       const species = pokemonSpeciesMap[speciesName];
       if (!species) throw new Error(`Could not find species data for ${speciesName}`);
       let item: string | null | undefined = null;
-      let moves: Array<{ name: Trainer["party"][number]["moves"][number]["name"]; current_pp: number }> = [];
+      let moves: Array<{ name: Trainer["party"][number]["moves"][number]["name"]; current_pp: number; pp_ups: number }> = [];
       if (trainerType === "TRAINERTYPE_MOVES") {
         moves = parts.slice(2).filter((move) => move !== "NO_MOVE").map((move) => ({
           name: move as Trainer["party"][number]["moves"][number]["name"],
           current_pp: movesMap[move].pp,
+          pp_ups: 0,
         }));
       } else if (trainerType === "TRAINERTYPE_ITEM") {
         item = parts[2];
@@ -135,6 +206,7 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
         moves = parts.slice(3).filter((move) => move !== "NO_MOVE").map((move) => ({
           name: move as Trainer["party"][number]["moves"][number]["name"],
           current_pp: movesMap[move].pp,
+          pp_ups: 0,
         }));
       }
 
@@ -257,6 +329,11 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
   for (let index = 0; index < trainers.length; index += 1) {
     trainers[index].trainer_class = metadata[index][0];
     trainers[index].trainer_id = metadata[index][1];
+    const encounterMusic = TRAINER_ENCOUNTER_MUSIC[trainers[index].trainer_class];
+    if (!encounterMusic) {
+      throw new Error(`Missing trainer encounter music for class ${trainers[index].trainer_class}`);
+    }
+    trainers[index].encounter_music = encounterMusic;
     const baseReward = classBaseRewards[trainers[index].trainer_class];
     if (!baseReward) {
       throw new Error(`Missing trainer base reward for class ${trainers[index].trainer_class}`);

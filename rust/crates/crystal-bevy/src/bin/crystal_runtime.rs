@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use crystal_assets::AssetRoot;
-use crystal_bevy::{CORE_RUNTIME_PACK_PATH, CrystalRuntime, RuntimeOverworldFrame};
+use crystal_bevy::{CrystalRuntime, RuntimeOverworldFrame};
 use crystal_core::battle::start::WildBattleStart;
 use crystal_core::input::GameButton;
 use crystal_core::world::map::TilePosition;
@@ -182,8 +182,8 @@ impl RuntimeCliConfig {
         }
 
         Ok(Self {
-            repository_root: repository_root.unwrap_or_else(|| PathBuf::from(".")),
-            pack_path: pack_path.unwrap_or_else(|| PathBuf::from(CORE_RUNTIME_PACK_PATH)),
+            repository_root: repository_root.context("repository-root argument is required")?,
+            pack_path: pack_path.context("compiled-pack argument is required")?,
             spawn,
             steps,
             load_save,
@@ -195,11 +195,10 @@ impl RuntimeCliConfig {
 
 fn print_help() {
     println!(
-        "Usage: crystal_runtime [repository-root] [compiled-pack] [--spawn id] [--steps tokens] [--load-save path] [--save path]"
+        "Usage: crystal_runtime <repository-root> <compiled-pack> [--spawn id] [--steps tokens] [--load-save path] [--save path]"
     );
     println!();
     println!("compiled-pack is resolved relative to apps/web/assets/data.");
-    println!("Default compiled-pack: {CORE_RUNTIME_PACK_PATH}");
     println!("steps tokens are comma-separated frames; combine held buttons with '+'.");
     println!("Example: --steps right,right,a+right");
     println!("Save files must use .crystalsave.");
@@ -344,6 +343,15 @@ fn format_wild_encounter(encounter: &WildEncounterRoll) -> String {
             resolved.level,
             encounter.rng_seed_after
         ),
+        None if encounter.repelled_by.is_some() => format!(
+            "wild_repel:{} surface={:?} roll={} threshold={} item={} rng={}",
+            encounter.map_name,
+            encounter.surface,
+            encounter.encounter_roll,
+            encounter.threshold,
+            encounter.repelled_by.as_deref().expect("repel item"),
+            encounter.rng_seed_after
+        ),
         None => format!(
             "wild_none:{} surface={:?} roll={} threshold={} rng={}",
             encounter.map_name,
@@ -375,16 +383,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_to_repository_root_and_core_pack() {
-        let config = RuntimeCliConfig::from_args(Vec::<String>::new()).expect("config");
+    fn requires_repository_root_and_pack_path_without_defaults() {
+        let missing_repo = RuntimeCliConfig::from_args(Vec::<String>::new())
+            .expect_err("repository root must be explicit")
+            .to_string();
+        assert!(
+            missing_repo.contains("repository-root argument is required"),
+            "{missing_repo}"
+        );
 
-        assert_eq!(config.repository_root, PathBuf::from("."));
-        assert_eq!(config.pack_path, PathBuf::from(CORE_RUNTIME_PACK_PATH));
-        assert_eq!(config.spawn, 0);
-        assert!(config.steps.is_empty());
-        assert_eq!(config.load_save, None);
-        assert_eq!(config.save, None);
-        assert!(!config.help);
+        let missing_pack = RuntimeCliConfig::from_args(["/repo".to_string()])
+            .expect_err("compiled pack must be explicit")
+            .to_string();
+        assert!(
+            missing_pack.contains("compiled-pack argument is required"),
+            "{missing_pack}"
+        );
     }
 
     #[test]
@@ -482,12 +496,35 @@ mod tests {
                 slot: 0,
                 level: 2,
             }),
+            repelled_by: None,
             rng_seed_after: 42,
         };
 
         assert_eq!(
             format_wild_encounter(&encounter),
             "wild:RuntimeMap surface=Grass roll=7 slot=0 species=CHIKORITA level=2 rng=42"
+        );
+    }
+
+    #[test]
+    fn formats_repelled_wild_encounter_events_for_headless_playback() {
+        let encounter = WildEncounterRoll {
+            map_name: "RuntimeMap".to_string(),
+            tile: TilePosition::new(2, 0),
+            surface: crystal_core::world::encounters::EncounterSurface::Grass,
+            time: crystal_core::world::encounters::TimeOfDay::Day,
+            threshold: 255,
+            encounter_roll: 7,
+            slot_percent_roll: Some(1),
+            level_roll: Some(1),
+            resolved: None,
+            repelled_by: Some("REPEL".to_string()),
+            rng_seed_after: 42,
+        };
+
+        assert_eq!(
+            format_wild_encounter(&encounter),
+            "wild_repel:RuntimeMap surface=Grass roll=7 threshold=255 item=REPEL rng=42"
         );
     }
 
@@ -513,6 +550,7 @@ mod tests {
             slot_percent_roll: Some(1),
             level_roll: Some(1),
             resolved: None,
+            repelled_by: None,
             rng_seed_after: 42,
         };
         let battle = WildBattleStart {

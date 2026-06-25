@@ -1,5 +1,4 @@
 import { calculateExperience } from "@pokecrystal/core/engine/experience";
-import { GrowthRate } from "@pokecrystal/core/core/enums";
 import type { LearnedMove, Pokemon } from "@pokecrystal/core/core/models";
 import { MoveName, Stat } from "@pokecrystal/core/core/enums";
 import { BattleMenu } from "./overlays/_battle-menu";
@@ -21,8 +20,6 @@ import {
   buildOakIntroControlLines,
   buildTitleScreenControlLines,
 } from "./control-lines";
-
-const GrowthRate_VALUES = new Set(Object.values(GrowthRate));
 
 type BattleContextDebugFields = BattleContext &
   Partial<{
@@ -616,10 +613,7 @@ const expToNext = (mon: Pokemon): number | null => {
     return 0;
   }
   try {
-    if (!GrowthRate_VALUES.has(growth as GrowthRate)) {
-      return null;
-    }
-    const target = calculateExperience(growth as GrowthRate, level + 1);
+    const target = calculateExperience(String(growth), level + 1);
     return Math.max(0, target - Number(currentExp));
   } catch {
     return null;

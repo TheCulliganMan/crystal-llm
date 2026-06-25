@@ -9,7 +9,6 @@ import {
   MoveName,
   Stat,
   StatusCondition,
-  MoveEffect,
   PlayerGender,
   ItemPocket,
   BattleTurn,
@@ -66,7 +65,7 @@ export const MoveSchema = z.object({
   power: z.number(),
   accuracy: z.number(),
   pp: z.number(),
-  effect: z.nativeEnum(MoveEffect).default(MoveEffect.NORMAL_HIT),
+  effect: z.string().default("NORMAL_HIT"),
   effect_chance: z.number().default(0),
   stat: z.preprocess(
     (value) => (value === null ? undefined : value),

@@ -43,6 +43,16 @@ impl From<SceneError> for ScriptSceneError {
     }
 }
 
+pub const SCRIPT_SCENE_CHECK_COMMANDS: &[&str] = &["checkscene"];
+pub const SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS: &[&str] = &["setscene"];
+pub const SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS: &[&str] = &["setmapscene"];
+
+pub fn is_known_script_scene_command(command: &str) -> bool {
+    SCRIPT_SCENE_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command)
+        || SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command)
+}
+
 pub fn apply_script_scene_command(
     state: &mut GameState,
     current_map_name: &str,
@@ -187,6 +197,16 @@ mod tests {
             source_script: "GateScript".to_string(),
             command_index: 4,
         }
+    }
+
+    #[test]
+    fn exported_scene_command_sets_are_exact() {
+        assert!(SCRIPT_SCENE_CHECK_COMMANDS.contains(&"checkscene"));
+        assert!(SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&"setscene"));
+        assert!(SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&"setmapscene"));
+        assert!(is_known_script_scene_command("setscene"));
+        assert!(!is_known_script_scene_command("SetScene"));
+        assert!(!is_known_script_scene_command("resetscene"));
     }
 
     #[test]

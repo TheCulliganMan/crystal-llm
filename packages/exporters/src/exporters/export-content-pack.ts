@@ -10,15 +10,25 @@ import type { Trainer } from "@pokecrystal/core/core/models/trainer";
 import type { ExportedItem } from "./export-items";
 import type { NpcData } from "./export-npcs";
 import { ensureDir, removeMatchingOutputs, writeJsonToTargets } from "./asm-utils";
-import type { EggMovesData, LevelUpLearnsets, LevelUpMovesData } from "./export-data";
+import type { EggMovesData, GrowthRateCurveData, LevelUpLearnsets, LevelUpMovesData } from "./export-data";
 import type { PokegearLandmarksPayload } from "./export-pokegear-landmarks";
 import type { PlayabilityRules } from "./export-playability";
 import type { ExportedAudioAsset } from "./export-audio-assets";
 import type { ExportedPokemonEvolutionData } from "./export-evolutions";
+import type { ExportedFieldEncounterData } from "./export-field-encounters";
+import type { ExportedFishingCatalog } from "./export-fishing";
+import type { ExportedFieldMoveCatalog } from "./export-field-moves";
+import type { ExportedBattleRewardRules } from "./export-battle-reward-rules";
+import type { ExportedBattleEscapeRules } from "./export-battle-escape-rules";
+import type { ExportedStepEventRules } from "./export-step-event-rules";
+import type { ExportedCaptureRules } from "./export-capture-rules";
+import type { ExportedFruitTreeCatalog } from "./export-fruit-trees";
+import type { CurrencyConstantsPayload } from "./export-currency-constants";
 
 const CONTENT_PACK_CATEGORIES = [
   "pokemon",
   "moves",
+  "growth_rates",
   "learnsets",
   "level_up_moves",
   "egg_moves",
@@ -28,10 +38,36 @@ const CONTENT_PACK_CATEGORIES = [
   "map_attributes",
   "map_dimensions",
   "wild_encounters",
+  "field_encounters",
   "runtime_spawn_points",
   "runtime_map_metadata",
   "flee_mons",
+  "roaming_pokemon",
+  "buena_password_categories",
+  "buena_prizes",
+  "kurt_apricorn_recipes",
+  "shuckie_gift",
+  "dratini_move_sets",
+  "bug_contest_config",
+  "battle_tower_rules",
+  "oak_ratings",
+  "odd_egg_definitions",
+  "magikarp_lengths",
+  "happiness_data",
+  "encounter_slot_tables",
+  "encounter_music_modifiers",
+  "battle_stat_multipliers",
+  "capture_wobble_probabilities",
+  "capture_rules",
+  "move_priorities",
+  "type_categories",
+  "type_effectiveness",
+  "weather_modifiers",
+  "battle_reward_rules",
+  "battle_escape_rules",
+  "step_event_rules",
   "fishing",
+  "field_moves",
   "fruit_trees",
   "npcs",
   "pokegear_landmarks",
@@ -93,18 +129,48 @@ type CompiledContentPack = {
 export type CoreExportPayload = {
   pokemonData: PokemonSpecies[];
   movesData: Record<string, Move>;
+  growthRatesData?: GrowthRateCurveData[];
   learnsetsData: LevelUpLearnsets;
   levelUpMovesData: LevelUpMovesData;
   eggMovesData: EggMovesData;
   evolutions: ExportedPokemonEvolutionData[];
   wildEncounters: WildEncounterData[];
+  fieldEncounters?: ExportedFieldEncounterData[];
+  fishing?: ExportedFishingCatalog;
+  fieldMoves?: ExportedFieldMoveCatalog;
+  fruitTrees?: ExportedFruitTreeCatalog;
   runtimeSpawnPoints?: unknown;
   runtimeMapMetadata?: unknown;
   fleeMons?: unknown;
+  roamingPokemon?: unknown;
+  buenaPasswordCategories?: unknown;
+  buenaPrizes?: unknown;
+  kurtApricornRecipes?: unknown;
+  shuckieGift?: unknown;
+  dratiniMoveSets?: unknown;
+  bugContestConfig?: unknown;
+  battleTowerRules?: unknown;
+  oakRatings?: unknown;
+  oddEggDefinitions?: unknown;
+  magikarpLengths?: unknown;
+  happinessData?: unknown;
+  encounterSlotTables?: unknown;
+  encounterMusicModifiers?: unknown;
+  battleStatMultipliers?: unknown;
+  captureWobbleProbabilities?: unknown;
+  captureRules?: ExportedCaptureRules;
+  movePriorities?: unknown;
+  typeCategories?: unknown;
+  typeEffectiveness?: unknown;
+  weatherModifiers?: unknown;
+  battleRewardRules?: ExportedBattleRewardRules;
+  battleEscapeRules?: ExportedBattleEscapeRules;
+  stepEventRules?: ExportedStepEventRules;
   mapDimensions: Record<string, { width: number; height: number }>;
   mapAttributes: Record<string, unknown>;
   items: ExportedItem[];
   marts?: Record<string, string[]>;
+  currencyConstants?: CurrencyConstantsPayload;
   pcStrings?: Record<string, string>;
   menuIcons?: Record<string, string>;
   pokedexEntries?: unknown[];
@@ -492,7 +558,7 @@ const requireContentPack = (value: unknown, index: number): ContentPack => {
   };
 };
 
-const readIndex = (): ContentPackIndex => {
+const readPreservedPacks = (): ContentPack[] => {
   const indexPath = joinPath(getDataDir(), "content-packs/index.json");
   const parsed = readJsonAssetSync<unknown>(indexPath);
   if (!isRecord(parsed)) {
@@ -504,10 +570,12 @@ const readIndex = (): ContentPackIndex => {
   if (!Array.isArray(parsed.packs)) {
     throw new Error("Content pack index must declare packs as an array.");
   }
-  return {
-    version: parsed.version,
-    packs: parsed.packs.map(requireContentPack),
-  };
+  return parsed.packs
+    .filter((pack) => {
+      const id = isRecord(pack) && typeof pack.id === "string" ? pack.id : "";
+      return id !== CORE_PACK_ID && !id.startsWith(`${MODULE_PREFIX}-`);
+    })
+    .map(requireContentPack);
 };
 
 const parentPathFor = (filePath: string, _category: ContentPackCategory): string =>
@@ -582,6 +650,9 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   for (const [name, move] of Object.entries(payload.movesData)) {
     writeCorePackEntry(files.moves, "moves", name, move);
   }
+  if (payload.growthRatesData && payload.growthRatesData.length > 0) {
+    writeCorePackEntry(files.growth_rates, "growth_rates", "growth_rates", payload.growthRatesData);
+  }
   for (const [species, learnset] of Object.entries(payload.learnsetsData)) {
     writeCorePackEntry(files.learnsets, "learnsets", species, {
       species,
@@ -611,6 +682,11 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     const encounterPath = writeCorePackEntry(files.wild_encounters, "wild_encounters", encounter.map_name, encounter);
     encounterPathByMapName.set(encounter.map_name, encounterPath);
   }
+  const fieldEncounterPathByMapName = new Map<string, string>();
+  for (const encounter of payload.fieldEncounters ?? []) {
+    const encounterPath = writeCorePackEntry(files.field_encounters, "field_encounters", encounter.map_name, encounter);
+    fieldEncounterPathByMapName.set(encounter.map_name, encounterPath);
+  }
   if (payload.runtimeSpawnPoints) {
     writeCorePackEntry(files.runtime_spawn_points, "runtime_spawn_points", "spawn_points", payload.runtimeSpawnPoints);
   }
@@ -619,6 +695,132 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   }
   if (payload.fleeMons) {
     writeCorePackEntry(files.flee_mons, "flee_mons", "flee_mons", payload.fleeMons);
+  }
+  if (payload.roamingPokemon) {
+    writeCorePackEntry(files.roaming_pokemon, "roaming_pokemon", "roaming_pokemon", payload.roamingPokemon);
+  }
+  if (payload.buenaPasswordCategories) {
+    writeCorePackEntry(
+      files.buena_password_categories,
+      "buena_password_categories",
+      "buena_password_categories",
+      payload.buenaPasswordCategories
+    );
+  }
+  if (payload.buenaPrizes) {
+    writeCorePackEntry(files.buena_prizes, "buena_prizes", "buena_prizes", payload.buenaPrizes);
+  }
+  if (payload.kurtApricornRecipes) {
+    writeCorePackEntry(
+      files.kurt_apricorn_recipes,
+      "kurt_apricorn_recipes",
+      "kurt_apricorn_recipes",
+      payload.kurtApricornRecipes
+    );
+  }
+  if (payload.shuckieGift) {
+    writeCorePackEntry(files.shuckie_gift, "shuckie_gift", "shuckie_gift", payload.shuckieGift);
+  }
+  if (payload.dratiniMoveSets) {
+    writeCorePackEntry(
+      files.dratini_move_sets,
+      "dratini_move_sets",
+      "dratini_move_sets",
+      payload.dratiniMoveSets
+    );
+  }
+  if (payload.bugContestConfig) {
+    writeCorePackEntry(files.bug_contest_config, "bug_contest_config", "bug_contest_config", payload.bugContestConfig);
+  }
+  if (payload.battleTowerRules) {
+    writeCorePackEntry(
+      files.battle_tower_rules,
+      "battle_tower_rules",
+      "battle_tower_rules",
+      payload.battleTowerRules
+    );
+  }
+  if (payload.oakRatings) {
+    writeCorePackEntry(files.oak_ratings, "oak_ratings", "oak_ratings", payload.oakRatings);
+  }
+  if (payload.oddEggDefinitions) {
+    writeCorePackEntry(
+      files.odd_egg_definitions,
+      "odd_egg_definitions",
+      "odd_egg_definitions",
+      payload.oddEggDefinitions
+    );
+  }
+  if (payload.magikarpLengths) {
+    writeCorePackEntry(files.magikarp_lengths, "magikarp_lengths", "magikarp_lengths", payload.magikarpLengths);
+  }
+  if (payload.happinessData) {
+    writeCorePackEntry(files.happiness_data, "happiness_data", "happiness_data", payload.happinessData);
+  }
+  if (payload.encounterSlotTables) {
+    writeCorePackEntry(
+      files.encounter_slot_tables,
+      "encounter_slot_tables",
+      "encounter_slot_tables",
+      payload.encounterSlotTables
+    );
+  }
+  if (payload.encounterMusicModifiers) {
+    writeCorePackEntry(
+      files.encounter_music_modifiers,
+      "encounter_music_modifiers",
+      "encounter_music_modifiers",
+      payload.encounterMusicModifiers
+    );
+  }
+  if (payload.battleStatMultipliers) {
+    writeCorePackEntry(
+      files.battle_stat_multipliers,
+      "battle_stat_multipliers",
+      "battle_stat_multipliers",
+      payload.battleStatMultipliers
+    );
+  }
+  if (payload.captureWobbleProbabilities) {
+    writeCorePackEntry(
+      files.capture_wobble_probabilities,
+      "capture_wobble_probabilities",
+      "capture_wobble_probabilities",
+      payload.captureWobbleProbabilities
+    );
+  }
+  if (payload.captureRules) {
+    writeCorePackEntry(files.capture_rules, "capture_rules", "rules", payload.captureRules);
+  }
+  if (payload.movePriorities) {
+    writeCorePackEntry(files.move_priorities, "move_priorities", "move_priorities", payload.movePriorities);
+  }
+  if (payload.typeCategories) {
+    writeCorePackEntry(files.type_categories, "type_categories", "type_categories", payload.typeCategories);
+  }
+  if (payload.typeEffectiveness) {
+    writeCorePackEntry(files.type_effectiveness, "type_effectiveness", "type_effectiveness", payload.typeEffectiveness);
+  }
+  if (payload.weatherModifiers) {
+    writeCorePackEntry(files.weather_modifiers, "weather_modifiers", "weather_modifiers", payload.weatherModifiers);
+  }
+  if (payload.battleRewardRules) {
+    writeCorePackEntry(files.battle_reward_rules, "battle_reward_rules", "rules", payload.battleRewardRules);
+  }
+  if (payload.battleEscapeRules) {
+    writeCorePackEntry(files.battle_escape_rules, "battle_escape_rules", "rules", payload.battleEscapeRules);
+  }
+  if (payload.stepEventRules) {
+    writeCorePackEntry(files.step_event_rules, "step_event_rules", "rules", payload.stepEventRules);
+  }
+  if (payload.fishing) {
+    writeCorePackEntry(files.fishing, "fishing", "fishing", payload.fishing);
+  }
+  if (payload.fieldMoves) {
+    writeCorePackEntry(files.field_moves, "field_moves", "field_moves", payload.fieldMoves);
+  }
+  if (payload.fruitTrees && Object.keys(payload.fruitTrees).length > 0) {
+    writeCorePackEntry(files.fruit_trees, "fruit_trees", "fruit_trees", payload.fruitTrees);
   }
   for (const audioAsset of payload.audioAssets ?? []) {
     writeAudioAssetFile(files.audio, audioAsset, writtenPayloads);
@@ -662,6 +864,9 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   }
   if (payload.marts && Object.keys(payload.marts).length > 0) {
     writeCorePackEntry(files.marts, "marts", "marts", payload.marts);
+  }
+  if (payload.currencyConstants && Object.keys(payload.currencyConstants).length > 0) {
+    writeCorePackEntry(files.currency_constants, "currency_constants", "constants", payload.currencyConstants);
   }
   if (payload.pcStrings && Object.keys(payload.pcStrings).length > 0) {
     writeCorePackEntry(files.pc_strings, "pc_strings", "pc_strings", payload.pcStrings);
@@ -764,10 +969,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   const compiledPath = "content-packs/core-modular.compiled.json";
   writeJsonToTargets(compiledPath, buildCompiledCorePack(files, writtenPayloads), { indent: 0 });
 
-  const index = readIndex();
-  const remainingPacks = index.packs.filter(
-    (pack) => pack.id !== CORE_PACK_ID && !pack.id.startsWith(`${MODULE_PREFIX}-`)
-  );
+  const remainingPacks = readPreservedPacks();
   remainingPacks.push({
     id: CORE_PACK_ID,
     enabled: true,
@@ -786,12 +988,39 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "runtime_spawn_points", prefix: "runtime-spawn-points" },
     { category: "runtime_map_metadata", prefix: "runtime-map-metadata" },
     { category: "flee_mons", prefix: "flee-mons" },
+    { category: "roaming_pokemon", prefix: "roaming-pokemon" },
+    { category: "buena_password_categories", prefix: "buena-password-categories" },
+    { category: "buena_prizes", prefix: "buena-prizes" },
+    { category: "kurt_apricorn_recipes", prefix: "kurt-apricorn-recipes" },
+    { category: "shuckie_gift", prefix: "shuckie-gift" },
+    { category: "dratini_move_sets", prefix: "dratini-move-sets" },
+    { category: "bug_contest_config", prefix: "bug-contest-config" },
+    { category: "battle_tower_rules", prefix: "battle-tower-rules" },
+    { category: "oak_ratings", prefix: "oak-ratings" },
+    { category: "odd_egg_definitions", prefix: "odd-egg-definitions" },
+    { category: "magikarp_lengths", prefix: "magikarp-lengths" },
+    { category: "happiness_data", prefix: "happiness-data" },
+    { category: "encounter_slot_tables", prefix: "encounter-slot-tables" },
+    { category: "battle_stat_multipliers", prefix: "battle-stat-multipliers" },
+    { category: "capture_wobble_probabilities", prefix: "capture-wobble-probabilities" },
+    { category: "capture_rules", prefix: "capture-rules" },
+    { category: "move_priorities", prefix: "move-priorities" },
+    { category: "type_categories", prefix: "type-categories" },
+    { category: "type_effectiveness", prefix: "type-effectiveness" },
+    { category: "weather_modifiers", prefix: "weather-modifiers" },
+    { category: "battle_reward_rules", prefix: "battle-reward-rules" },
+    { category: "battle_escape_rules", prefix: "battle-escape-rules" },
+    { category: "step_event_rules", prefix: "step-event-rules" },
+    { category: "fishing", prefix: "fishing" },
+    { category: "field_moves", prefix: "field-moves" },
+    { category: "fruit_trees", prefix: "fruit-trees" },
     { category: "pokemon", prefix: "pokemon" },
     { category: "moves", prefix: "move" },
     { category: "learnsets", prefix: "learnset" },
     { category: "level_up_moves", prefix: "level-up-move" },
     { category: "egg_moves", prefix: "egg-move" },
     { category: "items", prefix: "item" },
+    { category: "currency_constants", prefix: "currency-constants" },
     { category: "pc_strings", prefix: "pc-strings" },
     { category: "menu_icons", prefix: "menu-icons" },
     { category: "trainers", prefix: "trainer" },
@@ -834,21 +1063,28 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     }
   }
 
-  for (const [mapName, routePath] of encounterPathByMapName) {
-    const name = fileStem(routePath);
+  const routeMapNames = new Set([...encounterPathByMapName.keys(), ...fieldEncounterPathByMapName.keys()]);
+  for (const mapName of [...routeMapNames].sort((a, b) => a.localeCompare(b))) {
+    const routePath = encounterPathByMapName.get(mapName);
+    const fieldEncounterPath = fieldEncounterPathByMapName.get(mapName);
+    const name = fileStem(routePath ?? fieldEncounterPath ?? mapName);
     const mapPath = mapPathByName.get(mapName);
     const mapBlockPath = mapBlockPathByName.get(mapName);
     const mapAttributePath = mapAttributePathByName.get(mapName);
     const mapDimensionKey = mapDimensionKeyByName.get(mapName);
     const mapDimensionPath = mapDimensionKey ? mapDimensionPathByName.get(mapDimensionKey) : undefined;
     const npcPath = npcPathByName.get(mapName);
+    const parentPath = routePath
+      ? parentPathFor(routePath, "wild_encounters")
+      : parentPathFor(fieldEncounterPath!, "field_encounters");
     remainingPacks.push(
-      makeModulePack(`${MODULE_PREFIX}-route-${name}`, parentPathFor(routePath, "wild_encounters"), {
+      makeModulePack(`${MODULE_PREFIX}-route-${name}`, parentPath, {
         maps: mapPath ? [mapPath] : [],
         map_blocks: mapBlockPath ? [mapBlockPath] : [],
         map_attributes: mapAttributePath ? [mapAttributePath] : [],
         map_dimensions: mapDimensionPath ? [mapDimensionPath] : [],
-        wild_encounters: [routePath],
+        wild_encounters: routePath ? [routePath] : [],
+        field_encounters: fieldEncounterPath ? [fieldEncounterPath] : [],
         npcs: npcPath ? [npcPath] : [],
       })
     );

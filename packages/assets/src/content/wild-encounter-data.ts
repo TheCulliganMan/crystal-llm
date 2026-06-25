@@ -3,23 +3,23 @@ import { z } from 'zod';
 export const WildEncounterSchema = z.object({
   level: z.number(),
   species: z.string(),
-});
+}).strict();
 export type WildEncounter = z.infer<typeof WildEncounterSchema>;
 
 export const WildEncounterTableSchema = z.object({
   morning: z.array(WildEncounterSchema),
   day: z.array(WildEncounterSchema),
   night: z.array(WildEncounterSchema),
-});
+}).strict();
 export type WildEncounterTable = z.infer<typeof WildEncounterTableSchema>;
 
 export const WildEncounterDataSchema = z.object({
   map_name: z.string(),
-  grass_rates: z.record(z.string(), z.number()).optional().nullable(),
-  water_rate: z.number().optional().nullable(),
-  grass: WildEncounterTableSchema.optional().nullable(),
-  water: WildEncounterTableSchema.optional().nullable(),
-});
+  grass_rates: z.record(z.string(), z.number()).nullable(),
+  water_rate: z.number().nullable(),
+  grass: WildEncounterTableSchema.nullable(),
+  water: WildEncounterTableSchema.nullable(),
+}).strict();
 export type WildEncounterData = z.infer<typeof WildEncounterDataSchema>;
 
 export const wildEncounterData: WildEncounterData[] = [

@@ -104,6 +104,7 @@ describe("exportTrainers", () => {
         trainer_id: "YOUNGSTER_JOEY",
         trainer_class: "YOUNGSTER",
         base_reward: 4,
+        encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER",
         party: [expect.objectContaining({ species: expect.objectContaining({ id: "CHIKORITA" }) })],
       }),
     ]);

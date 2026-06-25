@@ -4,20 +4,16 @@ import { Pokemon, PokemonSpecies } from "@pokecrystal/core/core/models";
 import { GameState } from "@pokecrystal/core/core/state";
 import { HardwareRNG } from "@pokecrystal/core/engine/games/rng";
 import { EventManager, StartBattleEvent } from "@pokecrystal/core/engine/events/events";
-import type { EventManagerLike } from "@pokecrystal/core/engine/events/event-manager-like";
 import { Item } from "@pokecrystal/core/core/enums/item";
-import { defaultMusicTokenForMap } from "@pokecrystal/core/engine/world/map-music";
 import { checkRoamingEncounter, createRoamingBattlePokemon, RoamerState } from "@pokecrystal/core/engine/world/roamers";
 import { describeCollision, resolveCollisionValue, Terrain } from "@pokecrystal/core/engine/world/overworld/collision-data";
 import { getCoordCollision } from "@pokecrystal/core/engine/world/overworld/collision-rules";
-import { OverworldBase } from "@pokecrystal/core/engine/world/overworld/overworld-base";
 import { ALL_SWARM_DEFINITIONS, SwarmDefinition } from "@pokecrystal/core/engine/world/overworld/swarm";
 import { applySafariBattleType } from "@pokecrystal/core/engine/world/safari-zone";
 import { METATILE_WIDTH } from "@pokecrystal/core/core/tileset-data";
 import { createPokemon } from "@pokecrystal/core/engine/systems/pokemon";
 import { OverworldMap } from "@pokecrystal/core/engine/world/overworld/overworld-map";
 import type { OverworldTilesetLike } from "@pokecrystal/core/engine/world/overworld/tileset-types";
-import { wildEncounterData } from "@pokecrystal/assets/content/wild-encounter-data";
 
 type RandomSource = {
   nextByte: () => number;
@@ -73,15 +69,9 @@ const CAVE_TILESETS = new Set(["cave", "dark_cave"]);
 const LAND_ENCOUNTER_ENVIRONMENTS = new Set(["CAVE"]);
 
 const TIME_KEYS: Record<string, "morning" | "day" | "night"> = {
-  morn: "morning",
   morning: "morning",
   day: "day",
-  afternoon: "day",
-  nite: "night",
   night: "night",
-  evening: "night",
-  dark: "night",
-  darkness: "night",
 };
 
 const DOUBLE_ENCOUNTER_MUSIC_TOKENS = new Set([
@@ -100,26 +90,11 @@ const percentToByte = (value: number): number => {
   return Math.floor((value * 0xff) / 100);
 };
 
-const normalizeMapKey = (mapName: string): string => {
-  const helper = (OverworldBase as typeof OverworldBase & {
-    _normalizeMapKey?: (input: string) => string;
-  })._normalizeMapKey;
-  if (typeof helper === "function") {
-    return helper(mapName);
-  }
-  return mapName.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-};
-
-const buildEncounterMap = (): Map<string, WildEncounterData> => {
-  return new Map(wildEncounterData.map((entry) => [entry.map_name, entry]));
-};
-
 const resolveEncounterTimeKey = (timeOfDay: unknown): "morning" | "day" | "night" => {
-  const raw = String(timeOfDay ?? "").trim().toLowerCase();
-  if (!raw) {
-    return "day";
+  if (typeof timeOfDay !== "string") {
+    throw new Error(`Unknown wild encounter time of day '${timeOfDay}'.`);
   }
-  const key = TIME_KEYS[raw];
+  const key = TIME_KEYS[timeOfDay];
   if (!key) {
     throw new Error(`Unknown wild encounter time of day '${timeOfDay}'.`);
   }
@@ -278,15 +253,10 @@ export class WildEncounterManager {
       } else if (source && typeof source === "object") {
         this.encounterMap = new Map(Object.entries(source));
       } else {
-        this.encounterMap = buildEncounterMap();
+        throw new Error("Wild encounter data loader is missing definitive modpack data.");
       }
     }
-    const direct = this.encounterMap.get(map_name);
-    if (direct) {
-      return direct;
-    }
-    const normalized = normalizeMapKey(map_name);
-    return this.encounterMap.get(normalized) ?? null;
+    return this.encounterMap.get(map_name) ?? null;
   }
 
   public _resolve_surface(overworld: OverworldLike): EncounterSurface | null {
@@ -335,19 +305,7 @@ export class WildEncounterManager {
       return true;
     }
     const tilesetName = attributes?.tileset_name ?? "";
-    if (tilesetName && CAVE_TILESETS.has(tilesetName.toLowerCase())) {
-      return true;
-    }
-    const normalized = normalizeMapKey(mapName);
-    const normalizedAttrs = mapAttributes?.get(normalized);
-    if (
-      normalizedAttrs?.environment &&
-      LAND_ENCOUNTER_ENVIRONMENTS.has(normalizedAttrs.environment)
-    ) {
-      return true;
-    }
-    const normalizedTileset = normalizedAttrs?.tileset_name ?? "";
-    return Boolean(normalizedTileset && CAVE_TILESETS.has(normalizedTileset.toLowerCase()));
+    return Boolean(tilesetName && CAVE_TILESETS.has(tilesetName));
   }
 
   public _resolve_table(
@@ -359,7 +317,7 @@ export class WildEncounterManager {
     if (!encounterTable) {
       return [];
     }
-    const key = resolveEncounterTimeKey(this.game_state.wram.time_of_day ?? "day");
+    const key = resolveEncounterTimeKey(this.game_state.wram.time_of_day);
     const slots = (encounterTable as WildEncounterTable)[key] ?? [];
     return [...slots];
   }
@@ -406,7 +364,7 @@ export class WildEncounterManager {
 
   private _get_base_rate(data: WildEncounterData, surface: EncounterSurface): number {
     if (surface !== EncounterSurface.WATER && data.grass_rates) {
-      const key = resolveEncounterTimeKey(this.game_state.wram.time_of_day ?? "day");
+      const key = resolveEncounterTimeKey(this.game_state.wram.time_of_day);
       return data.grass_rates[key] ?? 0;
     }
     if (surface === EncounterSurface.WATER && data.water_rate !== undefined) {
@@ -438,11 +396,7 @@ export class WildEncounterManager {
         }
       }
     }
-    const mapName = overworld.current_map_name ?? "";
-    if (!mapName) {
-      return null;
-    }
-    return defaultMusicTokenForMap(mapName);
+    return null;
   }
 
   private _apply_cleanse_tag_effect(threshold: number): number {
@@ -459,15 +413,12 @@ export class WildEncounterManager {
         continue;
       }
       const itemValue = item as unknown;
-      const normalized =
+      const itemId =
         typeof itemValue === "string"
-          ? itemValue.toUpperCase()
-          : String(
-              (itemValue as { script_name?: string; id?: string }).script_name ??
-                (itemValue as { id?: string }).id ??
-                itemValue
-            ).toUpperCase();
-      if (normalized === Item.CLEANSE_TAG) {
+          ? itemValue
+          : (itemValue as { script_name?: string; id?: string }).script_name ??
+            (itemValue as { id?: string }).id;
+      if (itemId === Item.CLEANSE_TAG) {
         return threshold >> 1;
       }
     }
@@ -576,11 +527,10 @@ export class WildEncounterManager {
     }
     const wram = this.game_state.wram;
     const speciesTable = this.data_loader.pokemonData ?? {};
-    const normalizedSpecies = species_name?.toUpperCase?.() ?? species_name;
     const species =
       speciesTable instanceof Map
-        ? speciesTable.get(normalizedSpecies)
-        : (speciesTable as Record<string, PokemonSpecies | undefined>)[normalizedSpecies];
+        ? speciesTable.get(species_name)
+        : (speciesTable as Record<string, PokemonSpecies | undefined>)[species_name];
     if (!species) {
       throw new Error(`Unknown wild species '${species_name}' in encounter table.`);
     }

@@ -4,9 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::GameState;
 
-pub const MAX_MONEY: u32 = 999_999;
-pub const MAX_COINS: u16 = 9_999;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MoneyAccount {
@@ -36,21 +33,12 @@ pub struct ScriptEconomyCommand {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrencyCatalog(pub BTreeMap<String, u32>);
 
 impl CurrencyCatalog {
     pub fn get(&self, id: &str) -> Option<u32> {
         self.0.get(id).copied()
-    }
-}
-
-impl Default for CurrencyCatalog {
-    fn default() -> Self {
-        let mut values = BTreeMap::new();
-        values.insert("MAX_COINS".to_string(), u32::from(MAX_COINS));
-        values.insert("MAX_MONEY".to_string(), MAX_MONEY);
-        Self(values)
     }
 }
 
@@ -118,12 +106,25 @@ pub enum EconomyError {
     InvalidAmountExpression { expression: String },
     InvalidAmountToken { token: String },
     UnknownCurrencyConstant { token: String },
+    MissingCurrencyLimit { constant: String },
     AmountOverflow { expression: String },
     CoinsAmountOutOfRange { amount: u32 },
     UnknownMoneyAccount { account: String },
     UnknownEconomyCommand { command: String },
     MissingMoneyAccount { command: String },
     UnexpectedMoneyAccount { command: String },
+}
+
+pub const SCRIPT_MONEY_CHECK_COMMANDS: &[&str] = &["checkmoney"];
+pub const SCRIPT_MONEY_MUTATION_COMMANDS: &[&str] = &["takemoney", "givemoney"];
+pub const SCRIPT_COIN_CHECK_COMMANDS: &[&str] = &["checkcoins"];
+pub const SCRIPT_COIN_MUTATION_COMMANDS: &[&str] = &["givecoins", "takecoins"];
+
+pub fn is_known_script_economy_command(command: &str) -> bool {
+    SCRIPT_MONEY_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command)
+        || SCRIPT_COIN_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command)
 }
 
 pub fn apply_script_economy_command(
@@ -150,6 +151,17 @@ pub fn apply_script_economy_command(
         "takemoney" => {
             let account = require_money_account(&command)?;
             let balance = take_money(state, account, &command.amount_tokens, constants)?;
+            Ok(ScriptEconomyOutcome::MoneyChanged {
+                command: command.command,
+                account,
+                balance,
+                source_script: command.source_script,
+                command_index: command.command_index,
+            })
+        }
+        "givemoney" => {
+            let account = require_money_account(&command)?;
+            let balance = give_money(state, account, &command.amount_tokens, constants)?;
             Ok(ScriptEconomyOutcome::MoneyChanged {
                 command: command.command,
                 account,
@@ -277,11 +289,12 @@ pub fn take_money(
     constants: &CurrencyCatalog,
 ) -> Result<u32, EconomyError> {
     let amount = resolve_amount(amount_tokens, constants)?;
+    let cap = money_cap(constants)?;
     let balance = match account {
         MoneyAccount::YourMoney => &mut state.money,
         MoneyAccount::MomsMoney => &mut state.moms_money,
     };
-    *balance = balance.saturating_sub(amount).min(MAX_MONEY);
+    *balance = balance.saturating_sub(amount).min(cap);
     Ok(*balance)
 }
 
@@ -292,12 +305,21 @@ pub fn give_money(
     constants: &CurrencyCatalog,
 ) -> Result<u32, EconomyError> {
     let amount = resolve_amount(amount_tokens, constants)?;
+    let cap = money_cap(constants)?;
     let balance = match account {
         MoneyAccount::YourMoney => &mut state.money,
         MoneyAccount::MomsMoney => &mut state.moms_money,
     };
-    *balance = balance.saturating_add(amount).min(MAX_MONEY);
+    *balance = balance.saturating_add(amount).min(cap);
     Ok(*balance)
+}
+
+fn money_cap(constants: &CurrencyCatalog) -> Result<u32, EconomyError> {
+    constants
+        .get("MAX_MONEY")
+        .ok_or_else(|| EconomyError::MissingCurrencyLimit {
+            constant: "MAX_MONEY".to_string(),
+        })
 }
 
 pub fn check_coins(
@@ -315,7 +337,8 @@ pub fn give_coins(
     constants: &CurrencyCatalog,
 ) -> Result<u16, EconomyError> {
     let amount = resolve_coin_amount(amount_tokens, constants)?;
-    state.coins = state.coins.saturating_add(amount).min(MAX_COINS);
+    let cap = coin_cap(constants)?;
+    state.coins = state.coins.saturating_add(amount).min(cap);
     Ok(state.coins)
 }
 
@@ -334,10 +357,20 @@ fn resolve_coin_amount(
     constants: &CurrencyCatalog,
 ) -> Result<u16, EconomyError> {
     let amount = resolve_amount(amount_tokens, constants)?;
+    let cap = u32::from(coin_cap(constants)?);
     u16::try_from(amount)
         .ok()
-        .filter(|amount| *amount <= MAX_COINS)
+        .filter(|amount| u32::from(*amount) <= cap)
         .ok_or(EconomyError::CoinsAmountOutOfRange { amount })
+}
+
+fn coin_cap(constants: &CurrencyCatalog) -> Result<u16, EconomyError> {
+    let cap = constants
+        .get("MAX_COINS")
+        .ok_or_else(|| EconomyError::MissingCurrencyLimit {
+            constant: "MAX_COINS".to_string(),
+        })?;
+    u16::try_from(cap).map_err(|_| EconomyError::CoinsAmountOutOfRange { amount: cap })
 }
 
 fn compare_currency(current: u32, required: u32) -> CurrencyCheck {
@@ -380,6 +413,9 @@ fn reject_money_account(command: &ScriptEconomyCommand) -> Result<(), EconomyErr
 mod tests {
     use super::*;
 
+    const TEST_MAX_MONEY: u32 = 999_999;
+    const TEST_MAX_COINS: u16 = 9_999;
+
     fn tokens(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -403,7 +439,7 @@ mod tests {
         let constants = CurrencyCatalog(
             [
                 ("ROUTE43GATE_TOLL".to_string(), 1_000),
-                ("MAX_COINS".to_string(), u32::from(MAX_COINS)),
+                ("MAX_COINS".to_string(), u32::from(TEST_MAX_COINS)),
             ]
             .into_iter()
             .collect(),
@@ -427,7 +463,14 @@ mod tests {
 
     #[test]
     fn money_checks_and_mutation_use_exact_accounts() {
-        let constants = CurrencyCatalog([("TOLL".to_string(), 1_000)].into_iter().collect());
+        let constants = CurrencyCatalog(
+            [
+                ("TOLL".to_string(), 1_000),
+                ("MAX_MONEY".to_string(), TEST_MAX_MONEY),
+            ]
+            .into_iter()
+            .collect(),
+        );
         let mut state = GameState {
             money: 1_200,
             moms_money: 500,
@@ -466,15 +509,19 @@ mod tests {
 
     #[test]
     fn coin_operations_clamp_to_coin_case_and_reject_oversized_amounts() {
-        let constants = CurrencyCatalog::default();
+        let constants = CurrencyCatalog(
+            [("MAX_COINS".to_string(), u32::from(TEST_MAX_COINS))]
+                .into_iter()
+                .collect(),
+        );
         let mut state = GameState {
-            coins: MAX_COINS - 1,
+            coins: TEST_MAX_COINS - 1,
             ..GameState::default()
         };
 
         assert_eq!(
             give_coins(&mut state, &tokens(&["18"]), &constants),
-            Ok(MAX_COINS)
+            Ok(TEST_MAX_COINS)
         );
         assert_eq!(
             check_coins(&state, &tokens(&["MAX_COINS", "-", "1"]), &constants)
@@ -486,6 +533,48 @@ mod tests {
             take_coins(&mut state, &tokens(&["99999"]), &constants),
             Err(EconomyError::CoinsAmountOutOfRange { amount: 99_999 })
         );
+    }
+
+    #[test]
+    fn coin_mutations_require_explicit_max_coins_constant_without_global_cap_fallback() {
+        let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
+        let mut state = GameState {
+            coins: 800,
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            apply_script_economy_command(
+                &mut state,
+                economy_command("givecoins", None, &["PRICE"]),
+                &constants,
+            ),
+            Err(EconomyError::MissingCurrencyLimit {
+                constant: "MAX_COINS".to_string(),
+            })
+        );
+        assert_eq!(state.coins, 800);
+    }
+
+    #[test]
+    fn currency_catalog_default_is_empty_without_builtin_constants() {
+        let constants = CurrencyCatalog::default();
+
+        assert_eq!(constants.get("MAX_COINS"), None);
+        assert_eq!(constants.get("MAX_MONEY"), None);
+    }
+
+    #[test]
+    fn exported_economy_command_sets_are_exact() {
+        assert!(SCRIPT_MONEY_CHECK_COMMANDS.contains(&"checkmoney"));
+        assert!(SCRIPT_MONEY_MUTATION_COMMANDS.contains(&"takemoney"));
+        assert!(SCRIPT_MONEY_MUTATION_COMMANDS.contains(&"givemoney"));
+        assert!(SCRIPT_COIN_CHECK_COMMANDS.contains(&"checkcoins"));
+        assert!(SCRIPT_COIN_MUTATION_COMMANDS.contains(&"givecoins"));
+        assert!(SCRIPT_COIN_MUTATION_COMMANDS.contains(&"takecoins"));
+        assert!(is_known_script_economy_command("checkmoney"));
+        assert!(!is_known_script_economy_command("CheckMoney"));
+        assert!(!is_known_script_economy_command("paymoney"));
     }
 
     #[test]
@@ -548,7 +637,15 @@ mod tests {
 
     #[test]
     fn applies_script_economy_mutations_with_exact_accounts() {
-        let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
+        let constants = CurrencyCatalog(
+            [
+                ("PRICE".to_string(), 500),
+                ("MAX_MONEY".to_string(), TEST_MAX_MONEY),
+                ("MAX_COINS".to_string(), u32::from(TEST_MAX_COINS)),
+            ]
+            .into_iter()
+            .collect(),
+        );
         let mut state = GameState {
             money: 800,
             moms_money: 300,
@@ -581,6 +678,27 @@ mod tests {
         )
         .expect("give coins");
         assert_eq!(state.coins, 510);
+    }
+
+    #[test]
+    fn money_mutations_require_explicit_max_money_constant_without_global_cap_fallback() {
+        let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
+        let mut state = GameState {
+            money: 800,
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            apply_script_economy_command(
+                &mut state,
+                economy_command("givemoney", Some("YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            Err(EconomyError::MissingCurrencyLimit {
+                constant: "MAX_MONEY".to_string(),
+            })
+        );
+        assert_eq!(state.money, 800);
     }
 
     #[test]

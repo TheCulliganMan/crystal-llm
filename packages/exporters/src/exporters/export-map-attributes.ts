@@ -44,6 +44,23 @@ function requireStringField(mapping: Record<string, string | boolean>, key: stri
   return value;
 }
 
+export function resolveMapMusicAssetId(token: string, mapName: string): string {
+  const value = token.trim();
+  if (!value) {
+    throw new Error(`Missing music for map '${mapName}'.`);
+  }
+  if (value === "MUSIC_MAHOGANY_MART") {
+    return "MUSIC_CHERRYGROVE_CITY";
+  }
+  if (value === "RADIO_TOWER_MUSIC | MUSIC_GOLDENROD_CITY") {
+    return "MUSIC_GOLDENROD_CITY";
+  }
+  if (/^MUSIC_[A-Z0-9_]+$/.test(value)) {
+    return value;
+  }
+  throw new Error(`Unsupported map music token '${token}' for map '${mapName}'.`);
+}
+
 export function parseMapPhoneFlag(token: string): number {
   const value = token.trim();
   if (value === "TRUE") return 1;
@@ -250,7 +267,7 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
       phone_flag: Boolean(mapMeta.phone_flag),
       environment: requireStringField(mapMeta, "environment", mapName),
       location: requireStringField(mapMeta, "location", mapName),
-      music: requireStringField(mapMeta, "music", mapName),
+      music: resolveMapMusicAssetId(requireStringField(mapMeta, "music", mapName), mapName),
       palette: requireStringField(mapMeta, "palette", mapName),
       fishing_group: requireStringField(mapMeta, "fishing_group", mapName),
       map_constant: mapConstant,

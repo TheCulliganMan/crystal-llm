@@ -132,7 +132,6 @@ export function exportAudioAssets(
     "audio/music_pointers.asm",
     "MUSIC"
   )
-    .filter(({ id }) => id !== "MUSIC_NONE")
     .map(({ id, label }) => {
       const stem = musicLabelStems.get(label);
       if (!stem) {

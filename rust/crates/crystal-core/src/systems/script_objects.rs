@@ -124,6 +124,69 @@ pub enum ScriptObjectCommandError {
     EventFlag { error: EventFlagError },
 }
 
+pub const SCRIPT_OBJECT_VISIBILITY_COMMANDS: &[&str] = &["appear", "disappear"];
+pub const SCRIPT_OBJECT_COORDINATE_COMMANDS: &[&str] = &["moveobject"];
+pub const SCRIPT_OBJECT_DIRECTION_COMMANDS: &[&str] = &["turnobject"];
+pub const SCRIPT_OBJECT_TARGET_COMMANDS: &[&str] = &["faceobject", "follow"];
+pub const SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS: &[&str] = &["applymovement"];
+pub const SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS: &[&str] = &["applymovementlasttalked"];
+pub const SCRIPT_OBJECT_MOVEMENT_COMMANDS: &[&str] = &["applymovement", "applymovementlasttalked"];
+pub const SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS: &[&str] = &["faceplayer", "stopfollow"];
+pub const SCRIPT_OBJECT_EMOTE_COMMANDS: &[&str] = &["showemote"];
+
+pub const SCRIPT_MOVEMENT_DIRECTION_COMMANDS: &[&str] = &[
+    "step",
+    "slow_step",
+    "big_step",
+    "jump_step",
+    "fast_jump_step",
+    "slow_jump_step",
+    "turn_head",
+];
+pub const SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS: &[&str] = &["step_sleep"];
+pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
+    "step_end",
+    "fix_facing",
+    "remove_fixed_facing",
+    "set_sliding",
+    "remove_sliding",
+    "teleport_from",
+    "skyfall_top",
+    "tree_shake",
+];
+pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
+    "step",
+    "slow_step",
+    "big_step",
+    "jump_step",
+    "fast_jump_step",
+    "slow_jump_step",
+    "turn_head",
+    "step_sleep",
+    "step_end",
+    "fix_facing",
+    "remove_fixed_facing",
+    "set_sliding",
+    "remove_sliding",
+    "teleport_from",
+    "skyfall_top",
+    "tree_shake",
+];
+
+pub fn is_known_script_object_command(command: &str) -> bool {
+    SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_movement_command(command: &str) -> bool {
+    SCRIPT_MOVEMENT_COMMANDS.contains(&command)
+}
+
 pub fn apply_script_object_mutation(
     state: &mut GameState,
     session: &mut OverworldSession,
@@ -214,8 +277,10 @@ pub fn apply_script_movement(
                 });
                 steps_applied += 1;
             }
-            "step" | "slow_step" | "big_step" | "jump_step" | "fast_jump_step"
-            | "slow_jump_step" => {
+            command
+                if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command)
+                    && command != "turn_head" =>
+            {
                 let direction = movement_step_direction(movement, step)?;
                 if !fixed_facing {
                     facing = direction;
@@ -814,6 +879,54 @@ mod tests {
                 object_id: "UNKNOWN_OBJECT".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn exported_object_command_sets_are_exact() {
+        assert!(SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&"appear"));
+        assert!(SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&"disappear"));
+        assert!(SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&"moveobject"));
+        assert!(SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&"turnobject"));
+        assert!(SCRIPT_OBJECT_TARGET_COMMANDS.contains(&"faceobject"));
+        assert!(SCRIPT_OBJECT_TARGET_COMMANDS.contains(&"follow"));
+        assert!(SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&"applymovement"));
+        assert!(SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS.contains(&"applymovementlasttalked"));
+        assert!(SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&"applymovement"));
+        assert!(SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&"applymovementlasttalked"));
+        assert!(SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&"faceplayer"));
+        assert!(SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&"stopfollow"));
+        assert!(SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&"showemote"));
+        assert!(is_known_script_object_command("moveobject"));
+        assert!(!is_known_script_object_command("MoveObject"));
+        assert!(!is_known_script_object_command("hideobject"));
+        assert_eq!(
+            SCRIPT_MOVEMENT_DIRECTION_COMMANDS,
+            &[
+                "step",
+                "slow_step",
+                "big_step",
+                "jump_step",
+                "fast_jump_step",
+                "slow_jump_step",
+                "turn_head"
+            ]
+        );
+        assert_eq!(SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, &["step_sleep"]);
+        assert_eq!(
+            SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
+            &[
+                "step_end",
+                "fix_facing",
+                "remove_fixed_facing",
+                "set_sliding",
+                "remove_sliding",
+                "teleport_from",
+                "skyfall_top",
+                "tree_shake"
+            ]
+        );
+        assert!(is_known_script_movement_command("turn_head"));
+        assert!(!is_known_script_movement_command("spin_forever"));
     }
 
     #[test]

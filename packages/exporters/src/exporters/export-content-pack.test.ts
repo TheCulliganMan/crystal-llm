@@ -9,6 +9,7 @@ const mockReadJsonAssetSync = jest.fn();
 const TEST_CONTENT_PACK_CATEGORIES = [
   "pokemon",
   "moves",
+  "growth_rates",
   "learnsets",
   "level_up_moves",
   "egg_moves",
@@ -18,10 +19,36 @@ const TEST_CONTENT_PACK_CATEGORIES = [
   "map_attributes",
   "map_dimensions",
   "wild_encounters",
+  "field_encounters",
   "runtime_spawn_points",
   "runtime_map_metadata",
   "flee_mons",
+  "roaming_pokemon",
+  "buena_password_categories",
+  "buena_prizes",
+  "kurt_apricorn_recipes",
+  "shuckie_gift",
+  "dratini_move_sets",
+  "bug_contest_config",
+  "battle_tower_rules",
+  "oak_ratings",
+  "odd_egg_definitions",
+  "magikarp_lengths",
+  "happiness_data",
+  "encounter_slot_tables",
+  "encounter_music_modifiers",
+  "battle_stat_multipliers",
+  "capture_wobble_probabilities",
+  "capture_rules",
+  "move_priorities",
+  "type_categories",
+  "type_effectiveness",
+  "weather_modifiers",
+  "battle_reward_rules",
+  "battle_escape_rules",
+  "step_event_rules",
   "fishing",
+  "field_moves",
   "fruit_trees",
   "npcs",
   "pokegear_landmarks",
@@ -160,6 +187,148 @@ describe("export-core-content-pack", () => {
       evolutions: [{ species: "TOTODILE" } as never],
       wildEncounters: [{ map_name: "Route1" } as never],
       fleeMons: { always: ["RAIKOU"], often: [], sometimes: [] },
+      roamingPokemon: [{ species: "RAIKOU", level: 40, mapGroup: 2, mapNumber: 5 }],
+      buenaPasswordCategories: [
+        { id: "HealingItems", categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] },
+      ],
+      buenaPrizes: [{ itemId: "RARE_CANDY", cost: 3 }],
+      kurtApricornRecipes: [{ apricorn: "RED_APRICORN", ball: "LEVEL_BALL" }],
+      shuckieGift: {
+        species: "SHUCKLE",
+        level: 15,
+        heldItem: "BERRY",
+        nickname: "SHUCKIE",
+        originalTrainerName: "MANIA",
+        originalTrainerId: 518,
+        gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
+      },
+      dratiniMoveSets: [{ mode: 0, moves: ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] }],
+      bugContestConfig: {
+        parkBalls: 20,
+        timerMinutes: 20,
+        timerSeconds: 0,
+        selectedContestantCount: 5,
+        contestantFlags: ["EVENT_BUG_CATCHING_CONTESTANT_1A", "EVENT_BUG_CATCHING_CONTESTANT_2A"],
+      },
+      battleTowerRules: {
+        bannedSpecies: ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+        requiredPartyCount: 3,
+        challengeStreakLength: 7,
+        minimumLevelGroup: 1,
+        maximumLevelGroup: 10,
+        levelGroupSize: 10,
+        partyCountFailureText: "OnlyThreeMonMayBeEnteredText",
+        duplicateSpeciesFailureText: "TheMonMustAllBeDifferentKindsText",
+        duplicateHeldItemFailureText: "TheMonMustNotHoldTheSameItemsText",
+        eggFailureText: "YouCantTakeAnEggText",
+      },
+      oakRatings: [
+        {
+          caughtCountLimit: 9,
+          fanfare: "SFX_DEX_FANFARE_LESS_THAN_20",
+          textLabel: "OakRating01",
+        },
+      ],
+      oddEggDefinitions: [
+        {
+          species: "CLEFFA",
+          moves: ["POUND", "CHARM", "DIZZY_PUNCH"],
+          originalTrainerId: 768,
+          dvs: [2, 10, 10, 10],
+          probability: 100,
+          level: 5,
+          experience: 125,
+          hatchCycles: 20,
+          nickname: "EGG",
+          originalTrainerName: "ODD",
+        },
+      ],
+      magikarpLengths: [
+        { threshold: 110, divisor: 1 },
+        { threshold: 310, divisor: 2 },
+      ],
+      happinessData: {
+        changes: [{ code: "HAPPINESS_GROOMING", changeCode: 18, low: 3, mid: 3, high: 1 }],
+        services: [
+          {
+            routine: "DaisysGrooming",
+            outcomes: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
+          },
+        ],
+      },
+      encounterSlotTables: {
+        grass: [{ threshold: 100, slot: 0 }],
+        water: [{ threshold: 100, slot: 0 }],
+      },
+      encounterMusicModifiers: {
+        modifiers: [{ music_id: "MUSIC_POKEMON_MARCH", numerator: 2, denominator: 1 }],
+      },
+      battleStatMultipliers: {
+        stat: [{ numerator: 1, denominator: 1 }],
+        accuracy: [{ numerator: 1, denominator: 1 }],
+      },
+      captureWobbleProbabilities: [{ catch_rate: 255, chance: 255 }],
+      captureRules: {
+        fast_ball_species: ["MAGNEMITE"],
+        heavy_ball_modifiers: { MAGNEMITE: 0 },
+        ball_rules: {
+          POKE_BALL: {
+            multiplier_numerator: 1,
+            multiplier_denominator: 1,
+            battle_type: "",
+            skip_hp_calc: false,
+            use_heavy_ball_weight_modifier: false,
+            use_level_ball_multiplier: false,
+            require_same_species: false,
+            require_same_gender: false,
+            require_fast_species: false,
+          },
+        },
+        guaranteed_capture_balls: [],
+        status_bonus: { SLEEP: 10, FREEZE: 10 },
+      },
+      movePriorities: {
+        base_priority: 1,
+        effect_priorities: [{ move_effect: "PRIORITY_HIT", priority: 2 }],
+        move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
+      },
+      typeCategories: {
+        physical: ["NORMAL", "FIGHTING"],
+        special: ["FIRE", "WATER"],
+      },
+      typeEffectiveness: {
+        matchups: [{ attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } }],
+        foresight_matchups: [{ attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } }],
+      },
+      weatherModifiers: {
+        type_modifiers: [
+          { weather: "WEATHER_RAIN", move_type: "WATER", multiplier: { numerator: 3, denominator: 2 } },
+        ],
+        move_effect_modifiers: [],
+      },
+      battleRewardRules: {
+        max_level: 100,
+        wild_exp_divisor: 7,
+        trainer_exp_numerator: 3,
+        trainer_exp_denominator: 2,
+      },
+      battleEscapeRules: {
+        player_speed_multiplier: 32,
+        enemy_speed_divisor: 4,
+        failed_attempt_bonus: 30,
+        rng_roll_values: 256,
+      },
+      stepEventRules: {
+        poison_step_interval: 4,
+        egg_step_trigger: 128,
+        hatched_egg_happiness: 120,
+        poison_status: "POISON",
+        egg_nickname: "EGG",
+        happiness_step_counter_mask: 1,
+        happiness_step_counter_target: 0,
+      },
+      fruitTrees: { FRUITTREE_ROUTE_29: "BERRY" },
+      currencyConstants: { MAX_MONEY: 999999, MAX_COINS: 9999 },
       mapDimensions: { ROUTE_1: { width: 10, height: 8 } },
       mapAttributes: { Route1: { environment: "TOWN", map_constant: "ROUTE_1" } },
       items: [{ name: "POTION", price: 300 } as never],
@@ -257,8 +426,10 @@ describe("export-core-content-pack", () => {
       },
       { indent: 2 }
     );
-    expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
-      "content-packs/core-modular.compiled.json",
+    const compiledCall = mockWriteJsonToTargets.mock.calls.find(
+      (call) => call[0] === "content-packs/core-modular.compiled.json"
+    );
+    expect(compiledCall?.[1]).toEqual(
       expect.objectContaining({
         version: 1,
         packId: "core-modular",
@@ -273,9 +444,180 @@ describe("export-core-content-pack", () => {
           map_dimensions: [{ ROUTE_1: { width: 10, height: 8 } }],
           wild_encounters: [{ map_name: "Route1" }],
           flee_mons: [{ always: ["RAIKOU"], often: [], sometimes: [] }],
+          roaming_pokemon: [[{ species: "RAIKOU", level: 40, mapGroup: 2, mapNumber: 5 }]],
+          buena_password_categories: [[{ id: "HealingItems", categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] }]],
+          buena_prizes: [[{ itemId: "RARE_CANDY", cost: 3 }]],
+          kurt_apricorn_recipes: [[{ apricorn: "RED_APRICORN", ball: "LEVEL_BALL" }]],
+          shuckie_gift: [
+            {
+              species: "SHUCKLE",
+              level: 15,
+              heldItem: "BERRY",
+              nickname: "SHUCKIE",
+              originalTrainerName: "MANIA",
+              originalTrainerId: 518,
+              gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
+            },
+          ],
+          dratini_move_sets: [[{ mode: 0, moves: ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] }]],
+          bug_contest_config: [
+            {
+              parkBalls: 20,
+              timerMinutes: 20,
+              timerSeconds: 0,
+              selectedContestantCount: 5,
+              contestantFlags: ["EVENT_BUG_CATCHING_CONTESTANT_1A", "EVENT_BUG_CATCHING_CONTESTANT_2A"],
+            },
+          ],
+          battle_tower_rules: [
+            {
+              bannedSpecies: ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+              requiredPartyCount: 3,
+              challengeStreakLength: 7,
+              minimumLevelGroup: 1,
+              maximumLevelGroup: 10,
+              levelGroupSize: 10,
+              partyCountFailureText: "OnlyThreeMonMayBeEnteredText",
+              duplicateSpeciesFailureText: "TheMonMustAllBeDifferentKindsText",
+              duplicateHeldItemFailureText: "TheMonMustNotHoldTheSameItemsText",
+              eggFailureText: "YouCantTakeAnEggText",
+            },
+          ],
+          oak_ratings: [
+            [
+              {
+                caughtCountLimit: 9,
+                fanfare: "SFX_DEX_FANFARE_LESS_THAN_20",
+                textLabel: "OakRating01",
+              },
+            ],
+          ],
+          odd_egg_definitions: [
+            [
+              {
+                species: "CLEFFA",
+                moves: ["POUND", "CHARM", "DIZZY_PUNCH"],
+                originalTrainerId: 768,
+                dvs: [2, 10, 10, 10],
+                probability: 100,
+                level: 5,
+                experience: 125,
+                hatchCycles: 20,
+                nickname: "EGG",
+                originalTrainerName: "ODD",
+              },
+            ],
+          ],
+          magikarp_lengths: [[{ threshold: 110, divisor: 1 }, { threshold: 310, divisor: 2 }]],
+          happiness_data: [
+            {
+              changes: [{ code: "HAPPINESS_GROOMING", changeCode: 18, low: 3, mid: 3, high: 1 }],
+              services: [
+                {
+                  routine: "DaisysGrooming",
+                  outcomes: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
+                },
+              ],
+            },
+          ],
+          encounter_slot_tables: [
+            {
+              grass: [{ threshold: 100, slot: 0 }],
+              water: [{ threshold: 100, slot: 0 }],
+            },
+          ],
+          encounter_music_modifiers: [
+            {
+              modifiers: [{ music_id: "MUSIC_POKEMON_MARCH", numerator: 2, denominator: 1 }],
+            },
+          ],
+          battle_stat_multipliers: [
+            {
+              stat: [{ numerator: 1, denominator: 1 }],
+              accuracy: [{ numerator: 1, denominator: 1 }],
+            },
+          ],
+          capture_wobble_probabilities: [[{ catch_rate: 255, chance: 255 }]],
+          capture_rules: [
+            {
+              fast_ball_species: ["MAGNEMITE"],
+              heavy_ball_modifiers: { MAGNEMITE: 0 },
+              ball_rules: {
+                POKE_BALL: {
+                  multiplier_numerator: 1,
+                  multiplier_denominator: 1,
+                  battle_type: "",
+                  skip_hp_calc: false,
+                  use_heavy_ball_weight_modifier: false,
+                  use_level_ball_multiplier: false,
+                  require_same_species: false,
+                  require_same_gender: false,
+                  require_fast_species: false,
+                },
+              },
+              guaranteed_capture_balls: [],
+              status_bonus: { SLEEP: 10, FREEZE: 10 },
+            },
+          ],
+          move_priorities: [
+            {
+              base_priority: 1,
+              effect_priorities: [{ move_effect: "PRIORITY_HIT", priority: 2 }],
+              move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
+            },
+          ],
+          type_categories: [
+            {
+              physical: ["NORMAL", "FIGHTING"],
+              special: ["FIRE", "WATER"],
+            },
+          ],
+          type_effectiveness: [
+            {
+              matchups: [{ attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } }],
+              foresight_matchups: [
+                { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
+              ],
+            },
+          ],
+          weather_modifiers: [
+            {
+              type_modifiers: [
+                { weather: "WEATHER_RAIN", move_type: "WATER", multiplier: { numerator: 3, denominator: 2 } },
+              ],
+              move_effect_modifiers: [],
+            },
+          ],
+          battle_reward_rules: [
+            {
+              max_level: 100,
+              wild_exp_divisor: 7,
+              trainer_exp_numerator: 3,
+              trainer_exp_denominator: 2,
+            },
+          ],
+          battle_escape_rules: [
+            {
+              player_speed_multiplier: 32,
+              enemy_speed_divisor: 4,
+              failed_attempt_bonus: 30,
+              rng_roll_values: 256,
+            },
+          ],
+          step_event_rules: [
+            {
+              poison_step_interval: 4,
+              egg_step_trigger: 128,
+              hatched_egg_happiness: 120,
+              poison_status: "POISON",
+              egg_nickname: "EGG",
+              happiness_step_counter_mask: 1,
+              happiness_step_counter_target: 0,
+            },
+          ],
           fishing: [],
-          fruit_trees: [],
-          currency_constants: [],
+          fruit_trees: [{ FRUITTREE_ROUTE_29: "BERRY" }],
+          currency_constants: [{ MAX_MONEY: 999999, MAX_COINS: 9999 }],
           npcs: [
             {
               Route1: [
@@ -322,9 +664,9 @@ describe("export-core-content-pack", () => {
           pokemon_frontpic_anim: [{ TOTODILE: { commands: [{ kind: "endanim" }] } }],
           audio: [{ id: "MUSIC_ROUTE_29", path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid", kind: "music" }],
         }),
-      }),
-      { indent: 0 }
+      })
     );
+    expect(compiledCall?.[2]).toEqual({ indent: 0 });
 
     const indexCall = mockWriteJsonToTargets.mock.calls.at(-1);
     expect(indexCall?.[0]).toBe("content-packs/index.json");
@@ -347,6 +689,44 @@ describe("export-core-content-pack", () => {
             map_attributes: ["content-packs/core-modular/map_attributes/Route1.json"],
             map_dimensions: ["content-packs/core-modular/map_dimensions/ROUTE_1.json"],
             wild_encounters: ["content-packs/core-modular/wild_encounters/Route1.json"],
+            roaming_pokemon: ["content-packs/core-modular/roaming_pokemon/roaming_pokemon.json"],
+            buena_password_categories: [
+              "content-packs/core-modular/buena_password_categories/buena_password_categories.json",
+            ],
+            buena_prizes: ["content-packs/core-modular/buena_prizes/buena_prizes.json"],
+            kurt_apricorn_recipes: [
+              "content-packs/core-modular/kurt_apricorn_recipes/kurt_apricorn_recipes.json",
+            ],
+            shuckie_gift: ["content-packs/core-modular/shuckie_gift/shuckie_gift.json"],
+            dratini_move_sets: ["content-packs/core-modular/dratini_move_sets/dratini_move_sets.json"],
+            bug_contest_config: ["content-packs/core-modular/bug_contest_config/bug_contest_config.json"],
+            battle_tower_rules: ["content-packs/core-modular/battle_tower_rules/battle_tower_rules.json"],
+            oak_ratings: ["content-packs/core-modular/oak_ratings/oak_ratings.json"],
+            odd_egg_definitions: ["content-packs/core-modular/odd_egg_definitions/odd_egg_definitions.json"],
+            magikarp_lengths: ["content-packs/core-modular/magikarp_lengths/magikarp_lengths.json"],
+            happiness_data: ["content-packs/core-modular/happiness_data/happiness_data.json"],
+            encounter_slot_tables: [
+              "content-packs/core-modular/encounter_slot_tables/encounter_slot_tables.json",
+            ],
+            encounter_music_modifiers: [
+              "content-packs/core-modular/encounter_music_modifiers/encounter_music_modifiers.json",
+            ],
+            battle_stat_multipliers: [
+              "content-packs/core-modular/battle_stat_multipliers/battle_stat_multipliers.json",
+            ],
+            capture_wobble_probabilities: [
+              "content-packs/core-modular/capture_wobble_probabilities/capture_wobble_probabilities.json",
+            ],
+            capture_rules: ["content-packs/core-modular/capture_rules/rules.json"],
+            move_priorities: ["content-packs/core-modular/move_priorities/move_priorities.json"],
+            type_categories: ["content-packs/core-modular/type_categories/type_categories.json"],
+            type_effectiveness: ["content-packs/core-modular/type_effectiveness/type_effectiveness.json"],
+            weather_modifiers: ["content-packs/core-modular/weather_modifiers/weather_modifiers.json"],
+            battle_reward_rules: ["content-packs/core-modular/battle_reward_rules/rules.json"],
+            battle_escape_rules: ["content-packs/core-modular/battle_escape_rules/rules.json"],
+            step_event_rules: ["content-packs/core-modular/step_event_rules/rules.json"],
+            fruit_trees: ["content-packs/core-modular/fruit_trees/fruit_trees.json"],
+            currency_constants: ["content-packs/core-modular/currency_constants/constants.json"],
             npcs: ["content-packs/core-modular/npcs/Route1.json"],
             pokegear_landmarks: ["content-packs/core-modular/pokegear_landmarks/landmarks.json"],
             items: ["content-packs/core-modular/items/POTION.json"],
@@ -359,6 +739,13 @@ describe("export-core-content-pack", () => {
           enabled: false,
           files: expect.objectContaining({
             audio: ["content-packs/core-modular/music/MUSIC_ROUTE_29.mid"],
+          }),
+        }),
+        expect.objectContaining({
+          id: "module-fruit-trees-fruit_trees",
+          enabled: false,
+          files: expect.objectContaining({
+            fruit_trees: ["content-packs/core-modular/fruit_trees/fruit_trees.json"],
           }),
         }),
         expect.objectContaining({
@@ -719,7 +1106,7 @@ describe("export-core-content-pack", () => {
               nickname: "STRING",
               level: 7,
               item: "BERRY",
-              moves: [{ name: "TACKLE", current_pp: 35 }],
+              moves: [{ name: "TACKLE", current_pp: 35, pp_ups: 0 }],
               hp: 20,
               dvs: { attack: 1, defense: 0, speed: 0, special: 0, hp: 0 },
             },
@@ -741,7 +1128,7 @@ describe("export-core-content-pack", () => {
       species: "CATERPIE",
       level: 7,
       item: "BERRY",
-      moves: [{ name: "TACKLE", current_pp: 35 }],
+      moves: [{ name: "TACKLE", current_pp: 35, pp_ups: 0 }],
       dvs: { attack: 1, defense: 0, speed: 0, special: 0, hp: 0 },
     });
 

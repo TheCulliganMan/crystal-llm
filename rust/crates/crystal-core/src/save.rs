@@ -239,17 +239,13 @@ pub fn assert_save_matches_modpack(
 }
 
 fn validate_save_path(path: &Path) -> Result<(), SaveError> {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    if extension != SAVE_EXTENSION {
-        return Err(SaveError::InvalidExtension {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension == SAVE_EXTENSION => Ok(()),
+        _ => Err(SaveError::InvalidExtension {
             path: path.display().to_string(),
             expected: SAVE_EXTENSION,
-        });
+        }),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -296,6 +292,19 @@ mod tests {
         );
 
         let error = write_save_game(&path, &save).expect_err("json saves are not runtime saves");
+
+        assert!(matches!(error, SaveError::InvalidExtension { .. }));
+    }
+
+    #[test]
+    fn save_path_requires_explicit_crystalsave_extension() {
+        let path = temp_save_path("slot");
+        let save = SaveGame::new(
+            GameState::default(),
+            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+        );
+
+        let error = write_save_game(&path, &save).expect_err("missing extension is invalid");
 
         assert!(matches!(error, SaveError::InvalidExtension { .. }));
     }

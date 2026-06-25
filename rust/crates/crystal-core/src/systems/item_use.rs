@@ -32,12 +32,6 @@ pub struct ItemUseRequest {
 #[serde(deny_unknown_fields)]
 pub struct ItemUseOutcome {
     pub item_id: String,
-    pub effect: String,
-    pub held_effect: String,
-    pub parameter: i16,
-    pub property: String,
-    pub field_menu: String,
-    pub battle_menu: String,
     pub context: ItemUseContext,
     pub consumed: bool,
 }
@@ -74,11 +68,11 @@ pub fn use_bag_item(
             item_id: request.item_id,
         });
     }
-    let menu = match request.context {
-        ItemUseContext::Field => &item.field_menu,
-        ItemUseContext::Battle => &item.battle_menu,
+    let usable = match request.context {
+        ItemUseContext::Field => item.field_usable,
+        ItemUseContext::Battle => item.battle_usable,
     };
-    if menu == "ITEMMENU_NOUSE" {
+    if !usable {
         return Err(ItemUseError::UnusableInContext {
             item_id: request.item_id,
             context: request.context,
@@ -95,12 +89,6 @@ pub fn use_bag_item(
     };
     let outcome = ItemUseOutcome {
         item_id: request.item_id,
-        effect: item.effect.clone(),
-        held_effect: item.held_effect.clone(),
-        parameter: item.parameter,
-        property: item.property.clone(),
-        field_menu: item.field_menu.clone(),
-        battle_menu: item.battle_menu.clone(),
         context: request.context,
         consumed,
     };
@@ -109,12 +97,6 @@ pub fn use_bag_item(
         .item_use_events
         .push(ItemUseRuntimeEvent {
             item_id: outcome.item_id.clone(),
-            effect: outcome.effect.clone(),
-            held_effect: outcome.held_effect.clone(),
-            parameter: outcome.parameter,
-            property: outcome.property.clone(),
-            field_menu: outcome.field_menu.clone(),
-            battle_menu: outcome.battle_menu.clone(),
             context: outcome.context.as_str().to_string(),
             consumed: outcome.consumed,
         });
@@ -124,7 +106,7 @@ pub fn use_bag_item(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ItemPocket;
+    use crate::models::{ItemPocket, item_pocket};
 
     fn item(
         id: &str,
@@ -137,16 +119,38 @@ mod tests {
             name: id.replace('_', " "),
             description: String::new(),
             effect: format!("EFFECT_{id}"),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 7,
             property: "NO_LIMITS".to_string(),
             pocket,
             field_menu: field_menu.to_string(),
+            field_usable: field_menu != "ITEMMENU_NOUSE",
             battle_menu: battle_menu.to_string(),
+            battle_usable: battle_menu != "ITEMMENU_NOUSE",
             script_name: id.to_string(),
             consumable,
             tmhm_index: None,
+            tmhm_move: None,
         }
     }
 
@@ -158,10 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn uses_exact_modpack_item_effect_and_consumes_declared_consumables() {
+    fn uses_exact_modpack_item_id_and_consumes_declared_consumables() {
         let items = catalog(vec![item(
             "POTION",
-            ItemPocket::Item,
+            item_pocket("ITEM"),
             "ITEMMENU_PARTY",
             "ITEMMENU_PARTY",
             true,
@@ -179,7 +183,7 @@ mod tests {
         )
         .expect("use item");
 
-        assert_eq!(outcome.effect, "EFFECT_POTION");
+        assert_eq!(outcome.item_id, "POTION");
         assert!(outcome.consumed);
         assert_eq!(state.bag.quantity(&items["POTION"]), 1);
         assert_eq!(state.script_runtime.item_use_events.len(), 1);
@@ -188,10 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_key_items_record_effect_without_consumption() {
+    fn exact_key_items_record_item_id_without_consumption() {
         let items = catalog(vec![item(
             "ITEMFINDER",
-            ItemPocket::KeyItem,
+            item_pocket("KEY_ITEM"),
             "ITEMMENU_CLOSE",
             "ITEMMENU_NOUSE",
             false,
@@ -215,16 +219,17 @@ mod tests {
         assert!(!outcome.consumed);
         assert_eq!(state.bag.quantity(&items["ITEMFINDER"]), 1);
         assert_eq!(
-            state.script_runtime.item_use_events[0].effect,
-            "EFFECT_ITEMFINDER"
+            state.script_runtime.item_use_events[0].item_id,
+            "ITEMFINDER"
         );
+        assert_eq!(state.script_runtime.item_use_events[0].context, "field");
     }
 
     #[test]
     fn rejects_unknown_case_changed_and_context_unusable_items() {
         let items = catalog(vec![item(
             "POTION",
-            ItemPocket::Item,
+            item_pocket("ITEM"),
             "ITEMMENU_PARTY",
             "ITEMMENU_NOUSE",
             true,
@@ -268,10 +273,45 @@ mod tests {
     }
 
     #[test]
+    fn accepts_modpack_item_menu_ids_without_core_whitelisting() {
+        let items = catalog(vec![item(
+            "MOD_MENU_ITEM",
+            item_pocket("ITEM"),
+            "ITEMMENU_MODDED",
+            "ITEMMENU_NOUSE",
+            true,
+        )]);
+        let mut state = GameState::default();
+        state
+            .bag
+            .add_item(&items["MOD_MENU_ITEM"], 1)
+            .expect("add item");
+
+        let outcome = use_bag_item(
+            &mut state,
+            &items,
+            ItemUseRequest {
+                item_id: "MOD_MENU_ITEM".to_string(),
+                context: ItemUseContext::Field,
+            },
+        )
+        .expect("modpack menu ids are definitive data");
+
+        assert_eq!(outcome.item_id, "MOD_MENU_ITEM");
+        assert!(outcome.consumed);
+        assert_eq!(state.bag.quantity(&items["MOD_MENU_ITEM"]), 0);
+        assert_eq!(state.script_runtime.item_use_events.len(), 1);
+        assert_eq!(
+            state.script_runtime.item_use_events[0].item_id,
+            "MOD_MENU_ITEM"
+        );
+    }
+
+    #[test]
     fn not_held_items_do_not_record_or_consume() {
         let items = catalog(vec![item(
             "POTION",
-            ItemPocket::Item,
+            item_pocket("ITEM"),
             "ITEMMENU_PARTY",
             "ITEMMENU_PARTY",
             true,
@@ -301,7 +341,7 @@ mod tests {
     fn non_consumable_items_are_pack_declared_not_pocket_inferred() {
         let items = catalog(vec![item(
             "MODDED_CHARM",
-            ItemPocket::Item,
+            item_pocket("ITEM"),
             "ITEMMENU_CLOSE",
             "ITEMMENU_NOUSE",
             false,

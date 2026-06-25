@@ -234,13 +234,14 @@ pub fn extract_asm_program(source_text: &str, entry_label: &str) -> Option<Strin
     (!blocks.is_empty()).then(|| blocks.join("\n\n"))
 }
 
-pub fn parse_audio_program(source_text: &str) -> ParsedAudioProgram {
+pub fn parse_audio_program(source_text: &str) -> Result<ParsedAudioProgram> {
     let mut parsed = ParsedAudioProgram {
         channel_count: 0,
         channels: BTreeMap::new(),
         subroutines: BTreeMap::new(),
     };
     let mut current_label: Option<String> = None;
+    let mut channel_count_seen = false;
 
     for raw in source_text.lines() {
         let line = clean_asm_line(raw);
@@ -271,8 +272,21 @@ pub fn parse_audio_program(source_text: &str) -> ParsedAudioProgram {
 
         let (command, args) = split_command(&line);
         if command == "channel_count" {
-            if let Some(first) = args.first().and_then(|arg| arg.parse::<u8>().ok()) {
-                parsed.channel_count = first;
+            if channel_count_seen {
+                anyhow::bail!("audio program declares channel_count more than once");
+            }
+            channel_count_seen = true;
+            if args.len() != 1 {
+                anyhow::bail!(
+                    "audio program channel_count requires exactly one argument, found {}",
+                    args.len()
+                );
+            }
+            parsed.channel_count = args[0]
+                .parse::<u8>()
+                .with_context(|| format!("invalid audio channel_count '{}'", args[0]))?;
+            if parsed.channel_count == 0 {
+                anyhow::bail!("audio program channel_count must be positive");
             }
         }
 
@@ -288,7 +302,18 @@ pub fn parse_audio_program(source_text: &str) -> ParsedAudioProgram {
         }
     }
 
-    parsed
+    if !channel_count_seen {
+        anyhow::bail!("audio program is missing channel_count");
+    }
+    if parsed.channels.len() != usize::from(parsed.channel_count) {
+        anyhow::bail!(
+            "audio program channel_count {} does not match {} parsed channels",
+            parsed.channel_count,
+            parsed.channels.len()
+        );
+    }
+
+    Ok(parsed)
 }
 
 fn parse_pointer_sections(text: &str) -> BTreeMap<String, Vec<String>> {
@@ -515,6 +540,8 @@ mod tests {
         .expect("copy unsupported MIDI extension fixture");
         std::fs::write(temp.join("cries/CRY_NIDORAN_M.mp3"), b"not supported")
             .expect("write unsupported cry format");
+        std::fs::write(temp.join("sfx/SFX_TACKLE.MID"), b"MThd")
+            .expect("write case-changed MIDI extension");
 
         let error = AudioRepository::from_audio_root(&temp)
             .load_pointer_table()
@@ -523,7 +550,9 @@ mod tests {
 
         assert!(error.contains("must use the .mid extension"));
         assert!(
-            error.contains("ignored.midi") || error.contains("CRY_NIDORAN_M.mp3"),
+            error.contains("ignored.midi")
+                || error.contains("CRY_NIDORAN_M.mp3")
+                || error.contains("SFX_TACKLE.MID"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(temp);
@@ -658,7 +687,7 @@ Music_Other:
         assert!(extracted.contains("sound_call .sub1"), "{extracted}");
         assert!(!extracted.contains("Music_Other:"), "{extracted}");
 
-        let parsed = parse_audio_program(&extracted);
+        let parsed = parse_audio_program(&extracted).expect("parse extracted audio");
         assert_eq!(parsed.channel_count, 1);
         assert!(parsed.channels.contains_key("Music_Test_Ch1"));
         assert!(parsed.subroutines.contains_key(".mainloop"));
@@ -677,6 +706,56 @@ Music_Test_Ch1:
 "#;
 
         assert_eq!(extract_asm_program(source, "Music_Test"), None);
+    }
+
+    #[test]
+    fn parsed_audio_program_requires_exact_channel_count() {
+        let missing = parse_audio_program(
+            r#"
+Music_Test:
+    channel 1, Music_Test_Ch1
+
+Music_Test_Ch1:
+    sound_ret
+"#,
+        )
+        .expect_err("missing channel_count must not default to zero")
+        .to_string();
+        assert!(missing.contains("missing channel_count"), "{missing}");
+
+        let malformed = parse_audio_program(
+            r#"
+Music_Test:
+    channel_count many
+    channel 1, Music_Test_Ch1
+
+Music_Test_Ch1:
+    sound_ret
+"#,
+        )
+        .expect_err("malformed channel_count must not be ignored")
+        .to_string();
+        assert!(
+            malformed.contains("invalid audio channel_count"),
+            "{malformed}"
+        );
+
+        let mismatch = parse_audio_program(
+            r#"
+Music_Test:
+    channel_count 2
+    channel 1, Music_Test_Ch1
+
+Music_Test_Ch1:
+    sound_ret
+"#,
+        )
+        .expect_err("channel_count must match parsed channels")
+        .to_string();
+        assert!(
+            mismatch.contains("does not match 1 parsed channels"),
+            "{mismatch}"
+        );
     }
 
     #[test]

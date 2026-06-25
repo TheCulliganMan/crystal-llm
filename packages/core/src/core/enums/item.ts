@@ -17,6 +17,7 @@ export enum ItemEffect {
   ESCAPE_ROPE = "ESCAPE_ROPE",
   REPEL = "REPEL",
   RESTORE_PP = "RESTORE_PP",
+  PP_UP = "PP_UP",
   VITAMIN = "VITAMIN",
   RARE_CANDY = "RARE_CANDY",
   X_ACCURACY = "X_ACCURACY",

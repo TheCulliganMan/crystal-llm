@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -85,6 +85,49 @@ pub enum ScriptTextCommandError {
     UnknownTextLabel { command: String, text_label: String },
     #[error("script text command '{command}' has unexpected text label")]
     UnexpectedTextLabel { command: String },
+}
+
+pub const SCRIPT_TEXT_NO_LABEL_COMMANDS: &[&str] = &[
+    "opentext",
+    "closetext",
+    "promptbutton",
+    "waitbutton",
+    "yesorno",
+];
+
+pub const SCRIPT_TEXT_LABEL_COMMANDS: &[&str] = &["writetext", "jumptext", "jumptextfaceplayer"];
+
+pub fn is_known_script_text_command(command: &str) -> bool {
+    SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command)
+        || SCRIPT_TEXT_LABEL_COMMANDS.contains(&command)
+}
+
+pub fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
+    BTreeMap::from([
+        ("text", 1),
+        ("line", 1),
+        ("para", 1),
+        ("cont", 1),
+        ("done", 0),
+        ("prompt", 0),
+        ("text_ram", 1),
+        ("text_decimal", 3),
+        ("text_far", 1),
+        ("sound_dex_fanfare_50_79", 0),
+        ("sound_dex_fanfare_80_109", 0),
+        ("sound_dex_fanfare_140_169", 0),
+        ("sound_dex_fanfare_170_199", 0),
+        ("sound_dex_fanfare_200_229", 0),
+        ("sound_dex_fanfare_230_plus", 0),
+    ])
+}
+
+pub fn menu_definition_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
+    BTreeMap::from([
+        ("db", BTreeSet::from([1, 3])),
+        ("menu_coords", BTreeSet::from([4])),
+        ("dw", BTreeSet::from([1])),
+    ])
 }
 
 pub fn resolve_script_text_command(
@@ -312,6 +355,33 @@ mod tests {
             source_script: "TextScript".to_string(),
             command_index: 3,
         }
+    }
+
+    #[test]
+    fn exported_text_command_sets_are_exact() {
+        assert!(SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&"opentext"));
+        assert!(SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&"yesorno"));
+        assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"writetext"));
+        assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"jumptextfaceplayer"));
+        assert!(is_known_script_text_command("jumptext"));
+        assert!(!is_known_script_text_command("JumpText"));
+        assert!(!is_known_script_text_command("text"));
+        assert_eq!(text_body_command_arg_counts()["text"], 1);
+        assert_eq!(text_body_command_arg_counts()["text_decimal"], 3);
+        assert_eq!(
+            text_body_command_arg_counts()["sound_dex_fanfare_230_plus"],
+            0
+        );
+        assert!(!text_body_command_arg_counts().contains_key("text_default"));
+        assert_eq!(
+            menu_definition_command_arg_counts()["menu_coords"],
+            BTreeSet::from([4])
+        );
+        assert_eq!(
+            menu_definition_command_arg_counts()["db"],
+            BTreeSet::from([1, 3])
+        );
+        assert!(!menu_definition_command_arg_counts().contains_key("verticalmenu"));
     }
 
     #[test]

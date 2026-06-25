@@ -9,20 +9,22 @@ import { EventManager } from "@pokecrystal/core/engine/events/events";
 import { createTestPokemon } from "@pokecrystal/core/engine/world/story-events/test-utils";
 import type { WildEncounterData } from "@pokecrystal/assets/content/wild-encounter-data";
 import { resolveCollisionValue } from "@pokecrystal/core/engine/world/overworld/collision-data";
+import { Item } from "@pokecrystal/core/core/enums/item";
 
 describe("Wild encounter data", () => {
   it("loads route encounters from asset data", () => {
     const loader = new DataLoader();
     loader.load_wild_encounter_data();
-    expect(loader.wild_encounter_data?.has("ROUTE_29")).toBe(true);
+    expect(loader.wild_encounter_data?.has("Route29")).toBe(true);
   });
 
-  it("resolves encounter data for route map names", () => {
+  it("resolves encounter data for exact modpack map ids", () => {
     const loader = new DataLoader();
     loader.load_wild_encounter_data();
     const gameState = { wram: {} } as GameState;
     const manager = new WildEncounterManager(gameState, loader, null);
     expect(manager._lookup_map_data("Route29")).not.toBeNull();
+    expect(manager._lookup_map_data("ROUTE_29")).toBeNull();
   });
 
   it("loads Ice Path encounter data from ASM assets", () => {
@@ -32,7 +34,7 @@ describe("Wild encounter data", () => {
     const manager = new WildEncounterManager(gameState, loader, null);
     const data = manager._lookup_map_data("IcePath1F");
 
-    expect(data?.map_name).toBe("ICE_PATH_1F");
+    expect(data?.map_name).toBe("IcePath1F");
     expect(data?.grass_rates?.day).toBe(2);
     expect(data?.grass?.day).toEqual(
       expect.arrayContaining([{ level: 21, species: "SWINUB" }])
@@ -55,6 +57,18 @@ describe("Wild encounter data", () => {
     expect(dispatched?.name).toBe("start_battle");
     // Ensure the wild Pokemon was created from loaded species data.
     expect(dispatched?.data?.enemy_pokemon?.species?.id).toBe("PIDGEY");
+  });
+
+  it("requires exact species ids from wild encounter data", () => {
+    const loader = new DataLoader();
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [createTestPokemon("TOTODILE", 5)];
+    const eventManager = new EventManager(gameState as unknown as GameState);
+    const manager = new WildEncounterManager(gameState as unknown as GameState, loader, eventManager);
+
+    expect(() => manager["_start_battle"]("pidgey", 3)).toThrow(
+      "Unknown wild species 'pidgey' in encounter table."
+    );
   });
 
   it("initializes and stores roamer HP and DVs when first starting a roaming battle", () => {
@@ -126,17 +140,62 @@ describe("Wild encounter data", () => {
     ).toThrow("Unknown wild encounter time of day 'twilight'.");
   });
 
-  it("throws when fallback map music resolution is missing during encounter-rate evaluation", () => {
+  it("requires canonical wild encounter time-of-day keys", () => {
+    const loader = new DataLoader();
+    const gameState = createInitialGameState();
+    gameState.wram.time_of_day = "morn";
+    const manager = new WildEncounterManager(gameState as unknown as GameState, loader, null);
+
+    const encounterData: WildEncounterData = {
+      map_name: "TEST_MAP",
+      grass_rates: { morning: 10, day: 20, night: 30 },
+      water_rate: null,
+      grass: {
+        morning: [{ species: "RATTATA", level: 2 }],
+        day: [{ species: "PIDGEY", level: 3 }],
+        night: [{ species: "HOOTHOOT", level: 4 }],
+      },
+      water: null,
+    };
+
+    expect(() =>
+      manager._resolve_table(encounterData, EncounterSurface.GRASS)
+    ).toThrow("Unknown wild encounter time of day 'morn'.");
+  });
+
+  it("fails when the loader has no definitive wild encounter data", () => {
+    const gameState = createInitialGameState();
+    const manager = new WildEncounterManager(gameState as unknown as GameState, {}, null);
+
+    expect(() => manager._lookup_map_data("ROUTE_29")).toThrow(
+      "Wild encounter data loader is missing definitive modpack data."
+    );
+  });
+
+  it("does not infer map music when audio state is missing", () => {
     const loader = new DataLoader();
     const gameState = createInitialGameState();
     const manager = new WildEncounterManager(gameState as unknown as GameState, loader, null);
 
-    expect(() =>
+    expect(
       manager["_current_map_music_token"]({
         current_map_name: "MISSING_WILD_MUSIC_MAP",
         audio_engine: null,
       } as never)
-    ).toThrow("No default music mapping for map 'MISSING_WILD_MUSIC_MAP'.");
+    ).toBeNull();
+  });
+
+  it("applies Cleanse Tag only for exact modpack item ids", () => {
+    const loader = new DataLoader();
+    const gameState = createInitialGameState();
+    gameState.sram.party.pokemon = [createTestPokemon("CYNDAQUIL", 6)];
+    const manager = new WildEncounterManager(gameState as unknown as GameState, loader, null);
+
+    gameState.sram.party.pokemon[0]!.item = "cleanse_tag" as never;
+    expect(manager["_apply_cleanse_tag_effect"](100)).toBe(100);
+
+    gameState.sram.party.pokemon[0]!.item = Item.CLEANSE_TAG as never;
+    expect(manager["_apply_cleanse_tag_effect"](100)).toBe(50);
   });
 
   it.each([
@@ -260,8 +319,10 @@ describe("Wild encounter data", () => {
 
   it("dispatches a wild battle from IcePath1F cave floor when the encounter roll succeeds", () => {
     const loader = new DataLoader();
-    loader.load_map_attributes();
     loader.load_wild_encounter_data();
+    loader.map_attributes = new Map([
+      ["IcePath1F", { environment: "CAVE", tileset_name: "cave" }],
+    ]);
     const gameState = createInitialGameState();
     gameState.wram.time_of_day = "day";
     gameState.wram.wild_encounter_cooldown = 0;

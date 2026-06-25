@@ -6,7 +6,7 @@ type ItemSeed = {
     name: string;
     asm_name?: string;
     price: number;
-    effect: ItemEffect;
+    effect: string;
     param: number;
     pocket: ItemPocket;
     description: string;
@@ -92,7 +92,7 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.CARD_KEY]: { name: "CARD KEY", price: 0, effect: ItemEffect.CARD_KEY, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A keycard that opens doors in the RADIO TOWER." },
     [Item.BASEMENT_KEY]: { name: "BASEMENT KEY", price: 0, effect: ItemEffect.BASEMENT_KEY, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A key that opens doors in the GOLDENROD TUNNEL." },
     [Item.SQUIRT_BOTTLE]: { name: "SQUIRTBOTTLE", asm_name: "SQUIRTBOTTLE", price: 0, effect: ItemEffect.SQUIRTBOTTLE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A bottle for watering plants." },
-    [Item.BLUE_CARD]: { name: "BLUE CARD", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "Card to save points.", held_effect: "HELD_NONE" },
+    [Item.BLUE_CARD]: { name: "BLUE CARD", price: 0, effect: ItemEffect.BLUE_CARD, param: 0, pocket: ItemPocket.KEY_ITEM, description: "Card to save points.", held_effect: "HELD_NONE" },
     [Item.KINGS_ROCK]: { name: "KING'S ROCK", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A hold item that may cause flinching." },
     [Item.BERRY]: { name: "BERRY", price: 0, effect: ItemEffect.RESTORE_HP, param: 10, pocket: ItemPocket.ITEM, description: "A hold item that restores HP by 10." },
     [Item.GOLD_BERRY]: { name: "GOLD BERRY", price: 0, effect: ItemEffect.RESTORE_HP, param: 30, pocket: ItemPocket.ITEM, description: "A hold item that restores HP by 30." },
@@ -174,9 +174,9 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.PASS]: { name: "PASS", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.KEY_ITEM, description: "A ticket for the MAGNET TRAIN.", held_effect: "HELD_NONE" },
     [Item.PEARL]: { name: "PEARL", price: 1400, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A beautiful pearl. Sell low.", held_effect: "HELD_NONE" },
     [Item.PNK_APRICORN]: { name: "PNK APRICORN", price: 200, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "A pink APRICORN.", held_effect: "HELD_NONE" },
-    [Item.PP_UP]: { name: "PP UP", price: 9800, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.ITEM, description: "Raises max PP of a selected move.", held_effect: "HELD_NONE" },
+    [Item.PP_UP]: { name: "PP UP", price: 9800, effect: ItemEffect.PP_UP, param: 0, pocket: ItemPocket.ITEM, description: "Raises max PP of a selected move.", held_effect: "HELD_NONE" },
     [Item.ETHER]: { name: "ETHER", price: 1200, effect: ItemEffect.RESTORE_PP, param: 10, pocket: ItemPocket.ITEM, description: "Restores PP of one move by 10.", held_effect: "HELD_NONE" },
-    [Item.ENERGY_ROOT]: { name: "ENERGY ROOT", price: 800, effect: ItemEffect.RESTORE_HP, param: 0, pocket: ItemPocket.ITEM, description: "Restores #MON HP by 200. Bitter.", held_effect: "HELD_NONE" },
+    [Item.ENERGY_ROOT]: { name: "ENERGY ROOT", price: 800, effect: ItemEffect.RESTORE_HP, param: 200, pocket: ItemPocket.ITEM, description: "Restores #MON HP by 200. Bitter.", held_effect: "HELD_NONE" },
     [Item.HEAL_POWDER]: { name: "HEAL POWDER", price: 450, effect: ItemEffect.STATUS_HEAL, param: 0, pocket: ItemPocket.ITEM, description: "Cures all status problems. Bitter.", held_effect: "HELD_NONE" },
     [Item.REVIVAL_HERB]: { name: "REVIVAL HERB", price: 2800, effect: ItemEffect.REVIVE, param: 0, pocket: ItemPocket.ITEM, description: "Revives a fainted #MON. Bitter.", held_effect: "HELD_NONE" },
     [Item.RAGECANDYBAR]: { name: "RAGECANDYBAR", price: 300, effect: ItemEffect.RESTORE_HP, param: 20, pocket: ItemPocket.ITEM, description: "Restores #MON HP by 20.", held_effect: "HELD_NONE" },
@@ -247,10 +247,46 @@ const itemData: Record<Item, ItemSeed> = {
     [Item.TM_HM_57]: { name: "HM07", price: 0, effect: ItemEffect.NONE, param: 0, pocket: ItemPocket.TM_HM, description: "Teaches WATERFALL." },
 };
 
-export const items: ItemType[] = Object.entries(itemData).map(([script_name, data]) => ({
-    ...ItemSchema.parse(data),
-    script_name: script_name as Item,
-}));
+const toGeneratedItemRecord = (script_name: string, data: ItemSeed): ItemType =>
+    ItemSchema.parse({
+        name: data.name,
+        script_name,
+        description: data.description,
+        effect: data.effect,
+        status_heals: [],
+        revive_hp_percent: null,
+        party_revive_hp_percent: null,
+        pp_restore_scope: null,
+        pp_restore_points: null,
+        pp_up_stages: null,
+        vitamin_stat: null,
+        vitamin_stat_exp: null,
+        vitamin_max_stat_exp: null,
+        rare_candy_level_gain: null,
+        battle_stat_boost_stat: null,
+        battle_stat_boost_stages: null,
+        battle_escape_mode: null,
+        battle_focus_energy: null,
+        battle_stat_drop_guard: null,
+        battle_stat_drop_guard_turns: null,
+        confusion_heal: null,
+        repel_steps: null,
+        escape_rope_mode: null,
+        price: data.price,
+        held_effect: data.held_effect ?? "HELD_NONE",
+        parameter: data.param,
+        property: data.property ?? "",
+        pocket: data.pocket,
+        field_menu: data.field_menu ?? "",
+        battle_menu: data.battle_menu ?? "",
+        consumable: data.pocket === ItemPocket.BALL || data.field_menu !== "ITEMMENU_NOUSE" || data.battle_menu !== "ITEMMENU_NOUSE",
+        tmhm_index: null,
+        tmhm_move: null,
+    });
+
+export const items: ItemType[] = Object.entries(itemData).map(([script_name, data]) =>
+    toGeneratedItemRecord(script_name as Item, data)
+);
 
 export const itemEffectsByAsmName = new Map(
     Object.entries(itemData).map(([script_name, data]) => [data.asm_name ?? script_name, String(data.effect)])

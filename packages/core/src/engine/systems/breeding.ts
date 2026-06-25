@@ -465,6 +465,7 @@ function _to_learned_moves(moves: MoveName[]): LearnedMove[] {
     return moves.map((move) => ({
         name: move,
         current_pp: pp_map.get(move)!,
+        pp_ups: 0,
     }));
 }
 

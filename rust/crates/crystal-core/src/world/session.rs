@@ -10,8 +10,9 @@ use super::collision::{
     Terrain, TilesetCollision, describe_collision, permissions, sample_collision,
 };
 use super::encounters::{
-    EncounterError, EncounterSurface, ResolvedWildEncounter, TimeOfDay, WildEncounterData,
-    encounter_threshold, passes_encounter_roll, select_wild_encounter,
+    EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
+    ResolvedWildEncounter, TimeOfDay, WildEncounterData, encounter_threshold,
+    passes_encounter_roll, select_wild_encounter,
 };
 use super::map::{Direction, OverworldMapData, TilePosition};
 use super::movement::{
@@ -138,6 +139,7 @@ pub struct WildEncounterRoll {
     pub slot_percent_roll: Option<u8>,
     pub level_roll: Option<u8>,
     pub resolved: Option<ResolvedWildEncounter>,
+    pub repelled_by: Option<String>,
     pub rng_seed_after: u32,
 }
 
@@ -501,6 +503,8 @@ impl OverworldSession {
     pub fn check_wild_encounter(
         &self,
         encounters: &WildEncounterData,
+        slot_tables: &EncounterSlotTables,
+        music_modifiers: &EncounterMusicModifiers,
         rng: &mut Random,
         options: EncounterCheckOptions,
     ) -> Result<Option<WildEncounterRoll>, EncounterError> {
@@ -512,6 +516,7 @@ impl OverworldSession {
             surface,
             options.time,
             options.music_token.as_deref(),
+            music_modifiers,
             options.has_cleanse_tag,
         )?;
         let encounter_roll = rng.randrange(256) as u8;
@@ -526,6 +531,7 @@ impl OverworldSession {
                 slot_percent_roll: None,
                 level_roll: None,
                 resolved: None,
+                repelled_by: None,
                 rng_seed_after: rng.seed(),
             }));
         }
@@ -534,6 +540,7 @@ impl OverworldSession {
         let level_roll = rng.randrange(256) as u8;
         let resolved = select_wild_encounter(
             encounters,
+            slot_tables,
             surface,
             options.time,
             slot_percent_roll,
@@ -549,6 +556,7 @@ impl OverworldSession {
             slot_percent_roll: Some(slot_percent_roll),
             level_roll: Some(level_roll),
             resolved,
+            repelled_by: None,
             rng_seed_after: rng.seed(),
         }))
     }
@@ -877,6 +885,22 @@ mod tests {
                 night: Vec::new(),
             }),
             water: None,
+        }
+    }
+
+    fn encounter_slot_tables() -> EncounterSlotTables {
+        EncounterSlotTables {
+            grass: vec![crate::world::encounters::EncounterSlotChance {
+                threshold: 100,
+                slot: 0,
+            }],
+            water: Vec::new(),
+        }
+    }
+
+    fn encounter_music_modifiers() -> EncounterMusicModifiers {
+        EncounterMusicModifiers {
+            modifiers: Vec::new(),
         }
     }
 
@@ -1272,6 +1296,8 @@ mod tests {
         let roll = session
             .check_wild_encounter(
                 &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
                 &mut rng,
                 EncounterCheckOptions::default(),
             )
@@ -1298,6 +1324,8 @@ mod tests {
         let roll = session
             .check_wild_encounter(
                 &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
                 &mut rng,
                 EncounterCheckOptions::default(),
             )

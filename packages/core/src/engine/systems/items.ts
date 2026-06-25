@@ -1,54 +1,28 @@
 import { GameState } from "../../core/state";
 import { DataLoader } from "../../core/data-loader";
 import { Item } from "../../core/models";
-import { ItemEffect, ItemPocket } from "../../core/enums/item";
+import { ItemPocket } from "../../core/enums/item";
 import * as tmhmSystem from "./tmhm";
 import { TMHM_MOVES } from "../../core/tmhm";
 import { items as contentItems } from "@pokecrystal/assets/content/items";
 
 const CONTENT_ITEM_INDEX: Map<string, Item> = new Map();
 
-const normalizeItemLookupKey = (value: string): string => {
-  return value
-    .normalize("NFKD")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
-};
-
-const addItemIndexAlias = (key: string, item: Item): void => {
-  if (!CONTENT_ITEM_INDEX.has(key)) {
-    CONTENT_ITEM_INDEX.set(key, item);
-  }
-
-  const normalized = normalizeItemLookupKey(key);
-  if (normalized && !CONTENT_ITEM_INDEX.has(normalized)) {
-    CONTENT_ITEM_INDEX.set(normalized, item);
-  }
-
-  const scriptNameAlias = normalizeItemLookupKey(item.script_name ?? item.name);
-  if (scriptNameAlias && !CONTENT_ITEM_INDEX.has(scriptNameAlias)) {
-    CONTENT_ITEM_INDEX.set(scriptNameAlias, item);
-  }
-};
-
 const ensureContentItemIndex = (): Map<string, Item> => {
   if (CONTENT_ITEM_INDEX.size > 0) {
     return CONTENT_ITEM_INDEX;
   }
   for (const item of contentItems) {
-    addItemIndexAlias(item.script_name, item);
+    CONTENT_ITEM_INDEX.set(item.script_name, item);
   }
   return CONTENT_ITEM_INDEX;
 };
 
-const canonicaliseItemName = (item: string | Item): string => {
-  let nameToProcess: string;
+const exactItemKey = (item: string | Item): string => {
   if (typeof item === "object" && item !== null) {
-    nameToProcess = item.script_name || item.name;
-  } else {
-    nameToProcess = item as string;
+    return item.script_name;
   }
-  return nameToProcess.replace(/ /g, "_").toUpperCase();
+  return item;
 };
 
 export type ItemSystemDataLoader =
@@ -80,9 +54,12 @@ export class ItemSystem {
       throw new Error("quantity must be a positive integer");
     }
 
-    const canonical = canonicaliseItemName(item);
+    const canonical = exactItemKey(item);
     const definition = this.resolveItemDefinition(canonical);
-    const pocket = this.inferPocket(canonical, definition);
+    if (!definition) {
+      throw new Error(`Unknown item definition: ${canonical}`);
+    }
+    const pocket = definition.pocket;
 
     if (pocket === ItemPocket.TM_HM) {
       return this.addTmhm(canonical);
@@ -124,67 +101,31 @@ export class ItemSystem {
       throw new Error("quantity must be a positive integer");
     }
 
-    const canonical = canonicaliseItemName(item);
-    if (
-      this.inferPocket(canonical, this.resolveItemDefinition(canonical)) ===
-      ItemPocket.TM_HM
-    ) {
+    const canonical = exactItemKey(item);
+    const definition = this.resolveRequiredItemDefinition(canonical);
+    if (definition.pocket === ItemPocket.TM_HM) {
       return this.removeTmhm(canonical);
     }
 
-    const definition = this.resolveItemDefinition(canonical);
-    const pocket = this.inferPocket(canonical, definition);
-    const inventory = this.getInventoryForPocket(pocket);
-    if (this.decrementFromInventory(inventory, canonical, quantity)) {
-      return true;
-    }
-
-    for (const [, fallbackInventory] of this.allPockets()) {
-      if (fallbackInventory === inventory) {
-        continue;
-      }
-      if (
-        this.decrementFromInventory(
-          fallbackInventory as Record<string, number>,
-          canonical,
-          quantity
-        )
-      ) {
-        return true;
-      }
-    }
-    return false;
+    return this.decrementFromInventory(this.getInventoryForPocket(definition.pocket), canonical, quantity);
   }
 
   public hasItem(item: string | Item): boolean {
-    const canonical = canonicaliseItemName(item);
-    if (
-      this.inferPocket(canonical, this.resolveItemDefinition(canonical)) ===
-      ItemPocket.TM_HM
-    ) {
+    const canonical = exactItemKey(item);
+    const definition = this.resolveRequiredItemDefinition(canonical);
+    if (definition.pocket === ItemPocket.TM_HM) {
       return this.tmhmHas(canonical);
     }
-    for (const [, inventory] of this.allPockets()) {
-      if ((inventory[canonical] || 0) > 0) {
-        return true;
-      }
-    }
-    return false;
+    return (this.getInventoryForPocket(definition.pocket)[canonical] || 0) > 0;
   }
 
   public getQuantity(item: string | Item): number {
-    const canonical = canonicaliseItemName(item);
-    if (
-      this.inferPocket(canonical, this.resolveItemDefinition(canonical)) ===
-      ItemPocket.TM_HM
-    ) {
+    const canonical = exactItemKey(item);
+    const definition = this.resolveRequiredItemDefinition(canonical);
+    if (definition.pocket === ItemPocket.TM_HM) {
       return this.tmhmHas(canonical) ? 1 : 0;
     }
-    let total = 0;
-    for (const [, inventory] of this.allPockets()) {
-      total += inventory[canonical] || 0;
-    }
-    return total;
+    return this.getInventoryForPocket(definition.pocket)[canonical] || 0;
   }
 
   public listItems(pocket?: ItemPocket): Record<string, number> {
@@ -205,36 +146,17 @@ export class ItemSystem {
   }
 
   public getItemDefinition(item: string | Item): Item {
-    const canonical = canonicaliseItemName(item);
+    const canonical = exactItemKey(item);
     const definition = this.resolveItemDefinition(canonical);
     if (definition) {
       return definition;
     }
-    // Fallback
-    const displayName = canonical.replace(/_/g, " ");
-    return {
-      name: displayName,
-      description: "No description available.",
-      price: 0,
-      pocket: ItemPocket.ITEM,
-      parameter: 0,
-      effect: ItemEffect.NONE,
-      script_name: canonical,
-      held_effect: "HELD_NONE",
-      property: "",
-      field_menu: "",
-      battle_menu: "",
-    };
+    throw new Error(`Unknown item definition: ${canonical}`);
   }
 
   public getDisplayName(item: string | Item): string {
-    const definition = this.resolveItemDefinition(canonicaliseItemName(item));
-    let baseName: string;
-    if (!definition) {
-      baseName = canonicaliseItemName(item).replace(/_/g, " ");
-    } else {
-      baseName = definition.name;
-    }
+    const definition = this.resolveRequiredItemDefinition(exactItemKey(item));
+    let baseName = definition.name;
 
     baseName = baseName.replace(/_/g, " ").trim();
     if (baseName.startsWith("TM") && /^\d+$/.test(baseName.substring(2).trim())) {
@@ -256,9 +178,12 @@ export class ItemSystem {
   }
 
   public getItemPocket(item: string | Item): ItemPocket {
-    const canonical = canonicaliseItemName(item);
+    const canonical = exactItemKey(item);
     const definition = this.resolveItemDefinition(canonical);
-    return this.inferPocket(canonical, definition);
+    if (!definition) {
+      throw new Error(`Unknown item definition: ${canonical}`);
+    }
+    return definition.pocket;
   }
 
   private titleCase(s: string): string {
@@ -308,142 +233,22 @@ export class ItemSystem {
     if (!itemData) {
       return this.resolveContentDefinition(canonical);
     }
-    const candidates = this.candidateLookupNames(canonical);
     if (itemData instanceof Map) {
-      if (itemData.size === 0) {
-        this.populateItemData(itemData);
-      }
-      return this.hydrateDefinition(canonical, this.lookupInItemCollection(itemData, candidates));
+      return itemData.get(canonical);
     }
-    if (Object.keys(itemData).length === 0) {
-      const seeded = this.seedItemRecord();
-      for (const [key, value] of Object.entries(seeded)) {
-        itemData[key] = value;
-      }
+    return itemData[canonical];
+  }
+
+  private resolveRequiredItemDefinition(canonical: string): Item {
+    const definition = this.resolveItemDefinition(canonical);
+    if (!definition) {
+      throw new Error(`Unknown item definition: ${canonical}`);
     }
-    return this.hydrateDefinition(canonical, this.lookupInItemCollection(itemData, candidates));
+    return definition;
   }
 
   private resolveContentDefinition(canonical: string): Item | undefined {
-    return this.lookupInItemCollection(ensureContentItemIndex(), this.candidateLookupNames(canonical));
-  }
-
-  private hydrateDefinition(canonical: string, definition: Item | undefined): Item | undefined {
-    if (!definition) {
-      return this.resolveContentDefinition(canonical);
-    }
-    if (definition.effect !== ItemEffect.NONE) {
-      return definition;
-    }
-    const contentDefinition = this.resolveContentDefinition(canonical);
-    if (!contentDefinition || contentDefinition.effect === ItemEffect.NONE) {
-      return definition;
-    }
-    return {
-      ...contentDefinition,
-      ...definition,
-      effect: contentDefinition.effect,
-    };
-  }
-
-  private candidateLookupNames(canonical: string): string[] {
-    const base = canonical.toUpperCase();
-    const withSpaces = base.replace(/_/g, " ");
-    const variants = new Set<string>([canonical, base, withSpaces]);
-    const titleVariant = this.titleCase(withSpaces);
-    if (!variants.has(titleVariant)) {
-      variants.add(titleVariant);
-    }
-    const collapsed = withSpaces.replace(/ /g, "");
-    if (!variants.has(collapsed)) {
-      variants.add(collapsed);
-    }
-    const normalized = normalizeItemLookupKey(base);
-    if (normalized) {
-      variants.add(normalized);
-    }
-    const normalizedTitle = normalizeItemLookupKey(titleVariant);
-    if (normalizedTitle) {
-      variants.add(normalizedTitle);
-    }
-    if (canonical !== base) {
-      const canonicalNormalized = normalizeItemLookupKey(canonical);
-      if (canonicalNormalized) {
-        variants.add(canonicalNormalized);
-      }
-    }
-    return [...variants];
-  }
-
-  private lookupInItemCollection(
-    itemData: Map<string, Item> | Record<string, Item>,
-    candidates: string[],
-  ): Item | undefined {
-    for (const candidate of candidates) {
-      if (itemData instanceof Map) {
-        const direct = itemData.get(candidate);
-        if (direct) {
-          return direct;
-        }
-      } else {
-        const direct = itemData[candidate];
-        if (direct) {
-          return direct;
-        }
-      }
-    }
-
-    const normalizedCandidates = new Set(
-      candidates.map((candidate) => normalizeItemLookupKey(candidate))
-    );
-
-    if (itemData instanceof Map) {
-      for (const [key, item] of itemData.entries()) {
-        const itemScriptName = item.script_name || "";
-        const itemName = item.name || "";
-        const keys = [key, itemScriptName, itemName];
-        for (const candidateKey of keys) {
-          if (normalizedCandidates.has(normalizeItemLookupKey(candidateKey))) {
-            return item;
-          }
-        }
-      }
-      return undefined;
-    }
-
-    for (const [key, item] of Object.entries(itemData)) {
-      const itemScriptName = item.script_name || "";
-      const itemName = item.name || "";
-      const keys = [key, itemScriptName, itemName];
-      for (const candidateKey of keys) {
-        if (normalizedCandidates.has(normalizeItemLookupKey(candidateKey))) {
-          return item;
-        }
-      }
-    }
-    return undefined;
-  }
-
-  private inferPocket(canonical: string, definition?: Item): ItemPocket {
-    if (definition?.pocket) {
-      return definition.pocket;
-    }
-    const upperName = canonical.toUpperCase();
-    if (upperName.startsWith("TM") || upperName.startsWith("HM")) {
-      return ItemPocket.TM_HM;
-    }
-    if (upperName.endsWith("_BALL") || upperName.endsWith("BALL")) {
-      return ItemPocket.BALL;
-    }
-    if (
-      upperName.endsWith("_CARD") ||
-      upperName.endsWith("_PASS") ||
-      upperName.endsWith("TICKET") ||
-      upperName.endsWith("GEAR")
-    ) {
-      return ItemPocket.KEY_ITEM;
-    }
-    return ItemPocket.ITEM;
+    return ensureContentItemIndex().get(canonical);
   }
 
   private tmhmFlags(): number[] {
@@ -518,27 +323,4 @@ export class ItemSystem {
     return true;
   }
 
-  private populateItemData(itemData: Map<string, Item>): void {
-    for (const item of contentItems) {
-      itemData.set(item.script_name, item);
-      itemData.set(item.name, item);
-      const normalized = normalizeItemLookupKey(item.script_name);
-      if (normalized) {
-        itemData.set(normalized, item);
-      }
-    }
-  }
-
-  private seedItemRecord(): Record<string, Item> {
-    const record: Record<string, Item> = {};
-    for (const item of contentItems) {
-      record[item.script_name] = item;
-      record[item.name] = item;
-      const normalized = normalizeItemLookupKey(item.script_name);
-      if (normalized) {
-        record[normalized] = item;
-      }
-    }
-    return record;
-  }
 }

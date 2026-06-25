@@ -214,7 +214,7 @@ const buildMoveset = (moveNames: readonly string[]): LearnedMove[] => {
     if (!metadata) {
       throw new Error(`Unknown move '${upper}'`);
     }
-    learned.push({ name: key, current_pp: metadata.pp ?? 0 });
+    learned.push({ name: key, current_pp: metadata.pp ?? 0, pp_ups: 0 });
   }
   return learned;
 };

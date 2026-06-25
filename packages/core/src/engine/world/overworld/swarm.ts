@@ -66,11 +66,13 @@ const SWARM_DEFINITIONS: Record<SwarmType, SwarmDefinition> = {
     encounterData: {
       map_name: "DARK_CAVE_VIOLET_ENTRANCE",
       grass_rates: { morning: 4, day: 4, night: 4 },
+      water_rate: null,
       grass: {
         morning: buildEncounters(DUNSPARCE_ENTRIES),
         day: buildEncounters(DUNSPARCE_ENTRIES),
         night: buildEncounters(DUNSPARCE_ENTRIES),
       } as WildEncounterTable,
+      water: null,
     } as WildEncounterData,
   },
   [SwarmType.YANMA]: {
@@ -82,11 +84,13 @@ const SWARM_DEFINITIONS: Record<SwarmType, SwarmDefinition> = {
     encounterData: {
       map_name: "ROUTE_35",
       grass_rates: { morning: 10, day: 10, night: 10 },
+      water_rate: null,
       grass: {
         morning: buildEncounters(YANMA_DAY_ENTRIES),
         day: buildEncounters(YANMA_DAY_ENTRIES),
         night: buildEncounters(YANMA_NIGHT_ENTRIES),
       } as WildEncounterTable,
+      water: null,
     } as WildEncounterData,
   },
 };

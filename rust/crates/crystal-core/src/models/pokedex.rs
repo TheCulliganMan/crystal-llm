@@ -49,12 +49,12 @@ impl PokedexState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, PokemonType};
+    use crate::models::{BaseStats, pokemon_type};
 
     fn species(id: &str) -> PokemonSpecies {
         let mut species = PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65));
-        species.type1 = PokemonType::Normal;
-        species.type2 = PokemonType::Normal;
+        species.type1 = pokemon_type("NORMAL");
+        species.type2 = pokemon_type("NORMAL");
         species
     }
 

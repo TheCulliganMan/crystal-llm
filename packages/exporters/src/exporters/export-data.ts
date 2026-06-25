@@ -2,13 +2,21 @@ import fs from "fs";
 import path from "path";
 import type { Move } from "@pokecrystal/core/core/models/move";
 import type { PokemonSpecies } from "@pokecrystal/core/core/models/pokemon";
-import { EggGroup, GenderRatio, GrowthRate, PokemonType, Stat } from "@pokecrystal/core/core/enums/pokemon";
+import { GenderRatio, Stat } from "@pokecrystal/core/core/enums/pokemon";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { stripAsmComment, writeJsonToTargets } from "./asm-utils";
 
 export type LevelUpLearnsets = Record<string, Array<[number, string]>>;
 export type LevelUpMovesData = Record<string, Array<{ level: number; move: string }>>;
 export type EggMovesData = Record<string, string[]>;
+export type GrowthRateCurveData = {
+  id: string;
+  numerator: number;
+  denominator: number;
+  quadratic: number;
+  linear: number;
+  constant: number;
+};
 
 const STAT_MAPPING: Record<string, Stat> = {
   ATTACK: "ATTACK",
@@ -67,12 +75,12 @@ export function parseBaseStats(filePath: string, idMap: Record<string, number>, 
   const tmhmMatch = content.match(/tmhm\s+([A-Z_ ,]+)/);
   const tmhmLearnset = tmhmMatch ? tmhmMatch[1].split(",").map((part) => part.trim()).filter(Boolean) : [];
 
-  const type1 = enumKeyOrThrow(PokemonType, typeMatch[1], "Pokemon type", filePath);
-  const type2 = enumKeyOrThrow(PokemonType, typeMatch[2], "Pokemon type", filePath);
+  const type1 = typeMatch[1];
+  const type2 = typeMatch[2];
   const genderRatio = enumKeyOrThrow(GenderRatio, genderRatioMatch[1], "gender ratio", filePath);
-  const growthRate = enumKeyOrThrow(GrowthRate, growthRateMatch[1], "growth rate", filePath);
-  const eggGroup1 = enumKeyOrThrow(EggGroup, eggGroupsMatch[1], "egg group", filePath);
-  const eggGroup2 = enumKeyOrThrow(EggGroup, eggGroupsMatch[2], "egg group", filePath);
+  const growthRate = growthRateMatch[1];
+  const eggGroup1 = eggGroupsMatch[1];
+  const eggGroup2 = eggGroupsMatch[2];
   const intId = idMap[speciesId];
   if (intId === undefined) {
     throw new Error(`Missing numeric species id for ${speciesId} in ${filePath}`);
@@ -109,6 +117,33 @@ export function parseBaseStats(filePath: string, idMap: Record<string, number>, 
     back_pic: 0,
     weight,
   } as PokemonSpecies;
+}
+
+export function parseGrowthRates(filePath: string): GrowthRateCurveData[] {
+  const content = fs.readFileSync(filePath, "utf8");
+  const rates: GrowthRateCurveData[] = [];
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripAsmComment(rawLine);
+    const match = line.match(/^growth_rate\s+(-?\d+),\s*(-?\d+),\s*(-?\d+),\s*(-?\d+),\s*(-?\d+)/);
+    if (!match) continue;
+    const commentMatch = rawLine.match(/;\s*(.+)$/);
+    if (!commentMatch) {
+      throw new Error(`Missing growth-rate label comment in ${filePath}: ${rawLine}`);
+    }
+    const id = `GROWTH_${commentMatch[1].trim().replace(/\s+/g, "_").toUpperCase()}`;
+    rates.push({
+      id,
+      numerator: Number.parseInt(match[1], 10),
+      denominator: Number.parseInt(match[2], 10),
+      quadratic: Number.parseInt(match[3], 10),
+      linear: Number.parseInt(match[4], 10),
+      constant: Number.parseInt(match[5], 10),
+    });
+  }
+  if (rates.length === 0) {
+    throw new Error(`No growth rates parsed from ${filePath}`);
+  }
+  return rates;
 }
 
 export function loadAllPokemonData(baseStatsPath: string, idMap: Record<string, number>): PokemonSpecies[] {
@@ -343,6 +378,7 @@ export function exportData(): {
   learnsetsData: LevelUpLearnsets;
   levelUpMovesData: LevelUpMovesData;
   eggMovesData: EggMovesData;
+  growthRatesData: GrowthRateCurveData[];
 } {
   const root = getDisassemblyRoot();
   const constantsPath = path.join(root, "constants", "pokemon_constants.asm");
@@ -350,16 +386,19 @@ export function exportData(): {
   const movesPath = path.join(root, "data", "moves", "moves.asm");
   const learnsetsPath = path.join(root, "data", "pokemon", "evos_attacks.asm");
   const eggMovesPath = path.join(root, "data", "pokemon", "egg_moves.asm");
+  const growthRatesPath = path.join(root, "data", "growth_rates.asm");
   const idMap = parsePokemonConstants(constantsPath);
   const pokemonData = loadAllPokemonData(baseStatsPath, idMap);
   const movesData = parseMoves(movesPath);
   const learnsetsData = parseLearnsets(learnsetsPath, idMap);
   const levelUpMovesData = buildLevelUpMovesData(learnsetsData);
   const eggMovesData = parseEggMoves(eggMovesPath, idMap);
+  const growthRatesData = parseGrowthRates(growthRatesPath);
   writeJsonToTargets("pokemon_data.json", pokemonData, { indent: 2 });
   writeJsonToTargets("moves_data.json", movesData, { indent: 2 });
   writeJsonToTargets("learnsets.json", learnsetsData, { indent: 2 });
   writeJsonToTargets("level_up_moves.json", levelUpMovesData, { indent: 2 });
   writeJsonToTargets("egg_moves.json", eggMovesData, { indent: 2 });
-  return { pokemonData, movesData, learnsetsData, levelUpMovesData, eggMovesData };
+  writeJsonToTargets("growth_rates.json", growthRatesData, { indent: 2 });
+  return { pokemonData, movesData, learnsetsData, levelUpMovesData, eggMovesData, growthRatesData };
 }

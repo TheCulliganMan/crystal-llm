@@ -550,7 +550,7 @@ const buildLearnedMoves = (mon: BattleTowerMon, dataLoader?: DataLoader | null):
     if (currentPp <= 0 && cachedMoveData?.pp) {
       currentPp = Number(cachedMoveData.pp);
     }
-    moves.push({ name: normalizedName, current_pp: currentPp });
+    moves.push({ name: normalizedName, current_pp: currentPp, pp_ups: 0 });
   });
   return moves;
 };

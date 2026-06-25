@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::item::{Item, ItemPocket};
+use super::item::{
+    ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item,
+};
 
 pub const MAX_ITEM_STACK: u16 = 99;
 pub const ITEM_POCKET_CAPACITY: usize = 20;
@@ -10,7 +12,7 @@ pub const BALL_POCKET_CAPACITY: usize = 12;
 pub const KEY_ITEM_POCKET_CAPACITY: usize = 25;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Bag {
     pub items: BTreeMap<String, u16>,
     pub balls: BTreeMap<String, u16>,
@@ -23,29 +25,30 @@ impl Bag {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
         }
-        match definition.pocket {
-            ItemPocket::Item => add_to_inventory(
+        match definition.pocket.as_str() {
+            ITEM_POCKET_ITEM => add_to_inventory(
                 &mut self.items,
                 &definition.script_name,
                 quantity,
                 MAX_ITEM_STACK,
                 Some(ITEM_POCKET_CAPACITY),
             ),
-            ItemPocket::Ball => add_to_inventory(
+            ITEM_POCKET_BALL => add_to_inventory(
                 &mut self.balls,
                 &definition.script_name,
                 quantity,
                 MAX_ITEM_STACK,
                 Some(BALL_POCKET_CAPACITY),
             ),
-            ItemPocket::KeyItem => add_to_inventory(
+            ITEM_POCKET_KEY_ITEM => add_to_inventory(
                 &mut self.key_items,
                 &definition.script_name,
                 quantity,
                 1,
                 Some(KEY_ITEM_POCKET_CAPACITY),
             ),
-            ItemPocket::TmHm => self.add_tmhm(definition),
+            ITEM_POCKET_TM_HM => self.add_tmhm(definition),
+            other => Err(format!("unsupported item pocket '{other}'")),
         }
     }
 
@@ -53,23 +56,24 @@ impl Bag {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
         }
-        match definition.pocket {
-            ItemPocket::Item => Ok(remove_from_inventory(
+        match definition.pocket.as_str() {
+            ITEM_POCKET_ITEM => Ok(remove_from_inventory(
                 &mut self.items,
                 &definition.script_name,
                 quantity,
             )),
-            ItemPocket::Ball => Ok(remove_from_inventory(
+            ITEM_POCKET_BALL => Ok(remove_from_inventory(
                 &mut self.balls,
                 &definition.script_name,
                 quantity,
             )),
-            ItemPocket::KeyItem => Ok(remove_from_inventory(
+            ITEM_POCKET_KEY_ITEM => Ok(remove_from_inventory(
                 &mut self.key_items,
                 &definition.script_name,
                 quantity,
             )),
-            ItemPocket::TmHm => self.remove_tmhm(definition),
+            ITEM_POCKET_TM_HM => self.remove_tmhm(definition),
+            other => Err(format!("unsupported item pocket '{other}'")),
         }
     }
 
@@ -78,32 +82,33 @@ impl Bag {
     }
 
     pub fn quantity(&self, definition: &Item) -> u16 {
-        match definition.pocket {
-            ItemPocket::Item => self
+        match definition.pocket.as_str() {
+            ITEM_POCKET_ITEM => self
                 .items
                 .get(&definition.script_name)
                 .copied()
                 .unwrap_or(0),
-            ItemPocket::Ball => self
+            ITEM_POCKET_BALL => self
                 .balls
                 .get(&definition.script_name)
                 .copied()
                 .unwrap_or(0),
-            ItemPocket::KeyItem => self
+            ITEM_POCKET_KEY_ITEM => self
                 .key_items
                 .get(&definition.script_name)
                 .copied()
                 .unwrap_or(0),
-            ItemPocket::TmHm => definition
+            ITEM_POCKET_TM_HM => definition
                 .tmhm_index
                 .and_then(|index| self.tm_hm.get(index).copied())
                 .map(u16::from)
                 .unwrap_or(0),
+            _ => 0,
         }
     }
 
     pub fn consume_ball(&mut self, definition: &Item) -> Result<bool, String> {
-        if definition.pocket != ItemPocket::Ball {
+        if definition.pocket != ITEM_POCKET_BALL {
             return Err(format!(
                 "item '{}' is not in the BALL pocket",
                 definition.script_name
@@ -232,28 +237,51 @@ fn validate_inventory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{ItemPocket, item_pocket};
 
     fn item(id: &str, pocket: ItemPocket) -> Item {
         Item {
             name: id.replace('_', " "),
             description: String::new(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
             pocket,
             field_menu: String::new(),
+            field_usable: true,
             battle_menu: String::new(),
+            battle_usable: true,
             script_name: id.to_string(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         }
     }
 
     #[test]
     fn bag_adds_and_consumes_exact_ball_ids() {
-        let poke_ball = item("POKE_BALL", ItemPocket::Ball);
+        let poke_ball = item("POKE_BALL", item_pocket("BALL"));
         let mut bag = Bag::default();
 
         assert!(bag.add_item(&poke_ball, 2).expect("add balls"));
@@ -269,10 +297,10 @@ mod tests {
     fn bag_uses_pocket_capacities_without_item_id_coercion() {
         let mut bag = Bag::default();
         for index in 0..BALL_POCKET_CAPACITY {
-            let ball = item(&format!("MOD_BALL_{index}"), ItemPocket::Ball);
+            let ball = item(&format!("MOD_BALL_{index}"), item_pocket("BALL"));
             assert!(bag.add_item(&ball, 1).expect("add ball"));
         }
-        let extra = item("mod_ball_0", ItemPocket::Ball);
+        let extra = item("mod_ball_0", item_pocket("BALL"));
         assert!(!bag.add_item(&extra, 1).expect("ball pocket full"));
         assert_eq!(bag.quantity(&extra), 0);
         bag.validate().expect("valid bag");
@@ -280,8 +308,8 @@ mod tests {
 
     #[test]
     fn key_items_do_not_stack_and_tmhm_flags_are_exact() {
-        let bicycle = item("BICYCLE", ItemPocket::KeyItem);
-        let mut tm_mud_slap = item("TM_MUD_SLAP", ItemPocket::TmHm);
+        let bicycle = item("BICYCLE", item_pocket("KEY_ITEM"));
+        let mut tm_mud_slap = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         tm_mud_slap.tmhm_index = Some(30);
         let mut bag = Bag::default();
 
@@ -296,7 +324,7 @@ mod tests {
 
     #[test]
     fn tmhm_items_require_explicit_index_data() {
-        let tm = item("TM_MUD_SLAP", ItemPocket::TmHm);
+        let tm = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         let mut bag = Bag::default();
 
         let error = bag.add_item(&tm, 1).expect_err("missing tmhm index");
@@ -317,5 +345,29 @@ mod tests {
         .to_string();
 
         assert!(error.contains("unknown field `legacy_pc_items`"), "{error}");
+    }
+
+    #[test]
+    fn bag_json_requires_all_inventory_pockets_without_empty_defaults() {
+        let complete = serde_json::json!({
+            "items": {},
+            "balls": {},
+            "key_items": {},
+            "tm_hm": []
+        });
+        serde_json::from_value::<Bag>(complete.clone())
+            .expect("explicit empty bag pockets are valid");
+
+        for field in ["items", "balls", "key_items", "tm_hm"] {
+            let mut missing = complete.clone();
+            missing.as_object_mut().expect("bag object").remove(field);
+            let error = serde_json::from_value::<Bag>(missing)
+                .expect_err("missing bag pocket must not default to empty")
+                .to_string();
+            assert!(
+                error.contains(&format!("missing field `{field}`")),
+                "{error}"
+            );
+        }
     }
 }

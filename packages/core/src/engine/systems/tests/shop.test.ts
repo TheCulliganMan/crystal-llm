@@ -13,8 +13,42 @@ describe("Shop", () => {
   let shop: Shop;
   let mockMartData: Map<string, string[]>;
   let mockItemData: Map<string, Item>;
-  const makeItem = (value: { name: string; price: number; pocket: ItemPocket }): Item =>
-    ItemSchema.parse(value);
+  const makeItem = (value: { name: string; price: number; pocket: ItemPocket; script_name?: string; effect?: string }): Item =>
+    ItemSchema.parse({
+      name: value.name,
+      script_name: value.script_name ?? value.name,
+      description: "",
+      effect: value.effect ?? (value.pocket === ItemPocket.BALL ? "POKE_BALL" : "NONE"),
+      status_heals: [],
+      revive_hp_percent: null,
+      party_revive_hp_percent: null,
+      pp_restore_scope: null,
+      pp_restore_points: null,
+      pp_up_stages: null,
+      vitamin_stat: null,
+      vitamin_stat_exp: null,
+      vitamin_max_stat_exp: null,
+      rare_candy_level_gain: null,
+      battle_stat_boost_stat: null,
+      battle_stat_boost_stages: null,
+      battle_escape_mode: null,
+      battle_focus_energy: null,
+      battle_stat_drop_guard: null,
+      battle_stat_drop_guard_turns: null,
+      confusion_heal: null,
+      repel_steps: null,
+      escape_rope_mode: null,
+      price: value.price,
+      held_effect: "HELD_NONE",
+      parameter: 0,
+      property: "",
+      pocket: value.pocket,
+      field_menu: "",
+      battle_menu: "",
+      consumable: value.pocket !== ItemPocket.KEY_ITEM,
+      tmhm_index: null,
+      tmhm_move: null,
+    });
 
   beforeEach(() => {
     gameState = createInitialGameState();
@@ -175,12 +209,12 @@ describe("Shop", () => {
 
     test("should not exceed MAX_MONEY when selling", () => {
       gameState.sram.money = MAX_MONEY - 100;
-      itemSystem.addItem("RARE_CANDY", 1);
       mockItemData.set("RARE_CANDY", makeItem({
         name: "RARE CANDY",
         price: 1000,
         pocket: ItemPocket.ITEM,
       }));
+      itemSystem.addItem("RARE_CANDY", 1);
       const item: MartItem = {
         identifier: "RARE_CANDY",
         displayName: "Rare Candy",

@@ -1,6 +1,5 @@
 import { MoveName } from "@pokecrystal/core/core/enums/move";
 import { PokemonType } from "@pokecrystal/core/core/enums/pokemon";
-import { MoveEffect } from "@pokecrystal/core/core/enums";
 import { Stat } from "@pokecrystal/core/core/enums/pokemon";
 import { loadMergedMovesDataSync } from "@pokecrystal/core/core/content-packs";
 
@@ -10,7 +9,7 @@ export interface Move {
   power: number;
   accuracy: number;
   pp: number;
-  effect: MoveEffect;
+  effect: string;
   effect_chance: number;
   stat?: Stat | null;
   amount?: number | null;

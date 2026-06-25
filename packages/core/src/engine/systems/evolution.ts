@@ -342,7 +342,7 @@ export class Evolution {
         continue;
       }
       const pp = moveData[moveName]?.pp ?? 0;
-      const entry: LearnedMove = { name: moveName, current_pp: pp };
+      const entry: LearnedMove = { name: moveName, current_pp: pp, pp_ups: 0 };
       current.push(entry);
       learned.push(entry);
       known.add(moveName);

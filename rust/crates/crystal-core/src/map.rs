@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +100,30 @@ pub struct MapEventSectionCommand {
     pub command_index: usize,
 }
 
+pub fn map_script_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
+    BTreeMap::from([
+        ("def_scene_scripts", BTreeSet::from([0])),
+        ("scene_script", BTreeSet::from([1, 2])),
+        ("scene_const", BTreeSet::from([1])),
+        ("def_callbacks", BTreeSet::from([0])),
+        ("callback", BTreeSet::from([2])),
+    ])
+}
+
+pub fn map_event_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
+    BTreeMap::from([
+        ("db", BTreeSet::from([2])),
+        ("def_warp_events", BTreeSet::from([0])),
+        ("warp_event", BTreeSet::from([4])),
+        ("def_coord_events", BTreeSet::from([0])),
+        ("coord_event", BTreeSet::from([4])),
+        ("def_bg_events", BTreeSet::from([0])),
+        ("bg_event", BTreeSet::from([4])),
+        ("def_object_events", BTreeSet::from([0])),
+        ("object_event", BTreeSet::from([13])),
+    ])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectEvent {
@@ -151,6 +177,34 @@ mod tests {
         .expect_err("missing args must not default to empty")
         .to_string();
         assert!(error.contains("missing field `args`"), "{error}");
+    }
+
+    #[test]
+    fn map_section_command_arg_counts_are_exact_pack_values() {
+        assert_eq!(
+            map_script_section_command_arg_counts(),
+            BTreeMap::from([
+                ("def_scene_scripts", BTreeSet::from([0])),
+                ("scene_script", BTreeSet::from([1, 2])),
+                ("scene_const", BTreeSet::from([1])),
+                ("def_callbacks", BTreeSet::from([0])),
+                ("callback", BTreeSet::from([2])),
+            ])
+        );
+        assert_eq!(
+            map_event_section_command_arg_counts(),
+            BTreeMap::from([
+                ("db", BTreeSet::from([2])),
+                ("def_warp_events", BTreeSet::from([0])),
+                ("warp_event", BTreeSet::from([4])),
+                ("def_coord_events", BTreeSet::from([0])),
+                ("coord_event", BTreeSet::from([4])),
+                ("def_bg_events", BTreeSet::from([0])),
+                ("bg_event", BTreeSet::from([4])),
+                ("def_object_events", BTreeSet::from([0])),
+                ("object_event", BTreeSet::from([13])),
+            ])
+        );
     }
 
     #[test]

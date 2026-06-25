@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::move_data::Move;
-use crate::systems::experience::calculate_experience;
+use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_experience};
 use crate::systems::learnsets::{SpeciesLearnsets, default_moves_for_level};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -19,100 +19,27 @@ pub enum Stat {
     Evasion,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PokemonType {
-    Normal,
-    Fighting,
-    Flying,
-    Poison,
-    Ground,
-    Rock,
-    Bug,
-    Ghost,
-    Steel,
-    Fire,
-    Water,
-    Grass,
-    Electric,
-    PsychicType,
-    Ice,
-    Dragon,
-    Dark,
-    CurseType,
-    None,
-    Unknown,
+pub type PokemonType = String;
+
+pub fn pokemon_type(id: &str) -> PokemonType {
+    id.to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum GrowthRate {
-    #[serde(rename = "GROWTH_MEDIUM_FAST")]
-    MediumFast,
-    #[serde(rename = "GROWTH_SLIGHTLY_FAST")]
-    SlightlyFast,
-    #[serde(rename = "GROWTH_SLIGHTLY_SLOW")]
-    SlightlySlow,
-    #[serde(rename = "GROWTH_MEDIUM_SLOW")]
-    MediumSlow,
-    #[serde(rename = "GROWTH_FAST")]
-    Fast,
-    #[serde(rename = "GROWTH_SLOW")]
-    Slow,
-    #[serde(rename = "GROWTH_ERRATIC")]
-    Erratic,
-    #[serde(rename = "GROWTH_FLUCTUATING")]
-    Fluctuating,
+pub type GrowthRate = String;
+
+pub fn growth_rate(id: &str) -> GrowthRate {
+    id.to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EggGroup {
-    #[serde(rename = "EGG_NONE")]
-    None,
-    #[serde(rename = "EGG_MONSTER")]
-    Monster,
-    #[serde(rename = "EGG_WATER_1")]
-    Water1,
-    #[serde(rename = "EGG_BUG")]
-    Bug,
-    #[serde(rename = "EGG_FLYING")]
-    Flying,
-    #[serde(rename = "EGG_GROUND")]
-    Ground,
-    #[serde(rename = "EGG_FAIRY")]
-    Fairy,
-    #[serde(rename = "EGG_PLANT")]
-    Plant,
-    #[serde(rename = "EGG_HUMANSHAPE")]
-    Humanshape,
-    #[serde(rename = "EGG_WATER_3")]
-    Water3,
-    #[serde(rename = "EGG_MINERAL")]
-    Mineral,
-    #[serde(rename = "EGG_INDETERMINATE")]
-    Indeterminate,
-    #[serde(rename = "EGG_WATER_2")]
-    Water2,
-    #[serde(rename = "EGG_DITTO")]
-    Ditto,
-    #[serde(rename = "EGG_DRAGON")]
-    Dragon,
-    #[serde(rename = "EGG_UNDISCOVERED")]
-    Undiscovered,
+pub type EggGroup = String;
+pub type Ability = String;
+
+pub fn egg_group(id: &str) -> EggGroup {
+    id.to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Ability {
-    None,
-    Guts,
-    LightBall,
-    ThickClub,
-}
-
-impl Default for Ability {
-    fn default() -> Self {
-        Self::None
-    }
+pub fn ability(id: &str) -> Ability {
+    id.to_string()
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,8 +173,8 @@ impl PokemonSpecies {
             id: id.into(),
             int_id: 0,
             base_stats,
-            type1: PokemonType::Normal,
-            type2: PokemonType::Normal,
+            type1: pokemon_type("NORMAL"),
+            type2: pokemon_type("NORMAL"),
             catch_rate: 45,
             base_exp: 64,
             item1: None,
@@ -256,11 +183,11 @@ impl PokemonSpecies {
             unknown1: 0,
             step_cycles_to_hatch: 20,
             unknown2: 0,
-            growth_rate: GrowthRate::MediumSlow,
-            egg_group1: EggGroup::Monster,
-            egg_group2: EggGroup::Monster,
+            growth_rate: growth_rate("GROWTH_MEDIUM_SLOW"),
+            egg_group1: egg_group("EGG_MONSTER"),
+            egg_group2: egg_group("EGG_MONSTER"),
             tmhm_learnset: Vec::new(),
-            ability: Ability::None,
+            ability: ability("NONE"),
             pic_size: 0,
             front_pic: 0,
             back_pic: 0,
@@ -274,6 +201,7 @@ impl PokemonSpecies {
 pub struct LearnedMove {
     pub name: String,
     pub current_pp: u8,
+    pub pp_ups: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -285,6 +213,8 @@ pub enum PokemonBuildError {
         species_id: String,
         move_name: String,
     },
+    #[error("experience table error: {0}")]
+    Experience(#[from] ExperienceError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,9 +222,10 @@ pub enum PokemonBuildError {
 pub struct Pokemon {
     pub species: PokemonSpecies,
     pub nickname: String,
+    #[serde(deserialize_with = "required_nullable_string")]
     pub item: Option<String>,
     pub moves: Vec<LearnedMove>,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_string")]
     pub status: Option<String>,
     pub level: u8,
     pub hp: u16,
@@ -519,6 +450,7 @@ pub fn create_pokemon_from_known_dvs(
     dvs: Dv,
     learnsets: &SpeciesLearnsets,
     moves: &BTreeMap<String, Move>,
+    growth_rates: &GrowthRateCatalog,
 ) -> Result<Pokemon, PokemonBuildError> {
     let stats = calculate_stats(species, level, dvs, StatExperience::default());
     if !learnsets.contains_key(&species.id) {
@@ -539,9 +471,10 @@ pub fn create_pokemon_from_known_dvs(
                         species_id: species.id.clone(),
                         move_name: name.clone(),
                     })?;
-            Ok(LearnedMove {
+            Ok::<LearnedMove, PokemonBuildError>(LearnedMove {
                 name,
                 current_pp: move_data.pp,
+                pp_ups: 0,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -564,7 +497,7 @@ pub fn create_pokemon_from_known_dvs(
         focus_energy: false,
         original_trainer_name: "PLAYER".to_string(),
         original_trainer_id: 0,
-        experience: calculate_experience(species.growth_rate, level),
+        experience: calculate_experience(growth_rates, &species.growth_rate, level)?,
         hp_exp: 0,
         attack_exp: 0,
         defense_exp: 0,
@@ -648,6 +581,34 @@ mod tests {
     }
 
     #[test]
+    fn species_type_ids_are_modpack_owned_strings_not_core_enums() {
+        let mut species = species_json();
+        species["type1"] = serde_json::json!("AETHER");
+        species["type2"] = serde_json::json!("VOID");
+
+        let parsed = serde_json::from_value::<PokemonSpecies>(species)
+            .expect("modded species type ids are exact data");
+
+        assert_eq!(parsed.type1, pokemon_type("AETHER"));
+        assert_eq!(parsed.type2, pokemon_type("VOID"));
+    }
+
+    #[test]
+    fn species_metadata_ids_are_modpack_owned_strings_not_core_enums() {
+        let mut species = species_json();
+        species["egg_group1"] = serde_json::json!("EGG_CRYSTAL");
+        species["egg_group2"] = serde_json::json!("EGG_ANCIENT");
+        species["ability"] = serde_json::json!("SHED_SKIN_PLUS");
+
+        let parsed = serde_json::from_value::<PokemonSpecies>(species)
+            .expect("modded species metadata ids are exact data");
+
+        assert_eq!(parsed.egg_group1, egg_group("EGG_CRYSTAL"));
+        assert_eq!(parsed.egg_group2, egg_group("EGG_ANCIENT"));
+        assert_eq!(parsed.ability, ability("SHED_SKIN_PLUS"));
+    }
+
+    #[test]
     fn species_json_requires_explicit_nullable_held_items() {
         let mut species = species_json();
         species
@@ -698,11 +659,55 @@ mod tests {
         let error = serde_json::from_value::<LearnedMove>(serde_json::json!({
             "name": "TACKLE",
             "current_pp": 35,
+            "pp_ups": 0,
             "move": "Tackle"
         }))
         .expect_err("learned moves must not accept display move aliases")
         .to_string();
         assert!(error.contains("unknown field `move`"), "{error}");
+
+        let error = serde_json::from_value::<LearnedMove>(serde_json::json!({
+            "name": "TACKLE",
+            "current_pp": 35
+        }))
+        .expect_err("learned moves must declare PP Up stages explicitly")
+        .to_string();
+        assert!(error.contains("missing field `pp_ups`"), "{error}");
+    }
+
+    #[test]
+    fn pokemon_json_requires_explicit_nullable_item_and_status() {
+        let pokemon = Pokemon::new_for_tests(chikorita(), 5, Dv::from_non_hp(10, 10, 10, 10));
+
+        let mut missing_item = serde_json::to_value(&pokemon).expect("pokemon json");
+        missing_item
+            .as_object_mut()
+            .expect("pokemon object")
+            .remove("item");
+        let item_error = serde_json::from_value::<Pokemon>(missing_item)
+            .expect_err("missing held item must not deserialize as None")
+            .to_string();
+        assert!(item_error.contains("missing field `item`"), "{item_error}");
+
+        let mut missing_status = serde_json::to_value(&pokemon).expect("pokemon json");
+        missing_status
+            .as_object_mut()
+            .expect("pokemon object")
+            .remove("status");
+        let status_error = serde_json::from_value::<Pokemon>(missing_status)
+            .expect_err("missing status must not deserialize as healthy")
+            .to_string();
+        assert!(
+            status_error.contains("missing field `status`"),
+            "{status_error}"
+        );
+
+        let explicit_nulls = serde_json::from_value::<Pokemon>(
+            serde_json::to_value(&pokemon).expect("pokemon json"),
+        )
+        .expect("explicit null item and status are valid");
+        assert_eq!(explicit_nulls.item, None);
+        assert_eq!(explicit_nulls.status, None);
     }
 
     #[test]
@@ -748,6 +753,7 @@ mod tests {
 
     #[test]
     fn pokemon_factory_uses_learnsets_move_pp_stats_and_experience() {
+        let growth_rates = crate::systems::experience::crystal_growth_rate_catalog_for_tests();
         let species = chikorita();
         let learnsets = [(
             "CHIKORITA".to_string(),
@@ -764,7 +770,7 @@ mod tests {
                 "TACKLE".to_string(),
                 Move {
                     name: "TACKLE".to_string(),
-                    move_type: PokemonType::Normal,
+                    move_type: pokemon_type("NORMAL"),
                     power: 35,
                     accuracy: 95,
                     pp: 35,
@@ -778,7 +784,7 @@ mod tests {
                 "GROWL".to_string(),
                 Move {
                     name: "GROWL".to_string(),
-                    move_type: PokemonType::Normal,
+                    move_type: pokemon_type("NORMAL"),
                     power: 0,
                     accuracy: 100,
                     pp: 40,
@@ -798,6 +804,7 @@ mod tests {
             Dv::from_non_hp(10, 10, 10, 10),
             &learnsets,
             &moves,
+            &growth_rates,
         )
         .expect("pokemon builds from exact learnset and moves");
 
@@ -812,7 +819,35 @@ mod tests {
     }
 
     #[test]
+    fn pokemon_factory_requires_growth_rate_catalog_entry_without_fallback() {
+        let growth_rates = crate::systems::experience::crystal_growth_rate_catalog_for_tests();
+        let learnsets = [("CHIKORITA".to_string(), Vec::new())]
+            .into_iter()
+            .collect();
+        let moves = BTreeMap::new();
+
+        let mut species = chikorita();
+        species.growth_rate = growth_rate("GROWTH_CUSTOM");
+        assert_eq!(
+            create_pokemon_from_known_dvs(
+                &species,
+                5,
+                Dv::from_non_hp(10, 10, 10, 10),
+                &learnsets,
+                &moves,
+                &growth_rates,
+            ),
+            Err(PokemonBuildError::Experience(
+                ExperienceError::MissingGrowthRate {
+                    growth_rate: "GROWTH_CUSTOM".to_string(),
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn pokemon_factory_rejects_missing_learnset_or_move_without_pp_fallback() {
+        let growth_rates = crate::systems::experience::crystal_growth_rate_catalog_for_tests();
         let species = chikorita();
         let learnsets = [(
             "CHIKORITA".to_string(),
@@ -831,6 +866,7 @@ mod tests {
                 Dv::from_non_hp(10, 10, 10, 10),
                 &SpeciesLearnsets::new(),
                 &BTreeMap::new(),
+                &growth_rates,
             ),
             Err(PokemonBuildError::MissingLearnset {
                 species_id: "CHIKORITA".to_string(),
@@ -843,6 +879,7 @@ mod tests {
                 Dv::from_non_hp(10, 10, 10, 10),
                 &learnsets,
                 &BTreeMap::new(),
+                &growth_rates,
             ),
             Err(PokemonBuildError::UnknownLearnsetMove {
                 species_id: "CHIKORITA".to_string(),

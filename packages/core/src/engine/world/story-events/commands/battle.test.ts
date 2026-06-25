@@ -1,5 +1,6 @@
 import { PokemonSpeciesSchema, TrainerSchema, type Pokemon } from "@pokecrystal/core/core/models";
 import { ItemSchema } from "@pokecrystal/core/core/models/item";
+import { items as contentItems } from "@pokecrystal/assets/content/items";
 import { getFilledSlots } from "@pokecrystal/core/core/models/party";
 import { DataLoader } from "@pokecrystal/core/core/data-loader";
 import { getPokedexFlag } from "@pokecrystal/core/core/pokedex";
@@ -102,7 +103,7 @@ describe("battle command lookups", () => {
   });
 
   it("binds item lookups to the loader instance", () => {
-    const item = ItemSchema.parse({ name: "POTION" });
+    const item = ItemSchema.parse(contentItems.find((candidate) => candidate.script_name === "POTION"));
     const itemData = new Map([[item.name, item]]);
     const loader = {
       itemData,

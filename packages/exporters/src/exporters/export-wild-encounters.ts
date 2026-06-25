@@ -5,12 +5,12 @@ import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { mapConstantToName } from "@pokecrystal/core/engine/world/maps";
 import { writeJsonToTargets } from "./asm-utils";
 
-function emptyTable(): WildEncounterTable {
-  return { morning: [], day: [], night: [] };
-}
-
 function hasEncounters(table: WildEncounterTable | null | undefined): boolean {
   return Boolean(table && (table.morning.length || table.day.length || table.night.length));
+}
+
+function hasSurfaceData(rate: WildEncounterData["grass_rates"] | WildEncounterData["water_rate"], table: WildEncounterTable | null | undefined): boolean {
+  return rate !== null || table !== null || hasEncounters(table);
 }
 
 export function parseWildEncounters(filePath: string): WildEncounterData[] {
@@ -83,8 +83,8 @@ export function parseWildEncounters(filePath: string): WildEncounterData[] {
       map_name: mapName,
       grass_rates: grassRates,
       water_rate: waterRate,
-      grass: isWater ? emptyTable() : { morning: morningEncounters, day: dayEncounters, night: nightEncounters },
-      water: isWater ? { morning: waterEncounters, day: [...waterEncounters], night: [...waterEncounters] } : emptyTable(),
+      grass: isWater ? null : { morning: morningEncounters, day: dayEncounters, night: nightEncounters },
+      water: isWater ? { morning: waterEncounters, day: [...waterEncounters], night: [...waterEncounters] } : null,
     });
   }
 
@@ -100,18 +100,18 @@ export function mergeWildEncounterData(collections: Iterable<Iterable<WildEncoun
         merged.set(entry.map_name, entry);
         continue;
       }
-      if ((entry.grass_rates !== null || hasEncounters(entry.grass)) && (existing.grass_rates !== null || hasEncounters(existing.grass))) {
+      if (hasSurfaceData(entry.grass_rates, entry.grass) && hasSurfaceData(existing.grass_rates, existing.grass)) {
         throw new Error(`Duplicate grass wild encounter data for ${entry.map_name}.`);
       }
-      if ((entry.water_rate !== null || hasEncounters(entry.water)) && (existing.water_rate !== null || hasEncounters(existing.water))) {
+      if (hasSurfaceData(entry.water_rate, entry.water) && hasSurfaceData(existing.water_rate, existing.water)) {
         throw new Error(`Duplicate water wild encounter data for ${entry.map_name}.`);
       }
       merged.set(entry.map_name, {
         map_name: entry.map_name,
         grass_rates: entry.grass_rates ?? existing.grass_rates,
         water_rate: entry.water_rate ?? existing.water_rate,
-        grass: hasEncounters(entry.grass) ? entry.grass : existing.grass,
-        water: hasEncounters(entry.water) ? entry.water : existing.water,
+        grass: entry.grass ?? existing.grass,
+        water: entry.water ?? existing.water,
       });
     }
   }

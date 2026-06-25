@@ -69,6 +69,17 @@ describe('Pokemon', () => {
         });
     });
 
+    describe('PokemonSpeciesSchema', () => {
+        it('preserves exact modpack growth-rate ids', () => {
+            const species = PokemonSpeciesSchema.parse({
+                ...sampleSpecies,
+                growth_rate: 'GROWTH_CUSTOM_PACK_CURVE',
+            });
+
+            expect(species.growth_rate).toBe('GROWTH_CUSTOM_PACK_CURVE');
+        });
+    });
+
     describe('createPokemon', () => {
         it('should create a new Pokemon with correct stats and DVs', () => {
             // Configure the mock to return specific DV values

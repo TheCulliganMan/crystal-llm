@@ -59,6 +59,103 @@ pub enum ScriptAudioError {
     UnknownCryAsset { audio_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptAudioCommandIssue {
+    MissingMusicId,
+    UnknownMusicId,
+    MissingSoundEffectId,
+    UnknownSoundEffectId,
+    MissingCrySpecies,
+    UnknownCrySpecies,
+    MissingCryMetadata,
+    UnknownCryAsset,
+    MissingMusicFadeFrames,
+    UnexpectedAudioId,
+    UnexpectedFadeFrames,
+    UnknownCommand,
+}
+
+pub const SCRIPT_AUDIO_MUSIC_COMMANDS: &[&str] = &["playmusic"];
+pub const SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS: &[&str] = &["playsound"];
+pub const SCRIPT_AUDIO_CRY_COMMANDS: &[&str] = &["cry"];
+pub const SCRIPT_AUDIO_MUSIC_FADE_COMMANDS: &[&str] = &["musicfadeout"];
+pub const SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS: &[&str] = &["waitsfx"];
+
+pub fn is_known_script_audio_command(command: &str) -> bool {
+    SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&command)
+        || SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&command)
+        || SCRIPT_AUDIO_CRY_COMMANDS.contains(&command)
+        || SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&command)
+        || SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&command)
+}
+
+pub fn script_audio_command_issues(
+    command: &ScriptAudioCommand,
+    music_ids: &BTreeSet<String>,
+    sound_effect_ids: &BTreeSet<String>,
+    cry_ids: &BTreeSet<String>,
+    species: &BTreeMap<String, PokemonSpecies>,
+    cry_by_species: &BTreeMap<String, String>,
+) -> Vec<ScriptAudioCommandIssue> {
+    let mut issues = Vec::new();
+    match command.command.as_str() {
+        "playmusic" => {
+            check_audio_id(
+                command.audio_id.as_deref(),
+                music_ids,
+                ScriptAudioCommandIssue::MissingMusicId,
+                ScriptAudioCommandIssue::UnknownMusicId,
+                &mut issues,
+            );
+        }
+        "playsound" => {
+            check_audio_id(
+                command.audio_id.as_deref(),
+                sound_effect_ids,
+                ScriptAudioCommandIssue::MissingSoundEffectId,
+                ScriptAudioCommandIssue::UnknownSoundEffectId,
+                &mut issues,
+            );
+        }
+        "cry" => match command.audio_id.as_deref() {
+            Some(species_id) if species.contains_key(species_id) => {
+                match cry_by_species.get(species_id) {
+                    Some(cry_id) if cry_ids.contains(cry_id) => {}
+                    Some(_) => issues.push(ScriptAudioCommandIssue::UnknownCryAsset),
+                    None => issues.push(ScriptAudioCommandIssue::MissingCryMetadata),
+                }
+            }
+            Some(_) => issues.push(ScriptAudioCommandIssue::UnknownCrySpecies),
+            None => issues.push(ScriptAudioCommandIssue::MissingCrySpecies),
+        },
+        "musicfadeout" => {
+            check_audio_id(
+                command.audio_id.as_deref(),
+                music_ids,
+                ScriptAudioCommandIssue::MissingMusicId,
+                ScriptAudioCommandIssue::UnknownMusicId,
+                &mut issues,
+            );
+            if command.fade_frames.is_none() {
+                issues.push(ScriptAudioCommandIssue::MissingMusicFadeFrames);
+            }
+        }
+        "waitsfx" => {
+            if command.audio_id.is_some() {
+                issues.push(ScriptAudioCommandIssue::UnexpectedAudioId);
+            }
+        }
+        _ => issues.push(ScriptAudioCommandIssue::UnknownCommand),
+    }
+    if !SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&command.command.as_str())
+        && command.fade_frames.is_some()
+    {
+        issues.push(ScriptAudioCommandIssue::UnexpectedFadeFrames);
+    }
+    issues
+}
+
 pub fn resolve_script_audio_command(
     command: ScriptAudioCommand,
     music_ids: &BTreeSet<String>,
@@ -226,6 +323,20 @@ pub fn apply_audio_cue_to_state(state: &mut GameState, cue: &ScriptAudioCue) {
     }
 }
 
+fn check_audio_id(
+    audio_id: Option<&str>,
+    known_ids: &BTreeSet<String>,
+    missing: ScriptAudioCommandIssue,
+    unknown: ScriptAudioCommandIssue,
+    issues: &mut Vec<ScriptAudioCommandIssue>,
+) {
+    match audio_id {
+        Some(audio_id) if known_ids.contains(audio_id) => {}
+        Some(_) => issues.push(unknown),
+        None => issues.push(missing),
+    }
+}
+
 fn runtime_kind(kind: ScriptAudioKind) -> ScriptAudioRuntimeKind {
     match kind {
         ScriptAudioKind::Music => ScriptAudioRuntimeKind::Music,
@@ -284,6 +395,100 @@ mod tests {
 
     fn species(id: &str) -> PokemonSpecies {
         PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 65, 45, 49, 65))
+    }
+
+    #[test]
+    fn exported_audio_command_sets_are_exact() {
+        assert!(SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&"playmusic"));
+        assert!(SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&"playsound"));
+        assert!(SCRIPT_AUDIO_CRY_COMMANDS.contains(&"cry"));
+        assert!(SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&"musicfadeout"));
+        assert!(SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&"waitsfx"));
+        assert!(is_known_script_audio_command("playsound"));
+        assert!(!is_known_script_audio_command("PlaySound"));
+        assert!(!is_known_script_audio_command("mp3"));
+    }
+
+    #[test]
+    fn script_audio_issue_collector_reports_exact_pack_shape_errors() {
+        let music = BTreeSet::from(["MUSIC_ROUTE_29".to_string()]);
+        let sfx = BTreeSet::from(["SFX_GET_BADGE".to_string()]);
+        let cries = BTreeSet::from(["CRY_LUGIA".to_string()]);
+        let species = BTreeMap::from([("LUGIA".to_string(), species("LUGIA"))]);
+        let cry_by_species = BTreeMap::from([("LUGIA".to_string(), "CRY_HO_OH".to_string())]);
+
+        assert_eq!(
+            script_audio_command_issues(
+                &command("playmusic", None, Some(4)),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![
+                ScriptAudioCommandIssue::MissingMusicId,
+                ScriptAudioCommandIssue::UnexpectedFadeFrames,
+            ]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("playsound", Some("sfx_get_badge"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::UnknownSoundEffectId]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("cry", Some("LUGIA"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::UnknownCryAsset]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("musicfadeout", Some("MUSIC_ROUTE_29"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::MissingMusicFadeFrames]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("waitsfx", Some("SFX_GET_BADGE"), Some(1)),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![
+                ScriptAudioCommandIssue::UnexpectedAudioId,
+                ScriptAudioCommandIssue::UnexpectedFadeFrames,
+            ]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("mp3", Some("MUSIC_ROUTE_29"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::UnknownCommand]
+        );
     }
 
     #[test]

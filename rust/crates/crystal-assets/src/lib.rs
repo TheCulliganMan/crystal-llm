@@ -3,60 +3,120 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
+use crystal_core::battle::capture::{
+    CaptureBallRuleIssue, CaptureWobbleProbability, capture_ball_rule_issues,
+};
+use crystal_core::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
 use crystal_core::battle::start::{
     StaticWildBattleRequest, StaticWildBattleStart, TrainerBattleRequest, TrainerBattleStartStatus,
     WildBattleStart, static_wild_battle_start, trainer_battle_start,
     wild_battle_start_from_encounter,
 };
+use crystal_core::battle::stats::BattleStatMultiplierTables;
+use crystal_core::battle::turn::MovePriorityTable;
 use crystal_core::map::{
     BackgroundEvent, CoordEvent, MapAttributes, MapConnection, MapEventSectionCommand, MapEvents,
     MapScene, MapSceneTable, MapScriptSectionCommand, ObjectEvent, WarpEvent,
+    map_event_section_command_arg_counts, map_script_section_command_arg_counts,
 };
+#[cfg(test)]
+use crystal_core::models::FrontpicAnimCommand;
 use crystal_core::models::{
-    Dv, Item, ItemPocket, Move, Pokemon, PokemonSpecies, Trainer, TrainerCatalog,
-    create_pokemon_from_known_dvs,
+    Dv, FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_TM_HM, Item,
+    Move, Pokemon, PokemonSpecies, Trainer, TrainerCatalog, create_pokemon_from_known_dvs,
+    frontpic_anim_command_issue,
 };
 use crystal_core::random::Random;
+use crystal_core::systems::battle_escape::BattleEscapeRules;
+use crystal_core::systems::battle_rewards::BattleRewardRules;
 use crystal_core::systems::economy::{
-    CurrencyCatalog, MoneyAccount, ScriptEconomyCommand, resolve_amount,
+    CurrencyCatalog, MoneyAccount, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
+    SCRIPT_MONEY_CHECK_COMMANDS, SCRIPT_MONEY_MUTATION_COMMANDS, ScriptEconomyCommand,
+    is_known_script_economy_command, resolve_amount,
 };
 use crystal_core::systems::evolution::{
-    EvolutionEntry, EvolutionTable, HAPPINESS_ANYTIME, HAPPINESS_MORNDAY, HAPPINESS_NITE,
-    METHOD_HAPPINESS, METHOD_ITEM, METHOD_LEVEL, METHOD_STAT, METHOD_TRADE, STAT_ATK_EQ_DEF,
-    STAT_ATK_GT_DEF, STAT_ATK_LT_DEF, TRADE_ANY_ITEM,
+    EvolutionEntry, EvolutionTable, METHOD_HAPPINESS, METHOD_ITEM, METHOD_LEVEL, METHOD_STAT,
+    METHOD_TRADE, TRADE_ANY_ITEM, is_known_happiness_window, is_known_stat_evolution_ratio,
 };
-use crystal_core::systems::field_items::{FruitTreeCatalog, ScriptFieldPickup};
+use crystal_core::systems::field_items::{
+    FruitTreeCatalog, SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS,
+    SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
+    SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS, ScriptFieldPickup, ScriptFieldPickupIssue,
+    script_field_pickup_issues,
+};
+use crystal_core::systems::field_moves::{
+    FieldItemRule, FieldMoveBlockRule, FieldMoveCatalog, FieldMoveFlagRule, FieldMoveMoveRule,
+    FieldMoveRule, FieldMoveTravelRule,
+};
 use crystal_core::systems::gift_pokemon::{GiftPokemonScript, NO_ITEM};
 use crystal_core::systems::learnsets::{LearnsetEntry, SpeciesLearnsets};
-use crystal_core::systems::phone::{PhoneContactCatalog, ScriptPhoneCommand};
-use crystal_core::systems::script_audio::ScriptAudioCommand;
+use crystal_core::systems::phone::{
+    PhoneContactCatalog, SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_REGISTRATION_COMMANDS,
+    ScriptPhoneCommand, ScriptPhoneError, validate_script_phone_command,
+};
+use crystal_core::systems::script_audio::{
+    ScriptAudioCommand, ScriptAudioCommandIssue, script_audio_command_issues,
+};
 use crystal_core::systems::script_blocks::{CHANGE_BLOCK_COORD_STRIDE, ScriptBlockChange};
 use crystal_core::systems::script_control::{
     ScriptControlCommand, validate_script_control_command,
 };
-use crystal_core::systems::script_flags::ScriptFlagCommand;
+use crystal_core::systems::script_flags::{
+    ScriptFlagCommand, ScriptFlagCommandIssue, is_known_script_flag_command,
+    script_flag_command_issues,
+};
 use crystal_core::systems::script_items::{ScriptItemAccess, ScriptItemGrant};
 use crystal_core::systems::script_objects::{
-    ScriptMovement, ScriptMovementStep, ScriptObjectCommand, is_hideable_object_event_flag,
-    parse_script_direction,
+    SCRIPT_MOVEMENT_DIRECTION_COMMANDS, SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
+    SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, SCRIPT_OBJECT_COORDINATE_COMMANDS,
+    SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_DIRECTION_COMMANDS,
+    SCRIPT_OBJECT_EMOTE_COMMANDS, SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS,
+    SCRIPT_OBJECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS,
+    SCRIPT_OBJECT_TARGET_COMMANDS, SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement,
+    ScriptMovementStep, ScriptObjectCommand, is_hideable_object_event_flag,
+    is_known_script_movement_command, is_known_script_object_command, parse_script_direction,
 };
-use crystal_core::systems::script_runtime::ScriptRuntimeCommand;
-use crystal_core::systems::script_scenes::ScriptSceneCommand;
+use crystal_core::systems::script_runtime::{
+    ScriptRuntimeCommand, ScriptRuntimeCommandError, script_runtime_command_arg_counts,
+    validate_script_runtime_command,
+};
+use crystal_core::systems::script_scenes::{
+    SCRIPT_SCENE_CHECK_COMMANDS, SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS,
+    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS, ScriptSceneCommand, is_known_script_scene_command,
+};
 use crystal_core::systems::script_text::{
-    ScriptMenuCommand, ScriptMenuDefinition, ScriptTextBody, ScriptTextBodyCommand,
-    ScriptTextCommand,
+    SCRIPT_TEXT_LABEL_COMMANDS, SCRIPT_TEXT_NO_LABEL_COMMANDS, ScriptMenuCommand,
+    ScriptMenuDefinition, ScriptTextBody, ScriptTextBodyCommand, ScriptTextCommand,
+    is_known_script_text_command, menu_definition_command_arg_counts, text_body_command_arg_counts,
 };
 use crystal_core::systems::script_variables::{
     ScriptVariableCommand, validate_script_variable_command,
 };
-use crystal_core::systems::script_warps::{ScriptMapCommand, parse_script_warp_facing};
-use crystal_core::systems::shop::{MartCatalog, ScriptShopCommand};
+use crystal_core::systems::script_warps::{
+    SCRIPT_MAP_FACING_WARP_COMMANDS, SCRIPT_MAP_NEW_LOAD_COMMANDS, SCRIPT_MAP_NO_PAYLOAD_COMMANDS,
+    SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS, ScriptMapCommand,
+    is_known_script_map_command, parse_script_warp_facing,
+};
+use crystal_core::systems::shop::{
+    MartCatalog, SCRIPT_SHOP_COMMANDS, ScriptShopCommand, ShopError, validate_script_shop_command,
+};
+use crystal_core::systems::special_routines::{
+    BUENA_PASSWORD_CATEGORY_ITEM, BUENA_PASSWORD_CATEGORY_MON, BUENA_PASSWORD_CATEGORY_MOVE,
+    BattleTowerRules, BuenaPasswordCategoryDefinition, BuenaPrizeDefinition, BugContestConfig,
+    DratiniMoveSetDefinition, HappinessData, KurtApricornRecipe, MagikarpLengthEntry,
+    OakRatingEntry, OddEggDefinition, RoamingPokemonDefinition, ShuckieGiftDefinition,
+    is_known_buena_password_category_type, is_known_special_routine,
+};
+use crystal_core::systems::step_events::StepEventRules;
 use crystal_core::world::collision::{
     MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile,
     is_permission_passable, permissions, sample_collision,
 };
-use crystal_core::world::encounters::WildEncounterData;
-use crystal_core::world::fishing::FishingCatalog;
+use crystal_core::world::encounters::{
+    ENCOUNTER_TIME_KEYS, EncounterMusicModifiers, EncounterSlotTables, FieldEncounterData,
+    FieldEncounterEntry, WildEncounterData, resolve_encounter_time_key,
+};
+use crystal_core::world::fishing::{FishingCatalog, is_known_fishing_rod};
 use crystal_core::world::map::{Direction, OverworldMapData, TilePosition};
 use crystal_core::world::session::{
     ConnectionDestination, ConnectionTransition, ConnectionTrigger, WarpDestination,
@@ -70,10 +130,20 @@ use serde_json::Value;
 pub use crystal_core::battle::capture::CaptureRules;
 
 pub mod modpack {
-    pub use crystal_core::battle::capture::CaptureRules;
+    pub use crystal_core::battle::capture::{CaptureRules, CaptureWobbleProbability};
+    pub use crystal_core::battle::damage::{
+        TypeCategories, TypeEffectivenessEntry, TypeEffectivenessTable, WeatherModifiers,
+        WeatherMoveEffectModifier, WeatherTypeModifier,
+    };
+    pub use crystal_core::battle::stats::{BattleStatMultiplier, BattleStatMultiplierTables};
+    pub use crystal_core::battle::turn::{
+        MoveEffectPriority, MovePriorityOverride, MovePriorityTable,
+    };
     pub use crystal_core::map::{MapEventSectionCommand, MapScriptSectionCommand};
+    pub use crystal_core::systems::battle_rewards::BattleRewardRules;
     pub use crystal_core::systems::economy::{CurrencyCatalog, ScriptEconomyCommand};
     pub use crystal_core::systems::evolution::{EvolutionEntry, EvolutionTable};
+    pub use crystal_core::systems::experience::{GrowthRateCatalog, GrowthRateCurve};
     pub use crystal_core::systems::field_items::{FruitTreeCatalog, ScriptFieldPickup};
     pub use crystal_core::systems::gift_pokemon::GiftPokemonScript;
     pub use crystal_core::systems::phone::{
@@ -96,6 +166,9 @@ pub mod modpack {
     pub use crystal_core::systems::script_variables::ScriptVariableCommand;
     pub use crystal_core::systems::script_warps::ScriptMapCommand;
     pub use crystal_core::systems::shop::{MartCatalog, ScriptShopCommand};
+    pub use crystal_core::world::encounters::{
+        EncounterMusicModifier, EncounterMusicModifiers, EncounterSlotChance, EncounterSlotTables,
+    };
     pub use crystal_core::world::fishing::FishingCatalog;
 
     pub use super::{
@@ -109,6 +182,13 @@ pub mod modpack {
         read_loaded_compiled_game_pack, write_compiled_game_pack,
     };
     pub use crystal_core::models::{Trainer, TrainerCatalog};
+    pub use crystal_core::systems::special_routines::{
+        BattleTowerRules, BuenaPasswordCategoryDefinition, BuenaPrizeDefinition, BugContestConfig,
+        DratiniMoveSetDefinition, HappinessChangeEntry, HappinessData, HappinessServiceOutcome,
+        HappinessServiceTable, KurtApricornRecipe, MagikarpLengthEntry, OakRatingEntry,
+        OddEggDefinition, RoamingPokemonDefinition, ShuckieGiftDefinition,
+    };
+    pub use crystal_core::systems::step_events::StepEventRules;
 }
 
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
@@ -276,6 +356,7 @@ impl AssetRoot {
 pub enum ContentPackCategory {
     Pokemon,
     Moves,
+    GrowthRates,
     Learnsets,
     LevelUpMoves,
     EggMoves,
@@ -285,11 +366,37 @@ pub enum ContentPackCategory {
     MapAttributes,
     MapDimensions,
     WildEncounters,
+    FieldEncounters,
     RuntimeSpawnPoints,
     RuntimeMapMetadata,
     FleeMons,
+    RoamingPokemon,
+    BuenaPasswordCategories,
+    BuenaPrizes,
+    KurtApricornRecipes,
+    ShuckieGift,
+    DratiniMoveSets,
+    BugContestConfig,
+    BattleTowerRules,
+    OakRatings,
+    OddEggDefinitions,
+    MagikarpLengths,
+    HappinessData,
+    EncounterSlotTables,
+    EncounterMusicModifiers,
+    BattleStatMultipliers,
+    CaptureWobbleProbabilities,
+    CaptureRules,
+    BattleEscapeRules,
+    MovePriorities,
+    TypeCategories,
+    TypeEffectiveness,
+    WeatherModifiers,
+    BattleRewardRules,
+    StepEventRules,
     Fishing,
     FruitTrees,
+    FieldMoves,
     Npcs,
     PokegearLandmarks,
     PcStrings,
@@ -329,6 +436,7 @@ pub enum ContentPackCategory {
 pub struct ContentPackFiles {
     pub pokemon: Vec<String>,
     pub moves: Vec<String>,
+    pub growth_rates: Vec<String>,
     pub learnsets: Vec<String>,
     pub level_up_moves: Vec<String>,
     pub egg_moves: Vec<String>,
@@ -338,11 +446,37 @@ pub struct ContentPackFiles {
     pub map_attributes: Vec<String>,
     pub map_dimensions: Vec<String>,
     pub wild_encounters: Vec<String>,
+    pub field_encounters: Vec<String>,
     pub runtime_spawn_points: Vec<String>,
     pub runtime_map_metadata: Vec<String>,
     pub flee_mons: Vec<String>,
+    pub roaming_pokemon: Vec<String>,
+    pub buena_password_categories: Vec<String>,
+    pub buena_prizes: Vec<String>,
+    pub kurt_apricorn_recipes: Vec<String>,
+    pub shuckie_gift: Vec<String>,
+    pub dratini_move_sets: Vec<String>,
+    pub bug_contest_config: Vec<String>,
+    pub battle_tower_rules: Vec<String>,
+    pub oak_ratings: Vec<String>,
+    pub odd_egg_definitions: Vec<String>,
+    pub magikarp_lengths: Vec<String>,
+    pub happiness_data: Vec<String>,
+    pub encounter_slot_tables: Vec<String>,
+    pub encounter_music_modifiers: Vec<String>,
+    pub battle_stat_multipliers: Vec<String>,
+    pub capture_wobble_probabilities: Vec<String>,
+    pub capture_rules: Vec<String>,
+    pub battle_escape_rules: Vec<String>,
+    pub move_priorities: Vec<String>,
+    pub type_categories: Vec<String>,
+    pub type_effectiveness: Vec<String>,
+    pub weather_modifiers: Vec<String>,
+    pub battle_reward_rules: Vec<String>,
+    pub step_event_rules: Vec<String>,
     pub fishing: Vec<String>,
     pub fruit_trees: Vec<String>,
+    pub field_moves: Vec<String>,
     pub npcs: Vec<String>,
     pub pokegear_landmarks: Vec<String>,
     pub pc_strings: Vec<String>,
@@ -382,6 +516,7 @@ impl ContentPackFiles {
         match category {
             ContentPackCategory::Pokemon => &self.pokemon,
             ContentPackCategory::Moves => &self.moves,
+            ContentPackCategory::GrowthRates => &self.growth_rates,
             ContentPackCategory::Learnsets => &self.learnsets,
             ContentPackCategory::LevelUpMoves => &self.level_up_moves,
             ContentPackCategory::EggMoves => &self.egg_moves,
@@ -391,11 +526,37 @@ impl ContentPackFiles {
             ContentPackCategory::MapAttributes => &self.map_attributes,
             ContentPackCategory::MapDimensions => &self.map_dimensions,
             ContentPackCategory::WildEncounters => &self.wild_encounters,
+            ContentPackCategory::FieldEncounters => &self.field_encounters,
             ContentPackCategory::RuntimeSpawnPoints => &self.runtime_spawn_points,
             ContentPackCategory::RuntimeMapMetadata => &self.runtime_map_metadata,
             ContentPackCategory::FleeMons => &self.flee_mons,
+            ContentPackCategory::RoamingPokemon => &self.roaming_pokemon,
+            ContentPackCategory::BuenaPasswordCategories => &self.buena_password_categories,
+            ContentPackCategory::BuenaPrizes => &self.buena_prizes,
+            ContentPackCategory::KurtApricornRecipes => &self.kurt_apricorn_recipes,
+            ContentPackCategory::ShuckieGift => &self.shuckie_gift,
+            ContentPackCategory::DratiniMoveSets => &self.dratini_move_sets,
+            ContentPackCategory::BugContestConfig => &self.bug_contest_config,
+            ContentPackCategory::BattleTowerRules => &self.battle_tower_rules,
+            ContentPackCategory::OakRatings => &self.oak_ratings,
+            ContentPackCategory::OddEggDefinitions => &self.odd_egg_definitions,
+            ContentPackCategory::MagikarpLengths => &self.magikarp_lengths,
+            ContentPackCategory::HappinessData => &self.happiness_data,
+            ContentPackCategory::EncounterSlotTables => &self.encounter_slot_tables,
+            ContentPackCategory::EncounterMusicModifiers => &self.encounter_music_modifiers,
+            ContentPackCategory::BattleStatMultipliers => &self.battle_stat_multipliers,
+            ContentPackCategory::CaptureWobbleProbabilities => &self.capture_wobble_probabilities,
+            ContentPackCategory::CaptureRules => &self.capture_rules,
+            ContentPackCategory::BattleEscapeRules => &self.battle_escape_rules,
+            ContentPackCategory::MovePriorities => &self.move_priorities,
+            ContentPackCategory::TypeCategories => &self.type_categories,
+            ContentPackCategory::TypeEffectiveness => &self.type_effectiveness,
+            ContentPackCategory::WeatherModifiers => &self.weather_modifiers,
+            ContentPackCategory::BattleRewardRules => &self.battle_reward_rules,
+            ContentPackCategory::StepEventRules => &self.step_event_rules,
             ContentPackCategory::Fishing => &self.fishing,
             ContentPackCategory::FruitTrees => &self.fruit_trees,
+            ContentPackCategory::FieldMoves => &self.field_moves,
             ContentPackCategory::Npcs => &self.npcs,
             ContentPackCategory::PokegearLandmarks => &self.pokegear_landmarks,
             ContentPackCategory::PcStrings => &self.pc_strings,
@@ -435,6 +596,7 @@ impl ContentPackFiles {
 const CONTENT_PACK_CATEGORIES: &[ContentPackCategory] = &[
     ContentPackCategory::Pokemon,
     ContentPackCategory::Moves,
+    ContentPackCategory::GrowthRates,
     ContentPackCategory::Learnsets,
     ContentPackCategory::LevelUpMoves,
     ContentPackCategory::EggMoves,
@@ -444,11 +606,37 @@ const CONTENT_PACK_CATEGORIES: &[ContentPackCategory] = &[
     ContentPackCategory::MapAttributes,
     ContentPackCategory::MapDimensions,
     ContentPackCategory::WildEncounters,
+    ContentPackCategory::FieldEncounters,
     ContentPackCategory::RuntimeSpawnPoints,
     ContentPackCategory::RuntimeMapMetadata,
     ContentPackCategory::FleeMons,
+    ContentPackCategory::RoamingPokemon,
+    ContentPackCategory::BuenaPasswordCategories,
+    ContentPackCategory::BuenaPrizes,
+    ContentPackCategory::KurtApricornRecipes,
+    ContentPackCategory::ShuckieGift,
+    ContentPackCategory::DratiniMoveSets,
+    ContentPackCategory::BugContestConfig,
+    ContentPackCategory::BattleTowerRules,
+    ContentPackCategory::OakRatings,
+    ContentPackCategory::OddEggDefinitions,
+    ContentPackCategory::MagikarpLengths,
+    ContentPackCategory::HappinessData,
+    ContentPackCategory::EncounterSlotTables,
+    ContentPackCategory::EncounterMusicModifiers,
+    ContentPackCategory::BattleStatMultipliers,
+    ContentPackCategory::CaptureWobbleProbabilities,
+    ContentPackCategory::CaptureRules,
+    ContentPackCategory::BattleEscapeRules,
+    ContentPackCategory::MovePriorities,
+    ContentPackCategory::TypeCategories,
+    ContentPackCategory::TypeEffectiveness,
+    ContentPackCategory::WeatherModifiers,
+    ContentPackCategory::BattleRewardRules,
+    ContentPackCategory::StepEventRules,
     ContentPackCategory::Fishing,
     ContentPackCategory::FruitTrees,
+    ContentPackCategory::FieldMoves,
     ContentPackCategory::Npcs,
     ContentPackCategory::PokegearLandmarks,
     ContentPackCategory::PcStrings,
@@ -488,6 +676,7 @@ impl ContentPackCategory {
         match self {
             ContentPackCategory::Pokemon => "pokemon",
             ContentPackCategory::Moves => "moves",
+            ContentPackCategory::GrowthRates => "growth_rates",
             ContentPackCategory::Learnsets => "learnsets",
             ContentPackCategory::LevelUpMoves => "level_up_moves",
             ContentPackCategory::EggMoves => "egg_moves",
@@ -497,11 +686,37 @@ impl ContentPackCategory {
             ContentPackCategory::MapAttributes => "map_attributes",
             ContentPackCategory::MapDimensions => "map_dimensions",
             ContentPackCategory::WildEncounters => "wild_encounters",
+            ContentPackCategory::FieldEncounters => "field_encounters",
             ContentPackCategory::RuntimeSpawnPoints => "runtime_spawn_points",
             ContentPackCategory::RuntimeMapMetadata => "runtime_map_metadata",
             ContentPackCategory::FleeMons => "flee_mons",
+            ContentPackCategory::RoamingPokemon => "roaming_pokemon",
+            ContentPackCategory::BuenaPasswordCategories => "buena_password_categories",
+            ContentPackCategory::BuenaPrizes => "buena_prizes",
+            ContentPackCategory::KurtApricornRecipes => "kurt_apricorn_recipes",
+            ContentPackCategory::ShuckieGift => "shuckie_gift",
+            ContentPackCategory::DratiniMoveSets => "dratini_move_sets",
+            ContentPackCategory::BugContestConfig => "bug_contest_config",
+            ContentPackCategory::BattleTowerRules => "battle_tower_rules",
+            ContentPackCategory::OakRatings => "oak_ratings",
+            ContentPackCategory::OddEggDefinitions => "odd_egg_definitions",
+            ContentPackCategory::MagikarpLengths => "magikarp_lengths",
+            ContentPackCategory::HappinessData => "happiness_data",
+            ContentPackCategory::EncounterSlotTables => "encounter_slot_tables",
+            ContentPackCategory::EncounterMusicModifiers => "encounter_music_modifiers",
+            ContentPackCategory::BattleStatMultipliers => "battle_stat_multipliers",
+            ContentPackCategory::CaptureWobbleProbabilities => "capture_wobble_probabilities",
+            ContentPackCategory::CaptureRules => "capture_rules",
+            ContentPackCategory::BattleEscapeRules => "battle_escape_rules",
+            ContentPackCategory::MovePriorities => "move_priorities",
+            ContentPackCategory::TypeCategories => "type_categories",
+            ContentPackCategory::TypeEffectiveness => "type_effectiveness",
+            ContentPackCategory::WeatherModifiers => "weather_modifiers",
+            ContentPackCategory::BattleRewardRules => "battle_reward_rules",
+            ContentPackCategory::StepEventRules => "step_event_rules",
             ContentPackCategory::Fishing => "fishing",
             ContentPackCategory::FruitTrees => "fruit_trees",
+            ContentPackCategory::FieldMoves => "field_moves",
             ContentPackCategory::Npcs => "npcs",
             ContentPackCategory::PokegearLandmarks => "pokegear_landmarks",
             ContentPackCategory::PcStrings => "pc_strings",
@@ -615,6 +830,7 @@ pub struct CompiledContentPack {
 pub struct CompiledContentPackCategories {
     pub pokemon: Vec<Value>,
     pub moves: Vec<Value>,
+    pub growth_rates: Vec<Value>,
     pub learnsets: Vec<Value>,
     pub level_up_moves: Vec<Value>,
     pub egg_moves: Vec<Value>,
@@ -624,11 +840,37 @@ pub struct CompiledContentPackCategories {
     pub map_attributes: Vec<Value>,
     pub map_dimensions: Vec<Value>,
     pub wild_encounters: Vec<Value>,
+    pub field_encounters: Vec<Value>,
     pub runtime_spawn_points: Vec<Value>,
     pub runtime_map_metadata: Vec<Value>,
     pub flee_mons: Vec<Value>,
+    pub roaming_pokemon: Vec<Value>,
+    pub buena_password_categories: Vec<Value>,
+    pub buena_prizes: Vec<Value>,
+    pub kurt_apricorn_recipes: Vec<Value>,
+    pub shuckie_gift: Vec<Value>,
+    pub dratini_move_sets: Vec<Value>,
+    pub bug_contest_config: Vec<Value>,
+    pub battle_tower_rules: Vec<Value>,
+    pub oak_ratings: Vec<Value>,
+    pub odd_egg_definitions: Vec<Value>,
+    pub magikarp_lengths: Vec<Value>,
+    pub happiness_data: Vec<Value>,
+    pub encounter_slot_tables: Vec<Value>,
+    pub encounter_music_modifiers: Vec<Value>,
+    pub battle_stat_multipliers: Vec<Value>,
+    pub capture_wobble_probabilities: Vec<Value>,
+    pub capture_rules: Vec<Value>,
+    pub battle_escape_rules: Vec<Value>,
+    pub move_priorities: Vec<Value>,
+    pub type_categories: Vec<Value>,
+    pub type_effectiveness: Vec<Value>,
+    pub weather_modifiers: Vec<Value>,
+    pub battle_reward_rules: Vec<Value>,
+    pub step_event_rules: Vec<Value>,
     pub fishing: Vec<Value>,
     pub fruit_trees: Vec<Value>,
+    pub field_moves: Vec<Value>,
     pub npcs: Vec<Value>,
     pub pokegear_landmarks: Vec<Value>,
     pub pc_strings: Vec<Value>,
@@ -668,6 +910,7 @@ impl CompiledContentPackCategories {
         match category {
             ContentPackCategory::Pokemon => &self.pokemon,
             ContentPackCategory::Moves => &self.moves,
+            ContentPackCategory::GrowthRates => &self.growth_rates,
             ContentPackCategory::Learnsets => &self.learnsets,
             ContentPackCategory::LevelUpMoves => &self.level_up_moves,
             ContentPackCategory::EggMoves => &self.egg_moves,
@@ -677,11 +920,37 @@ impl CompiledContentPackCategories {
             ContentPackCategory::MapAttributes => &self.map_attributes,
             ContentPackCategory::MapDimensions => &self.map_dimensions,
             ContentPackCategory::WildEncounters => &self.wild_encounters,
+            ContentPackCategory::FieldEncounters => &self.field_encounters,
             ContentPackCategory::RuntimeSpawnPoints => &self.runtime_spawn_points,
             ContentPackCategory::RuntimeMapMetadata => &self.runtime_map_metadata,
             ContentPackCategory::FleeMons => &self.flee_mons,
+            ContentPackCategory::RoamingPokemon => &self.roaming_pokemon,
+            ContentPackCategory::BuenaPasswordCategories => &self.buena_password_categories,
+            ContentPackCategory::BuenaPrizes => &self.buena_prizes,
+            ContentPackCategory::KurtApricornRecipes => &self.kurt_apricorn_recipes,
+            ContentPackCategory::ShuckieGift => &self.shuckie_gift,
+            ContentPackCategory::DratiniMoveSets => &self.dratini_move_sets,
+            ContentPackCategory::BugContestConfig => &self.bug_contest_config,
+            ContentPackCategory::BattleTowerRules => &self.battle_tower_rules,
+            ContentPackCategory::OakRatings => &self.oak_ratings,
+            ContentPackCategory::OddEggDefinitions => &self.odd_egg_definitions,
+            ContentPackCategory::MagikarpLengths => &self.magikarp_lengths,
+            ContentPackCategory::HappinessData => &self.happiness_data,
+            ContentPackCategory::EncounterSlotTables => &self.encounter_slot_tables,
+            ContentPackCategory::EncounterMusicModifiers => &self.encounter_music_modifiers,
+            ContentPackCategory::BattleStatMultipliers => &self.battle_stat_multipliers,
+            ContentPackCategory::CaptureWobbleProbabilities => &self.capture_wobble_probabilities,
+            ContentPackCategory::CaptureRules => &self.capture_rules,
+            ContentPackCategory::BattleEscapeRules => &self.battle_escape_rules,
+            ContentPackCategory::MovePriorities => &self.move_priorities,
+            ContentPackCategory::TypeCategories => &self.type_categories,
+            ContentPackCategory::TypeEffectiveness => &self.type_effectiveness,
+            ContentPackCategory::WeatherModifiers => &self.weather_modifiers,
+            ContentPackCategory::BattleRewardRules => &self.battle_reward_rules,
+            ContentPackCategory::StepEventRules => &self.step_event_rules,
             ContentPackCategory::Fishing => &self.fishing,
             ContentPackCategory::FruitTrees => &self.fruit_trees,
+            ContentPackCategory::FieldMoves => &self.field_moves,
             ContentPackCategory::Npcs => &self.npcs,
             ContentPackCategory::PokegearLandmarks => &self.pokegear_landmarks,
             ContentPackCategory::PcStrings => &self.pc_strings,
@@ -768,11 +1037,35 @@ pub struct ModpackPayload {
     pub evolutions: EvolutionTable,
     pub marts: MartCatalog,
     pub currency_constants: CurrencyCatalog,
+    pub battle_reward_rules: BattleRewardRules,
+    pub battle_escape_rules: BattleEscapeRules,
+    pub step_event_rules: StepEventRules,
     pub fishing: FishingCatalog,
     pub fruit_trees: FruitTreeCatalog,
+    pub field_moves: FieldMoveCatalog,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
+    pub buena_password_categories: Vec<BuenaPasswordCategoryDefinition>,
+    pub roaming_pokemon: Vec<RoamingPokemonDefinition>,
+    pub buena_prizes: Vec<BuenaPrizeDefinition>,
+    pub kurt_apricorn_recipes: Vec<KurtApricornRecipe>,
+    pub shuckie_gift: Option<ShuckieGiftDefinition>,
+    pub dratini_move_sets: Vec<DratiniMoveSetDefinition>,
+    pub bug_contest_config: Option<BugContestConfig>,
+    pub battle_tower_rules: Option<BattleTowerRules>,
+    pub oak_ratings: Vec<OakRatingEntry>,
+    pub odd_egg_definitions: Vec<OddEggDefinition>,
+    pub magikarp_lengths: Vec<MagikarpLengthEntry>,
+    pub happiness_data: Option<HappinessData>,
+    pub encounter_slot_tables: EncounterSlotTables,
+    pub encounter_music_modifiers: EncounterMusicModifiers,
+    pub battle_stat_multipliers: BattleStatMultiplierTables,
+    pub capture_wobble_probabilities: Vec<CaptureWobbleProbability>,
+    pub move_priorities: MovePriorityTable,
+    pub type_categories: TypeCategories,
+    pub type_effectiveness: TypeEffectivenessTable,
+    pub weather_modifiers: WeatherModifiers,
     pub pc_strings: BTreeMap<String, String>,
     pub menu_icons: BTreeMap<String, String>,
     pub pokedex_entries: Vec<RuntimePokedexEntry>,
@@ -787,8 +1080,10 @@ pub struct ModpackPayload {
     pub sprite_anim_bundle: String,
     pub sprite_palette_defaults: BTreeMap<String, i64>,
     pub pokegear_town_map_palette_map: BTreeMap<String, Vec<String>>,
+    pub pokegear_landmarks: PokegearLandmarksPayload,
     pub pokemon_cries: BTreeMap<String, PokemonCryMetadata>,
     pub wild_encounters: Vec<WildEncounterData>,
+    pub field_encounters: Vec<FieldEncounterData>,
     pub trainers: TrainerCatalog,
     pub phone_contacts: PhoneContactCatalog,
     pub permanent_phone_numbers: Vec<String>,
@@ -841,6 +1136,25 @@ pub struct RuntimeMapMetadata {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PokegearLandmarksPayload {
+    pub landmarks: Vec<PokegearLandmark>,
+    pub map_to_landmark: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PokegearLandmark {
+    pub id: u16,
+    pub constant: String,
+    pub label: String,
+    pub name: String,
+    pub x: i16,
+    pub y: i16,
+    pub region: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InitializeEventsConfig {
     pub event_flags: Vec<String>,
@@ -871,22 +1185,6 @@ pub struct RuntimePokedexEntry {
     pub height_digits: u16,
     pub weight_digits: u16,
     pub pages: Vec<String>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrontpicAnimCommand {
-    pub kind: String,
-    pub frame: Option<u16>,
-    pub duration: Option<u16>,
-    pub count: Option<u16>,
-    pub target: Option<u16>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrontpicAnimProgram {
-    pub commands: Vec<FrontpicAnimCommand>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -948,7 +1246,9 @@ impl ModpackAudioAsset {
             .parent()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
-            .unwrap_or_default();
+            .with_context(|| {
+                format!("audio file path '{path}' must live under music, sfx, or cries")
+            })?;
         match parent {
             "music" => Self::music(stem.to_string(), path),
             "sfx" => Self::sound_effect(stem.to_string(), path),
@@ -993,7 +1293,9 @@ impl ModpackAudioAsset {
         let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                anyhow::anyhow!("audio asset '{}' path must have a file extension", self.id)
+            })?;
         match self.kind {
             ModpackAudioKind::Music | ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry
                 if extension == "mid" =>
@@ -1072,7 +1374,7 @@ pub struct ScriptedTrainerBattle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ModpackCompileOptions {
     pub verify: bool,
     pub playability: PlayabilityRules,
@@ -1378,11 +1680,25 @@ fn verify_game_data(
     let map_names = all_map_names(data);
 
     verify_species_and_moves(data, &mut diagnostics);
+    verify_items(data, &mut diagnostics);
     verify_evolutions(data, &mut diagnostics);
     verify_encounters(data, &map_names, &mut diagnostics);
     verify_audio_assets(asset_root, data, &mut diagnostics);
+    verify_map_music(data, &mut diagnostics);
+    verify_trainer_encounter_music(data, &mut diagnostics);
     verify_capture_rules(data, &mut diagnostics);
+    verify_capture_wobble_probabilities(data, &mut diagnostics);
+    verify_battle_escape_rules(data, &mut diagnostics);
+    verify_move_priorities(data, &mut diagnostics);
+    verify_type_categories(data, &mut diagnostics);
+    verify_type_effectiveness(data, &mut diagnostics);
+    verify_weather_modifiers(data, &mut diagnostics);
+    verify_battle_reward_rules(data, &mut diagnostics);
+    verify_step_event_rules(data, &mut diagnostics);
     verify_runtime_pack_data(data, &mut diagnostics);
+    verify_encounter_slot_tables(data, &mut diagnostics);
+    verify_encounter_music_modifiers(data, &mut diagnostics);
+    verify_battle_stat_multipliers(data, &mut diagnostics);
     verify_phone_contacts(data, &mut diagnostics);
     verify_special_routines(data, &mut diagnostics);
     verify_marts(data, &mut diagnostics);
@@ -1408,6 +1724,7 @@ fn verify_game_data(
     verify_script_phone_commands(data, &mut diagnostics);
     verify_script_runtime_commands(data, &mut diagnostics);
     verify_fishing(data, &mut diagnostics);
+    verify_field_moves(data, &mut diagnostics);
     let graph = verify_maps(asset_root, data, &map_names, rules, &mut diagnostics);
 
     let reachable_maps = reachable_maps(&map_names, &graph, rules);
@@ -1499,6 +1816,18 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
                 "Pokemon species is missing an explicit level-up learnset",
             ));
         }
+        for item_id in [species.item1.as_deref(), species.item2.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !data.items.contains_key(item_id) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_species_held_item",
+                    species_id,
+                    format!("Pokemon species references missing held item '{item_id}'"),
+                ));
+            }
+        }
         for move_name in &species.tmhm_learnset {
             if !data.moves.contains_key(move_name) {
                 diagnostics.push(VerificationError::error(
@@ -1527,6 +1856,278 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
                 ));
             }
         }
+    }
+}
+
+fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    for (item_id, item) in &data.items {
+        if item.pocket == ITEM_POCKET_BALL
+            && !data
+                .capture_rules
+                .ball_rules
+                .contains_key(&item.script_name)
+            && !data
+                .capture_rules
+                .guaranteed_capture_balls
+                .contains(&item.script_name)
+        {
+            diagnostics.push(VerificationError::error(
+                "unknown_capture_ball_item",
+                item_id,
+                format!(
+                    "BALL pocket item '{}' uses unsupported capture ball id '{}'",
+                    item_id, item.script_name
+                ),
+            ));
+        }
+        verify_item_payload_fields(item_id, item, diagnostics);
+    }
+}
+
+fn verify_item_payload_fields(
+    item_id: &str,
+    item: &Item,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if item.parameter != 0 {
+        verify_item_heal_amount(item_id, item, diagnostics);
+    }
+    if item.revive_hp_percent.is_some() {
+        verify_item_percent(
+            item_id,
+            item.revive_hp_percent,
+            "revive_hp_percent",
+            "invalid_item_revive_hp_percent",
+            diagnostics,
+        );
+    }
+    if item.party_revive_hp_percent.is_some() {
+        verify_item_percent(
+            item_id,
+            item.party_revive_hp_percent,
+            "party_revive_hp_percent",
+            "invalid_item_party_revive_hp_percent",
+            diagnostics,
+        );
+    }
+    if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
+        verify_item_pp_restore_payload(item_id, item, diagnostics);
+    }
+    if let Some(stages) = item.pp_up_stages {
+        if !(1..=3).contains(&stages) {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_pp_up_stages",
+                item_id,
+                format!("pp_up_stages must be from 1 to 3, found {stages}"),
+            ));
+        }
+    }
+    if item.vitamin_stat.is_some()
+        || item.vitamin_stat_exp.is_some()
+        || item.vitamin_max_stat_exp.is_some()
+    {
+        verify_item_vitamin_payload(item_id, item, diagnostics);
+    }
+    if let Some(level_gain) = item.rare_candy_level_gain {
+        if level_gain == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_rare_candy_level_gain",
+                item_id,
+                format!("rare_candy_level_gain must be positive, found {level_gain}"),
+            ));
+        }
+    }
+    if item.battle_stat_boost_stat.is_some() || item.battle_stat_boost_stages.is_some() {
+        verify_item_battle_stat_boost_payload(item_id, item, diagnostics);
+    }
+    if let Some(guard) = item.battle_stat_drop_guard {
+        if !guard {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_battle_stat_drop_guard",
+                item_id,
+                "battle_stat_drop_guard must be true when declared",
+            ));
+        }
+    }
+    if let Some(mode) = item.battle_escape_mode.as_deref() {
+        if mode != "WILD_BATTLE" {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_battle_escape_mode",
+                item_id,
+                format!("battle_escape_mode must be 'WILD_BATTLE' when declared, found '{mode}'"),
+            ));
+        }
+    }
+    if let Some(steps) = item.repel_steps {
+        if steps == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_repel_steps",
+                item_id,
+                format!("repel_steps must be positive when declared, found {steps}"),
+            ));
+        }
+    }
+    if let Some(focus) = item.battle_focus_energy {
+        if !focus {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_battle_focus_energy",
+                item_id,
+                "battle_focus_energy must be true when declared",
+            ));
+        }
+    }
+    if let Some(confusion_heal) = item.confusion_heal {
+        if !confusion_heal {
+            diagnostics.push(VerificationError::error(
+                "invalid_item_confusion_heal",
+                item_id,
+                "confusion_heal must be true when declared",
+            ));
+        }
+    }
+}
+
+fn verify_item_heal_amount(item_id: &str, item: &Item, diagnostics: &mut Vec<VerificationError>) {
+    if item.parameter == -1 || item.parameter > 0 {
+        return;
+    }
+    diagnostics.push(VerificationError::error(
+        "invalid_item_heal_amount",
+        item_id,
+        format!(
+            "{} requires parameter -1 or a positive HP amount, found {}",
+            item.effect, item.parameter
+        ),
+    ));
+}
+
+fn verify_item_percent(
+    item_id: &str,
+    percent: Option<u8>,
+    field_name: &str,
+    invalid_code: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    match percent {
+        Some(percent) if (1..=100).contains(&percent) => {}
+        Some(percent) => diagnostics.push(VerificationError::error(
+            invalid_code,
+            item_id,
+            format!("{field_name} must be from 1 to 100, found {percent}"),
+        )),
+        None => {}
+    }
+}
+
+fn verify_item_pp_restore_payload(
+    item_id: &str,
+    item: &Item,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    match item.pp_restore_scope.as_deref() {
+        Some("MOVE" | "POKEMON") => {}
+        Some(scope) => diagnostics.push(VerificationError::error(
+            "invalid_item_pp_restore_scope",
+            item_id,
+            format!("RESTORE_PP requires pp_restore_scope 'MOVE' or 'POKEMON', found '{scope}'"),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_item_pp_restore_scope",
+            item_id,
+            "RESTORE_PP requires explicit pp_restore_scope",
+        )),
+    }
+    if let Some(0) = item.pp_restore_points {
+        diagnostics.push(VerificationError::error(
+            "invalid_item_pp_restore_points",
+            item_id,
+            "RESTORE_PP pp_restore_points must be positive when present",
+        ));
+    }
+}
+
+fn verify_item_vitamin_payload(
+    item_id: &str,
+    item: &Item,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    match item.vitamin_stat.as_deref() {
+        Some("HP" | "ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL") => {}
+        Some(stat) => diagnostics.push(VerificationError::error(
+            "invalid_item_vitamin_stat",
+            item_id,
+            format!("VITAMIN uses unknown vitamin_stat '{stat}'"),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_item_vitamin_stat",
+            item_id,
+            "VITAMIN requires explicit vitamin_stat",
+        )),
+    }
+    match item.vitamin_stat_exp {
+        Some(amount) if amount > 0 => {}
+        Some(amount) => diagnostics.push(VerificationError::error(
+            "invalid_item_vitamin_stat_exp",
+            item_id,
+            format!("VITAMIN requires positive vitamin_stat_exp, found {amount}"),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_item_vitamin_stat_exp",
+            item_id,
+            "VITAMIN requires explicit vitamin_stat_exp",
+        )),
+    }
+    match (item.vitamin_max_stat_exp, item.vitamin_stat_exp) {
+        (Some(max), Some(amount)) if max >= amount && max > 0 => {}
+        (Some(max), _) => diagnostics.push(VerificationError::error(
+            "invalid_item_vitamin_max_stat_exp",
+            item_id,
+            format!("VITAMIN requires vitamin_max_stat_exp >= vitamin_stat_exp and positive, found {max}"),
+        )),
+        (None, _) => diagnostics.push(VerificationError::error(
+            "missing_item_vitamin_max_stat_exp",
+            item_id,
+            "VITAMIN requires explicit vitamin_max_stat_exp",
+        )),
+    }
+}
+
+fn verify_item_battle_stat_boost_payload(
+    item_id: &str,
+    item: &Item,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    match item.battle_stat_boost_stat.as_deref() {
+        Some("ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL_ATTACK" | "ACCURACY") => {}
+        Some(stat) => diagnostics.push(VerificationError::error(
+            "invalid_item_battle_stat_boost_stat",
+            item_id,
+            format!(
+                "{} uses unknown battle_stat_boost_stat '{stat}'",
+                item.effect
+            ),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_item_battle_stat_boost_stat",
+            item_id,
+            format!("{} requires explicit battle_stat_boost_stat", item.effect),
+        )),
+    }
+    match item.battle_stat_boost_stages {
+        Some(stages) if (1..=6).contains(&stages) => {}
+        Some(stages) => diagnostics.push(VerificationError::error(
+            "invalid_item_battle_stat_boost_stages",
+            item_id,
+            format!(
+                "{} requires battle_stat_boost_stages from 1 to 6, found {stages}",
+                item.effect
+            ),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_item_battle_stat_boost_stages",
+            item_id,
+            format!("{} requires explicit battle_stat_boost_stages", item.effect),
+        )),
     }
 }
 
@@ -1580,7 +2181,7 @@ fn verify_evolutions(data: &GameDataSet, diagnostics: &mut Vec<VerificationError
                     )),
                 },
                 METHOD_HAPPINESS => match entry.happiness.as_deref() {
-                    Some(HAPPINESS_ANYTIME | HAPPINESS_MORNDAY | HAPPINESS_NITE) => {}
+                    Some(window) if is_known_happiness_window(window) => {}
                     Some(window) => diagnostics.push(VerificationError::error(
                         "unknown_evolution_happiness_window",
                         species_id,
@@ -1612,7 +2213,7 @@ fn verify_evolutions(data: &GameDataSet, diagnostics: &mut Vec<VerificationError
                         ));
                     }
                     match entry.stat_ratio.as_deref() {
-                        Some(STAT_ATK_GT_DEF | STAT_ATK_LT_DEF | STAT_ATK_EQ_DEF) => {}
+                        Some(ratio) if is_known_stat_evolution_ratio(ratio) => {}
                         Some(ratio) => diagnostics.push(VerificationError::error(
                             "unknown_evolution_stat_ratio",
                             species_id,
@@ -1659,6 +2260,91 @@ fn verify_encounters(
         }
         verify_wild_encounter_rates_and_tables(map_name, encounters, diagnostics);
     }
+    for (map_name, encounters) in &data.field_encounters {
+        if !map_names.contains(map_name) {
+            diagnostics.push(VerificationError::error(
+                "unknown_field_encounter_map",
+                map_name,
+                "field encounters reference a map that is not loaded",
+            ));
+        }
+        for species in field_encounter_species(encounters) {
+            if !data.pokemon.contains_key(&species) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_field_encounter_species",
+                    map_name,
+                    format!("field encounters reference missing species '{species}'"),
+                ));
+            }
+        }
+        verify_field_encounter_tables(map_name, encounters, diagnostics);
+    }
+}
+
+fn verify_field_encounter_tables(
+    map_name: &str,
+    encounters: &FieldEncounterData,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if let Some(headbutt) = encounters.headbutt.as_ref() {
+        verify_field_encounter_bucket(
+            map_name,
+            "headbutt",
+            "common",
+            &headbutt.common,
+            diagnostics,
+        );
+        verify_field_encounter_bucket(map_name, "headbutt", "rare", &headbutt.rare, diagnostics);
+    }
+    if let Some(rock_smash) = encounters.rock_smash.as_ref() {
+        verify_field_encounter_bucket(
+            map_name,
+            "rock_smash",
+            "common",
+            &rock_smash.common,
+            diagnostics,
+        );
+    }
+}
+
+fn verify_field_encounter_bucket(
+    map_name: &str,
+    kind: &'static str,
+    bucket: &'static str,
+    entries: &[FieldEncounterEntry],
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let subject = format!("{map_name}:{kind}:{bucket}");
+    if entries.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "empty_field_encounter_bucket",
+            &subject,
+            format!("{kind} field encounters require a non-empty {bucket} bucket"),
+        ));
+        return;
+    }
+
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.weight == 0 {
+            diagnostics.push(VerificationError::error(
+                "zero_weight_field_encounter",
+                &format!("{subject}:{index}"),
+                format!(
+                    "{kind} field encounter {bucket} entry for '{}' has zero weight",
+                    entry.species
+                ),
+            ));
+        }
+    }
+
+    let total_weight: u16 = entries.iter().map(|entry| u16::from(entry.weight)).sum();
+    if total_weight != 100 {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_encounter_weight_total",
+            &subject,
+            format!("{kind} field encounter {bucket} weights total {total_weight}, expected 100"),
+        ));
+    }
 }
 
 fn verify_wild_encounter_rates_and_tables(
@@ -1666,11 +2352,9 @@ fn verify_wild_encounter_rates_and_tables(
     encounters: &WildEncounterData,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    let expected_times = ["morning", "day", "night"];
-
     if let Some(rates) = encounters.grass_rates.as_ref() {
         for time in rates.keys() {
-            if !expected_times.contains(&time.as_str()) {
+            if !ENCOUNTER_TIME_KEYS.contains(&time.as_str()) {
                 diagnostics.push(VerificationError::error(
                     "unknown_grass_encounter_rate_time",
                     map_name,
@@ -1681,32 +2365,31 @@ fn verify_wild_encounter_rates_and_tables(
     }
 
     if let Some(grass) = encounters.grass.as_ref() {
-        for time in expected_times {
-            let slots = match time {
-                "morning" => &grass.morning,
-                "day" => &grass.day,
-                "night" => &grass.night,
-                _ => unreachable!("fixed encounter time list"),
-            };
+        for time in ENCOUNTER_TIME_KEYS {
+            let time_of_day =
+                resolve_encounter_time_key(time).expect("core encounter time key must resolve");
+            let slots = grass.slots(time_of_day);
             let rate = encounters
                 .grass_rates
                 .as_ref()
-                .and_then(|rates| rates.get(time))
+                .and_then(|rates| rates.get(*time))
                 .copied();
 
-            if !slots.is_empty() && rate.is_none() {
+            if rate.is_none() {
                 diagnostics.push(VerificationError::error(
                     "missing_grass_encounter_rate",
                     map_name,
                     format!("grass encounters for '{time}' require an exact grass rate"),
                 ));
             }
-            if rate.unwrap_or(0) > 0 && slots.is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "empty_grass_encounter_slots",
-                    map_name,
-                    format!("grass encounter rate for '{time}' has no slots"),
-                ));
+            if let Some(rate) = rate {
+                if rate > 0 && slots.is_empty() {
+                    diagnostics.push(VerificationError::error(
+                        "empty_grass_encounter_slots",
+                        map_name,
+                        format!("grass encounter rate for '{time}' has no slots"),
+                    ));
+                }
             }
         }
     } else if encounters
@@ -1722,36 +2405,37 @@ fn verify_wild_encounter_rates_and_tables(
     }
 
     if let Some(water) = encounters.water.as_ref() {
-        let has_slots =
-            !water.morning.is_empty() || !water.day.is_empty() || !water.night.is_empty();
-        if has_slots && encounters.water_rate.is_none() {
+        if encounters.water_rate.is_none() {
             diagnostics.push(VerificationError::error(
                 "missing_water_encounter_rate",
                 map_name,
                 "water encounters require an exact water rate",
             ));
         }
-        if encounters.water_rate.unwrap_or(0) > 0 {
-            for (time, slots) in [
-                ("morning", &water.morning),
-                ("day", &water.day),
-                ("night", &water.night),
-            ] {
-                if slots.is_empty() {
-                    diagnostics.push(VerificationError::error(
-                        "empty_water_encounter_slots",
-                        map_name,
-                        format!("water encounter rate has no slots for '{time}'"),
-                    ));
+        if let Some(water_rate) = encounters.water_rate {
+            if water_rate > 0 {
+                for time in ENCOUNTER_TIME_KEYS {
+                    let time_of_day = resolve_encounter_time_key(time)
+                        .expect("core encounter time key must resolve");
+                    let slots = water.slots(time_of_day);
+                    if slots.is_empty() {
+                        diagnostics.push(VerificationError::error(
+                            "empty_water_encounter_slots",
+                            map_name,
+                            format!("water encounter rate has no slots for '{time}'"),
+                        ));
+                    }
                 }
             }
         }
-    } else if encounters.water_rate.unwrap_or(0) > 0 {
-        diagnostics.push(VerificationError::error(
-            "missing_water_encounter_table",
-            map_name,
-            "positive water encounter rate requires a water encounter table",
-        ));
+    } else if let Some(water_rate) = encounters.water_rate {
+        if water_rate > 0 {
+            diagnostics.push(VerificationError::error(
+                "missing_water_encounter_table",
+                map_name,
+                "positive water encounter rate requires a water encounter table",
+            ));
+        }
     }
 }
 
@@ -1807,7 +2491,60 @@ fn verify_audio_assets(
     }
 }
 
+fn verify_map_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let (music, _, _) = script_audio_catalog_ids(data);
+    for (map_name, module) in &data.maps {
+        let Some(music_id) = module.attributes.music.as_deref() else {
+            continue;
+        };
+        if !music.contains(music_id) {
+            diagnostics.push(VerificationError::error(
+                "unknown_map_music_id",
+                map_name,
+                format!("map music references missing music audio id '{music_id}'"),
+            ));
+        }
+    }
+}
+
+fn verify_trainer_encounter_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.trainers.is_empty() {
+        return;
+    }
+    let (music, _, _) = script_audio_catalog_ids(data);
+    for (trainer_id, trainer) in &data.trainers.trainers {
+        if trainer.encounter_music.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "missing_trainer_encounter_music",
+                trainer_id,
+                "trainer is missing explicit encounter music",
+            ));
+        } else if !music.contains(&trainer.encounter_music) {
+            diagnostics.push(VerificationError::error(
+                "unknown_trainer_encounter_music",
+                trainer_id,
+                format!(
+                    "trainer references missing encounter music '{}'",
+                    trainer.encounter_music
+                ),
+            ));
+        }
+    }
+}
+
 fn verify_capture_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data
+        .items
+        .values()
+        .any(|item| item.pocket == ITEM_POCKET_BALL)
+        && data.capture_rules.ball_rules.is_empty()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_capture_ball_rules",
+            "capture_rules:ball_rules",
+            "capture ball rules must be declared when BALL pocket items exist",
+        ));
+    }
     for species in &data.capture_rules.fast_ball_species {
         if !data.pokemon.contains_key(species) {
             diagnostics.push(VerificationError::error(
@@ -1825,6 +2562,81 @@ fn verify_capture_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationEr
                 "Heavy Ball rule references a species that is not loaded",
             ));
         }
+    }
+    for (ball_id, rule) in &data.capture_rules.ball_rules {
+        let subject = format!("capture_rules:ball_rules:{ball_id}");
+        for issue in capture_ball_rule_issues(ball_id, rule) {
+            match issue {
+                CaptureBallRuleIssue::InvalidBallId => diagnostics.push(VerificationError::error(
+                    "invalid_capture_ball_id",
+                    &subject,
+                    "capture ball id must be an exact nonempty id",
+                )),
+                CaptureBallRuleIssue::InvalidBattleType => {
+                    diagnostics.push(VerificationError::error(
+                        "invalid_capture_ball_battle_type",
+                        &subject,
+                        "capture ball battle type must be exact when present",
+                    ));
+                }
+                CaptureBallRuleIssue::InvalidMultiplierDenominator => {
+                    diagnostics.push(VerificationError::error(
+                        "invalid_capture_ball_multiplier",
+                        &subject,
+                        "capture ball multiplier denominator must be nonzero",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn verify_capture_wobble_probabilities(
+    data: &GameDataSet,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if !data
+        .items
+        .values()
+        .any(|item| item.pocket == ITEM_POCKET_BALL)
+    {
+        return;
+    }
+    if data.capture_wobble_probabilities.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_capture_wobble_probabilities",
+            "capture_wobble_probabilities",
+            "capture wobble probabilities must be declared when capture balls exist",
+        ));
+        return;
+    }
+    let mut previous = 0;
+    for entry in &data.capture_wobble_probabilities {
+        if entry.catch_rate == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_capture_wobble_catch_rate",
+                "capture_wobble_probabilities",
+                "capture wobble catch rates must be in 1..=255",
+            ));
+        }
+        if entry.catch_rate < previous {
+            diagnostics.push(VerificationError::error(
+                "unordered_capture_wobble_probability",
+                "capture_wobble_probabilities",
+                format!(
+                    "capture wobble catch rate {} appears after {}",
+                    entry.catch_rate, previous
+                ),
+            ));
+        }
+        previous = entry.catch_rate;
+    }
+    if previous != u8::MAX {
+        diagnostics.push(VerificationError::error(
+            "incomplete_capture_wobble_probabilities",
+            "capture_wobble_probabilities",
+            "capture wobble probabilities must end at catch rate 255",
+        ));
     }
 }
 
@@ -1919,41 +2731,59 @@ fn verify_script_economy_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "checkmoney" | "takemoney" => {
-                    let Some(account) = command.account.as_deref() else {
-                        diagnostics.push(VerificationError::error(
-                            "missing_script_money_account",
-                            &subject,
-                            "money command is missing account id",
-                        ));
-                        continue;
-                    };
-                    if MoneyAccount::from_script_id(account).is_err() {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_money_account",
-                            &subject,
-                            format!("money command references unknown account '{account}'"),
-                        ));
-                    }
-                }
-                "checkcoins" | "givecoins" | "takecoins" => {
-                    if command.account.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_coin_account",
-                            &subject,
-                            "coin command must not carry a money account id",
-                        ));
-                    }
-                }
-                name => {
+            if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command.command.as_str())
+                || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
+            {
+                let Some(account) = command.account.as_deref() else {
                     diagnostics.push(VerificationError::error(
-                        "unknown_script_economy_command",
+                        "missing_script_money_account",
                         &subject,
-                        format!("unknown economy command '{name}'"),
+                        "money command is missing account id",
                     ));
                     continue;
+                };
+                if MoneyAccount::from_script_id(account).is_err() {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_script_money_account",
+                        &subject,
+                        format!("money command references unknown account '{account}'"),
+                    ));
                 }
+                if SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
+                    && constants.get("MAX_MONEY").is_none()
+                {
+                    diagnostics.push(VerificationError::error(
+                        "missing_script_money_cap",
+                        &subject,
+                        "money mutation requires MAX_MONEY in pack currency constants",
+                    ));
+                }
+            } else if SCRIPT_COIN_CHECK_COMMANDS.contains(&command.command.as_str())
+                || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
+            {
+                if command.account.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_coin_account",
+                        &subject,
+                        "coin command must not carry a money account id",
+                    ));
+                }
+                if SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
+                    && constants.get("MAX_COINS").is_none()
+                {
+                    diagnostics.push(VerificationError::error(
+                        "missing_script_coin_cap",
+                        &subject,
+                        "coin mutation requires MAX_COINS in pack currency constants",
+                    ));
+                }
+            } else if !is_known_script_economy_command(&command.command) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_script_economy_command",
+                    &subject,
+                    format!("unknown economy command '{}'", command.command),
+                ));
+                continue;
             }
             if let Err(error) = resolve_amount(&command.amount_tokens, &constants) {
                 diagnostics.push(VerificationError::error(
@@ -2003,6 +2833,27 @@ fn verify_gift_pokemon_scripts(data: &GameDataSet, diagnostics: &mut Vec<Verific
                     format!("gift references missing held item '{item_id}'"),
                 ));
             }
+            for (field, label) in [
+                ("nickname", gift.nickname_label.as_deref()),
+                ("original trainer", gift.ot_label.as_deref()),
+            ] {
+                let Some(label) = label else {
+                    continue;
+                };
+                if label.trim().is_empty() {
+                    diagnostics.push(VerificationError::error(
+                        "empty_gift_pokemon_label",
+                        &subject,
+                        format!("gift {field} label must be non-empty"),
+                    ));
+                } else if !module.scripts.contains_key(label) {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_gift_pokemon_label",
+                        &subject,
+                        format!("gift {field} label '{label}' is not loaded in map scripts"),
+                    ));
+                }
+            }
         }
     }
 }
@@ -2014,23 +2865,23 @@ fn verify_script_flag_commands(data: &GameDataSet, diagnostics: &mut Vec<Verific
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "setevent" | "clearevent" | "checkevent" | "setflag" | "clearflag"
-                | "checkflag" => {}
-                name => {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_flag_command",
-                        &subject,
-                        format!("unknown script flag command '{name}'"),
-                    ));
+            for issue in script_flag_command_issues(command) {
+                match issue {
+                    ScriptFlagCommandIssue::UnknownCommand => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_flag_command",
+                            &subject,
+                            format!("unknown script flag command '{}'", command.command),
+                        ));
+                    }
+                    ScriptFlagCommandIssue::EmptyFlagId => {
+                        diagnostics.push(VerificationError::error(
+                            "empty_script_flag_id",
+                            &subject,
+                            "script flag command references an empty flag id",
+                        ));
+                    }
                 }
-            }
-            if command.flag_id.is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "empty_script_flag_id",
-                    &subject,
-                    "script flag command references an empty flag id",
-                ));
             }
         }
     }
@@ -2043,82 +2894,78 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "checkscene" => {
-                    if command.map_id.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_scene_map",
-                            &subject,
-                            "checkscene must not carry a target map id",
-                        ));
-                    }
-                    if command.scene_id.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_scene_id",
-                            &subject,
-                            "checkscene must not carry a scene id",
-                        ));
-                    }
-                    if module.scenes.scenes.is_empty() {
-                        diagnostics.push(VerificationError::error(
-                            "missing_script_scene_table",
-                            &subject,
-                            "checkscene requires the current map to declare scenes",
-                        ));
-                    }
-                }
-                "setscene" => {
-                    if command.map_id.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_scene_map",
-                            &subject,
-                            "setscene must not carry a target map id",
-                        ));
-                    }
-                    verify_scene_token(
-                        diagnostics,
-                        &subject,
-                        map_name,
-                        command.scene_id.as_deref(),
-                        &module.scenes,
-                        scene_slot_count(module),
-                    );
-                }
-                "setmapscene" => {
-                    let Some(map_id) = command.map_id.as_deref() else {
-                        diagnostics.push(VerificationError::error(
-                            "missing_script_scene_map",
-                            &subject,
-                            "setmapscene requires a target map id",
-                        ));
-                        continue;
-                    };
-                    let Some((target_map_name, target_module)) =
-                        scene_table_for_map_id(data, map_id)
-                    else {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_scene_map",
-                            &subject,
-                            format!("setmapscene references missing map id '{map_id}'"),
-                        ));
-                        continue;
-                    };
-                    verify_scene_token(
-                        diagnostics,
-                        &subject,
-                        &target_map_name,
-                        command.scene_id.as_deref(),
-                        &target_module.scenes,
-                        scene_slot_count(target_module),
-                    );
-                }
-                name => {
+            if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
+                if command.map_id.is_some() {
                     diagnostics.push(VerificationError::error(
-                        "unknown_script_scene_command",
+                        "unexpected_script_scene_map",
                         &subject,
-                        format!("unknown scene command '{name}'"),
+                        "checkscene must not carry a target map id",
                     ));
                 }
+                if command.scene_id.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_scene_id",
+                        &subject,
+                        "checkscene must not carry a scene id",
+                    ));
+                }
+                if module.scenes.scenes.is_empty() {
+                    diagnostics.push(VerificationError::error(
+                        "missing_script_scene_table",
+                        &subject,
+                        "checkscene requires the current map to declare scenes",
+                    ));
+                }
+            } else if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
+            {
+                if command.map_id.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_scene_map",
+                        &subject,
+                        "setscene must not carry a target map id",
+                    ));
+                }
+                verify_scene_token(
+                    diagnostics,
+                    &subject,
+                    map_name,
+                    command.scene_id.as_deref(),
+                    &module.scenes,
+                    scene_slot_count(module),
+                );
+            } else if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
+            {
+                let Some(map_id) = command.map_id.as_deref() else {
+                    diagnostics.push(VerificationError::error(
+                        "missing_script_scene_map",
+                        &subject,
+                        "setmapscene requires a target map id",
+                    ));
+                    continue;
+                };
+                let Some((target_map_name, target_module)) = scene_table_for_map_id(data, map_id)
+                else {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_script_scene_map",
+                        &subject,
+                        format!("setmapscene references missing map id '{map_id}'"),
+                    ));
+                    continue;
+                };
+                verify_scene_token(
+                    diagnostics,
+                    &subject,
+                    &target_map_name,
+                    command.scene_id.as_deref(),
+                    &target_module.scenes,
+                    scene_slot_count(target_module),
+                );
+            } else if !is_known_script_scene_command(&command.command) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_script_scene_command",
+                    &subject,
+                    format!("unknown scene command '{}'", command.command),
+                ));
             }
         }
     }
@@ -2126,6 +2973,11 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
 
 fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let (music, sound_effects, cries) = script_audio_catalog_ids(data);
+    let cry_by_species: BTreeMap<String, String> = data
+        .pokemon_cries
+        .iter()
+        .map(|(species_id, metadata)| (species_id.clone(), metadata.cry.clone()))
+        .collect();
 
     for (map_name, module) in &data.maps {
         for command in &module.script_audio_commands {
@@ -2133,41 +2985,62 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "playmusic" => verify_audio_id(
-                    diagnostics,
-                    &subject,
-                    command.audio_id.as_deref(),
-                    &music,
-                    "missing_script_music_id",
-                    "unknown_script_music_id",
-                ),
-                "playsound" => verify_audio_id(
-                    diagnostics,
-                    &subject,
-                    command.audio_id.as_deref(),
-                    &sound_effects,
-                    "missing_script_sfx_id",
-                    "unknown_script_sfx_id",
-                ),
-                "cry" => {
-                    let Some(species_id) = command.audio_id.as_deref() else {
+            for issue in script_audio_command_issues(
+                command,
+                &music,
+                &sound_effects,
+                &cries,
+                &data.pokemon,
+                &cry_by_species,
+            ) {
+                match issue {
+                    ScriptAudioCommandIssue::MissingMusicId => {
+                        diagnostics.push(VerificationError::error(
+                            "missing_script_music_id",
+                            &subject,
+                            "audio command is missing a music id",
+                        ))
+                    }
+                    ScriptAudioCommandIssue::UnknownMusicId => {
+                        let audio_id = command.audio_id.as_deref().unwrap_or_default();
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_music_id",
+                            &subject,
+                            format!("audio command references missing music '{audio_id}'"),
+                        ));
+                    }
+                    ScriptAudioCommandIssue::MissingSoundEffectId => {
+                        diagnostics.push(VerificationError::error(
+                            "missing_script_sfx_id",
+                            &subject,
+                            "playsound command is missing a sound effect id",
+                        ))
+                    }
+                    ScriptAudioCommandIssue::UnknownSoundEffectId => {
+                        let audio_id = command.audio_id.as_deref().unwrap_or_default();
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_sfx_id",
+                            &subject,
+                            format!("playsound command references missing sfx '{audio_id}'"),
+                        ));
+                    }
+                    ScriptAudioCommandIssue::MissingCrySpecies => {
                         diagnostics.push(VerificationError::error(
                             "missing_script_cry_id",
                             &subject,
                             "cry command is missing a species id",
                         ));
-                        continue;
-                    };
-                    if !data.pokemon.contains_key(species_id) {
+                    }
+                    ScriptAudioCommandIssue::UnknownCrySpecies => {
+                        let species_id = command.audio_id.as_deref().unwrap_or_default();
                         diagnostics.push(VerificationError::error(
                             "unknown_script_cry_species",
                             &subject,
                             format!("cry command references missing species '{species_id}'"),
                         ));
-                        continue;
                     }
-                    let Some(cry_metadata) = pokemon_cry_metadata(data, species_id) else {
+                    ScriptAudioCommandIssue::MissingCryMetadata => {
+                        let species_id = command.audio_id.as_deref().unwrap_or_default();
                         diagnostics.push(VerificationError::error(
                             "missing_script_cry_metadata",
                             &subject,
@@ -2175,64 +3048,47 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                                 "cry command references species '{species_id}' without cry metadata"
                             ),
                         ));
-                        continue;
-                    };
-                    if !cries.contains(&cry_metadata.cry) {
+                    }
+                    ScriptAudioCommandIssue::UnknownCryAsset => {
+                        let species_id = command.audio_id.as_deref().unwrap_or_default();
+                        let cry_id = cry_by_species.get(species_id).map_or("", String::as_str);
                         diagnostics.push(VerificationError::error(
                             "unknown_script_cry_audio",
                             &subject,
                             format!(
-                                "cry command references missing cry audio '{}' for species '{species_id}'",
-                                cry_metadata.cry
+                                "cry command references missing cry audio '{cry_id}' for species '{species_id}'"
                             ),
                         ));
                     }
-                }
-                "musicfadeout" => {
-                    verify_audio_id(
-                        diagnostics,
-                        &subject,
-                        command.audio_id.as_deref(),
-                        &music,
-                        "missing_script_music_id",
-                        "unknown_script_music_id",
-                    );
-                    if command.fade_frames.is_none() {
+                    ScriptAudioCommandIssue::MissingMusicFadeFrames => {
                         diagnostics.push(VerificationError::error(
                             "missing_script_music_fade_frames",
                             &subject,
                             "musicfadeout command is missing fade frames",
                         ));
                     }
-                }
-                "waitsfx" => {
-                    if command.audio_id.is_some() {
+                    ScriptAudioCommandIssue::UnexpectedAudioId => {
                         diagnostics.push(VerificationError::error(
                             "unexpected_script_audio_id",
                             &subject,
                             "waitsfx command must not carry an audio id",
                         ));
                     }
-                    if command.fade_frames.is_some() {
+                    ScriptAudioCommandIssue::UnexpectedFadeFrames => {
                         diagnostics.push(VerificationError::error(
                             "unexpected_script_audio_fade_frames",
                             &subject,
-                            "waitsfx command must not carry fade frames",
+                            format!("{} command must not carry fade frames", command.command),
+                        ));
+                    }
+                    ScriptAudioCommandIssue::UnknownCommand => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_audio_command",
+                            &subject,
+                            format!("unknown audio command '{}'", command.command),
                         ));
                     }
                 }
-                name => diagnostics.push(VerificationError::error(
-                    "unknown_script_audio_command",
-                    &subject,
-                    format!("unknown audio command '{name}'"),
-                )),
-            }
-            if command.command != "musicfadeout" && command.fade_frames.is_some() {
-                diagnostics.push(VerificationError::error(
-                    "unexpected_script_audio_fade_frames",
-                    &subject,
-                    format!("{} command must not carry fade frames", command.command),
-                ));
             }
         }
     }
@@ -2315,135 +3171,109 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "faceplayer" => {}
-                "appear" | "disappear" => {
-                    let Some(object_id) = command.object_id.as_deref() else {
-                        diagnostics.push(VerificationError::error(
-                            "script_object_missing_id",
-                            &subject,
-                            format!("{} command is missing an object id", command.command),
-                        ));
-                        continue;
-                    };
-                    if object_id == "LAST_TALKED" || object_id == "PLAYER" {
-                        continue;
-                    }
-                    let Some(object) = module
-                        .objects
-                        .iter()
-                        .find(|object| object.object_identifier.as_deref() == Some(object_id))
-                    else {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_object_id",
-                            &subject,
-                            format!(
-                                "{} references missing object id '{object_id}'",
-                                command.command
-                            ),
-                        ));
-                        continue;
-                    };
-                    if object.event_flag != "-1"
-                        && !is_hideable_object_event_flag(&object.event_flag)
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "script_object_unhideable",
-                            &subject,
-                            format!(
-                                "{} references object '{}' with unhideable event flag '{}'",
-                                command.command, object_id, object.event_flag
-                            ),
-                        ));
-                    }
+            if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
+            } else if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command.command.as_str()) {
+                let Some(object_id) = command.object_id.as_deref() else {
+                    diagnostics.push(VerificationError::error(
+                        "script_object_missing_id",
+                        &subject,
+                        format!("{} command is missing an object id", command.command),
+                    ));
+                    continue;
+                };
+                if object_id == "LAST_TALKED" || object_id == "PLAYER" {
+                    continue;
                 }
-                "moveobject" => {
-                    verify_required_object_id(diagnostics, &subject, command, &object_ids, false);
-                    if command.x.is_none() || command.y.is_none() {
-                        diagnostics.push(VerificationError::error(
-                            "script_object_missing_coordinates",
-                            &subject,
-                            "moveobject command is missing x/y coordinates",
-                        ));
-                    }
+                let Some(object) = module
+                    .objects
+                    .iter()
+                    .find(|object| object.object_identifier.as_deref() == Some(object_id))
+                else {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_script_object_id",
+                        &subject,
+                        format!(
+                            "{} references missing object id '{object_id}'",
+                            command.command
+                        ),
+                    ));
+                    continue;
+                };
+                if object.event_flag != "-1" && !is_hideable_object_event_flag(&object.event_flag) {
+                    diagnostics.push(VerificationError::error(
+                        "script_object_unhideable",
+                        &subject,
+                        format!(
+                            "{} references object '{}' with unhideable event flag '{}'",
+                            command.command, object_id, object.event_flag
+                        ),
+                    ));
                 }
-                "turnobject" | "applymovement" | "faceobject" | "follow" => {
+            } else if SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command.command.as_str()) {
+                verify_required_object_id(diagnostics, &subject, command, &object_ids, false);
+                if command.x.is_none() || command.y.is_none() {
+                    diagnostics.push(VerificationError::error(
+                        "script_object_missing_coordinates",
+                        &subject,
+                        "moveobject command is missing x/y coordinates",
+                    ));
+                }
+            } else if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str())
+                || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str())
+            {
+                verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
+                if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str()) {
+                    verify_script_direction(diagnostics, &subject, command.direction.as_deref());
+                }
+                if SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str()) {
+                    verify_required_target_object_id(
+                        diagnostics,
+                        &subject,
+                        command,
+                        &object_ids,
+                        true,
+                    );
+                }
+            } else if SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
+                if SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
                     verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
-                    if command.command == "turnobject" {
-                        verify_script_direction(
-                            diagnostics,
-                            &subject,
-                            command.direction.as_deref(),
-                        );
-                    }
-                    if command.command == "faceobject" || command.command == "follow" {
-                        verify_required_target_object_id(
-                            diagnostics,
-                            &subject,
-                            command,
-                            &object_ids,
-                            true,
-                        );
-                    }
-                    if command.command == "applymovement" {
-                        let Some(movement) = command.movement.as_deref() else {
-                            diagnostics.push(VerificationError::error(
-                                "script_object_missing_movement",
-                                &subject,
-                                "applymovement command is missing a movement label",
-                            ));
-                            continue;
-                        };
-                        let movement_source = script_label_parent(&command.source_script);
-                        if !movements.contains(&(movement, None))
-                            && !movements.contains(&(movement, Some(movement_source)))
-                        {
-                            diagnostics.push(VerificationError::error(
-                                "unknown_script_movement",
-                                &subject,
-                                format!("applymovement references missing movement '{movement}'"),
-                            ));
-                        }
-                    }
                 }
-                "applymovementlasttalked" => {
-                    let Some(movement) = command.movement.as_deref() else {
-                        diagnostics.push(VerificationError::error(
-                            "script_object_missing_movement",
-                            &subject,
-                            "applymovementlasttalked command is missing a movement label",
-                        ));
-                        continue;
-                    };
-                    let movement_source = script_label_parent(&command.source_script);
-                    if !movements.contains(&(movement, None))
-                        && !movements.contains(&(movement, Some(movement_source)))
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_movement",
-                            &subject,
-                            format!(
-                                "applymovementlasttalked references missing movement '{movement}'"
-                            ),
-                        ));
-                    }
+                let Some(movement) = command.movement.as_deref() else {
+                    diagnostics.push(VerificationError::error(
+                        "script_object_missing_movement",
+                        &subject,
+                        format!("{} command is missing a movement label", command.command),
+                    ));
+                    continue;
+                };
+                let movement_source = script_label_parent(&command.source_script);
+                if !movements.contains(&(movement, None))
+                    && !movements.contains(&(movement, Some(movement_source)))
+                {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_script_movement",
+                        &subject,
+                        format!(
+                            "{} references missing movement '{movement}'",
+                            command.command
+                        ),
+                    ));
                 }
-                "stopfollow" => {}
-                "showemote" => {
-                    verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
-                    if command.emote.is_none() || command.duration.is_none() {
-                        diagnostics.push(VerificationError::error(
-                            "script_object_missing_emote",
-                            &subject,
-                            "showemote command is missing emote/duration fields",
-                        ));
-                    }
+            } else if SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command.command.as_str()) {
+                verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
+                if command.emote.is_none() || command.duration.is_none() {
+                    diagnostics.push(VerificationError::error(
+                        "script_object_missing_emote",
+                        &subject,
+                        "showemote command is missing emote/duration fields",
+                    ));
                 }
-                name => diagnostics.push(VerificationError::error(
+            } else if !is_known_script_object_command(&command.command) {
+                diagnostics.push(VerificationError::error(
                     "unknown_script_object_command",
                     &subject,
-                    format!("unknown object command '{name}'"),
-                )),
+                    format!("unknown object command '{}'", command.command),
+                ));
             }
         }
     }
@@ -2454,7 +3284,8 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
         for movement in &module.script_movements {
             for step in &movement.steps {
                 let subject = format!("{map_name}:{}:{}", movement.label, step.index);
-                match step.command.as_str() {
+                let command = step.command.as_str();
+                match command {
                     "step_end" => {
                         if step.direction.is_some() {
                             diagnostics.push(VerificationError::error(
@@ -2464,14 +3295,10 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
                             ));
                         }
                     }
-                    "fix_facing"
-                    | "remove_fixed_facing"
-                    | "step_sleep"
-                    | "set_sliding"
-                    | "remove_sliding"
-                    | "teleport_from"
-                    | "skyfall_top"
-                    | "tree_shake" => {
+                    command
+                        if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
+                            || SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS.contains(&command) =>
+                    {
                         if step.direction.is_some() {
                             diagnostics.push(VerificationError::error(
                                 "script_movement_unexpected_direction",
@@ -2480,8 +3307,7 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
                             ));
                         }
                     }
-                    "step" | "slow_step" | "big_step" | "jump_step" | "fast_jump_step"
-                    | "slow_jump_step" | "turn_head" => {
+                    command if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) => {
                         verify_script_direction(diagnostics, &subject, step.direction.as_deref());
                     }
                     command => diagnostics.push(VerificationError::error(
@@ -2503,116 +3329,107 @@ fn verify_script_map_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifica
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "warp" => {
-                    verify_script_warp_destination(
-                        diagnostics,
+            if SCRIPT_MAP_WARP_COMMANDS.contains(&command.command.as_str()) {
+                verify_script_warp_destination(
+                    diagnostics,
+                    &subject,
+                    command,
+                    &script_warp_targets,
+                );
+                if command.facing.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_warp_facing",
                         &subject,
-                        command,
-                        &script_warp_targets,
-                    );
-                    if command.facing.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_warp_facing",
-                            &subject,
-                            "warp command must not carry a facing direction",
-                        ));
-                    }
-                    if command.map_setup.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_map_setup",
-                            &subject,
-                            "warp command must not carry a map setup",
-                        ));
-                    }
+                        "warp command must not carry a facing direction",
+                    ));
                 }
-                "warpfacing" => {
-                    verify_script_warp_destination(
-                        diagnostics,
+                if command.map_setup.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_map_setup",
                         &subject,
-                        command,
-                        &script_warp_targets,
-                    );
-                    match command.facing.as_deref() {
-                        Some(facing) => {
-                            if parse_script_warp_facing(facing).is_err() {
-                                diagnostics.push(VerificationError::error(
-                                    "unknown_script_warp_facing",
-                                    &subject,
-                                    format!("warpfacing references unknown direction '{facing}'"),
-                                ));
-                            }
+                        "warp command must not carry a map setup",
+                    ));
+                }
+            } else if SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command.command.as_str()) {
+                verify_script_warp_destination(
+                    diagnostics,
+                    &subject,
+                    command,
+                    &script_warp_targets,
+                );
+                match command.facing.as_deref() {
+                    Some(facing) => {
+                        if parse_script_warp_facing(facing).is_err() {
+                            diagnostics.push(VerificationError::error(
+                                "unknown_script_warp_facing",
+                                &subject,
+                                format!("warpfacing references unknown direction '{facing}'"),
+                            ));
                         }
-                        None => diagnostics.push(VerificationError::error(
-                            "missing_script_warp_facing",
-                            &subject,
-                            "warpfacing command is missing a facing direction",
-                        )),
                     }
-                    if command.map_setup.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_map_setup",
-                            &subject,
-                            "warpfacing command must not carry a map setup",
-                        ));
-                    }
+                    None => diagnostics.push(VerificationError::error(
+                        "missing_script_warp_facing",
+                        &subject,
+                        "warpfacing command is missing a facing direction",
+                    )),
                 }
-                "warpcheck"
-                | "reloadmap"
-                | "reloadmappart"
-                | "reloadmapafterbattle"
-                | "refreshmap" => {
-                    verify_no_script_warp_destination(diagnostics, &subject, command);
-                    if command.facing.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_warp_facing",
-                            &subject,
-                            format!(
-                                "{} command must not carry a facing direction",
-                                command.command
-                            ),
-                        ));
-                    }
-                    if command.map_setup.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_map_setup",
-                            &subject,
-                            format!("{} command must not carry a map setup", command.command),
-                        ));
-                    }
+                if command.map_setup.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_map_setup",
+                        &subject,
+                        "warpfacing command must not carry a map setup",
+                    ));
                 }
-                "reanchormap" => {
-                    verify_no_script_warp_destination(diagnostics, &subject, command);
-                    if command.facing.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_warp_facing",
-                            &subject,
-                            "reanchormap command must not carry a facing direction",
-                        ));
-                    }
+            } else if SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
+                verify_no_script_warp_destination(diagnostics, &subject, command);
+                if command.facing.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_warp_facing",
+                        &subject,
+                        format!(
+                            "{} command must not carry a facing direction",
+                            command.command
+                        ),
+                    ));
                 }
-                "newloadmap" => {
-                    verify_no_script_warp_destination(diagnostics, &subject, command);
-                    if command.facing.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_warp_facing",
-                            &subject,
-                            "newloadmap command must not carry a facing direction",
-                        ));
-                    }
-                    if command.map_setup.is_none() {
-                        diagnostics.push(VerificationError::error(
-                            "missing_script_map_setup",
-                            &subject,
-                            "newloadmap command is missing a map setup",
-                        ));
-                    }
+                if command.map_setup.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_map_setup",
+                        &subject,
+                        format!("{} command must not carry a map setup", command.command),
+                    ));
                 }
-                name => diagnostics.push(VerificationError::error(
+            } else if SCRIPT_MAP_REANCHOR_COMMANDS.contains(&command.command.as_str()) {
+                verify_no_script_warp_destination(diagnostics, &subject, command);
+                if command.facing.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_warp_facing",
+                        &subject,
+                        "reanchormap command must not carry a facing direction",
+                    ));
+                }
+            } else if SCRIPT_MAP_NEW_LOAD_COMMANDS.contains(&command.command.as_str()) {
+                verify_no_script_warp_destination(diagnostics, &subject, command);
+                if command.facing.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_warp_facing",
+                        &subject,
+                        "newloadmap command must not carry a facing direction",
+                    ));
+                }
+                if command.map_setup.is_none() {
+                    diagnostics.push(VerificationError::error(
+                        "missing_script_map_setup",
+                        &subject,
+                        "newloadmap command is missing a map setup",
+                    ));
+                }
+            } else if !is_known_script_map_command(&command.command) {
+                diagnostics.push(VerificationError::error(
                     "unknown_script_map_command",
                     &subject,
-                    format!("unknown script map command '{name}'"),
-                )),
+                    format!("unknown script map command '{}'", command.command),
+                ));
             }
         }
     }
@@ -2699,46 +3516,44 @@ fn verify_script_text_commands(data: &GameDataSet, diagnostics: &mut Vec<Verific
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            match command.command.as_str() {
-                "opentext" | "closetext" | "promptbutton" | "waitbutton" | "yesorno" => {
-                    if command.text_label.is_some() {
-                        diagnostics.push(VerificationError::error(
-                            "unexpected_script_text_label",
-                            &subject,
-                            format!("{} command must not carry a text label", command.command),
-                        ));
-                    }
+            if SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command.command.as_str()) {
+                if command.text_label.is_some() {
+                    diagnostics.push(VerificationError::error(
+                        "unexpected_script_text_label",
+                        &subject,
+                        format!("{} command must not carry a text label", command.command),
+                    ));
                 }
-                "writetext" | "jumptext" | "jumptextfaceplayer" => {
-                    match command.text_label.as_deref() {
-                        Some(label) if text_labels.contains(label) => {}
-                        Some(label)
-                            if resolve_script_target_label(
-                                &module.scripts,
-                                &command.source_script,
-                                label,
-                            )
-                            .is_some_and(|resolved| text_labels.contains(resolved.as_str())) => {}
-                        Some(label) => diagnostics.push(VerificationError::error(
-                            "unknown_script_text_label",
-                            &subject,
-                            format!(
-                                "{} command references missing text label '{label}'",
-                                command.command
-                            ),
-                        )),
-                        None => diagnostics.push(VerificationError::error(
-                            "missing_script_text_label",
-                            &subject,
-                            format!("{} command is missing a text label", command.command),
-                        )),
-                    }
+            } else if SCRIPT_TEXT_LABEL_COMMANDS.contains(&command.command.as_str()) {
+                match command.text_label.as_deref() {
+                    Some(label) if text_labels.contains(label) => {}
+                    Some(label)
+                        if resolve_script_target_label(
+                            &module.scripts,
+                            &command.source_script,
+                            label,
+                        )
+                        .is_some_and(|resolved| text_labels.contains(resolved.as_str())) => {}
+                    Some(label) => diagnostics.push(VerificationError::error(
+                        "unknown_script_text_label",
+                        &subject,
+                        format!(
+                            "{} command references missing text label '{label}'",
+                            command.command
+                        ),
+                    )),
+                    None => diagnostics.push(VerificationError::error(
+                        "missing_script_text_label",
+                        &subject,
+                        format!("{} command is missing a text label", command.command),
+                    )),
                 }
-                name => diagnostics.push(VerificationError::error(
+            } else if !is_known_script_text_command(&command.command) {
+                diagnostics.push(VerificationError::error(
                     "unknown_script_text_command",
                     &subject,
-                    format!("unknown text command '{name}'"),
-                )),
+                    format!("unknown text command '{}'", command.command),
+                ));
             }
         }
     }
@@ -2886,17 +3701,17 @@ fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<Verific
                 "{map_name}:{}:{}",
                 pickup.source_script, pickup.command_index
             );
-            match pickup.command.as_str() {
-                "itemball" | "hiddenitem" => {
-                    let Some(item_id) = pickup.item_id.as_deref() else {
+            for issue in script_field_pickup_issues(pickup, &data.items, &data.fruit_trees) {
+                match issue {
+                    ScriptFieldPickupIssue::MissingItem => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_missing_item",
                             &subject,
                             format!("{} pickup is missing item_id", pickup.command),
                         ));
-                        continue;
-                    };
-                    if !data.items.contains_key(item_id) {
+                    }
+                    ScriptFieldPickupIssue::UnknownItem => {
+                        let item_id = pickup.item_id.as_deref().unwrap_or_default();
                         diagnostics.push(VerificationError::error(
                             "unknown_script_field_pickup_item",
                             &subject,
@@ -2906,22 +3721,22 @@ fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<Verific
                             ),
                         ));
                     }
-                    if pickup.quantity == 0 {
+                    ScriptFieldPickupIssue::InvalidQuantity => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_invalid_quantity",
                             &subject,
                             format!("{} pickup has zero quantity", pickup.command),
                         ));
                     }
-                    let Some(event_flag) = pickup.event_flag.as_deref() else {
+                    ScriptFieldPickupIssue::MissingEvent => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_missing_event",
                             &subject,
                             format!("{} pickup is missing event_flag", pickup.command),
                         ));
-                        continue;
-                    };
-                    if !is_hideable_object_event_flag(event_flag) {
+                    }
+                    ScriptFieldPickupIssue::InvalidCollectibleFlag => {
+                        let event_flag = pickup.event_flag.as_deref().unwrap_or_default();
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_uncollectible_event",
                             &subject,
@@ -2931,49 +3746,50 @@ fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<Verific
                             ),
                         ));
                     }
-                }
-                "fruittree" => {
-                    let Some(fruit_tree_id) = pickup.fruit_tree_id.as_deref() else {
+                    ScriptFieldPickupIssue::MissingFruitTree => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_missing_fruit_tree",
                             &subject,
                             "fruittree pickup is missing fruit_tree_id",
                         ));
-                        continue;
-                    };
-                    if fruit_tree_id.trim().is_empty() {
+                    }
+                    ScriptFieldPickupIssue::EmptyFruitTree => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_empty_fruit_tree",
                             &subject,
                             "fruittree pickup has an empty fruit_tree_id",
                         ));
                     }
-                    if !data.fruit_trees.0.contains_key(fruit_tree_id) {
+                    ScriptFieldPickupIssue::UnknownFruitTree => {
+                        let fruit_tree_id = pickup.fruit_tree_id.as_deref().unwrap_or_default();
                         diagnostics.push(VerificationError::error(
                             "unknown_script_field_fruit_tree",
                             &subject,
                             format!("fruittree references missing tree '{fruit_tree_id}'"),
                         ));
                     }
-                    if pickup.item_id.is_some() || pickup.event_flag.is_some() {
+                    ScriptFieldPickupIssue::MalformedFruitTree => {
                         diagnostics.push(VerificationError::error(
                             "script_field_pickup_malformed_fruit_tree",
                             &subject,
                             "fruittree pickup must not inline item_id or event_flag",
                         ));
                     }
+                    ScriptFieldPickupIssue::UnknownCommand => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_field_pickup_command",
+                            &subject,
+                            format!("unknown field pickup command '{}'", pickup.command),
+                        ));
+                    }
                 }
-                other => diagnostics.push(VerificationError::error(
-                    "unknown_script_field_pickup_command",
-                    &subject,
-                    format!("unknown field pickup command '{other}'"),
-                )),
             }
         }
     }
 }
 
 fn verify_phone_contacts(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let map_constants = map_constants(data);
     for (contact_id, record) in &data.phone_contacts.0 {
         let subject = format!("phone_contacts:{contact_id}");
         if contact_id.trim().is_empty() {
@@ -2999,6 +3815,40 @@ fn verify_phone_contacts(data: &GameDataSet, diagnostics: &mut Vec<VerificationE
                 &subject,
                 "phone contact primaryLabel must be nonempty",
             ));
+        }
+        if record.lines.is_empty() || record.lines.iter().any(|line| line.trim().is_empty()) {
+            diagnostics.push(VerificationError::error(
+                "invalid_phone_contact_lines",
+                &subject,
+                "phone contact display lines must be nonempty",
+            ));
+        } else if let Some(first_line) = record.lines.first() {
+            let expected_primary = first_line.trim_end_matches(':').trim();
+            if expected_primary != record.primary_label {
+                diagnostics.push(VerificationError::error(
+                    "phone_contact_primary_label_mismatch",
+                    &subject,
+                    format!(
+                        "phone contact primaryLabel '{}' does not match first display line '{}'",
+                        record.primary_label, first_line
+                    ),
+                ));
+            }
+        }
+        if let Some(map_constant) = record.map_constant.as_deref() {
+            if map_constant.trim().is_empty() {
+                diagnostics.push(VerificationError::error(
+                    "empty_phone_contact_map",
+                    &subject,
+                    "phone contact mapConstant must be nonempty when present",
+                ));
+            } else if !map_constants.contains_key(map_constant) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_phone_contact_map",
+                    &subject,
+                    format!("phone contact references missing map constant '{map_constant}'"),
+                ));
+            }
         }
     }
     for contact_id in &data.permanent_phone_numbers {
@@ -3307,6 +4157,51 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             ));
         }
     }
+    let landmark_constants: BTreeSet<&str> = data
+        .pokegear_landmarks
+        .landmarks
+        .iter()
+        .map(|landmark| landmark.constant.as_str())
+        .collect();
+    for landmark in &data.pokegear_landmarks.landmarks {
+        if landmark.constant.trim().is_empty()
+            || landmark.label.trim().is_empty()
+            || landmark.name.trim().is_empty()
+            || landmark.region.trim().is_empty()
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_pokegear_landmark",
+                &landmark.constant,
+                "Pokegear landmarks require non-empty constant, label, name, and region fields",
+            ));
+        }
+        if !landmark.constant.starts_with("LANDMARK_") {
+            diagnostics.push(VerificationError::error(
+                "invalid_pokegear_landmark_constant",
+                &landmark.constant,
+                "Pokegear landmark constants must use exact LANDMARK_* ids",
+            ));
+        }
+    }
+    for (map_name, landmark_constant) in &data.pokegear_landmarks.map_to_landmark {
+        if !data.maps.contains_key(map_name) {
+            diagnostics.push(VerificationError::error(
+                "unknown_pokegear_landmark_map",
+                map_name,
+                "Pokegear map-to-landmark entry references a map that is not loaded",
+            ));
+        }
+        if !landmark_constants.contains(landmark_constant.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "unknown_pokegear_landmark_constant",
+                map_name,
+                format!(
+                    "Pokegear map-to-landmark entry references missing landmark constant '{landmark_constant}'"
+                ),
+            ));
+        }
+    }
+    let (_, _, cry_audio) = script_audio_catalog_ids(data);
     for (species_id, cry) in &data.pokemon_cries {
         if species_id.trim().is_empty() || cry.cry.trim().is_empty() {
             diagnostics.push(VerificationError::error(
@@ -3319,6 +4214,26 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
                 "unknown_pokemon_cry_species",
                 species_id,
                 "Pokemon cry metadata species keys must match loaded Pokemon ids exactly",
+            ));
+        }
+    }
+    for species_id in data.pokemon.keys() {
+        let Some(cry) = data.pokemon_cries.get(species_id) else {
+            diagnostics.push(VerificationError::error(
+                "missing_species_cry_metadata",
+                species_id,
+                "Pokemon species is missing explicit cry metadata",
+            ));
+            continue;
+        };
+        if !cry_audio.contains(&cry.cry) {
+            diagnostics.push(VerificationError::error(
+                "unknown_species_cry_audio",
+                species_id,
+                format!(
+                    "Pokemon species references missing cry audio '{}' through cry metadata",
+                    cry.cry
+                ),
             ));
         }
     }
@@ -3365,6 +4280,15 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             ));
         }
     }
+    for species_id in data.pokemon.keys() {
+        if !data.menu_icons.contains_key(species_id) {
+            diagnostics.push(VerificationError::error(
+                "missing_species_menu_icon",
+                species_id,
+                "Pokemon species is missing an explicit menu icon entry",
+            ));
+        }
+    }
 
     for (species_id, entry) in &data.pokedex_entries {
         if species_id != &entry.species {
@@ -3392,6 +4316,15 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             ));
         }
     }
+    for species_id in data.pokemon.keys() {
+        if !data.pokedex_entries.contains_key(species_id) {
+            diagnostics.push(VerificationError::error(
+                "missing_species_pokedex_entry",
+                species_id,
+                "Pokemon species is missing an explicit Pokedex entry",
+            ));
+        }
+    }
 
     for (species_id, program) in &data.pokemon_frontpic_anim {
         if !is_frontpic_animation_asset_key(species_id, data) {
@@ -3410,41 +4343,47 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         }
         for (index, command) in program.commands.iter().enumerate() {
             let subject = format!("{species_id}:{index}");
-            match command.kind.as_str() {
-                "frame" => {
-                    if command.frame.is_none() || command.duration.is_none() {
+            if let Some(issue) = frontpic_anim_command_issue(command) {
+                match issue {
+                    FrontpicAnimCommandIssue::MissingFrame => {
                         diagnostics.push(VerificationError::error(
                             "malformed_frontpic_anim_command",
                             &subject,
                             "frame command requires frame and duration",
                         ));
                     }
-                }
-                "setrepeat" => {
-                    if command.count.is_none() {
+                    FrontpicAnimCommandIssue::MissingSetRepeatCount => {
                         diagnostics.push(VerificationError::error(
                             "malformed_frontpic_anim_command",
                             &subject,
                             "setrepeat command requires count",
                         ));
                     }
-                }
-                "dorepeat" => {
-                    if command.target.is_none() {
+                    FrontpicAnimCommandIssue::MissingDoRepeatTarget => {
                         diagnostics.push(VerificationError::error(
                             "malformed_frontpic_anim_command",
                             &subject,
                             "dorepeat command requires target",
                         ));
                     }
+                    FrontpicAnimCommandIssue::UnknownCommand => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_frontpic_anim_command",
+                            &subject,
+                            format!("unknown frontpic animation command '{}'", command.kind),
+                        ));
+                    }
                 }
-                "endanim" => {}
-                kind => diagnostics.push(VerificationError::error(
-                    "unknown_frontpic_anim_command",
-                    &subject,
-                    format!("unknown frontpic animation command '{kind}'"),
-                )),
             }
+        }
+    }
+    for species_id in data.pokemon.keys() {
+        if !data.pokemon_frontpic_anim.contains_key(species_id) {
+            diagnostics.push(VerificationError::error(
+                "missing_species_frontpic_anim",
+                species_id,
+                "Pokemon species is missing an explicit frontpic animation program",
+            ));
         }
     }
 }
@@ -3465,49 +4404,36 @@ fn is_frontpic_animation_asset_key(species_id: &str, data: &GameDataSet) -> bool
 }
 
 fn verify_script_shop_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let valid_mart_types = BTreeSet::from([
-        "MARTTYPE_STANDARD",
-        "MARTTYPE_PHARMACY",
-        "MARTTYPE_BITTER",
-        "MARTTYPE_BARGAIN",
-        "MARTTYPE_ROOFTOP",
-    ]);
     for (map_name, module) in &data.maps {
         for command in &module.script_shop_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if !valid_mart_types.contains(command.mart_type.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_shop_mart_type",
-                    &subject,
-                    format!("pokemart uses unknown mart type '{}'", command.mart_type),
-                ));
-            }
-            match command.mart_id.as_str() {
-                "0" => {
-                    if command.mart_type != "MARTTYPE_BARGAIN"
-                        && command.mart_type != "MARTTYPE_ROOFTOP"
-                    {
+            if let Err(error) = validate_script_shop_command(&data.marts, command) {
+                match error {
+                    ShopError::UnknownMartType { mart_type } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_shop_mart_type",
+                            &subject,
+                            format!("pokemart uses unknown mart type '{mart_type}'"),
+                        ));
+                    }
+                    ShopError::InvalidZeroMart { mart_type } => {
                         diagnostics.push(VerificationError::error(
                             "script_shop_invalid_zero_mart",
                             &subject,
-                            format!(
-                                "pokemart type '{}' cannot use explicit mart id 0",
-                                command.mart_type
-                            ),
+                            format!("pokemart type '{mart_type}' cannot use explicit mart id 0"),
                         ));
                     }
-                }
-                mart_id => {
-                    if !data.marts.0.contains_key(mart_id) {
+                    ShopError::UnknownMart { mart_id } => {
                         diagnostics.push(VerificationError::error(
                             "unknown_script_shop_mart",
                             &subject,
                             format!("pokemart references missing mart '{mart_id}'"),
                         ));
                     }
+                    _ => {}
                 }
             }
         }
@@ -3515,27 +4441,137 @@ fn verify_script_shop_commands(data: &GameDataSet, diagnostics: &mut Vec<Verific
 }
 
 fn verify_script_phone_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let valid_commands = BTreeSet::from(["askforphonenumber", "checkcellnum"]);
     for (map_name, module) in &data.maps {
         for command in &module.script_phone_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if !valid_commands.contains(command.command.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_phone_command",
-                    &subject,
-                    format!("unknown phone command '{}'", command.command),
-                ));
+            if let Err(error) = validate_script_phone_command(command, &data.phone_contacts) {
+                match error {
+                    ScriptPhoneError::UnknownCommand { command } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_phone_command",
+                            &subject,
+                            format!("unknown phone command '{command}'"),
+                        ));
+                    }
+                    ScriptPhoneError::UnknownContact {
+                        command: phone_command,
+                        contact_id,
+                    } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_phone_contact",
+                            &subject,
+                            format!(
+                                "phone command '{phone_command}' references unknown contact '{contact_id}'"
+                            ),
+                        ));
+                    }
+                    ScriptPhoneError::EmptyContact {
+                        command: phone_command,
+                    } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_phone_contact",
+                            &subject,
+                            format!(
+                                "phone command '{phone_command}' references unknown contact '{}'",
+                                command.contact_id
+                            ),
+                        ));
+                    }
+                    ScriptPhoneError::PaddedContact {
+                        command: phone_command,
+                        contact_id,
+                    } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_phone_contact",
+                            &subject,
+                            format!(
+                                "phone command '{phone_command}' references unknown contact '{contact_id}'"
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
             }
-            if !data.phone_contacts.0.contains_key(&command.contact_id) {
+        }
+    }
+}
+
+fn verify_happiness_data(data: &HappinessData, diagnostics: &mut Vec<VerificationError>) {
+    if data.changes.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "empty_happiness_changes",
+            "happiness_data:changes",
+            "happiness data requires at least one explicit change row",
+        ));
+    }
+    let mut change_codes = BTreeSet::new();
+    let mut code_names = BTreeSet::new();
+    for entry in &data.changes {
+        let subject = format!("happiness_data:changes:{}", entry.change_code);
+        if entry.code.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_happiness_change_code",
+                &subject,
+                "happiness change entries require exact nonempty code labels",
+            ));
+        }
+        if !code_names.insert(entry.code.clone()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_happiness_change_code",
+                &subject,
+                format!("duplicate happiness change code '{}'", entry.code),
+            ));
+        }
+        if !change_codes.insert(entry.change_code) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_happiness_change_index",
+                &subject,
+                format!("duplicate happiness change index {}", entry.change_code),
+            ));
+        }
+    }
+    if data.services.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "empty_happiness_services",
+            "happiness_data:services",
+            "happiness data requires explicit service probability tables",
+        ));
+    }
+    let mut service_names = BTreeSet::new();
+    for service in &data.services {
+        let subject = format!("happiness_data:services:{}", service.routine);
+        if service.routine.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_happiness_service_routine",
+                &subject,
+                "happiness service routine ids must be exact nonempty labels",
+            ));
+        }
+        if !service_names.insert(service.routine.clone()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_happiness_service",
+                &subject,
+                format!("duplicate happiness service table '{}'", service.routine),
+            ));
+        }
+        if service.outcomes.is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_happiness_service_outcomes",
+                &subject,
+                "happiness service tables require at least one outcome",
+            ));
+        }
+        for outcome in &service.outcomes {
+            if !change_codes.contains(&outcome.change_code) {
                 diagnostics.push(VerificationError::error(
-                    "unknown_script_phone_contact",
+                    "unknown_happiness_service_change",
                     &subject,
                     format!(
-                        "phone command '{}' references unknown contact '{}'",
-                        command.command, command.contact_id
+                        "happiness service outcome references missing change code {}",
+                        outcome.change_code
                     ),
                 ));
             }
@@ -3543,7 +4579,534 @@ fn verify_script_phone_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
     }
 }
 
+fn verify_encounter_slot_tables(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.wild_encounters.is_empty() {
+        return;
+    }
+    verify_encounter_slot_table(
+        "grass",
+        &data.encounter_slot_tables.grass,
+        "encounter_slot_tables:grass",
+        diagnostics,
+    );
+    verify_encounter_slot_table(
+        "water",
+        &data.encounter_slot_tables.water,
+        "encounter_slot_tables:water",
+        diagnostics,
+    );
+}
+
+fn verify_encounter_slot_table(
+    surface: &str,
+    table: &[crystal_core::world::encounters::EncounterSlotChance],
+    subject: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if table.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_encounter_slot_table",
+            subject,
+            format!("encounter slot table for {surface} must be declared by the modpack"),
+        ));
+        return;
+    }
+    let mut previous_threshold = 0;
+    let mut slots = BTreeSet::new();
+    for entry in table {
+        if entry.threshold == 0 || entry.threshold > 100 {
+            diagnostics.push(VerificationError::error(
+                "invalid_encounter_slot_threshold",
+                subject,
+                format!(
+                    "encounter slot table for {surface} has threshold {} outside 1..=100",
+                    entry.threshold
+                ),
+            ));
+        }
+        if entry.threshold < previous_threshold {
+            diagnostics.push(VerificationError::error(
+                "unordered_encounter_slot_threshold",
+                subject,
+                format!(
+                    "encounter slot table for {surface} has threshold {} after {}",
+                    entry.threshold, previous_threshold
+                ),
+            ));
+        }
+        previous_threshold = entry.threshold;
+        if !slots.insert(entry.slot) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_encounter_slot_index",
+                subject,
+                format!(
+                    "encounter slot table for {surface} repeats slot {}",
+                    entry.slot
+                ),
+            ));
+        }
+    }
+    if previous_threshold != 100 {
+        diagnostics.push(VerificationError::error(
+            "incomplete_encounter_slot_table",
+            subject,
+            format!("encounter slot table for {surface} must end at threshold 100"),
+        ));
+    }
+}
+
+fn verify_encounter_music_modifiers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.wild_encounters.is_empty() {
+        return;
+    }
+    let (music, _, _) = script_audio_catalog_ids(data);
+    if data.encounter_music_modifiers.modifiers.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_encounter_music_modifiers",
+            "encounter_music_modifiers",
+            "encounter music modifiers must be declared by the modpack",
+        ));
+        return;
+    }
+    let mut seen = BTreeSet::new();
+    for modifier in &data.encounter_music_modifiers.modifiers {
+        let subject = format!("encounter_music_modifiers:{}", modifier.music_id);
+        if modifier.music_id.is_empty() {
+            diagnostics.push(VerificationError::error(
+                "missing_encounter_music_modifier_id",
+                &subject,
+                "encounter music modifier is missing music_id",
+            ));
+        } else if !music.contains(&modifier.music_id) {
+            diagnostics.push(VerificationError::error(
+                "unknown_encounter_music_modifier_id",
+                &subject,
+                format!(
+                    "encounter music modifier references missing music audio id '{}'",
+                    modifier.music_id
+                ),
+            ));
+        }
+        if !seen.insert(modifier.music_id.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_encounter_music_modifier_id",
+                &subject,
+                format!(
+                    "encounter music modifiers repeat music id '{}'",
+                    modifier.music_id
+                ),
+            ));
+        }
+        if modifier.denominator == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_encounter_music_modifier_ratio",
+                &subject,
+                "encounter music modifier denominator must be greater than zero",
+            ));
+        }
+    }
+}
+
+fn verify_battle_stat_multipliers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.moves.is_empty() {
+        return;
+    }
+    verify_battle_stat_multiplier_table(
+        "stat",
+        &data.battle_stat_multipliers.stat,
+        "battle_stat_multipliers:stat",
+        diagnostics,
+    );
+    verify_battle_stat_multiplier_table(
+        "accuracy",
+        &data.battle_stat_multipliers.accuracy,
+        "battle_stat_multipliers:accuracy",
+        diagnostics,
+    );
+}
+
+fn verify_battle_stat_multiplier_table(
+    table_name: &str,
+    table: &[crystal_core::battle::stats::BattleStatMultiplier],
+    subject: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if table.len() != 13 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_stat_multiplier_table_length",
+            subject,
+            format!(
+                "battle stat multiplier table {table_name} must declare exactly 13 rows for stages -6..=6, found {}",
+                table.len()
+            ),
+        ));
+    }
+    for (index, entry) in table.iter().enumerate() {
+        let stage = index as i8 - 6;
+        if entry.numerator <= 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_stat_multiplier_numerator",
+                subject,
+                format!(
+                    "battle stat multiplier table {table_name} stage {stage} has nonpositive numerator {}",
+                    entry.numerator
+                ),
+            ));
+        }
+        if entry.denominator <= 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_stat_multiplier_denominator",
+                subject,
+                format!(
+                    "battle stat multiplier table {table_name} stage {stage} has nonpositive denominator {}",
+                    entry.denominator
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_weather_modifiers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.moves.is_empty() {
+        return;
+    }
+    if data.weather_modifiers.type_modifiers.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_weather_type_modifiers",
+            "weather_modifiers:type_modifiers",
+            "weather type modifiers must be declared when moves exist",
+        ));
+    }
+    if data.weather_modifiers.move_effect_modifiers.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_weather_move_effect_modifiers",
+            "weather_modifiers:move_effect_modifiers",
+            "weather move-effect modifiers must be declared when moves exist",
+        ));
+    }
+    for entry in &data.weather_modifiers.type_modifiers {
+        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
+            diagnostics.push(VerificationError::error(
+                "invalid_weather_modifier_weather",
+                "weather_modifiers:type_modifiers",
+                format!(
+                    "weather modifier has invalid weather id {:?}",
+                    entry.weather
+                ),
+            ));
+        }
+        verify_type_multiplier(
+            entry.multiplier,
+            "weather_modifiers:type_modifiers",
+            diagnostics,
+        );
+    }
+    for entry in &data.weather_modifiers.move_effect_modifiers {
+        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
+            diagnostics.push(VerificationError::error(
+                "invalid_weather_modifier_weather",
+                "weather_modifiers:move_effect_modifiers",
+                format!(
+                    "weather modifier has invalid weather id {:?}",
+                    entry.weather
+                ),
+            ));
+        }
+        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
+            diagnostics.push(VerificationError::error(
+                "invalid_weather_modifier_move_effect",
+                "weather_modifiers:move_effect_modifiers",
+                format!(
+                    "weather move-effect modifier has invalid move effect {:?}",
+                    entry.move_effect
+                ),
+            ));
+        }
+        verify_type_multiplier(
+            entry.multiplier,
+            "weather_modifiers:move_effect_modifiers",
+            diagnostics,
+        );
+    }
+}
+
+fn verify_type_effectiveness(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.moves.is_empty() {
+        return;
+    }
+    if data.type_effectiveness.matchups.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_type_effectiveness_matchups",
+            "type_effectiveness:matchups",
+            "type effectiveness matchups must be declared when moves exist",
+        ));
+    }
+    if data.type_effectiveness.foresight_matchups.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_type_effectiveness_foresight_matchups",
+            "type_effectiveness:foresight_matchups",
+            "Foresight type effectiveness matchups must be declared when moves exist",
+        ));
+    }
+    let declared_types: BTreeSet<&str> = data
+        .type_categories
+        .physical
+        .iter()
+        .chain(data.type_categories.special.iter())
+        .map(String::as_str)
+        .collect();
+    let mut matchup_pairs = BTreeSet::new();
+    for entry in &data.type_effectiveness.matchups {
+        verify_type_multiplier(entry.multiplier, "type_effectiveness:matchups", diagnostics);
+        if !declared_types.is_empty() {
+            if !declared_types.contains(entry.attacker.as_str()) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_type_effectiveness_attacker",
+                    "type_effectiveness:matchups",
+                    format!(
+                        "type effectiveness attacker {:?} is not declared in type categories",
+                        entry.attacker
+                    ),
+                ));
+            }
+            if !declared_types.contains(entry.defender.as_str()) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_type_effectiveness_defender",
+                    "type_effectiveness:matchups",
+                    format!(
+                        "type effectiveness defender {:?} is not declared in type categories",
+                        entry.defender
+                    ),
+                ));
+            }
+        }
+        if !matchup_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_type_effectiveness_matchup",
+                "type_effectiveness:matchups",
+                format!(
+                    "type effectiveness matchup {:?} -> {:?} is declared more than once",
+                    entry.attacker, entry.defender
+                ),
+            ));
+        }
+    }
+    for attacker in &declared_types {
+        for defender in &declared_types {
+            if !matchup_pairs.contains(&(*attacker, *defender)) {
+                diagnostics.push(VerificationError::error(
+                    "missing_type_effectiveness_matchup",
+                    "type_effectiveness:matchups",
+                    format!(
+                        "type effectiveness matchup {:?} -> {:?} must be declared explicitly",
+                        attacker, defender
+                    ),
+                ));
+            }
+        }
+    }
+    let mut foresight_pairs = BTreeSet::new();
+    for entry in &data.type_effectiveness.foresight_matchups {
+        verify_type_multiplier(
+            entry.multiplier,
+            "type_effectiveness:foresight_matchups",
+            diagnostics,
+        );
+        if !declared_types.is_empty() {
+            if !declared_types.contains(entry.attacker.as_str()) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_foresight_type_effectiveness_attacker",
+                    "type_effectiveness:foresight_matchups",
+                    format!(
+                        "Foresight type effectiveness attacker {:?} is not declared in type categories",
+                        entry.attacker
+                    ),
+                ));
+            }
+            if !declared_types.contains(entry.defender.as_str()) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_foresight_type_effectiveness_defender",
+                    "type_effectiveness:foresight_matchups",
+                    format!(
+                        "Foresight type effectiveness defender {:?} is not declared in type categories",
+                        entry.defender
+                    ),
+                ));
+            }
+        }
+        if !foresight_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_foresight_type_effectiveness_matchup",
+                "type_effectiveness:foresight_matchups",
+                format!(
+                    "Foresight type effectiveness matchup {:?} -> {:?} is declared more than once",
+                    entry.attacker, entry.defender
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_type_categories(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.moves.is_empty() {
+        return;
+    }
+    if data.type_categories.physical.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_physical_type_categories",
+            "type_categories:physical",
+            "physical type categories must be declared when moves exist",
+        ));
+    }
+    if data.type_categories.special.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_special_type_categories",
+            "type_categories:special",
+            "special type categories must be declared when moves exist",
+        ));
+    }
+    for type_id in &data.type_categories.physical {
+        verify_exact_type_category_token(type_id, "type_categories:physical", diagnostics);
+    }
+    for type_id in &data.type_categories.special {
+        verify_exact_type_category_token(type_id, "type_categories:special", diagnostics);
+    }
+    for type_id in &data.type_categories.physical {
+        if data
+            .type_categories
+            .special
+            .iter()
+            .any(|entry| entry == type_id)
+        {
+            diagnostics.push(VerificationError::error(
+                "overlapping_type_category",
+                "type_categories",
+                format!("type category '{type_id}' is declared as both physical and special"),
+            ));
+        }
+    }
+}
+
+fn verify_move_priorities(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.moves.is_empty() {
+        return;
+    }
+    if data.move_priorities.base_priority < 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_base_move_priority",
+            "move_priorities:base_priority",
+            format!(
+                "base move priority must be nonnegative, found {}",
+                data.move_priorities.base_priority
+            ),
+        ));
+    }
+    if data.move_priorities.effect_priorities.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_move_effect_priorities",
+            "move_priorities:effect_priorities",
+            "move effect priorities must be declared when moves exist",
+        ));
+    }
+    let mut effect_priorities = BTreeSet::new();
+    for entry in &data.move_priorities.effect_priorities {
+        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
+            diagnostics.push(VerificationError::error(
+                "invalid_move_effect_priority_id",
+                "move_priorities:effect_priorities",
+                format!(
+                    "move effect priority id must be exact and untrimmed, found {:?}",
+                    entry.move_effect
+                ),
+            ));
+        }
+        if !effect_priorities.insert(entry.move_effect.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_move_effect_priority",
+                "move_priorities:effect_priorities",
+                format!(
+                    "move effect priority '{}' is declared more than once",
+                    entry.move_effect
+                ),
+            ));
+        }
+        if entry.priority < 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_move_effect_priority",
+                "move_priorities:effect_priorities",
+                format!(
+                    "move effect priority must be nonnegative, found {}",
+                    entry.priority
+                ),
+            ));
+        }
+    }
+    for move_data in data.moves.values() {
+        if !effect_priorities.contains(move_data.effect.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "missing_move_effect_priority",
+                "move_priorities:effect_priorities",
+                format!(
+                    "move '{}' effect '{}' must have an explicit priority row",
+                    move_data.name, move_data.effect
+                ),
+            ));
+        }
+    }
+    for entry in &data.move_priorities.move_priorities {
+        if entry.r#move.trim().is_empty() || entry.r#move.trim() != entry.r#move {
+            diagnostics.push(VerificationError::error(
+                "invalid_move_priority_id",
+                "move_priorities:move_priorities",
+                format!(
+                    "move priority override id must be exact and untrimmed, found {:?}",
+                    entry.r#move
+                ),
+            ));
+        }
+        if entry.priority < 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_move_priority",
+                "move_priorities:move_priorities",
+                format!(
+                    "move priority override must be nonnegative, found {}",
+                    entry.priority
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_exact_type_category_token(
+    type_id: &str,
+    subject: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if type_id.trim().is_empty() || type_id.trim() != type_id {
+        diagnostics.push(VerificationError::error(
+            "invalid_type_category_token",
+            subject,
+            format!("type category token must be exact and untrimmed, found {type_id:?}"),
+        ));
+    }
+}
+
+fn verify_type_multiplier(
+    multiplier: crystal_core::battle::damage::TypeMultiplier,
+    subject: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if multiplier.denominator == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_type_multiplier_denominator",
+            subject,
+            "type multiplier denominator must be nonzero",
+        ));
+    }
+}
+
 fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let (music, _, _) = script_audio_catalog_ids(data);
     for routine in &data.special_routines {
         if routine.trim().is_empty() {
             diagnostics.push(VerificationError::error(
@@ -3552,38 +5115,739 @@ fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
                 "special routine ids must be nonempty exact labels",
             ));
         }
+        if !is_known_special_routine(routine) {
+            diagnostics.push(VerificationError::error(
+                "unknown_declared_special_routine",
+                &format!("special_routines:{routine}"),
+                format!("special routine '{routine}' is not implemented by the Rust runtime"),
+            ));
+        }
+        if routine == "FadeOutMusic" && !music.contains("MUSIC_NONE") {
+            diagnostics.push(VerificationError::error(
+                "missing_special_routine_music_id",
+                "special_routines:FadeOutMusic",
+                "FadeOutMusic requires the modpack to declare exact music id 'MUSIC_NONE'",
+            ));
+        }
+    }
+    if data.special_routines.contains("InitRoamMons") && data.roaming_pokemon.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_roaming_pokemon_definitions",
+            "special_routines:InitRoamMons",
+            "InitRoamMons requires explicit roaming Pokemon definitions in the modpack",
+        ));
+    }
+    if data.special_routines.contains("BuenaPrize") && data.buena_prizes.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_buena_prize_definitions",
+            "special_routines:BuenaPrize",
+            "BuenaPrize requires explicit Buena prize definitions in the modpack",
+        ));
+    }
+    if data.special_routines.contains("BuenasPassword") && data.buena_password_categories.is_empty()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_buena_password_categories",
+            "special_routines:BuenasPassword",
+            "BuenasPassword requires explicit Buena password categories in the modpack",
+        ));
+    }
+    if data.special_routines.contains("SelectApricornForKurt")
+        && data.kurt_apricorn_recipes.is_empty()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_kurt_apricorn_recipes",
+            "special_routines:SelectApricornForKurt",
+            "SelectApricornForKurt requires explicit Kurt apricorn recipes in the modpack",
+        ));
+    }
+    if (data.special_routines.contains("GiveShuckle")
+        || data.special_routines.contains("ReturnShuckie"))
+        && data.shuckie_gift.is_none()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_shuckie_gift",
+            "special_routines:Shuckie",
+            "GiveShuckle and ReturnShuckie require explicit Shuckie gift data in the modpack",
+        ));
+    }
+    if data.special_routines.contains("GiveDratini") && data.dratini_move_sets.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_dratini_move_sets",
+            "special_routines:GiveDratini",
+            "GiveDratini requires explicit Dratini move sets in the modpack",
+        ));
+    }
+    if data.special_routines.contains("GiveOddEgg") && data.odd_egg_definitions.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_odd_egg_definitions",
+            "special_routines:GiveOddEgg",
+            "GiveOddEgg requires explicit Odd Egg definitions in the modpack",
+        ));
+    }
+    if (data.special_routines.contains("GiveParkBalls")
+        || data
+            .special_routines
+            .contains("SelectRandomBugContestContestants"))
+        && data.bug_contest_config.is_none()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_bug_contest_config",
+            "special_routines:BugContest",
+            "GiveParkBalls and SelectRandomBugContestContestants require explicit Bug-Catching Contest config in the modpack",
+        ));
+    }
+    if (data.special_routines.contains("BattleTowerAction")
+        || data.special_routines.contains("CheckForBattleTowerRules"))
+        && data.battle_tower_rules.is_none()
+    {
+        diagnostics.push(VerificationError::error(
+            "missing_battle_tower_rules",
+            "special_routines:BattleTowerRules",
+            "Battle Tower special routines require explicit Battle Tower rules in the modpack",
+        ));
+    }
+    if data.special_routines.contains("ProfOaksPCBoot") && data.oak_ratings.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_oak_rating_table",
+            "special_routines:ProfOaksPCBoot",
+            "ProfOaksPCBoot requires explicit Oak rating entries in the modpack",
+        ));
+    }
+    if data.special_routines.contains("CheckMagikarpLength") && data.magikarp_lengths.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_magikarp_length_table",
+            "special_routines:CheckMagikarpLength",
+            "CheckMagikarpLength requires explicit Magikarp length table in the modpack",
+        ));
+    }
+    let happiness_service_required = [
+        "OlderHaircutBrother",
+        "YoungerHaircutBrother",
+        "DaisysGrooming",
+    ]
+    .iter()
+    .any(|routine| data.special_routines.contains(*routine));
+    if happiness_service_required && data.happiness_data.is_none() {
+        diagnostics.push(VerificationError::error(
+            "missing_happiness_data",
+            "special_routines:HappinessService",
+            "happiness service routines require explicit happiness data in the modpack",
+        ));
+    }
+    if let Some(happiness_data) = &data.happiness_data {
+        verify_happiness_data(happiness_data, diagnostics);
+    }
+    for (index, definition) in data.roaming_pokemon.iter().enumerate() {
+        let subject = format!("roaming_pokemon:{index}");
+        if definition.species.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_roaming_pokemon_species",
+                &subject,
+                "roaming Pokemon species id must be an exact nonempty id",
+            ));
+        } else if !data.pokemon.contains_key(&definition.species) {
+            diagnostics.push(VerificationError::error(
+                "unknown_roaming_pokemon_species",
+                &subject,
+                format!(
+                    "roaming Pokemon references missing species '{}'",
+                    definition.species
+                ),
+            ));
+        }
+        if definition.level == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_roaming_pokemon_level",
+                &subject,
+                "roaming Pokemon level must be nonzero",
+            ));
+        }
+    }
+    for (index, prize) in data.buena_prizes.iter().enumerate() {
+        let subject = format!("buena_prizes:{index}");
+        if prize.item_id.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_buena_prize_item",
+                &subject,
+                "Buena prize item id must be an exact nonempty id",
+            ));
+        } else if !data.items.contains_key(&prize.item_id) {
+            diagnostics.push(VerificationError::error(
+                "unknown_buena_prize_item",
+                &subject,
+                format!("Buena prize references missing item '{}'", prize.item_id),
+            ));
+        }
+        if prize.cost == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_buena_prize_cost",
+                &subject,
+                "Buena prize cost must be nonzero",
+            ));
+        }
+    }
+    for (index, category) in data.buena_password_categories.iter().enumerate() {
+        let subject = format!("buena_password_categories:{index}");
+        if category.id.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_buena_password_category_id",
+                &subject,
+                "Buena password category id must be an exact nonempty id",
+            ));
+        }
+        if !is_known_buena_password_category_type(&category.category_type) {
+            diagnostics.push(VerificationError::error(
+                "unknown_buena_password_category_type",
+                &subject,
+                format!(
+                    "Buena password category '{}' has unknown type '{}'",
+                    category.id, category.category_type
+                ),
+            ));
+        }
+        if category.points == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_buena_password_points",
+                &subject,
+                "Buena password category points must be nonzero",
+            ));
+        }
+        if category.options.is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_buena_password_options",
+                &subject,
+                "Buena password category must declare at least one option",
+            ));
+        }
+        for (option_index, option) in category.options.iter().enumerate() {
+            let option_subject = format!("{subject}:option:{option_index}");
+            if option.trim().is_empty() {
+                diagnostics.push(VerificationError::error(
+                    "empty_buena_password_option",
+                    &option_subject,
+                    "Buena password option must be an exact nonempty id or string",
+                ));
+                continue;
+            }
+            match category.category_type.as_str() {
+                BUENA_PASSWORD_CATEGORY_MON if !data.pokemon.contains_key(option) => {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_buena_password_species",
+                        &option_subject,
+                        format!("Buena password option references missing species '{option}'"),
+                    ));
+                }
+                BUENA_PASSWORD_CATEGORY_ITEM if !data.items.contains_key(option) => {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_buena_password_item",
+                        &option_subject,
+                        format!("Buena password option references missing item '{option}'"),
+                    ));
+                }
+                BUENA_PASSWORD_CATEGORY_MOVE if !data.moves.contains_key(option) => {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_buena_password_move",
+                        &option_subject,
+                        format!("Buena password option references missing move '{option}'"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    for (index, recipe) in data.kurt_apricorn_recipes.iter().enumerate() {
+        let subject = format!("kurt_apricorn_recipes:{index}");
+        if recipe.apricorn.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_kurt_apricorn_recipe_apricorn",
+                &subject,
+                "Kurt apricorn recipe apricorn id must be an exact nonempty id",
+            ));
+        } else if !data.items.contains_key(&recipe.apricorn) {
+            diagnostics.push(VerificationError::error(
+                "unknown_kurt_apricorn_recipe_apricorn",
+                &subject,
+                format!(
+                    "Kurt apricorn recipe references missing apricorn item '{}'",
+                    recipe.apricorn
+                ),
+            ));
+        }
+        if recipe.ball.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_kurt_apricorn_recipe_ball",
+                &subject,
+                "Kurt apricorn recipe ball id must be an exact nonempty id",
+            ));
+        } else if !data.items.contains_key(&recipe.ball) {
+            diagnostics.push(VerificationError::error(
+                "unknown_kurt_apricorn_recipe_ball",
+                &subject,
+                format!(
+                    "Kurt apricorn recipe references missing ball item '{}'",
+                    recipe.ball
+                ),
+            ));
+        }
+    }
+    if let Some(gift) = data.shuckie_gift.as_ref() {
+        if gift.species.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_shuckie_gift_species",
+                "shuckie_gift",
+                "Shuckie gift species id must be an exact nonempty id",
+            ));
+        } else if !data.pokemon.contains_key(&gift.species) {
+            diagnostics.push(VerificationError::error(
+                "unknown_shuckie_gift_species",
+                "shuckie_gift",
+                format!("Shuckie gift references missing species '{}'", gift.species),
+            ));
+        }
+        if gift.level == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_shuckie_gift_level",
+                "shuckie_gift",
+                "Shuckie gift level must be nonzero",
+            ));
+        }
+        if gift.held_item.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_shuckie_gift_item",
+                "shuckie_gift",
+                "Shuckie gift held item id must be an exact nonempty id",
+            ));
+        } else if !data.items.contains_key(&gift.held_item) {
+            diagnostics.push(VerificationError::error(
+                "unknown_shuckie_gift_item",
+                "shuckie_gift",
+                format!(
+                    "Shuckie gift references missing held item '{}'",
+                    gift.held_item
+                ),
+            ));
+        }
+        if gift.nickname.trim().is_empty() || gift.original_trainer_name.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_shuckie_gift_name",
+                "shuckie_gift",
+                "Shuckie gift nickname and original trainer name must be nonempty",
+            ));
+        }
+        let engine_flags = script_engine_flag_ids(data);
+        if gift.got_today_engine_flag.trim().is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_shuckie_gift_engine_flag",
+                "shuckie_gift",
+                "Shuckie gift engine flag must be an exact nonempty id",
+            ));
+        } else if !engine_flags.contains(&gift.got_today_engine_flag) {
+            diagnostics.push(VerificationError::error(
+                "unknown_shuckie_gift_engine_flag",
+                "shuckie_gift",
+                format!(
+                    "Shuckie gift references missing engine flag '{}'",
+                    gift.got_today_engine_flag
+                ),
+            ));
+        }
+    }
+    for (index, move_set) in data.dratini_move_sets.iter().enumerate() {
+        let subject = format!("dratini_move_sets:{index}");
+        if move_set.moves.is_empty() {
+            diagnostics.push(VerificationError::error(
+                "empty_dratini_move_set",
+                &subject,
+                "Dratini move set must contain at least one move",
+            ));
+        }
+        for (move_index, move_id) in move_set.moves.iter().enumerate() {
+            let move_subject = format!("{subject}:move:{move_index}");
+            if move_id.trim().is_empty() {
+                diagnostics.push(VerificationError::error(
+                    "empty_dratini_move",
+                    &move_subject,
+                    "Dratini move id must be an exact nonempty id",
+                ));
+            } else if !data.moves.contains_key(move_id) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_dratini_move",
+                    &move_subject,
+                    format!("Dratini move set references missing move '{move_id}'"),
+                ));
+            }
+        }
+    }
+    if !data.odd_egg_definitions.is_empty() {
+        let total_probability = data
+            .odd_egg_definitions
+            .iter()
+            .map(|definition| u32::from(definition.probability))
+            .sum::<u32>();
+        if total_probability != 100 {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_probability_total",
+                "odd_egg_definitions",
+                format!("Odd Egg probabilities must sum to 100, found {total_probability}"),
+            ));
+        }
+    }
+    for (index, definition) in data.odd_egg_definitions.iter().enumerate() {
+        let subject = format!("odd_egg_definitions:{index}");
+        if definition.species.trim().is_empty() || definition.species.trim() != definition.species {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_species",
+                &subject,
+                "Odd Egg species must be an exact nonempty species id",
+            ));
+        } else if !data.pokemon.contains_key(&definition.species) {
+            diagnostics.push(VerificationError::error(
+                "unknown_odd_egg_species",
+                &subject,
+                format!(
+                    "Odd Egg references missing species '{}'",
+                    definition.species
+                ),
+            ));
+        }
+        if definition.moves.is_empty() || definition.moves.len() > 4 {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_move_count",
+                &subject,
+                "Odd Egg move list must contain 1..=4 exact move ids",
+            ));
+        }
+        for (move_index, move_id) in definition.moves.iter().enumerate() {
+            let move_subject = format!("{subject}:move:{move_index}");
+            if move_id.trim().is_empty() || move_id.trim() != move_id {
+                diagnostics.push(VerificationError::error(
+                    "invalid_odd_egg_move",
+                    &move_subject,
+                    "Odd Egg move id must be an exact nonempty id",
+                ));
+            } else if !data.moves.contains_key(move_id) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_odd_egg_move",
+                    &move_subject,
+                    format!("Odd Egg references missing move '{move_id}'"),
+                ));
+            }
+        }
+        if definition.probability == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_probability",
+                &subject,
+                "Odd Egg probability must be positive",
+            ));
+        }
+        if definition.level == 0 || definition.level > 100 {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_level",
+                &subject,
+                format!("Odd Egg level must be 1..=100, found {}", definition.level),
+            ));
+        }
+        if definition.nickname.trim().is_empty()
+            || definition.nickname.trim() != definition.nickname
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_nickname",
+                &subject,
+                "Odd Egg nickname must be exact nonempty pack data",
+            ));
+        }
+        if definition.original_trainer_name.trim().is_empty()
+            || definition.original_trainer_name.trim() != definition.original_trainer_name
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_odd_egg_original_trainer_name",
+                &subject,
+                "Odd Egg original trainer name must be exact nonempty pack data",
+            ));
+        }
+    }
+    if let Some(config) = data.bug_contest_config.as_ref() {
+        if config.park_balls == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_bug_contest_park_balls",
+                "bug_contest_config",
+                "Bug-Catching Contest park_balls must be positive",
+            ));
+        }
+        if config.timer_seconds > 59 {
+            diagnostics.push(VerificationError::error(
+                "invalid_bug_contest_timer_seconds",
+                "bug_contest_config",
+                format!(
+                    "Bug-Catching Contest timer_seconds must be 0..=59, found {}",
+                    config.timer_seconds
+                ),
+            ));
+        }
+        if config.selected_contestant_count == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_bug_contest_selected_count",
+                "bug_contest_config",
+                "Bug-Catching Contest selected_contestant_count must be positive",
+            ));
+        }
+        if config.contestant_flags.len() < config.selected_contestant_count {
+            diagnostics.push(VerificationError::error(
+                "invalid_bug_contest_selected_count",
+                "bug_contest_config",
+                format!(
+                    "Bug-Catching Contest selected_contestant_count {} exceeds {} contestant flags",
+                    config.selected_contestant_count,
+                    config.contestant_flags.len()
+                ),
+            ));
+        }
+        let event_flags = script_event_flag_ids(data);
+        let mut seen = BTreeSet::new();
+        for (index, flag) in config.contestant_flags.iter().enumerate() {
+            let subject = format!("bug_contest_config:contestant_flags:{index}");
+            if flag.trim().is_empty() || flag.trim() != flag {
+                diagnostics.push(VerificationError::error(
+                    "empty_bug_contest_contestant_flag",
+                    &subject,
+                    "Bug-Catching Contest contestant flag must be an exact nonempty id",
+                ));
+                continue;
+            }
+            if !seen.insert(flag) {
+                diagnostics.push(VerificationError::error(
+                    "duplicate_bug_contest_contestant_flag",
+                    &subject,
+                    format!("Bug-Catching Contest contestant flag '{flag}' is duplicated"),
+                ));
+            }
+            if !event_flags.contains(flag) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_bug_contest_contestant_flag",
+                    &subject,
+                    format!("Bug-Catching Contest contestant flag '{flag}' is not loaded"),
+                ));
+            }
+        }
+    }
+    if let Some(rules) = data.battle_tower_rules.as_ref() {
+        if rules.required_party_count == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_tower_required_party_count",
+                "battle_tower_rules:required_party_count",
+                "Battle Tower requiredPartyCount must be nonzero",
+            ));
+        }
+        if rules.challenge_streak_length == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_tower_challenge_streak_length",
+                "battle_tower_rules:challengeStreakLength",
+                "Battle Tower challengeStreakLength must be nonzero",
+            ));
+        }
+        if rules.level_group_size == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_tower_level_group_size",
+                "battle_tower_rules:levelGroupSize",
+                "Battle Tower levelGroupSize must be nonzero",
+            ));
+        }
+        if rules.minimum_level_group == 0 || rules.maximum_level_group < rules.minimum_level_group {
+            diagnostics.push(VerificationError::error(
+                "invalid_battle_tower_level_group_range",
+                "battle_tower_rules:levelGroupRange",
+                "Battle Tower level group range must be nonzero and ordered",
+            ));
+        }
+        for (field, value) in [
+            (
+                "partyCountFailureText",
+                rules.party_count_failure_text.as_str(),
+            ),
+            (
+                "duplicateSpeciesFailureText",
+                rules.duplicate_species_failure_text.as_str(),
+            ),
+            (
+                "duplicateHeldItemFailureText",
+                rules.duplicate_held_item_failure_text.as_str(),
+            ),
+            ("eggFailureText", rules.egg_failure_text.as_str()),
+        ] {
+            if value.trim().is_empty() || value.trim() != value {
+                diagnostics.push(VerificationError::error(
+                    "invalid_battle_tower_failure_text",
+                    format!("battle_tower_rules:{field}"),
+                    "Battle Tower failure text ids must be exact nonempty ids",
+                ));
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for (index, species_id) in rules.banned_species.iter().enumerate() {
+            let subject = format!("battle_tower_rules:banned_species:{index}");
+            if species_id.trim().is_empty() || species_id.trim() != species_id {
+                diagnostics.push(VerificationError::error(
+                    "invalid_battle_tower_banned_species",
+                    &subject,
+                    "Battle Tower bannedSpecies entries must be exact nonempty species ids",
+                ));
+                continue;
+            }
+            if !seen.insert(species_id) {
+                diagnostics.push(VerificationError::error(
+                    "duplicate_battle_tower_banned_species",
+                    &subject,
+                    format!("Battle Tower bannedSpecies repeats '{species_id}'"),
+                ));
+            }
+            if !data.pokemon.contains_key(species_id) {
+                diagnostics.push(VerificationError::error(
+                    "unknown_battle_tower_banned_species",
+                    &subject,
+                    format!("Battle Tower bannedSpecies references missing species '{species_id}'"),
+                ));
+            }
+        }
+    }
+    if !data.oak_ratings.is_empty() {
+        let mut previous_limit = None;
+        for (index, entry) in data.oak_ratings.iter().enumerate() {
+            let subject = format!("oak_ratings:{index}");
+            if entry.fanfare.trim().is_empty() || entry.fanfare.trim() != entry.fanfare {
+                diagnostics.push(VerificationError::error(
+                    "invalid_oak_rating_fanfare",
+                    &subject,
+                    "Oak rating fanfare must be an exact nonempty id",
+                ));
+            }
+            if entry.text_label.trim().is_empty() || entry.text_label.trim() != entry.text_label {
+                diagnostics.push(VerificationError::error(
+                    "invalid_oak_rating_text_label",
+                    &subject,
+                    "Oak rating textLabel must be an exact nonempty id",
+                ));
+            }
+            if previous_limit.is_some_and(|limit| entry.caught_count_limit <= limit) {
+                diagnostics.push(VerificationError::error(
+                    "invalid_oak_rating_order",
+                    &subject,
+                    "Oak rating caughtCountLimit values must be strictly increasing",
+                ));
+            }
+            previous_limit = Some(entry.caught_count_limit);
+        }
+        if let Some(last) = data.oak_ratings.last() {
+            let pokemon_count = data.pokemon.len();
+            if pokemon_count > 0 && last.caught_count_limit < pokemon_count {
+                diagnostics.push(VerificationError::error(
+                    "incomplete_oak_rating_coverage",
+                    "oak_ratings",
+                    format!(
+                        "Oak rating table only covers {} caught Pokemon, but {} Pokemon are loaded",
+                        last.caught_count_limit, pokemon_count
+                    ),
+                ));
+            }
+        }
+    }
+    let mut previous_magikarp_threshold = None;
+    for (index, entry) in data.magikarp_lengths.iter().enumerate() {
+        let subject = format!("magikarp_lengths:{index}");
+        if entry.divisor == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_magikarp_length_divisor",
+                &subject,
+                format!(
+                    "Magikarp length threshold {} has zero divisor",
+                    entry.threshold
+                ),
+            ));
+        }
+        if previous_magikarp_threshold.is_some_and(|previous| entry.threshold <= previous) {
+            diagnostics.push(VerificationError::error(
+                "invalid_magikarp_length_threshold_order",
+                &subject,
+                "Magikarp length thresholds must be strictly increasing",
+            ));
+        }
+        previous_magikarp_threshold = Some(entry.threshold);
     }
 }
 
+fn script_event_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
+    let mut flags = data
+        .initialize_events
+        .event_flags
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for module in data.maps.values() {
+        for command in &module.script_flag_commands {
+            if command.flag_id.starts_with("EVENT_") {
+                flags.insert(command.flag_id.clone());
+            }
+        }
+    }
+    flags
+}
+
+fn script_engine_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
+    let mut flags = data
+        .initialize_events
+        .engine_flags
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for module in data.maps.values() {
+        for command in &module.script_flag_commands {
+            if command.flag_id.starts_with("ENGINE_") {
+                flags.insert(command.flag_id.clone());
+            }
+        }
+    }
+    flags
+}
+
 fn verify_script_runtime_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let expected_arg_counts = script_runtime_command_arg_counts();
     for (map_name, module) in &data.maps {
         for command in &module.script_runtime_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            let Some(expected) = expected_arg_counts.get(command.command.as_str()) else {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_runtime_command",
-                    &subject,
-                    format!("unknown runtime command '{}'", command.command),
-                ));
+            if let Err(error) = validate_script_runtime_command(command) {
+                match error {
+                    ScriptRuntimeCommandError::UnknownCommand { command } => {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_script_runtime_command",
+                            &subject,
+                            format!("unknown runtime command '{command}'"),
+                        ));
+                    }
+                    ScriptRuntimeCommandError::WrongArgCount {
+                        command,
+                        expected,
+                        actual,
+                    } => {
+                        diagnostics.push(VerificationError::error(
+                            "malformed_script_runtime_command",
+                            &subject,
+                            format!("{command} expects {expected} args but found {actual}"),
+                        ));
+                    }
+                    ScriptRuntimeCommandError::EmptyArg { command }
+                    | ScriptRuntimeCommandError::PaddedArg { command, .. } => {
+                        diagnostics.push(VerificationError::error(
+                            "malformed_script_runtime_command",
+                            &subject,
+                            format!("{command} requires exact nonempty args"),
+                        ));
+                    }
+                    _ => {}
+                }
                 continue;
             };
-            if command.args.len() != *expected {
-                diagnostics.push(VerificationError::error(
-                    "malformed_script_runtime_command",
-                    &subject,
-                    format!(
-                        "{} expects {} args but found {}",
-                        command.command,
-                        expected,
-                        command.args.len()
-                    ),
-                ));
-                continue;
-            }
             match command.command.as_str() {
                 "special" => {
                     let special_id = &command.args[0];
@@ -3963,17 +6227,12 @@ fn verify_required_target_object_id(
     }
 }
 
-fn pokemon_cry_metadata(data: &GameDataSet, species_id: &str) -> Option<PokemonCryMetadata> {
-    data.pokemon_cries.get(species_id).cloned()
-}
-
 fn script_audio_catalog_ids(
     data: &GameDataSet,
 ) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let mut music = BTreeSet::new();
     let mut sound_effects = BTreeSet::new();
     let mut cries = BTreeSet::new();
-    music.insert("MUSIC_NONE".to_string());
     for asset in &data.audio {
         match asset.kind {
             ModpackAudioKind::Music => {
@@ -3992,31 +6251,6 @@ fn script_audio_catalog_ids(
 
 fn insert_audio_id(catalog: &mut BTreeSet<String>, asset: &ModpackAudioAsset) {
     catalog.insert(asset.id.clone());
-}
-
-fn verify_audio_id(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    audio_id: Option<&str>,
-    catalog: &BTreeSet<String>,
-    missing_code: &str,
-    unknown_code: &str,
-) {
-    let Some(audio_id) = audio_id else {
-        diagnostics.push(VerificationError::error(
-            missing_code,
-            subject,
-            "audio command is missing an audio id",
-        ));
-        return;
-    };
-    if !catalog.contains(audio_id) {
-        diagnostics.push(VerificationError::error(
-            unknown_code,
-            subject,
-            format!("audio command references missing audio id '{audio_id}'"),
-        ));
-    }
 }
 
 fn scene_table_for_map_id<'a>(
@@ -4060,9 +6294,6 @@ fn verify_scene_token(
         if index < scene_slot_count {
             return;
         }
-        if scene_slot_count == 0 && table.scenes.is_empty() {
-            return;
-        }
     }
     diagnostics.push(VerificationError::error(
         "unknown_script_scene_id",
@@ -4071,19 +6302,185 @@ fn verify_scene_token(
     ));
 }
 
-fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.fishing.groups.is_empty() {
+fn verify_battle_reward_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.battle_reward_rules == BattleRewardRules::default() {
         return;
     }
-    for (map_name, attributes) in data.map_attributes.iter().chain(
-        data.maps
-            .iter()
-            .map(|(map_name, module)| (map_name, &module.attributes)),
-    ) {
-        if let Some(group) = attributes.fishing_group.as_deref()
-            && group != crystal_core::world::fishing::FISHGROUP_NONE
-            && !data.fishing.groups.contains_key(group)
-        {
+    if data.battle_reward_rules.max_level == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_reward_rule",
+            "battle_reward_rules:max_level",
+            "battle reward rules maxLevel must be nonzero",
+        ));
+    }
+    if data.battle_reward_rules.wild_exp_divisor <= 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_reward_rule",
+            "battle_reward_rules:wild_exp_divisor",
+            "battle reward rules wildExpDivisor must be positive",
+        ));
+    }
+    if data.battle_reward_rules.trainer_exp_numerator <= 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_reward_rule",
+            "battle_reward_rules:trainer_exp_numerator",
+            "battle reward rules trainerExpNumerator must be positive",
+        ));
+    }
+    if data.battle_reward_rules.trainer_exp_denominator <= 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_reward_rule",
+            "battle_reward_rules:trainer_exp_denominator",
+            "battle reward rules trainerExpDenominator must be positive",
+        ));
+    }
+}
+
+fn verify_battle_escape_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.pokemon.is_empty() {
+        return;
+    }
+    if data.battle_escape_rules == BattleEscapeRules::default() {
+        diagnostics.push(VerificationError::error(
+            "missing_battle_escape_rules",
+            "battle_escape_rules",
+            "battle escape rules must be declared when Pokemon exist",
+        ));
+        return;
+    }
+    if data.battle_escape_rules.player_speed_multiplier == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_escape_rule",
+            "battle_escape_rules:player_speed_multiplier",
+            "battle escape player speed multiplier must be nonzero",
+        ));
+    }
+    if data.battle_escape_rules.enemy_speed_divisor == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_escape_rule",
+            "battle_escape_rules:enemy_speed_divisor",
+            "battle escape enemy speed divisor must be nonzero",
+        ));
+    }
+    if data.battle_escape_rules.rng_roll_values == 0
+        || data.battle_escape_rules.rng_roll_values > u16::from(u8::MAX) + 1
+    {
+        diagnostics.push(VerificationError::error(
+            "invalid_battle_escape_rule",
+            "battle_escape_rules:rng_roll_values",
+            "battle escape rng roll values must be in 1..=256",
+        ));
+    }
+}
+
+fn verify_step_event_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.step_event_rules == StepEventRules::default() {
+        return;
+    }
+    if data.step_event_rules.poison_step_interval == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_step_event_rule",
+            "step_event_rules:poison_step_interval",
+            "step event rules poisonStepInterval must be nonzero",
+        ));
+    }
+    if data.step_event_rules.poison_status.trim().is_empty()
+        || data.step_event_rules.poison_status.trim() != data.step_event_rules.poison_status
+    {
+        diagnostics.push(VerificationError::error(
+            "invalid_step_event_rule",
+            "step_event_rules:poison_status",
+            "step event rules poisonStatus must be an exact nonempty status id",
+        ));
+    }
+    if data.step_event_rules.egg_nickname.trim().is_empty()
+        || data.step_event_rules.egg_nickname.trim() != data.step_event_rules.egg_nickname
+    {
+        diagnostics.push(VerificationError::error(
+            "invalid_step_event_rule",
+            "step_event_rules:egg_nickname",
+            "step event rules eggNickname must be an exact nonempty nickname token",
+        ));
+    }
+    if data.step_event_rules.happiness_step_counter_target
+        > data.step_event_rules.happiness_step_counter_mask
+    {
+        diagnostics.push(VerificationError::error(
+            "invalid_step_event_rule",
+            "step_event_rules:happiness_step_counter_target",
+            "step event rules happinessStepCounterTarget must fit inside happinessStepCounterMask",
+        ));
+    }
+}
+
+fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let referenced_groups: Vec<(&String, &str)> = data
+        .map_attributes
+        .iter()
+        .chain(
+            data.maps
+                .iter()
+                .map(|(map_name, module)| (map_name, &module.attributes)),
+        )
+        .filter_map(|(map_name, attributes)| {
+            attributes
+                .fishing_group
+                .as_deref()
+                .filter(|group| *group != crystal_core::world::fishing::FISHGROUP_NONE)
+                .map(|group| (map_name, group))
+        })
+        .collect();
+    if data.fishing.groups.is_empty() {
+        for (map_name, group) in referenced_groups {
+            diagnostics.push(VerificationError::error(
+                "missing_fishing_catalog",
+                map_name,
+                format!("map references fishing group '{group}' but no fishing catalog is loaded"),
+            ));
+        }
+        return;
+    }
+    if data.fishing.rod_items.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_fishing_rod_items",
+            "fishing",
+            "fishing catalog must declare exact item id to rod rules",
+        ));
+    }
+    let item_ids: BTreeSet<&str> = data.items.keys().map(String::as_str).collect();
+    let mut rod_item_ids = BTreeSet::new();
+    for rule in &data.fishing.rod_items {
+        let subject = format!("fishing:rod_items:{}", rule.item_id);
+        if !rod_item_ids.insert(rule.item_id.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_fishing_rod_item_id",
+                &subject,
+                format!("fishing rod item rules repeat item id '{}'", rule.item_id),
+            ));
+        }
+        if !is_known_fishing_rod(&rule.rod) {
+            diagnostics.push(VerificationError::error(
+                "unknown_fishing_rod_item_rod",
+                &subject,
+                format!(
+                    "fishing rod item rule references unknown rod '{}'",
+                    rule.rod
+                ),
+            ));
+        }
+        if !item_ids.contains(rule.item_id.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "unknown_fishing_rod_item_id",
+                &subject,
+                format!(
+                    "fishing rod item rule references missing item id '{}'",
+                    rule.item_id
+                ),
+            ));
+        }
+    }
+    for (map_name, group) in referenced_groups {
+        if !data.fishing.groups.contains_key(group) {
             diagnostics.push(VerificationError::error(
                 "unknown_map_fishing_group",
                 map_name,
@@ -4093,15 +6490,12 @@ fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) 
     }
     for (group_id, group) in &data.fishing.groups {
         for (rod, table) in &group.rod_tables {
-            match rod.as_str() {
-                crystal_core::world::fishing::ROD_OLD
-                | crystal_core::world::fishing::ROD_GOOD
-                | crystal_core::world::fishing::ROD_SUPER => {}
-                _ => diagnostics.push(VerificationError::error(
+            if !is_known_fishing_rod(rod) {
+                diagnostics.push(VerificationError::error(
                     "unknown_fishing_rod",
                     group_id,
                     format!("fishing group references unknown rod '{rod}'"),
-                )),
+                ));
             }
             for slot in &table.slots {
                 if let Some(species) = slot.species.as_deref()
@@ -4136,6 +6530,378 @@ fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) 
                 }
             }
         }
+    }
+    let mut seen_swarm_rules = BTreeSet::new();
+    for (index, rule) in data.fishing.swarm_rules.iter().enumerate() {
+        let subject = format!("fishing:swarm_rules:{index}");
+        if rule.daily_flag_bit >= u8::BITS as u8 {
+            diagnostics.push(VerificationError::error(
+                "invalid_fishing_swarm_flag_bit",
+                &subject,
+                format!(
+                    "fishing swarm rule dailyFlagBit must be 0..=7, found {}",
+                    rule.daily_flag_bit
+                ),
+            ));
+        }
+        if rule.base_group.trim().is_empty() || rule.base_group.trim() != rule.base_group {
+            diagnostics.push(VerificationError::error(
+                "invalid_fishing_swarm_base_group",
+                &subject,
+                "fishing swarm baseGroup must be an exact nonempty fish group id",
+            ));
+        } else if !data.fishing.groups.contains_key(&rule.base_group) {
+            diagnostics.push(VerificationError::error(
+                "unknown_fishing_swarm_base_group",
+                &subject,
+                format!(
+                    "fishing swarm rule references missing base group '{}'",
+                    rule.base_group
+                ),
+            ));
+        }
+        if rule.swarm_group.trim().is_empty() || rule.swarm_group.trim() != rule.swarm_group {
+            diagnostics.push(VerificationError::error(
+                "invalid_fishing_swarm_group",
+                &subject,
+                "fishing swarm swarmGroup must be an exact nonempty fish group id",
+            ));
+        } else if !data.fishing.groups.contains_key(&rule.swarm_group) {
+            diagnostics.push(VerificationError::error(
+                "unknown_fishing_swarm_group",
+                &subject,
+                format!(
+                    "fishing swarm rule references missing swarm group '{}'",
+                    rule.swarm_group
+                ),
+            ));
+        }
+        if !seen_swarm_rules.insert((rule.daily_flag_bit, rule.swarm, rule.base_group.as_str())) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_fishing_swarm_rule",
+                &subject,
+                "fishing swarm rules must not repeat the same dailyFlagBit, swarm, and baseGroup",
+            ));
+        }
+    }
+}
+
+fn verify_field_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.field_moves == FieldMoveCatalog::default() {
+        return;
+    }
+    verify_field_move_block_rule(data, "field_moves:cut", &data.field_moves.cut, diagnostics);
+    verify_field_move_block_rule(
+        data,
+        "field_moves:whirlpool",
+        &data.field_moves.whirlpool,
+        diagnostics,
+    );
+    verify_field_move_flag_rule(
+        data,
+        "field_moves:strength",
+        &data.field_moves.strength,
+        diagnostics,
+    );
+    verify_field_move_flag_rule(
+        data,
+        "field_moves:flash",
+        &data.field_moves.flash,
+        diagnostics,
+    );
+    verify_field_move_travel_rule(
+        data,
+        "field_moves:surf",
+        &data.field_moves.surf,
+        diagnostics,
+    );
+    verify_field_move_travel_rule(
+        data,
+        "field_moves:waterfall",
+        &data.field_moves.waterfall,
+        diagnostics,
+    );
+    verify_field_move_rule(data, "field_moves:fly", &data.field_moves.fly, diagnostics);
+    verify_field_move_move_rule(data, "field_moves:dig", &data.field_moves.dig, diagnostics);
+    verify_field_move_move_rule(
+        data,
+        "field_moves:teleport",
+        &data.field_moves.teleport,
+        diagnostics,
+    );
+    verify_field_escape_item_rule(data, diagnostics);
+    verify_field_repel_item_rule(data, diagnostics);
+    verify_field_item_rule(
+        data,
+        "field_moves:bicycle",
+        &data.field_moves.bicycle,
+        diagnostics,
+    );
+    verify_field_item_rule(
+        data,
+        "field_moves:itemfinder",
+        &data.field_moves.itemfinder,
+        diagnostics,
+    );
+    verify_field_item_rule(
+        data,
+        "field_moves:squirtbottle",
+        &data.field_moves.squirtbottle,
+        diagnostics,
+    );
+    verify_field_item_rule(
+        data,
+        "field_moves:coin_case",
+        &data.field_moves.coin_case,
+        diagnostics,
+    );
+    verify_field_item_rule(
+        data,
+        "field_moves:blue_card",
+        &data.field_moves.blue_card,
+        diagnostics,
+    );
+    verify_field_item_rule(
+        data,
+        "field_moves:town_map",
+        &data.field_moves.town_map,
+        diagnostics,
+    );
+}
+
+fn verify_field_move_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldMoveRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
+    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
+}
+
+fn verify_field_move_move_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldMoveMoveRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
+}
+
+fn verify_field_escape_item_rule(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let rule = &data.field_moves.escape_rope;
+    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_escape_item_id",
+            "field_moves:escape_rope",
+            "field escape item id must be exact and nonempty",
+        ));
+    }
+    if rule.escape_rope_mode.trim().is_empty()
+        || rule.escape_rope_mode.trim() != rule.escape_rope_mode
+    {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_escape_item_mode",
+            "field_moves:escape_rope",
+            "field escape item mode must be exact and nonempty",
+        ));
+    }
+    if data.items.is_empty() || rule.item_id.is_empty() || rule.escape_rope_mode.is_empty() {
+        return;
+    }
+    match data.items.get(&rule.item_id) {
+        Some(item) if item.escape_rope_mode.as_deref() == Some(rule.escape_rope_mode.as_str()) => {}
+        _ => {
+            diagnostics.push(VerificationError::error(
+                "unknown_field_escape_item_rule",
+                "field_moves:escape_rope",
+                format!(
+                    "field escape item rule references item '{}' with mode '{}' not implemented by the item payload",
+                    rule.item_id, rule.escape_rope_mode
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_field_repel_item_rule(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if data.items.is_empty() {
+        return;
+    }
+    if !data.items.values().any(|item| item.repel_steps.is_some()) {
+        diagnostics.push(VerificationError::error(
+            "missing_field_repel_item_payload",
+            "field_moves:repel",
+            "field repel behavior requires at least one item with repel_steps",
+        ));
+    }
+}
+
+fn verify_field_item_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldItemRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_item_id",
+            subject,
+            "field item id must be exact and nonempty",
+        ));
+        return;
+    }
+    if !data.items.contains_key(&rule.item_id) {
+        diagnostics.push(VerificationError::error(
+            "unknown_field_item_id",
+            subject,
+            format!("field item rule references unknown item '{}'", rule.item_id),
+        ));
+    }
+}
+
+fn verify_field_move_id(
+    data: &GameDataSet,
+    subject: &str,
+    move_id: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if move_id.trim().is_empty() || move_id.trim() != move_id {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_move_id",
+            subject,
+            "field move id must be an exact nonempty move id",
+        ));
+    } else if !data.moves.contains_key(move_id) {
+        diagnostics.push(VerificationError::error(
+            "unknown_field_move_id",
+            subject,
+            format!("field move references missing move '{move_id}'"),
+        ));
+    }
+}
+
+fn verify_field_move_badge(
+    subject: &str,
+    move_id: &str,
+    badge: &crystal_core::systems::field_moves::FieldMoveBadgeRequirement,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if badge.region != "johto" {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_move_badge_region",
+            subject,
+            format!(
+                "field move '{move_id}' badge region must be exact 'johto', found '{}'",
+                badge.region
+            ),
+        ));
+    }
+    if badge.index >= 8 {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_move_badge_index",
+            subject,
+            format!(
+                "field move '{move_id}' Johto badge index must be 0..=7, found {}",
+                badge.index
+            ),
+        ));
+    }
+}
+
+fn verify_field_move_block_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldMoveBlockRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
+    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
+    if rule.target_collisions.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_field_move_target_collisions",
+            subject,
+            format!(
+                "field move '{}' requires exact target collisions",
+                rule.move_id
+            ),
+        ));
+    }
+    if rule.replacements.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_field_move_replacements",
+            subject,
+            format!(
+                "field move '{}' requires exact replacement rows",
+                rule.move_id
+            ),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (index, replacement) in rule.replacements.iter().enumerate() {
+        let replacement_subject = format!("{subject}:replacement:{index}");
+        if replacement.tileset.trim().is_empty()
+            || replacement.tileset.trim() != replacement.tileset
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_move_replacement_tileset",
+                &replacement_subject,
+                "field move replacement tileset must be exact and nonempty",
+            ));
+        }
+        if replacement.variant.trim().is_empty()
+            || replacement.variant.trim() != replacement.variant
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_move_replacement_variant",
+                &replacement_subject,
+                "field move replacement variant must be exact and nonempty",
+            ));
+        }
+        if !seen.insert((replacement.tileset.as_str(), replacement.block_id)) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_field_move_replacement",
+                &replacement_subject,
+                "field move replacements must not repeat the same tileset and block id",
+            ));
+        }
+    }
+}
+
+fn verify_field_move_flag_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldMoveFlagRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
+    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
+    if rule.engine_flag.trim().is_empty() || rule.engine_flag.trim() != rule.engine_flag {
+        diagnostics.push(VerificationError::error(
+            "invalid_field_move_engine_flag",
+            subject,
+            format!(
+                "field move '{}' requires an exact engine flag",
+                rule.move_id
+            ),
+        ));
+    }
+}
+
+fn verify_field_move_travel_rule(
+    data: &GameDataSet,
+    subject: &str,
+    rule: &FieldMoveTravelRule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
+    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
+    if subject.ends_with(":waterfall") && rule.target_collisions.is_empty() {
+        diagnostics.push(VerificationError::error(
+            "missing_field_move_target_collisions",
+            subject,
+            "waterfall requires exact target collisions",
+        ));
     }
 }
 
@@ -5264,11 +8030,25 @@ fn encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
     species
 }
 
+fn field_encounter_species(data: &FieldEncounterData) -> BTreeSet<String> {
+    let mut species = BTreeSet::new();
+    for table in [data.headbutt.as_ref(), data.rock_smash.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        for encounter in table.common.iter().chain(table.rare.iter()) {
+            species.insert(encounter.species.clone());
+        }
+    }
+    species
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataSet {
     pub pokemon: BTreeMap<String, PokemonSpecies>,
     pub moves: BTreeMap<String, Move>,
+    pub growth_rates: crystal_core::systems::experience::GrowthRateCatalog,
     pub learnsets: SpeciesLearnsets,
     pub level_up_moves: BTreeMap<String, Value>,
     pub egg_moves: BTreeMap<String, Value>,
@@ -5281,11 +8061,35 @@ pub struct GameDataSet {
     pub items: BTreeMap<String, Item>,
     pub marts: MartCatalog,
     pub currency_constants: CurrencyCatalog,
+    pub battle_reward_rules: BattleRewardRules,
+    pub battle_escape_rules: BattleEscapeRules,
+    pub step_event_rules: StepEventRules,
     pub fishing: FishingCatalog,
     pub fruit_trees: FruitTreeCatalog,
+    pub field_moves: FieldMoveCatalog,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
+    pub buena_password_categories: Vec<BuenaPasswordCategoryDefinition>,
+    pub roaming_pokemon: Vec<RoamingPokemonDefinition>,
+    pub buena_prizes: Vec<BuenaPrizeDefinition>,
+    pub kurt_apricorn_recipes: Vec<KurtApricornRecipe>,
+    pub shuckie_gift: Option<ShuckieGiftDefinition>,
+    pub dratini_move_sets: Vec<DratiniMoveSetDefinition>,
+    pub bug_contest_config: Option<BugContestConfig>,
+    pub battle_tower_rules: Option<BattleTowerRules>,
+    pub oak_ratings: Vec<OakRatingEntry>,
+    pub odd_egg_definitions: Vec<OddEggDefinition>,
+    pub magikarp_lengths: Vec<MagikarpLengthEntry>,
+    pub happiness_data: Option<HappinessData>,
+    pub encounter_slot_tables: EncounterSlotTables,
+    pub encounter_music_modifiers: EncounterMusicModifiers,
+    pub battle_stat_multipliers: BattleStatMultiplierTables,
+    pub capture_wobble_probabilities: Vec<CaptureWobbleProbability>,
+    pub move_priorities: MovePriorityTable,
+    pub type_categories: TypeCategories,
+    pub type_effectiveness: TypeEffectivenessTable,
+    pub weather_modifiers: WeatherModifiers,
     pub pc_strings: BTreeMap<String, String>,
     pub menu_icons: BTreeMap<String, String>,
     pub pokedex_entries: BTreeMap<String, RuntimePokedexEntry>,
@@ -5302,8 +8106,9 @@ pub struct GameDataSet {
     pub pokegear_town_map_palette_map: BTreeMap<String, Vec<String>>,
     pub pokemon_cries: BTreeMap<String, PokemonCryMetadata>,
     pub wild_encounters: BTreeMap<String, WildEncounterData>,
+    pub field_encounters: BTreeMap<String, FieldEncounterData>,
     pub npcs: BTreeMap<String, Value>,
-    pub pokegear_landmarks: Vec<Value>,
+    pub pokegear_landmarks: PokegearLandmarksPayload,
     pub trainers: TrainerCatalog,
     pub pokedex: Vec<Value>,
     pub story_events: Vec<Value>,
@@ -5323,7 +8128,6 @@ impl GameDataSet {
     pub fn load_base_json(asset_root: &AssetRoot) -> Result<Self> {
         let index = asset_root.load_content_pack_index()?;
         let mut data = Self::default();
-        data.fruit_trees = base_fruit_tree_catalog();
         data.apply_content_pack_index(asset_root, &index)?;
         Ok(data)
     }
@@ -5428,6 +8232,13 @@ impl GameDataSet {
                     self.moves.insert(move_data.name.clone(), move_data);
                 }
             }
+            ContentPackCategory::GrowthRates => {
+                for curve in parse_one_or_many::<crystal_core::systems::experience::GrowthRateCurve>(
+                    payload,
+                )? {
+                    self.growth_rates.insert(curve.id.clone(), curve);
+                }
+            }
             ContentPackCategory::Items => {
                 for item in parse_one_or_many::<Item>(payload)? {
                     self.items.insert(item_key(&item)?, item);
@@ -5444,6 +8255,11 @@ impl GameDataSet {
                     self.wild_encounters.insert(data.map_name.clone(), data);
                 }
             }
+            ContentPackCategory::FieldEncounters => {
+                for data in parse_one_or_many::<FieldEncounterData>(payload)? {
+                    self.field_encounters.insert(data.map_name.clone(), data);
+                }
+            }
             ContentPackCategory::RuntimeSpawnPoints => {
                 self.runtime_spawn_points
                     .extend(parse_object_map::<RuntimeSpawnPoint>(payload)?);
@@ -5456,11 +8272,114 @@ impl GameDataSet {
                 self.flee_mons =
                     serde_json::from_value(payload).context("parse flee mons payload")?;
             }
+            ContentPackCategory::RoamingPokemon => {
+                self.roaming_pokemon =
+                    serde_json::from_value(payload).context("parse roaming Pokemon payload")?;
+            }
+            ContentPackCategory::BuenaPasswordCategories => {
+                self.buena_password_categories = serde_json::from_value(payload)
+                    .context("parse Buena password categories payload")?;
+            }
+            ContentPackCategory::BuenaPrizes => {
+                self.buena_prizes =
+                    serde_json::from_value(payload).context("parse Buena prizes payload")?;
+            }
+            ContentPackCategory::KurtApricornRecipes => {
+                self.kurt_apricorn_recipes = serde_json::from_value(payload)
+                    .context("parse Kurt apricorn recipes payload")?;
+            }
+            ContentPackCategory::ShuckieGift => {
+                self.shuckie_gift =
+                    Some(serde_json::from_value(payload).context("parse Shuckie gift payload")?);
+            }
+            ContentPackCategory::DratiniMoveSets => {
+                self.dratini_move_sets =
+                    serde_json::from_value(payload).context("parse Dratini move sets payload")?;
+            }
+            ContentPackCategory::BugContestConfig => {
+                self.bug_contest_config = Some(
+                    serde_json::from_value(payload)
+                        .context("parse Bug-Catching Contest config payload")?,
+                );
+            }
+            ContentPackCategory::BattleTowerRules => {
+                self.battle_tower_rules = Some(
+                    serde_json::from_value(payload).context("parse Battle Tower rules payload")?,
+                );
+            }
+            ContentPackCategory::OakRatings => {
+                self.oak_ratings =
+                    serde_json::from_value(payload).context("parse Oak rating table payload")?;
+            }
+            ContentPackCategory::OddEggDefinitions => {
+                self.odd_egg_definitions =
+                    serde_json::from_value(payload).context("parse Odd Egg definitions payload")?;
+            }
+            ContentPackCategory::MagikarpLengths => {
+                self.magikarp_lengths = serde_json::from_value(payload)
+                    .context("parse Magikarp length table payload")?;
+            }
+            ContentPackCategory::HappinessData => {
+                self.happiness_data =
+                    Some(serde_json::from_value(payload).context("parse happiness data payload")?);
+            }
+            ContentPackCategory::EncounterSlotTables => {
+                self.encounter_slot_tables = serde_json::from_value(payload)
+                    .context("parse encounter slot tables payload")?;
+            }
+            ContentPackCategory::EncounterMusicModifiers => {
+                self.encounter_music_modifiers = serde_json::from_value(payload)
+                    .context("parse encounter music modifiers payload")?;
+            }
+            ContentPackCategory::BattleStatMultipliers => {
+                self.battle_stat_multipliers = serde_json::from_value(payload)
+                    .context("parse battle stat multipliers payload")?;
+            }
+            ContentPackCategory::CaptureWobbleProbabilities => {
+                self.capture_wobble_probabilities = serde_json::from_value(payload)
+                    .context("parse capture wobble probabilities payload")?;
+            }
+            ContentPackCategory::CaptureRules => {
+                self.capture_rules =
+                    serde_json::from_value(payload).context("parse capture rules payload")?;
+            }
+            ContentPackCategory::BattleEscapeRules => {
+                self.battle_escape_rules =
+                    serde_json::from_value(payload).context("parse battle escape rules payload")?;
+            }
+            ContentPackCategory::MovePriorities => {
+                self.move_priorities =
+                    serde_json::from_value(payload).context("parse move priorities payload")?;
+            }
+            ContentPackCategory::TypeCategories => {
+                self.type_categories =
+                    serde_json::from_value(payload).context("parse type categories payload")?;
+            }
+            ContentPackCategory::TypeEffectiveness => {
+                self.type_effectiveness =
+                    serde_json::from_value(payload).context("parse type effectiveness payload")?;
+            }
+            ContentPackCategory::WeatherModifiers => {
+                self.weather_modifiers =
+                    serde_json::from_value(payload).context("parse weather modifiers payload")?;
+            }
+            ContentPackCategory::BattleRewardRules => {
+                self.battle_reward_rules =
+                    serde_json::from_value(payload).context("parse battle reward rules payload")?;
+            }
+            ContentPackCategory::StepEventRules => {
+                self.step_event_rules =
+                    serde_json::from_value(payload).context("parse step event rules payload")?;
+            }
             ContentPackCategory::Fishing => {
                 self.fishing = serde_json::from_value(payload).context("parse fishing payload")?;
             }
             ContentPackCategory::FruitTrees => {
                 merge_fruit_tree_payload(&mut self.fruit_trees, payload)?;
+            }
+            ContentPackCategory::FieldMoves => {
+                self.field_moves =
+                    serde_json::from_value(payload).context("parse field moves payload")?;
             }
             ContentPackCategory::MapAttributes => {
                 for (map_name, attributes) in parse_object_map::<MapAttributes>(payload)? {
@@ -5496,7 +8415,7 @@ impl GameDataSet {
                 merge_object_payload(&mut self.npcs, payload)?;
             }
             ContentPackCategory::PokegearLandmarks => {
-                push_flattened(&mut self.pokegear_landmarks, payload);
+                merge_pokegear_landmarks_payload(&mut self.pokegear_landmarks, payload)?;
             }
             ContentPackCategory::PcStrings => {
                 self.pc_strings.extend(parse_object_map::<String>(payload)?);
@@ -5620,6 +8539,8 @@ impl GameDataSet {
             &mut self.currency_constants,
             &manifest.payload.currency_constants,
         );
+        self.battle_reward_rules = manifest.payload.battle_reward_rules.clone();
+        self.step_event_rules = manifest.payload.step_event_rules.clone();
         for map in &manifest.payload.maps {
             self.maps.insert(map.id.clone(), map.clone());
         }
@@ -5633,8 +8554,15 @@ impl GameDataSet {
                 wild_encounter_data.clone(),
             );
         }
+        for field_encounter_data in &manifest.payload.field_encounters {
+            self.field_encounters.insert(
+                field_encounter_data.map_name.clone(),
+                field_encounter_data.clone(),
+            );
+        }
         self.fishing = manifest.payload.fishing.clone();
         merge_fruit_tree_catalog(&mut self.fruit_trees, &manifest.payload.fruit_trees);
+        self.field_moves = manifest.payload.field_moves.clone();
         self.runtime_spawn_points.extend(
             manifest
                 .payload
@@ -5650,6 +8578,28 @@ impl GameDataSet {
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
         self.flee_mons = manifest.payload.flee_mons.clone();
+        self.roaming_pokemon = manifest.payload.roaming_pokemon.clone();
+        self.buena_password_categories = manifest.payload.buena_password_categories.clone();
+        self.buena_prizes = manifest.payload.buena_prizes.clone();
+        self.kurt_apricorn_recipes = manifest.payload.kurt_apricorn_recipes.clone();
+        self.shuckie_gift = manifest.payload.shuckie_gift.clone();
+        self.dratini_move_sets = manifest.payload.dratini_move_sets.clone();
+        self.bug_contest_config = manifest.payload.bug_contest_config.clone();
+        self.battle_tower_rules = manifest.payload.battle_tower_rules.clone();
+        self.oak_ratings = manifest.payload.oak_ratings.clone();
+        self.odd_egg_definitions = manifest.payload.odd_egg_definitions.clone();
+        self.magikarp_lengths = manifest.payload.magikarp_lengths.clone();
+        self.happiness_data = manifest.payload.happiness_data.clone();
+        self.encounter_slot_tables = manifest.payload.encounter_slot_tables.clone();
+        self.encounter_music_modifiers = manifest.payload.encounter_music_modifiers.clone();
+        self.battle_stat_multipliers = manifest.payload.battle_stat_multipliers.clone();
+        self.capture_wobble_probabilities = manifest.payload.capture_wobble_probabilities.clone();
+        self.capture_rules = manifest.payload.capture_rules.clone();
+        self.battle_escape_rules = manifest.payload.battle_escape_rules.clone();
+        self.move_priorities = manifest.payload.move_priorities.clone();
+        self.type_categories = manifest.payload.type_categories.clone();
+        self.type_effectiveness = manifest.payload.type_effectiveness.clone();
+        self.weather_modifiers = manifest.payload.weather_modifiers.clone();
         self.pc_strings.extend(
             manifest
                 .payload
@@ -5709,6 +8659,10 @@ impl GameDataSet {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
+        merge_pokegear_landmarks(
+            &mut self.pokegear_landmarks,
+            &manifest.payload.pokegear_landmarks,
+        );
         self.pokemon_cries.extend(
             manifest
                 .payload
@@ -5745,6 +8699,30 @@ impl GameDataSet {
                 .iter()
                 .map(|(species, modifier)| (species.clone(), *modifier)),
         );
+        self.capture_rules.ball_rules.extend(
+            manifest
+                .payload
+                .capture_rules
+                .ball_rules
+                .iter()
+                .map(|(ball, rule)| (ball.clone(), rule.clone())),
+        );
+        self.capture_rules.guaranteed_capture_balls.extend(
+            manifest
+                .payload
+                .capture_rules
+                .guaranteed_capture_balls
+                .iter()
+                .cloned(),
+        );
+        self.capture_rules.status_bonus.extend(
+            manifest
+                .payload
+                .capture_rules
+                .status_bonus
+                .iter()
+                .map(|(status, bonus)| (status.clone(), *bonus)),
+        );
         self.tilesets
             .extend(manifest.payload.tilesets.iter().cloned());
         merge_playability_rules(&mut self.playability, &manifest.payload.playability);
@@ -5767,6 +8745,7 @@ impl GameDataSet {
             dvs,
             &self.learnsets,
             &self.moves,
+            &self.growth_rates,
         )?)
     }
 
@@ -5789,6 +8768,7 @@ impl GameDataSet {
             species,
             &self.learnsets,
             &self.moves,
+            &self.growth_rates,
             rng,
         )?)
     }
@@ -5802,6 +8782,7 @@ impl GameDataSet {
             &self.pokemon,
             &self.learnsets,
             &self.moves,
+            &self.growth_rates,
             request,
             rng,
         )?)
@@ -5818,6 +8799,7 @@ impl GameDataSet {
             &self.pokemon,
             &self.learnsets,
             &self.moves,
+            &self.growth_rates,
             request,
         )?)
     }
@@ -5849,6 +8831,9 @@ impl GameDataSet {
     }
 
     pub fn map_module(&self, map_name: &str) -> Result<MapModule> {
+        if let Some(module) = self.maps.get(map_name) {
+            return Ok(module.clone());
+        }
         let attributes = self
             .map_attributes
             .get(map_name)
@@ -5892,7 +8877,8 @@ impl GameDataSet {
             .with_context(|| format!("missing map scripts label {map_scripts_label}"))?;
         let scripts =
             runtime_module_script_subset(&self.map_scripts, [map_scripts_label, map_events_label]);
-        let scenes = parse_map_scene_table(map_name, map_scripts)?;
+        let mut scenes = parse_map_scene_table(map_name, map_scripts)?;
+        add_referenced_numeric_scene_ids(&mut scenes, self, map_name, &attributes, &scripts);
         let map_script_section_commands =
             parse_map_script_section_commands(map_name, map_scripts_label, map_scripts)?;
         let map_event_section_commands =
@@ -6024,10 +9010,7 @@ impl GameDataSet {
     }
 
     pub fn map_name_for_constant(&self, map_constant: &str) -> Option<String> {
-        self.map_attributes
-            .iter()
-            .find(|(_, attributes)| attributes.map_constant.as_deref() == Some(map_constant))
-            .map(|(name, _)| name.clone())
+        map_constants(self).get(map_constant).cloned()
     }
 
     pub fn resolve_connection_transition(
@@ -6216,7 +9199,12 @@ fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "compiled game pack {} must have a file extension",
+                path.display()
+            )
+        })?;
     if extension != COMPILED_GAME_PACK_EXTENSION {
         anyhow::bail!(
             "compiled game pack {} must use .{}",
@@ -6225,6 +9213,83 @@ fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn add_referenced_numeric_scene_ids(
+    scenes: &mut MapSceneTable,
+    data: &GameDataSet,
+    _map_name: &str,
+    attributes: &MapAttributes,
+    scripts: &BTreeMap<String, Value>,
+) {
+    if !scenes.scenes.is_empty() {
+        return;
+    }
+
+    let mut numeric_ids = BTreeSet::new();
+    for payload in scripts.values() {
+        collect_numeric_setscene_tokens(payload, &mut numeric_ids);
+    }
+    if let Some(map_constant) = attributes.map_constant.as_deref() {
+        for payload in data.map_scripts.values() {
+            collect_numeric_setmapscene_tokens(payload, map_constant, &mut numeric_ids);
+        }
+    }
+
+    scenes
+        .scenes
+        .extend(numeric_ids.into_iter().map(|scene_id| MapScene {
+            scene_id: scene_id.to_string(),
+            script_name: None,
+        }));
+}
+
+fn collect_numeric_setscene_tokens(payload: &Value, numeric_ids: &mut BTreeSet<usize>) {
+    let Some(entries) = payload.as_array() else {
+        return;
+    };
+    for entry in entries {
+        let Some("setscene") = entry.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(scene_id) = entry
+            .get("args")
+            .and_then(Value::as_array)
+            .and_then(|args| args.first())
+            .and_then(Value::as_str)
+            .and_then(|token| token.parse::<usize>().ok())
+        {
+            numeric_ids.insert(scene_id);
+        }
+    }
+}
+
+fn collect_numeric_setmapscene_tokens(
+    payload: &Value,
+    map_constant: &str,
+    numeric_ids: &mut BTreeSet<usize>,
+) {
+    let Some(entries) = payload.as_array() else {
+        return;
+    };
+    for entry in entries {
+        let Some("setmapscene") = entry.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(args) = entry.get("args").and_then(Value::as_array) else {
+            continue;
+        };
+        if args.first().and_then(Value::as_str) != Some(map_constant) {
+            continue;
+        }
+        if let Some(scene_id) = args
+            .get(1)
+            .and_then(Value::as_str)
+            .and_then(|token| token.parse::<usize>().ok())
+        {
+            numeric_ids.insert(scene_id);
+        }
+    }
 }
 
 fn parse_one_or_many<T>(payload: Value) -> Result<Vec<T>>
@@ -6373,44 +9438,37 @@ fn merge_currency_constants(target: &mut CurrencyCatalog, source: &CurrencyCatal
     }
 }
 
-fn base_fruit_tree_catalog() -> FruitTreeCatalog {
-    FruitTreeCatalog(
-        [
-            ("FRUITTREE_ROUTE_29", "BERRY"),
-            ("FRUITTREE_ROUTE_30_1", "BERRY"),
-            ("FRUITTREE_ROUTE_38", "BERRY"),
-            ("FRUITTREE_ROUTE_46_1", "BERRY"),
-            ("FRUITTREE_ROUTE_30_2", "PSNCUREBERRY"),
-            ("FRUITTREE_ROUTE_33", "PSNCUREBERRY"),
-            ("FRUITTREE_ROUTE_31", "BITTER_BERRY"),
-            ("FRUITTREE_ROUTE_43", "BITTER_BERRY"),
-            ("FRUITTREE_VIOLET_CITY", "PRZCUREBERRY"),
-            ("FRUITTREE_ROUTE_46_2", "PRZCUREBERRY"),
-            ("FRUITTREE_ROUTE_35", "MYSTERYBERRY"),
-            ("FRUITTREE_ROUTE_45", "MYSTERYBERRY"),
-            ("FRUITTREE_ROUTE_36", "ICE_BERRY"),
-            ("FRUITTREE_ROUTE_26", "ICE_BERRY"),
-            ("FRUITTREE_ROUTE_39", "MINT_BERRY"),
-            ("FRUITTREE_ROUTE_44", "BURNT_BERRY"),
-            ("FRUITTREE_ROUTE_37_1", "RED_APRICORN"),
-            ("FRUITTREE_ROUTE_37_2", "BLU_APRICORN"),
-            ("FRUITTREE_ROUTE_37_3", "BLK_APRICORN"),
-            ("FRUITTREE_AZALEA_TOWN", "WHT_APRICORN"),
-            ("FRUITTREE_ROUTE_42_1", "PNK_APRICORN"),
-            ("FRUITTREE_ROUTE_42_2", "GRN_APRICORN"),
-            ("FRUITTREE_ROUTE_42_3", "YLW_APRICORN"),
-            ("FRUITTREE_ROUTE_11", "BERRY"),
-            ("FRUITTREE_ROUTE_2", "PSNCUREBERRY"),
-            ("FRUITTREE_ROUTE_1", "BITTER_BERRY"),
-            ("FRUITTREE_ROUTE_8", "PRZCUREBERRY"),
-            ("FRUITTREE_PEWTER_CITY_1", "ICE_BERRY"),
-            ("FRUITTREE_PEWTER_CITY_2", "MINT_BERRY"),
-            ("FRUITTREE_FUCHSIA_CITY", "BURNT_BERRY"),
-        ]
-        .into_iter()
-        .map(|(tree_id, item_id)| (tree_id.to_string(), item_id.to_string()))
-        .collect(),
-    )
+fn merge_pokegear_landmarks_payload(
+    target: &mut PokegearLandmarksPayload,
+    payload: Value,
+) -> Result<()> {
+    let payload: PokegearLandmarksPayload =
+        serde_json::from_value(payload).context("parse pokegear landmarks payload")?;
+    merge_pokegear_landmarks(target, &payload);
+    Ok(())
+}
+
+fn merge_pokegear_landmarks(
+    target: &mut PokegearLandmarksPayload,
+    payload: &PokegearLandmarksPayload,
+) {
+    for landmark in &payload.landmarks {
+        if let Some(existing) = target
+            .landmarks
+            .iter_mut()
+            .find(|existing| existing.constant == landmark.constant)
+        {
+            *existing = landmark.clone();
+        } else {
+            target.landmarks.push(landmark.clone());
+        }
+    }
+    target.map_to_landmark.extend(
+        payload
+            .map_to_landmark
+            .iter()
+            .map(|(map, landmark)| (map.clone(), landmark.clone())),
+    );
 }
 
 fn merge_species_value_payload(
@@ -6543,30 +9601,6 @@ fn parse_map_events(map_name: &str, payload: &Value) -> Result<MapEvents> {
     }
 
     Ok(events)
-}
-
-fn map_script_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
-    BTreeMap::from([
-        ("def_scene_scripts", BTreeSet::from([0])),
-        ("scene_script", BTreeSet::from([1, 2])),
-        ("scene_const", BTreeSet::from([1])),
-        ("def_callbacks", BTreeSet::from([0])),
-        ("callback", BTreeSet::from([2])),
-    ])
-}
-
-fn map_event_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
-    BTreeMap::from([
-        ("db", BTreeSet::from([2])),
-        ("def_warp_events", BTreeSet::from([0])),
-        ("warp_event", BTreeSet::from([4])),
-        ("def_coord_events", BTreeSet::from([0])),
-        ("coord_event", BTreeSet::from([4])),
-        ("def_bg_events", BTreeSet::from([0])),
-        ("bg_event", BTreeSet::from([4])),
-        ("def_object_events", BTreeSet::from([0])),
-        ("object_event", BTreeSet::from([13])),
-    ])
 }
 
 fn parse_map_script_section_commands(
@@ -6773,55 +9807,55 @@ fn parse_script_field_pickups(
                 continue;
             };
             match command_name {
-                "itemball" => {
+                command if SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
-                    if args.len() != 1 && args.len() != 2 {
+                    if SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS.contains(&command)
+                        && args.len() != 1
+                        && args.len() != 2
+                    {
                         anyhow::bail!(
-                            "Malformed itemball command in {script_name} for {map_name}: expected 1 or 2 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 or 2 args, found {}.",
                             args.len()
                         );
                     }
-                    let event_flag = objects
-                        .iter()
-                        .find(|object| object.script == *script_name)
-                        .map(|object| object.event_flag.clone());
+                    if SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS.contains(&command)
+                        && args.len() != 2
+                    {
+                        anyhow::bail!(
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 2 args, found {}.",
+                            args.len()
+                        );
+                    }
+                    let (quantity, event_flag) =
+                        if SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS.contains(&command) {
+                            let event_flag = objects
+                                .iter()
+                                .find(|object| object.script == *script_name)
+                                .map(|object| object.event_flag.clone());
+                            let quantity = if let Some(quantity) = args.get(1) {
+                                parse_script_u16(quantity)?
+                            } else {
+                                1
+                            };
+                            (quantity, event_flag)
+                        } else {
+                            (1, Some(args[1].to_string()))
+                        };
                     pickups.push(ScriptFieldPickup {
                         command: command_name.to_string(),
                         item_id: Some(args[0].to_string()),
-                        quantity: if let Some(quantity) = args.get(1) {
-                            parse_script_u16(quantity)?
-                        } else {
-                            1
-                        },
+                        quantity,
                         event_flag,
                         fruit_tree_id: None,
                         source_script: script_name.clone(),
                         command_index: index,
                     });
                 }
-                "hiddenitem" => {
-                    let args = script_command_args(map_name, script_name, command_name, entry)?;
-                    if args.len() != 2 {
-                        anyhow::bail!(
-                            "Malformed hiddenitem command in {script_name} for {map_name}: expected 2 args, found {}.",
-                            args.len()
-                        );
-                    }
-                    pickups.push(ScriptFieldPickup {
-                        command: command_name.to_string(),
-                        item_id: Some(args[0].to_string()),
-                        quantity: 1,
-                        event_flag: Some(args[1].to_string()),
-                        fruit_tree_id: None,
-                        source_script: script_name.clone(),
-                        command_index: index,
-                    });
-                }
-                "fruittree" => {
+                command if SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
-                            "Malformed fruittree command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
                             args.len()
                         );
                     }
@@ -6855,7 +9889,7 @@ fn parse_script_shop_commands(
             let Some(command_name) = entry.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            if command_name != "pokemart" {
+            if !SCRIPT_SHOP_COMMANDS.contains(&command_name) {
                 continue;
             }
             let args = script_command_args(map_name, script_name, command_name, entry)?;
@@ -6889,7 +9923,9 @@ fn parse_script_phone_commands(
             let Some(command_name) = entry.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            if command_name != "checkcellnum" && command_name != "askforphonenumber" {
+            if !SCRIPT_PHONE_CHECK_COMMANDS.contains(&command_name)
+                && !SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&command_name)
+            {
                 continue;
             }
             let args = script_command_args(map_name, script_name, command_name, entry)?;
@@ -6908,72 +9944,6 @@ fn parse_script_phone_commands(
         }
     }
     Ok(commands)
-}
-
-fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
-    BTreeMap::from([
-        ("special", 1),
-        ("pause", 1),
-        ("earthquake", 1),
-        ("showemote", 3),
-        ("setlasttalked", 1),
-        ("variablesprite", 2),
-        ("gettrainername", 3),
-        ("getitemname", 2),
-        ("getmonname", 2),
-        ("loadmenu", 1),
-        ("verticalmenu", 0),
-        ("closewindow", 0),
-        ("menu_coords", 4),
-        ("dontrestartmapmusic", 0),
-        ("playmapmusic", 0),
-        ("faceplayer", 0),
-        ("endifjustbattled", 0),
-        ("jumpstd", 1),
-        ("itemnotify", 0),
-        ("addval", 1),
-        ("verbosegiveitemvar", 2),
-        ("getstring", 2),
-        ("addcellnum", 1),
-        ("specialphonecall", 1),
-        ("checkpoke", 1),
-        ("pokepic", 1),
-        ("closepokepic", 0),
-        ("trade", 1),
-        ("catchtutorial", 1),
-        ("warpsound", 0),
-        ("blackoutmod", 1),
-        ("wait", 1),
-        ("random", 1),
-        ("checkscene", 0),
-        ("battletowertext", 1),
-        ("halloffame", 0),
-        ("credits", 0),
-        ("dw", 1),
-        ("stonetable", 3),
-        ("elevfloor", 3),
-        ("ldh", 2),
-        ("ld", 2),
-        ("describedecoration", 1),
-        ("cmdqueue", 2),
-        ("conditional_event", 2),
-        ("push", 1),
-        ("pop", 1),
-        ("ret", 0),
-        ("checkver", 0),
-        ("writecmdqueue", 1),
-        ("elevator", 1),
-        ("teleport_from", 0),
-        ("_2dmenu", 0),
-        ("dn", 2),
-        ("dba", 1),
-        ("dbw", 2),
-        ("writevar", 1),
-        ("checkpokemail", 1),
-        ("getnum", 1),
-        ("callasm", 1),
-        ("givepokemail", 1),
-    ])
 }
 
 fn parse_script_runtime_commands(
@@ -7025,7 +9995,10 @@ fn parse_script_economy_commands(
                 continue;
             };
             match command_name {
-                "checkmoney" | "takemoney" => {
+                command
+                    if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command)
+                        || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command) =>
+                {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() < 2 {
                         anyhow::bail!(
@@ -7041,7 +10014,10 @@ fn parse_script_economy_commands(
                         command_index: index,
                     });
                 }
-                "checkcoins" | "givecoins" | "takecoins" => {
+                command
+                    if SCRIPT_COIN_CHECK_COMMANDS.contains(&command)
+                        || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command) =>
+                {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.is_empty() {
                         anyhow::bail!(
@@ -7184,11 +10160,11 @@ fn parse_script_scene_commands(
                 continue;
             };
             match command_name {
-                "checkscene" => {
+                command if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if !args.is_empty() {
                         anyhow::bail!(
-                            "Malformed checkscene command in {script_name} for {map_name}: expected 0 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 0 args, found {}.",
                             args.len()
                         );
                     }
@@ -7200,11 +10176,11 @@ fn parse_script_scene_commands(
                         command_index: index,
                     });
                 }
-                "setscene" => {
+                command if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
-                            "Malformed setscene command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
                             args.len()
                         );
                     }
@@ -7216,11 +10192,11 @@ fn parse_script_scene_commands(
                         command_index: index,
                     });
                 }
-                "setmapscene" => {
+                command if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 2 {
                         anyhow::bail!(
-                            "Malformed setmapscene command in {script_name} for {map_name}: expected 2 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 2 args, found {}.",
                             args.len()
                         );
                     }
@@ -7357,11 +10333,11 @@ fn parse_script_object_commands(
                 continue;
             };
             match command_name {
-                "faceplayer" => {
+                command if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if !args.is_empty() {
                         anyhow::bail!(
-                            "Malformed faceplayer command in {script_name} for {map_name}: expected 0 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 0 args, found {}.",
                             args.len()
                         );
                     }
@@ -7379,7 +10355,7 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "appear" | "disappear" => {
+                command if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
@@ -7401,11 +10377,11 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "moveobject" => {
+                command if SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 3 {
                         anyhow::bail!(
-                            "Malformed moveobject command in {script_name} for {map_name}: expected 3 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 3 args, found {}.",
                             args.len()
                         );
                     }
@@ -7423,11 +10399,11 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "turnobject" => {
+                command if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 2 {
                         anyhow::bail!(
-                            "Malformed turnobject command in {script_name} for {map_name}: expected 2 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 2 args, found {}.",
                             args.len()
                         );
                     }
@@ -7445,11 +10421,11 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "applymovement" => {
+                command if SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 2 {
                         anyhow::bail!(
-                            "Malformed applymovement command in {script_name} for {map_name}: expected 2 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 2 args, found {}.",
                             args.len()
                         );
                     }
@@ -7467,11 +10443,11 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "applymovementlasttalked" => {
+                command if SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
-                            "Malformed applymovementlasttalked command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
                             args.len()
                         );
                     }
@@ -7489,7 +10465,7 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "follow" | "faceobject" => {
+                command if SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 2 {
                         anyhow::bail!(
@@ -7511,33 +10487,11 @@ fn parse_script_object_commands(
                         command_index: index,
                     });
                 }
-                "stopfollow" => {
-                    let args = script_command_args(map_name, script_name, command_name, entry)?;
-                    if !args.is_empty() {
-                        anyhow::bail!(
-                            "Malformed stopfollow command in {script_name} for {map_name}: expected 0 args, found {}.",
-                            args.len()
-                        );
-                    }
-                    commands.push(ScriptObjectCommand {
-                        command: command_name.to_string(),
-                        object_id: None,
-                        target_object_id: None,
-                        x: None,
-                        y: None,
-                        direction: None,
-                        movement: None,
-                        emote: None,
-                        duration: None,
-                        source_script: script_name.clone(),
-                        command_index: index,
-                    });
-                }
-                "showemote" => {
+                command if SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 3 {
                         anyhow::bail!(
-                            "Malformed showemote command in {script_name} for {map_name}: expected 3 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 3 args, found {}.",
                             args.len()
                         );
                     }
@@ -7576,11 +10530,11 @@ fn parse_script_map_commands(
                 continue;
             };
             match command_name {
-                "warp" => {
+                command if SCRIPT_MAP_WARP_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 3 {
                         anyhow::bail!(
-                            "Malformed warp command in {script_name} for {map_name}: expected 3 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 3 args, found {}.",
                             args.len()
                         );
                     }
@@ -7595,11 +10549,11 @@ fn parse_script_map_commands(
                         command_index: index,
                     });
                 }
-                "warpfacing" => {
+                command if SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 4 {
                         anyhow::bail!(
-                            "Malformed warpfacing command in {script_name} for {map_name}: expected 4 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 4 args, found {}.",
                             args.len()
                         );
                     }
@@ -7614,11 +10568,11 @@ fn parse_script_map_commands(
                         command_index: index,
                     });
                 }
-                "newloadmap" => {
+                command if SCRIPT_MAP_NEW_LOAD_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
-                            "Malformed newloadmap command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
                             args.len()
                         );
                     }
@@ -7633,11 +10587,7 @@ fn parse_script_map_commands(
                         command_index: index,
                     });
                 }
-                "warpcheck"
-                | "reloadmap"
-                | "reloadmappart"
-                | "reloadmapafterbattle"
-                | "refreshmap" => {
+                command if SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if !args.is_empty() {
                         anyhow::bail!(
@@ -7656,11 +10606,11 @@ fn parse_script_map_commands(
                         command_index: index,
                     });
                 }
-                "reanchormap" => {
+                command if SCRIPT_MAP_REANCHOR_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() > 1 {
                         anyhow::bail!(
-                            "Malformed reanchormap command in {script_name} for {map_name}: expected 0 or 1 args, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 0 or 1 args, found {}.",
                             args.len()
                         );
                     }
@@ -7733,26 +10683,6 @@ fn parse_script_text_commands(
     Ok(commands)
 }
 
-fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
-    BTreeMap::from([
-        ("text", 1),
-        ("line", 1),
-        ("para", 1),
-        ("cont", 1),
-        ("done", 0),
-        ("prompt", 0),
-        ("text_ram", 1),
-        ("text_decimal", 3),
-        ("text_far", 1),
-        ("sound_dex_fanfare_50_79", 0),
-        ("sound_dex_fanfare_80_109", 0),
-        ("sound_dex_fanfare_140_169", 0),
-        ("sound_dex_fanfare_170_199", 0),
-        ("sound_dex_fanfare_200_229", 0),
-        ("sound_dex_fanfare_230_plus", 0),
-    ])
-}
-
 fn parse_script_text_bodies(
     map_name: &str,
     scripts: &BTreeMap<String, Value>,
@@ -7798,14 +10728,6 @@ fn parse_script_text_bodies(
         }
     }
     Ok(bodies)
-}
-
-fn menu_definition_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
-    BTreeMap::from([
-        ("db", BTreeSet::from([1, 3])),
-        ("menu_coords", BTreeSet::from([4])),
-        ("dw", BTreeSet::from([1])),
-    ])
 }
 
 fn parse_script_menu_definitions(
@@ -8113,9 +11035,7 @@ fn parse_script_movements(
     let mut movements = Vec::new();
     let movement_refs: BTreeSet<(&str, &str)> = object_commands
         .iter()
-        .filter(|command| {
-            command.command == "applymovement" || command.command == "applymovementlasttalked"
-        })
+        .filter(|command| SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()))
         .filter_map(|command| {
             command
                 .movement
@@ -8144,15 +11064,14 @@ fn parse_script_movements(
             let Some(command_name) = entry.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            if !is_movement_command(command_name) {
+            if !is_known_script_movement_command(command_name) {
                 anyhow::bail!(
                     "Malformed movement script {script_key} for {map_name}: non-movement command '{command_name}' at index {index}."
                 );
             }
             let args = script_command_args(map_name, script_key, command_name, entry)?;
             let (direction, duration) = match command_name {
-                "step" | "slow_step" | "big_step" | "jump_step" | "fast_jump_step"
-                | "slow_jump_step" | "turn_head" => {
+                command if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) => {
                     if args.len() != 1 {
                         anyhow::bail!(
                             "Malformed {command_name} movement in {script_key} for {map_name}: expected 1 arg, found {}.",
@@ -8175,14 +11094,7 @@ fn parse_script_movements(
                     };
                     (None, duration)
                 }
-                "step_end"
-                | "fix_facing"
-                | "remove_fixed_facing"
-                | "set_sliding"
-                | "remove_sliding"
-                | "teleport_from"
-                | "skyfall_top"
-                | "tree_shake" => {
+                command if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command) => {
                     if !args.is_empty() {
                         anyhow::bail!(
                             "Malformed {command_name} movement in {script_key} for {map_name}: expected 0 args, found {}.",
@@ -8207,28 +11119,6 @@ fn parse_script_movements(
         });
     }
     Ok(movements)
-}
-
-fn is_movement_command(command: &str) -> bool {
-    matches!(
-        command,
-        "step"
-            | "slow_step"
-            | "big_step"
-            | "jump_step"
-            | "fast_jump_step"
-            | "slow_jump_step"
-            | "turn_head"
-            | "step_sleep"
-            | "step_end"
-            | "fix_facing"
-            | "remove_fixed_facing"
-            | "set_sliding"
-            | "remove_sliding"
-            | "teleport_from"
-            | "skyfall_top"
-            | "tree_shake"
-    )
 }
 
 fn parse_scripted_trainer_battles(
@@ -8679,7 +11569,7 @@ fn item_key(item: &Item) -> Result<String> {
 }
 
 fn validate_manifest_item(item: &Item) -> Result<()> {
-    if item.pocket == ItemPocket::TmHm && item.tmhm_index.is_none() {
+    if item.pocket == ITEM_POCKET_TM_HM && item.tmhm_index.is_none() {
         anyhow::bail!(
             "TM/HM item '{}' must declare explicit tmhm_index",
             item.script_name
@@ -8820,7 +11710,7 @@ mod tests {
     use super::*;
     use crystal_core::map::MapConnection;
     use crystal_core::models::{
-        Ability, BaseStats, EggGroup, GrowthRate, Item, ItemPocket, PokemonType,
+        BaseStats, Item, ability, egg_group, growth_rate, item_pocket, pokemon_type,
     };
     use crystal_core::random::Random;
     use crystal_core::state::GameState;
@@ -8849,8 +11739,10 @@ mod tests {
         MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile, permissions,
         sample_collision,
     };
+    use crystal_core::world::encounters::EncounterMusicModifier;
     use crystal_core::world::encounters::{
-        EncounterSurface, TimeOfDay, WildEncounter, WildEncounterTable, table_for_surface,
+        EncounterSurface, FieldEncounterData, FieldEncounterEntry, FieldEncounterTable, TimeOfDay,
+        WildEncounter, WildEncounterTable, table_for_surface,
     };
     use crystal_core::world::map::{Direction, TilePosition};
     use crystal_core::world::movement::{StepOptions, StepOutcome};
@@ -8858,13 +11750,53 @@ mod tests {
         EncounterCheckOptions, OverworldSession, warp_tile_position,
     };
 
+    fn test_item(id: &str) -> Item {
+        Item {
+            name: id.to_string(),
+            description: String::new(),
+            effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
+            price: 0,
+            held_effect: "HELD_NONE".to_string(),
+            parameter: 0,
+            property: String::new(),
+            pocket: item_pocket("ITEM"),
+            field_menu: "ITEMMENU_NOUSE".to_string(),
+            field_usable: false,
+            battle_menu: "ITEMMENU_NOUSE".to_string(),
+            battle_usable: false,
+            script_name: id.to_string(),
+            consumable: false,
+            tmhm_index: None,
+            tmhm_move: None,
+        }
+    }
+
     fn species() -> PokemonSpecies {
         PokemonSpecies {
             id: "NEW_MON".to_string(),
             int_id: 252,
             base_stats: BaseStats::new(40, 50, 40, 60, 70, 50),
-            type1: PokemonType::Electric,
-            type2: PokemonType::Electric,
+            type1: pokemon_type("ELECTRIC"),
+            type2: pokemon_type("ELECTRIC"),
             catch_rate: 45,
             base_exp: 80,
             item1: None,
@@ -8873,11 +11805,11 @@ mod tests {
             unknown1: 0,
             step_cycles_to_hatch: 20,
             unknown2: 0,
-            growth_rate: GrowthRate::MediumFast,
-            egg_group1: EggGroup::Ground,
-            egg_group2: EggGroup::Ground,
+            growth_rate: growth_rate("GROWTH_MEDIUM_FAST"),
+            egg_group1: egg_group("EGG_GROUND"),
+            egg_group2: egg_group("EGG_GROUND"),
             tmhm_learnset: vec!["THUNDERBOLT".to_string()],
-            ability: Ability::None,
+            ability: ability("NONE"),
             pic_size: 0,
             front_pic: 0,
             back_pic: 0,
@@ -8888,7 +11820,7 @@ mod tests {
     fn test_move(name: &str) -> Move {
         Move {
             name: name.to_string(),
-            move_type: PokemonType::Normal,
+            move_type: pokemon_type("NORMAL"),
             power: 40,
             accuracy: 100,
             pp: 35,
@@ -8899,14 +11831,468 @@ mod tests {
         }
     }
 
+    fn test_battle_stat_multipliers() -> BattleStatMultiplierTables {
+        let identity = crystal_core::battle::stats::BattleStatMultiplier {
+            numerator: 1,
+            denominator: 1,
+        };
+        BattleStatMultiplierTables {
+            stat: vec![identity; 13],
+            accuracy: vec![identity; 13],
+        }
+    }
+
+    fn test_weather_modifiers() -> WeatherModifiers {
+        WeatherModifiers {
+            type_modifiers: vec![crystal_core::battle::damage::WeatherTypeModifier {
+                weather: "WEATHER_RAIN".to_string(),
+                move_type: pokemon_type("WATER"),
+                multiplier: crystal_core::battle::damage::TypeMultiplier {
+                    numerator: 3,
+                    denominator: 2,
+                },
+            }],
+            move_effect_modifiers: vec![crystal_core::battle::damage::WeatherMoveEffectModifier {
+                weather: "WEATHER_RAIN".to_string(),
+                move_effect: "EFFECT_SOLARBEAM".to_string(),
+                multiplier: crystal_core::battle::damage::TypeMultiplier {
+                    numerator: 1,
+                    denominator: 2,
+                },
+            }],
+        }
+    }
+
+    fn test_type_effectiveness() -> TypeEffectivenessTable {
+        let types = ["NORMAL", "FIGHTING", "FIRE", "WATER"];
+        let matchups = types
+            .iter()
+            .flat_map(|attacker| {
+                types.iter().map(move |defender| {
+                    crystal_core::battle::damage::TypeEffectivenessEntry {
+                        attacker: pokemon_type(attacker),
+                        defender: pokemon_type(defender),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier::one(),
+                    }
+                })
+            })
+            .collect();
+        TypeEffectivenessTable {
+            matchups,
+            foresight_matchups: vec![crystal_core::battle::damage::TypeEffectivenessEntry {
+                attacker: pokemon_type("NORMAL"),
+                defender: pokemon_type("FIGHTING"),
+                multiplier: crystal_core::battle::damage::TypeMultiplier::zero(),
+            }],
+        }
+    }
+
+    fn test_type_categories() -> TypeCategories {
+        TypeCategories {
+            physical: vec!["NORMAL".to_string(), "FIGHTING".to_string()],
+            special: vec!["FIRE".to_string(), "WATER".to_string()],
+        }
+    }
+
+    fn test_move_priorities() -> MovePriorityTable {
+        MovePriorityTable {
+            base_priority: 1,
+            effect_priorities: vec![
+                crystal_core::battle::turn::MoveEffectPriority {
+                    move_effect: "PRIORITY_HIT".to_string(),
+                    priority: 2,
+                },
+                crystal_core::battle::turn::MoveEffectPriority {
+                    move_effect: "NORMAL_HIT".to_string(),
+                    priority: 1,
+                },
+            ],
+            move_priorities: vec![crystal_core::battle::turn::MovePriorityOverride {
+                r#move: "VITAL_THROW".to_string(),
+                priority: 0,
+            }],
+        }
+    }
+
+    fn test_battle_escape_rules() -> BattleEscapeRules {
+        BattleEscapeRules {
+            player_speed_multiplier: 32,
+            enemy_speed_divisor: 4,
+            failed_attempt_bonus: 30,
+            rng_roll_values: 256,
+        }
+    }
+
     fn add_runtime_species_and_move(data: &mut GameDataSet) {
         let mut known_species = species();
         known_species.tmhm_learnset.clear();
         let species_id = known_species.id.clone();
         data.pokemon.insert(species_id.clone(), known_species);
         data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
+        data.battle_stat_multipliers = test_battle_stat_multipliers();
+        data.battle_escape_rules = test_battle_escape_rules();
+        data.move_priorities = test_move_priorities();
+        data.type_categories = test_type_categories();
+        data.type_effectiveness = test_type_effectiveness();
+        data.weather_modifiers = test_weather_modifiers();
         data.learnsets.insert(species_id.clone(), Vec::new());
-        data.evolutions.0.insert(species_id, Vec::new());
+        data.evolutions.0.insert(species_id.clone(), Vec::new());
+        data.menu_icons
+            .insert(species_id.clone(), "ICON_PIKACHU".to_string());
+        data.pokedex_entries.insert(
+            species_id.clone(),
+            RuntimePokedexEntry {
+                species: species_id.clone(),
+                classification: "SPARK".to_string(),
+                height_digits: 4,
+                weight_digits: 60,
+                pages: vec!["Stores static in its fur.".to_string()],
+            },
+        );
+        data.pokemon_frontpic_anim.insert(
+            species_id.clone(),
+            FrontpicAnimProgram {
+                commands: vec![FrontpicAnimCommand {
+                    kind: "endanim".to_string(),
+                    ..FrontpicAnimCommand::default()
+                }],
+            },
+        );
+        data.pokemon_cries.insert(
+            species_id,
+            PokemonCryMetadata {
+                cry: "CRY_CHIKORITA".to_string(),
+                pitch: 0,
+                length: 0,
+            },
+        );
+        data.audio.push(ModpackAudioAsset {
+            id: "CRY_CHIKORITA".to_string(),
+            path: "content-packs/core-modular/cries/CRY_CHIKORITA.mid".to_string(),
+            kind: ModpackAudioKind::Cry,
+        });
+    }
+
+    fn add_wild_encounter_marker(data: &mut GameDataSet) {
+        data.wild_encounters.insert(
+            "Route29".to_string(),
+            WildEncounterData {
+                map_name: "Route29".to_string(),
+                grass_rates: Some([("day".to_string(), 30)].into_iter().collect()),
+                water_rate: None,
+                grass: None,
+                water: None,
+            },
+        );
+    }
+
+    fn add_test_trainer(data: &mut GameDataSet, encounter_music: &str) {
+        data.trainers.trainers.insert(
+            "YOUNGSTER_JOEY".to_string(),
+            Trainer {
+                name: "Joey".to_string(),
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                party: Vec::new(),
+                win_quote: "I won!".to_string(),
+                lose_quote: "I lost!".to_string(),
+                items: Vec::new(),
+                base_reward: 4,
+                ai_move_flags: 0,
+                ai_item_switch_flags: 0,
+                encounter_music: encounter_music.to_string(),
+                ai_layers: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_missing_battle_escape_rules_without_formula_fallback() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        data.battle_escape_rules = BattleEscapeRules::default();
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.has_errors());
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_battle_escape_rules"
+                && diagnostic.subject == "battle_escape_rules"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_trainer_encounter_music_declared_by_pack() {
+        let mut data = GameDataSet::default();
+        add_test_trainer(&mut data, "");
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_trainer_encounter_music"
+                && diagnostic.subject == "YOUNGSTER_JOEY"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_trainer_encounter_music_reference_exact_music_asset() {
+        let mut data = GameDataSet::default();
+        add_test_trainer(&mut data, "MUSIC_YOUNGSTER_ENCOUNTER");
+        data.audio.push(ModpackAudioAsset {
+            id: "SFX_TACKLE".to_string(),
+            path: "content-packs/test/sfx/SFX_TACKLE.mid".to_string(),
+            kind: ModpackAudioKind::SoundEffect,
+        });
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_trainer_encounter_music"
+                && diagnostic.subject == "YOUNGSTER_JOEY"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_fly_field_move_from_exact_modpack_rule() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        data.field_moves.fly = FieldMoveRule {
+            move_id: "fly".to_string(),
+            badge: crystal_core::systems::field_moves::FieldMoveBadgeRequirement {
+                region: "johto".to_string(),
+                index: 5,
+            },
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_move_id" && diagnostic.subject == "field_moves:fly"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_escape_rope_rule_match_exact_item_payload() {
+        let mut data = GameDataSet::default();
+        let mut item = test_item("ESCAPE_ROPE");
+        item.effect = "ESCAPE_ROPE".to_string();
+        item.escape_rope_mode = Some("DIG_WARP".to_string());
+        data.items.insert("ESCAPE_ROPE".to_string(), item);
+        data.field_moves.escape_rope = crystal_core::systems::field_moves::FieldEscapeItemRule {
+            item_id: "MOD_ESCAPE_ROPE".to_string(),
+            escape_rope_mode: "MOD_WARP".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_escape_item_rule"
+                && diagnostic.subject == "field_moves:escape_rope"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_repel_rule_match_exact_item_payload() {
+        let mut data = GameDataSet::default();
+        let mut item = test_item("REPEL");
+        item.effect = "REPEL".to_string();
+        data.items.insert("REPEL".to_string(), item);
+        data.field_moves.repel = crystal_core::systems::field_moves::FieldRepelItemRule {};
+
+        let mut diagnostics = Vec::new();
+        verify_field_repel_item_rule(&data, &mut diagnostics);
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_field_repel_item_payload"
+                && diagnostic.subject == "field_moves:repel"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_bicycle_rule_match_exact_field_item_payload() {
+        let mut data = GameDataSet::default();
+        let mut item = test_item("BICYCLE");
+        item.effect = "BICYCLE".to_string();
+        item.field_menu = "ITEMMENU_CLOSE".to_string();
+        data.items.insert("BICYCLE".to_string(), item);
+        data.field_moves.bicycle = FieldItemRule {
+            item_id: "MOD_BICYCLE".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_item_id"
+                && diagnostic.subject == "field_moves:bicycle"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_field_key_item_rules_match_exact_item_payloads() {
+        let mut data = GameDataSet::default();
+        for (item_id, effect) in [
+            ("ITEMFINDER", "ITEMFINDER"),
+            ("SQUIRTBOTTLE", "SQUIRTBOTTLE"),
+            ("COIN_CASE", "COIN_CASE"),
+            ("BLUE_CARD", "BLUE_CARD"),
+            ("TOWN_MAP", "TOWN_MAP"),
+        ] {
+            let mut item = test_item(item_id);
+            item.effect = effect.to_string();
+            item.field_menu = "ITEMMENU_CLOSE".to_string();
+            data.items.insert(item_id.to_string(), item);
+        }
+        data.field_moves.itemfinder = FieldItemRule {
+            item_id: "MOD_ITEMFINDER".to_string(),
+        };
+        data.field_moves.squirtbottle = FieldItemRule {
+            item_id: "MOD_SQUIRTBOTTLE".to_string(),
+        };
+        data.field_moves.coin_case = FieldItemRule {
+            item_id: "MOD_COIN_CASE".to_string(),
+        };
+        data.field_moves.blue_card = FieldItemRule {
+            item_id: "MOD_BLUE_CARD".to_string(),
+        };
+        data.field_moves.town_map = FieldItemRule {
+            item_id: "MOD_TOWN_MAP".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for subject in [
+            "field_moves:itemfinder",
+            "field_moves:squirtbottle",
+            "field_moves:coin_case",
+            "field_moves:blue_card",
+            "field_moves:town_map",
+        ] {
+            assert!(report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unknown_field_item_id" && diagnostic.subject == subject
+            }));
+        }
+    }
+
+    #[test]
+    fn verifier_requires_encounter_music_modifiers_declared_by_pack() {
+        let mut data = GameDataSet::default();
+        add_wild_encounter_marker(&mut data);
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_encounter_music_modifiers"
+                && diagnostic.subject == "encounter_music_modifiers"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_encounter_music_modifiers_reference_exact_music_assets() {
+        let mut data = GameDataSet::default();
+        add_wild_encounter_marker(&mut data);
+        data.audio.push(ModpackAudioAsset {
+            id: "MUSIC_POKEMON_MARCH".to_string(),
+            path: "content-packs/test/music/MUSIC_POKEMON_MARCH.mid".to_string(),
+            kind: ModpackAudioKind::Music,
+        });
+        data.encounter_music_modifiers = EncounterMusicModifiers {
+            modifiers: vec![
+                EncounterMusicModifier {
+                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                    numerator: 2,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
+                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                    numerator: 2,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
+                    music_id: "SFX_TACKLE".to_string(),
+                    numerator: 1,
+                    denominator: 0,
+                },
+            ],
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_encounter_music_modifier_id"
+                && diagnostic.subject == "encounter_music_modifiers:MUSIC_POKEMON_MARCH"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_encounter_music_modifier_id"
+                && diagnostic.subject == "encounter_music_modifiers:SFX_TACKLE"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_encounter_music_modifier_ratio"
+                && diagnostic.subject == "encounter_music_modifiers:SFX_TACKLE"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_battle_escape_rules_from_pack() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        data.battle_escape_rules.player_speed_multiplier = 0;
+        data.battle_escape_rules.enemy_speed_divisor = 0;
+        data.battle_escape_rules.rng_roll_values = u16::from(u8::MAX) + 2;
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for subject in [
+            "battle_escape_rules:player_speed_multiplier",
+            "battle_escape_rules:enemy_speed_divisor",
+            "battle_escape_rules:rng_roll_values",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "invalid_battle_escape_rule" && diagnostic.subject == subject
+                }),
+                "missing invalid battle escape diagnostic for {subject}"
+            );
+        }
     }
 
     fn test_map_module(id: &str, map_constant: &str, connection_target: Option<&str>) -> MapModule {
@@ -9266,6 +12652,42 @@ mod tests {
     }
 
     #[test]
+    fn compile_options_json_requires_explicit_verification_and_playability_rules() {
+        let missing_verify = serde_json::from_value::<ModpackCompileOptions>(serde_json::json!({
+            "playability": PlayabilityRules::default()
+        }))
+        .expect_err("compile options must not default verification")
+        .to_string();
+        assert!(
+            missing_verify.contains("missing field `verify`"),
+            "{missing_verify}"
+        );
+
+        let missing_playability =
+            serde_json::from_value::<ModpackCompileOptions>(serde_json::json!({
+                "verify": true
+            }))
+            .expect_err("compile options must not default playability")
+            .to_string();
+        assert!(
+            missing_playability.contains("missing field `playability`"),
+            "{missing_playability}"
+        );
+
+        let unknown_fallback = serde_json::from_value::<ModpackCompileOptions>(serde_json::json!({
+            "verify": true,
+            "playability": PlayabilityRules::default(),
+            "fallback_playability": true
+        }))
+        .expect_err("compile options must not accept fallback metadata")
+        .to_string();
+        assert!(
+            unknown_fallback.contains("unknown field `fallback_playability`"),
+            "{unknown_fallback}"
+        );
+    }
+
+    #[test]
     fn content_pack_payloads_merge_playability_rules_as_modpack_data() {
         let mut data = GameDataSet::default();
 
@@ -9376,6 +12798,16 @@ mod tests {
             .to_string();
 
         assert!(error.contains("must use .crystalpack"));
+
+        let extensionless = temp_test_path("runtime");
+        let extensionless_error = write_compiled_game_pack(&extensionless, &pack)
+            .expect_err("runtime compiled packs must declare an exact extension")
+            .to_string();
+
+        assert!(
+            extensionless_error.contains("must have a file extension"),
+            "{extensionless_error}"
+        );
     }
 
     #[test]
@@ -9475,10 +12907,27 @@ mod tests {
                 .contains("must live under music, sfx, or cries")
         );
 
+        let root_level_error = ModpackAudioAsset::from_content_pack_path("MUSIC_ROUTE_29.mid")
+            .expect_err("root-level audio is not accepted");
+        assert!(
+            root_level_error
+                .to_string()
+                .contains("must live under music, sfx, or cries"),
+            "{root_level_error}"
+        );
+
         let lowercase_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/route29.mid")
                 .expect_err("lowercase path-derived music id is not accepted");
         assert!(lowercase_error.to_string().contains("must use an exact"));
+
+        let padded_id_error =
+            ModpackAudioAsset::music(" MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.mid")
+                .expect_err("padded audio ids are not accepted");
+        assert!(
+            padded_id_error.to_string().contains("must use an exact"),
+            "{padded_id_error}"
+        );
 
         let mismatched_path =
             ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_30.mid")
@@ -9495,6 +12944,16 @@ mod tests {
                 .expect_err("music ASM is not accepted");
         assert!(asm_error.to_string().contains("must use a .mid file"));
 
+        let extensionless_error =
+            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29")
+                .expect_err("extensionless music is not accepted");
+        assert!(
+            extensionless_error
+                .to_string()
+                .contains("path must have a file extension"),
+            "{extensionless_error}"
+        );
+
         let mp3_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.mp3")
                 .expect_err("MP3 music is not accepted");
@@ -9504,6 +12963,16 @@ mod tests {
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.midi")
                 .expect_err(".midi music is not accepted");
         assert!(midi_error.to_string().contains("must use a .mid file"));
+
+        let uppercase_mid_error =
+            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.MID")
+                .expect_err("case-changed MIDI extensions are not accepted");
+        assert!(
+            uppercase_mid_error
+                .to_string()
+                .contains("must use a .mid file"),
+            "{uppercase_mid_error}"
+        );
 
         let cry = ModpackAudioAsset::cry("CRY_NIDORAN_M", "mods/new/cries/CRY_NIDORAN_M.mid")
             .expect("valid MIDI cry asset");
@@ -9839,20 +13308,42 @@ mod tests {
                     name: "Spark Charm".to_string(),
                     description: "A charged charm.".to_string(),
                     effect: "NONE".to_string(),
+                    status_heals: Vec::new(),
+                    revive_hp_percent: None,
+                    party_revive_hp_percent: None,
+                    pp_restore_scope: None,
+                    pp_restore_points: None,
+                    pp_up_stages: None,
+                    vitamin_stat: None,
+                    vitamin_stat_exp: None,
+                    vitamin_max_stat_exp: None,
+                    rare_candy_level_gain: None,
+                    battle_stat_boost_stat: None,
+                    battle_stat_boost_stages: None,
+                    battle_escape_mode: None,
+                    battle_focus_energy: None,
+                    battle_stat_drop_guard: None,
+                    battle_stat_drop_guard_turns: None,
+                    confusion_heal: None,
+                    repel_steps: None,
+                    escape_rope_mode: None,
                     price: 100,
                     held_effect: "HELD_NONE".to_string(),
                     parameter: 0,
                     property: String::new(),
-                    pocket: ItemPocket::Item,
-                    field_menu: String::new(),
-                    battle_menu: String::new(),
+                    pocket: item_pocket("ITEM"),
+                    field_menu: "ITEMMENU_NOUSE".to_string(),
+                    field_usable: false,
+                    battle_menu: "ITEMMENU_NOUSE".to_string(),
+                    battle_usable: false,
                     script_name: "SPARK_CHARM".to_string(),
                     consumable: false,
                     tmhm_index: None,
+                    tmhm_move: None,
                 }],
                 moves: vec![Move {
                     name: "SPARK".to_string(),
-                    move_type: PokemonType::Electric,
+                    move_type: pokemon_type("ELECTRIC"),
                     power: 40,
                     accuracy: 100,
                     pp: 30,
@@ -9882,6 +13373,9 @@ mod tests {
                 capture_rules: CaptureRules {
                     fast_ball_species: ["MAGNEMITE".to_string()].into_iter().collect(),
                     heavy_ball_modifiers: [("KADABRA".to_string(), 40)].into_iter().collect(),
+                    ball_rules: BTreeMap::new(),
+                    guaranteed_capture_balls: BTreeSet::new(),
+                    status_bonus: BTreeMap::new(),
                 },
                 ..ModpackPayload::default()
             },
@@ -9984,6 +13478,99 @@ mod tests {
         assert!(codes.contains("pokedex_entry_species_mismatch"));
         assert!(codes.contains("invalid_pokedex_entry"));
         assert!(codes.contains("malformed_frontpic_anim_command"));
+    }
+
+    #[test]
+    fn verifier_requires_species_display_records_from_pack() {
+        let species_id = species().id;
+        let data = GameDataSet {
+            pokemon: [(species_id.clone(), species())].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for expected in [
+            "missing_species_menu_icon",
+            "missing_species_pokedex_entry",
+            "missing_species_frontpic_anim",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == expected && diagnostic.subject == species_id
+                }),
+                "missing diagnostic {expected}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_pokegear_landmarks_for_unknown_maps_or_constants() {
+        let data = GameDataSet {
+            maps: [(
+                "Route29".to_string(),
+                test_map_module("Route29", "ROUTE_29", None),
+            )]
+            .into_iter()
+            .collect(),
+            pokegear_landmarks: PokegearLandmarksPayload {
+                landmarks: vec![
+                    PokegearLandmark {
+                        id: 1,
+                        constant: "LANDMARK_ROUTE_29".to_string(),
+                        label: "ROUTE_29".to_string(),
+                        name: "Route 29".to_string(),
+                        x: 2,
+                        y: 3,
+                        region: "johto".to_string(),
+                    },
+                    PokegearLandmark {
+                        id: 2,
+                        constant: "route_30".to_string(),
+                        label: String::new(),
+                        name: "Route 30".to_string(),
+                        x: 4,
+                        y: 5,
+                        region: "johto".to_string(),
+                    },
+                ],
+                map_to_landmark: [
+                    ("Route29".to_string(), "LANDMARK_ROUTE_30".to_string()),
+                    ("MissingRoute".to_string(), "LANDMARK_ROUTE_29".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_landmark" && diagnostic.subject == "route_30"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_landmark_constant"
+                && diagnostic.subject == "route_30"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokegear_landmark_constant"
+                && diagnostic.subject == "Route29"
+                && diagnostic.message.contains("LANDMARK_ROUTE_30")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokegear_landmark_map"
+                && diagnostic.subject == "MissingRoute"
+        }));
     }
 
     #[test]
@@ -10329,6 +13916,741 @@ mod tests {
     }
 
     #[test]
+    fn content_pack_payloads_merge_roaming_pokemon_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::RoamingPokemon,
+            serde_json::json!([
+                { "species": "RAIKOU", "level": 40, "mapGroup": 2, "mapNumber": 5 }
+            ]),
+        )
+        .expect("apply roaming Pokemon payload");
+
+        assert_eq!(
+            data.roaming_pokemon,
+            vec![RoamingPokemonDefinition {
+                species: "RAIKOU".to_string(),
+                level: 40,
+                map_group: 2,
+                map_number: 5,
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_buena_prizes_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BuenaPrizes,
+            serde_json::json!([
+                { "itemId": "RARE_CANDY", "cost": 3 }
+            ]),
+        )
+        .expect("apply Buena prizes payload");
+
+        assert_eq!(
+            data.buena_prizes,
+            vec![BuenaPrizeDefinition {
+                item_id: "RARE_CANDY".to_string(),
+                cost: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_buena_password_categories_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BuenaPasswordCategories,
+            serde_json::json!([
+                {
+                    "id": "HealingItems",
+                    "categoryType": "BUENA_ITEM",
+                    "points": 12,
+                    "options": ["POTION", "ANTIDOTE", "PARLYZ_HEAL"]
+                }
+            ]),
+        )
+        .expect("apply Buena password category payload");
+
+        assert_eq!(
+            data.buena_password_categories,
+            vec![BuenaPasswordCategoryDefinition {
+                id: "HealingItems".to_string(),
+                category_type: "BUENA_ITEM".to_string(),
+                points: 12,
+                options: vec![
+                    "POTION".to_string(),
+                    "ANTIDOTE".to_string(),
+                    "PARLYZ_HEAL".to_string()
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_kurt_apricorn_recipes_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::KurtApricornRecipes,
+            serde_json::json!([
+                { "apricorn": "RED_APRICORN", "ball": "LEVEL_BALL" }
+            ]),
+        )
+        .expect("apply Kurt apricorn recipe payload");
+
+        assert_eq!(
+            data.kurt_apricorn_recipes,
+            vec![KurtApricornRecipe {
+                apricorn: "RED_APRICORN".to_string(),
+                ball: "LEVEL_BALL".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_shuckie_gift_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::ShuckieGift,
+            serde_json::json!({
+                "species": "SHUCKLE",
+                "level": 15,
+                "heldItem": "BERRY",
+                "nickname": "SHUCKIE",
+                "originalTrainerName": "MANIA",
+                "originalTrainerId": 518,
+                "gotTodayEngineFlag": "ENGINE_GOT_SHUCKIE_TODAY"
+            }),
+        )
+        .expect("apply Shuckie gift payload");
+
+        assert_eq!(
+            data.shuckie_gift,
+            Some(ShuckieGiftDefinition {
+                species: "SHUCKLE".to_string(),
+                level: 15,
+                held_item: "BERRY".to_string(),
+                nickname: "SHUCKIE".to_string(),
+                original_trainer_name: "MANIA".to_string(),
+                original_trainer_id: 518,
+                got_today_engine_flag: "ENGINE_GOT_SHUCKIE_TODAY".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_dratini_move_sets_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::DratiniMoveSets,
+            serde_json::json!([
+                { "mode": 0, "moves": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] },
+                { "mode": 1, "moves": ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER"] }
+            ]),
+        )
+        .expect("apply Dratini move sets payload");
+
+        assert_eq!(
+            data.dratini_move_sets,
+            vec![
+                DratiniMoveSetDefinition {
+                    mode: 0,
+                    moves: vec![
+                        "WRAP".to_string(),
+                        "THUNDER_WAVE".to_string(),
+                        "TWISTER".to_string(),
+                        "EXTREMESPEED".to_string()
+                    ],
+                },
+                DratiniMoveSetDefinition {
+                    mode: 1,
+                    moves: vec![
+                        "WRAP".to_string(),
+                        "LEER".to_string(),
+                        "THUNDER_WAVE".to_string(),
+                        "TWISTER".to_string()
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_bug_contest_config_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BugContestConfig,
+            serde_json::json!({
+                "parkBalls": 20,
+                "timerMinutes": 20,
+                "timerSeconds": 0,
+                "selectedContestantCount": 5,
+                "contestantFlags": [
+                    "EVENT_BUG_CATCHING_CONTESTANT_1A",
+                    "EVENT_BUG_CATCHING_CONTESTANT_2A"
+                ]
+            }),
+        )
+        .expect("apply Bug-Catching Contest config payload");
+
+        assert_eq!(
+            data.bug_contest_config,
+            Some(BugContestConfig {
+                park_balls: 20,
+                timer_minutes: 20,
+                timer_seconds: 0,
+                selected_contestant_count: 5,
+                contestant_flags: vec![
+                    "EVENT_BUG_CATCHING_CONTESTANT_1A".to_string(),
+                    "EVENT_BUG_CATCHING_CONTESTANT_2A".to_string()
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_battle_tower_rules_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BattleTowerRules,
+            serde_json::json!({
+                "bannedSpecies": ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+                "requiredPartyCount": 3,
+                "challengeStreakLength": 7,
+                "minimumLevelGroup": 1,
+                "maximumLevelGroup": 10,
+                "levelGroupSize": 10,
+                "partyCountFailureText": "OnlyThreeMonMayBeEnteredText",
+                "duplicateSpeciesFailureText": "TheMonMustAllBeDifferentKindsText",
+                "duplicateHeldItemFailureText": "TheMonMustNotHoldTheSameItemsText",
+                "eggFailureText": "YouCantTakeAnEggText"
+            }),
+        )
+        .expect("apply Battle Tower rules payload");
+
+        assert_eq!(
+            data.battle_tower_rules,
+            Some(BattleTowerRules {
+                banned_species: vec![
+                    "MEWTWO".to_string(),
+                    "MEW".to_string(),
+                    "LUGIA".to_string(),
+                    "HO_OH".to_string(),
+                    "CELEBI".to_string(),
+                ],
+                required_party_count: 3,
+                challenge_streak_length: 7,
+                minimum_level_group: 1,
+                maximum_level_group: 10,
+                level_group_size: 10,
+                party_count_failure_text: "OnlyThreeMonMayBeEnteredText".to_string(),
+                duplicate_species_failure_text: "TheMonMustAllBeDifferentKindsText".to_string(),
+                duplicate_held_item_failure_text: "TheMonMustNotHoldTheSameItemsText".to_string(),
+                egg_failure_text: "YouCantTakeAnEggText".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_oak_ratings_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::OakRatings,
+            serde_json::json!([
+                {
+                    "caughtCountLimit": 9,
+                    "fanfare": "SFX_DEX_FANFARE_LESS_THAN_20",
+                    "textLabel": "OakRating01"
+                }
+            ]),
+        )
+        .expect("apply Oak ratings payload");
+
+        assert_eq!(
+            data.oak_ratings,
+            vec![OakRatingEntry {
+                caught_count_limit: 9,
+                fanfare: "SFX_DEX_FANFARE_LESS_THAN_20".to_string(),
+                text_label: "OakRating01".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_odd_egg_definitions_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::OddEggDefinitions,
+            serde_json::json!([
+                {
+                    "species": "CLEFFA",
+                    "moves": ["POUND", "CHARM", "DIZZY_PUNCH"],
+                    "originalTrainerId": 768,
+                    "dvs": [2, 10, 10, 10],
+                    "probability": 100,
+                    "level": 5,
+                    "experience": 125,
+                    "hatchCycles": 20,
+                    "nickname": "EGG",
+                    "originalTrainerName": "ODD"
+                }
+            ]),
+        )
+        .expect("apply Odd Egg definitions payload");
+
+        assert_eq!(
+            data.odd_egg_definitions,
+            vec![OddEggDefinition {
+                species: "CLEFFA".to_string(),
+                moves: vec![
+                    "POUND".to_string(),
+                    "CHARM".to_string(),
+                    "DIZZY_PUNCH".to_string()
+                ],
+                original_trainer_id: 768,
+                dvs: [2, 10, 10, 10],
+                probability: 100,
+                level: 5,
+                experience: 125,
+                hatch_cycles: 20,
+                nickname: "EGG".to_string(),
+                original_trainer_name: "ODD".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_magikarp_lengths_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::MagikarpLengths,
+            serde_json::json!([
+                { "threshold": 110, "divisor": 1 },
+                { "threshold": 310, "divisor": 2 }
+            ]),
+        )
+        .expect("apply Magikarp length table payload");
+
+        assert_eq!(
+            data.magikarp_lengths,
+            vec![
+                MagikarpLengthEntry {
+                    threshold: 110,
+                    divisor: 1,
+                },
+                MagikarpLengthEntry {
+                    threshold: 310,
+                    divisor: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_happiness_data_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::HappinessData,
+            serde_json::json!({
+                "changes": [
+                    { "code": "HAPPINESS_GROOMING", "changeCode": 18, "low": 3, "mid": 3, "high": 1 }
+                ],
+                "services": [
+                    {
+                        "routine": "DaisysGrooming",
+                        "outcomes": [
+                            { "rollWeight": 255, "scriptValue": 2, "changeCode": 18 }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .expect("apply happiness data payload");
+
+        assert_eq!(
+            data.happiness_data,
+            Some(HappinessData {
+                changes: vec![
+                    crystal_core::systems::special_routines::HappinessChangeEntry {
+                        code: "HAPPINESS_GROOMING".to_string(),
+                        change_code: 18,
+                        low: 3,
+                        mid: 3,
+                        high: 1,
+                    }
+                ],
+                services: vec![
+                    crystal_core::systems::special_routines::HappinessServiceTable {
+                        routine: "DaisysGrooming".to_string(),
+                        outcomes: vec![
+                            crystal_core::systems::special_routines::HappinessServiceOutcome {
+                                roll_weight: 255,
+                                script_value: 2,
+                                change_code: 18,
+                            },
+                        ],
+                    }
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_encounter_slot_tables_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::EncounterSlotTables,
+            serde_json::json!({
+                "grass": [
+                    { "threshold": 30, "slot": 0 },
+                    { "threshold": 100, "slot": 1 }
+                ],
+                "water": [
+                    { "threshold": 100, "slot": 0 }
+                ]
+            }),
+        )
+        .expect("apply encounter slot tables payload");
+
+        assert_eq!(
+            data.encounter_slot_tables,
+            EncounterSlotTables {
+                grass: vec![
+                    crystal_core::world::encounters::EncounterSlotChance {
+                        threshold: 30,
+                        slot: 0,
+                    },
+                    crystal_core::world::encounters::EncounterSlotChance {
+                        threshold: 100,
+                        slot: 1,
+                    },
+                ],
+                water: vec![crystal_core::world::encounters::EncounterSlotChance {
+                    threshold: 100,
+                    slot: 0,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_encounter_music_modifiers_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::EncounterMusicModifiers,
+            serde_json::json!({
+                "modifiers": [
+                    { "music_id": "MUSIC_POKEMON_MARCH", "numerator": 2, "denominator": 1 },
+                    { "music_id": "MUSIC_POKEMON_LULLABY", "numerator": 1, "denominator": 2 }
+                ]
+            }),
+        )
+        .expect("apply encounter music modifiers payload");
+
+        assert_eq!(
+            data.encounter_music_modifiers,
+            EncounterMusicModifiers {
+                modifiers: vec![
+                    EncounterMusicModifier {
+                        music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                    EncounterMusicModifier {
+                        music_id: "MUSIC_POKEMON_LULLABY".to_string(),
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_battle_stat_multipliers_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BattleStatMultipliers,
+            serde_json::json!({
+                "stat": [
+                    { "numerator": 25, "denominator": 100 },
+                    { "numerator": 28, "denominator": 100 },
+                    { "numerator": 33, "denominator": 100 },
+                    { "numerator": 40, "denominator": 100 },
+                    { "numerator": 50, "denominator": 100 },
+                    { "numerator": 66, "denominator": 100 },
+                    { "numerator": 1, "denominator": 1 },
+                    { "numerator": 15, "denominator": 10 },
+                    { "numerator": 2, "denominator": 1 },
+                    { "numerator": 25, "denominator": 10 },
+                    { "numerator": 3, "denominator": 1 },
+                    { "numerator": 35, "denominator": 10 },
+                    { "numerator": 4, "denominator": 1 }
+                ],
+                "accuracy": [
+                    { "numerator": 33, "denominator": 100 },
+                    { "numerator": 36, "denominator": 100 },
+                    { "numerator": 43, "denominator": 100 },
+                    { "numerator": 50, "denominator": 100 },
+                    { "numerator": 60, "denominator": 100 },
+                    { "numerator": 75, "denominator": 100 },
+                    { "numerator": 1, "denominator": 1 },
+                    { "numerator": 133, "denominator": 100 },
+                    { "numerator": 166, "denominator": 100 },
+                    { "numerator": 2, "denominator": 1 },
+                    { "numerator": 233, "denominator": 100 },
+                    { "numerator": 133, "denominator": 50 },
+                    { "numerator": 3, "denominator": 1 }
+                ]
+            }),
+        )
+        .expect("apply battle stat multipliers payload");
+
+        assert_eq!(data.battle_stat_multipliers.stat.len(), 13);
+        assert_eq!(data.battle_stat_multipliers.accuracy.len(), 13);
+        assert_eq!(data.battle_stat_multipliers.stat[0].numerator, 25);
+        assert_eq!(data.battle_stat_multipliers.accuracy[8].numerator, 166);
+        assert_eq!(data.battle_stat_multipliers.accuracy[11].denominator, 50);
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_capture_wobble_probabilities_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::CaptureWobbleProbabilities,
+            serde_json::json!([
+                { "catch_rate": 1, "chance": 63 },
+                { "catch_rate": 255, "chance": 255 }
+            ]),
+        )
+        .expect("apply capture wobble probabilities payload");
+
+        assert_eq!(
+            data.capture_wobble_probabilities,
+            vec![
+                CaptureWobbleProbability {
+                    catch_rate: 1,
+                    chance: 63,
+                },
+                CaptureWobbleProbability {
+                    catch_rate: 255,
+                    chance: 255,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_type_effectiveness_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::TypeEffectiveness,
+            serde_json::json!({
+                "matchups": [
+                    {
+                        "attacker": "FIRE",
+                        "defender": "GRASS",
+                        "multiplier": { "numerator": 2, "denominator": 1 }
+                    },
+                    {
+                        "attacker": "ELECTRIC",
+                        "defender": "GROUND",
+                        "multiplier": { "numerator": 0, "denominator": 1 }
+                    }
+                ],
+                "foresight_matchups": [
+                    {
+                        "attacker": "NORMAL",
+                        "defender": "GHOST",
+                        "multiplier": { "numerator": 0, "denominator": 1 }
+                    }
+                ]
+            }),
+        )
+        .expect("apply type effectiveness payload");
+
+        assert_eq!(
+            data.type_effectiveness,
+            TypeEffectivenessTable {
+                matchups: vec![
+                    crystal_core::battle::damage::TypeEffectivenessEntry {
+                        attacker: pokemon_type("FIRE"),
+                        defender: pokemon_type("GRASS"),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier {
+                            numerator: 2,
+                            denominator: 1,
+                        },
+                    },
+                    crystal_core::battle::damage::TypeEffectivenessEntry {
+                        attacker: pokemon_type("ELECTRIC"),
+                        defender: pokemon_type("GROUND"),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier::zero(),
+                    },
+                ],
+                foresight_matchups: vec![crystal_core::battle::damage::TypeEffectivenessEntry {
+                    attacker: pokemon_type("NORMAL"),
+                    defender: pokemon_type("GHOST"),
+                    multiplier: crystal_core::battle::damage::TypeMultiplier::zero(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_type_categories_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::TypeCategories,
+            serde_json::json!({
+                "physical": ["NORMAL", "FIGHTING", "BIRD"],
+                "special": ["FIRE", "WATER", "PSYCHIC_TYPE"]
+            }),
+        )
+        .expect("apply type categories payload");
+
+        assert_eq!(
+            data.type_categories,
+            TypeCategories {
+                physical: vec![
+                    "NORMAL".to_string(),
+                    "FIGHTING".to_string(),
+                    "BIRD".to_string(),
+                ],
+                special: vec![
+                    "FIRE".to_string(),
+                    "WATER".to_string(),
+                    "PSYCHIC_TYPE".to_string(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_move_priorities_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::MovePriorities,
+            serde_json::json!({
+                "base_priority": 1,
+                "effect_priorities": [
+                    { "move_effect": "PROTECT", "priority": 3 },
+                    { "move_effect": "PRIORITY_HIT", "priority": 2 }
+                ],
+                "move_priorities": [
+                    { "move": "VITAL_THROW", "priority": 0 }
+                ]
+            }),
+        )
+        .expect("apply move priorities payload");
+
+        assert_eq!(
+            data.move_priorities,
+            MovePriorityTable {
+                base_priority: 1,
+                effect_priorities: vec![
+                    crystal_core::battle::turn::MoveEffectPriority {
+                        move_effect: "PROTECT".to_string(),
+                        priority: 3,
+                    },
+                    crystal_core::battle::turn::MoveEffectPriority {
+                        move_effect: "PRIORITY_HIT".to_string(),
+                        priority: 2,
+                    },
+                ],
+                move_priorities: vec![crystal_core::battle::turn::MovePriorityOverride {
+                    r#move: "VITAL_THROW".to_string(),
+                    priority: 0,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_weather_modifiers_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::WeatherModifiers,
+            serde_json::json!({
+                "type_modifiers": [
+                    {
+                        "weather": "WEATHER_RAIN",
+                        "move_type": "WATER",
+                        "multiplier": { "numerator": 3, "denominator": 2 }
+                    },
+                    {
+                        "weather": "WEATHER_SUN",
+                        "move_type": "FIRE",
+                        "multiplier": { "numerator": 3, "denominator": 2 }
+                    }
+                ],
+                "move_effect_modifiers": [
+                    {
+                        "weather": "WEATHER_RAIN",
+                        "move_effect": "EFFECT_SOLARBEAM",
+                        "multiplier": { "numerator": 1, "denominator": 2 }
+                    }
+                ]
+            }),
+        )
+        .expect("apply weather modifiers payload");
+
+        assert_eq!(
+            data.weather_modifiers,
+            WeatherModifiers {
+                type_modifiers: vec![
+                    crystal_core::battle::damage::WeatherTypeModifier {
+                        weather: "WEATHER_RAIN".to_string(),
+                        move_type: pokemon_type("WATER"),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier {
+                            numerator: 3,
+                            denominator: 2,
+                        },
+                    },
+                    crystal_core::battle::damage::WeatherTypeModifier {
+                        weather: "WEATHER_SUN".to_string(),
+                        move_type: pokemon_type("FIRE"),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier {
+                            numerator: 3,
+                            denominator: 2,
+                        },
+                    },
+                ],
+                move_effect_modifiers: vec![
+                    crystal_core::battle::damage::WeatherMoveEffectModifier {
+                        weather: "WEATHER_RAIN".to_string(),
+                        move_effect: "EFFECT_SOLARBEAM".to_string(),
+                        multiplier: crystal_core::battle::damage::TypeMultiplier {
+                            numerator: 1,
+                            denominator: 2,
+                        },
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn modpack_overlay_replaces_marts_by_exact_id() {
         let mut data = GameDataSet {
             marts: MartCatalog(
@@ -10501,6 +14823,8 @@ mod tests {
                 .into_iter()
                 .collect(),
                 time_groups: Vec::new(),
+                swarm_rules: Vec::new(),
+                rod_items: Vec::new(),
             },
             flee_mons: FleeMonTables {
                 always: vec!["RAIKOU".to_string()],
@@ -10578,7 +14902,7 @@ mod tests {
                 "SPARK".to_string(),
                 Move {
                     name: "SPARK".to_string(),
-                    move_type: PokemonType::Electric,
+                    move_type: pokemon_type("ELECTRIC"),
                     power: 40,
                     accuracy: 100,
                     pp: 30,
@@ -10608,7 +14932,7 @@ mod tests {
                 pokemon: vec![replacement],
                 moves: vec![Move {
                     name: "NEW_MOVE".to_string(),
-                    move_type: PokemonType::Normal,
+                    move_type: pokemon_type("NORMAL"),
                     power: 1,
                     accuracy: 100,
                     pp: 40,
@@ -10744,6 +15068,57 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_present_wild_encounter_tables_without_exact_rates() {
+        let data = GameDataSet {
+            maps: [(
+                "Start".to_string(),
+                test_map_module("Start", "START_MAP", None),
+            )]
+            .into_iter()
+            .collect(),
+            wild_encounters: [(
+                "Start".to_string(),
+                WildEncounterData {
+                    map_name: "Start".to_string(),
+                    grass_rates: None,
+                    water_rate: None,
+                    grass: Some(WildEncounterTable::default()),
+                    water: Some(WildEncounterTable::default()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.has_errors());
+        for time in ["morning", "day", "night"] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "missing_grass_encounter_rate"
+                        && diagnostic.message.contains(time)
+                }),
+                "missing grass rate diagnostic for {time}: {:?}",
+                report.diagnostics
+            );
+        }
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "missing_water_encounter_rate"),
+            "missing water rate diagnostic: {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
     fn verifier_rejects_positive_wild_encounter_rates_without_tables() {
         let data = GameDataSet {
             maps: [(
@@ -10785,6 +15160,66 @@ mod tests {
                 .iter()
                 .any(|diagnostic| { diagnostic.code == "missing_water_encounter_table" })
         );
+    }
+
+    #[test]
+    fn verifier_rejects_present_field_encounter_tables_with_unusable_buckets() {
+        let data = GameDataSet {
+            pokemon: [("NEW_MON".to_string(), species())].into_iter().collect(),
+            maps: [(
+                "Start".to_string(),
+                test_map_module("Start", "START_MAP", None),
+            )]
+            .into_iter()
+            .collect(),
+            field_encounters: [(
+                "Start".to_string(),
+                FieldEncounterData {
+                    map_name: "Start".to_string(),
+                    headbutt: Some(FieldEncounterTable {
+                        common: vec![FieldEncounterEntry {
+                            weight: 90,
+                            species: "NEW_MON".to_string(),
+                            level: 3,
+                        }],
+                        rare: Vec::new(),
+                    }),
+                    rock_smash: Some(FieldEncounterTable {
+                        common: vec![FieldEncounterEntry {
+                            weight: 0,
+                            species: "NEW_MON".to_string(),
+                            level: 8,
+                        }],
+                        rare: Vec::new(),
+                    }),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.has_errors());
+        for code in [
+            "invalid_field_encounter_weight_total",
+            "empty_field_encounter_bucket",
+            "zero_weight_field_encounter",
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "missing diagnostic {code}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -10839,6 +15274,9 @@ mod tests {
             capture_rules: CaptureRules {
                 fast_ball_species: ["MISSING_FAST".to_string()].into_iter().collect(),
                 heavy_ball_modifiers: [("MISSING_HEAVY".to_string(), 40)].into_iter().collect(),
+                ball_rules: BTreeMap::new(),
+                guaranteed_capture_balls: BTreeSet::new(),
+                status_bonus: BTreeMap::new(),
             },
             ..GameDataSet::default()
         };
@@ -10858,6 +15296,323 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_unknown_ball_pocket_items_without_poke_ball_fallback() {
+        let mut mod_ball = test_item("MOD_BALL");
+        mod_ball.pocket = item_pocket("BALL");
+        let mut poke_ball = test_item("POKE_BALL");
+        poke_ball.pocket = item_pocket("BALL");
+        let data = GameDataSet {
+            items: [
+                ("MOD_BALL".to_string(), mod_ball),
+                ("POKE_BALL".to_string(), poke_ball),
+            ]
+            .into_iter()
+            .collect(),
+            capture_rules: CaptureRules {
+                fast_ball_species: BTreeSet::new(),
+                heavy_ball_modifiers: BTreeMap::new(),
+                ball_rules: [(
+                    "POKE_BALL".to_string(),
+                    crystal_core::battle::capture::CaptureBallRule {
+                        multiplier_numerator: 1,
+                        multiplier_denominator: 1,
+                        battle_type: String::new(),
+                        skip_hp_calc: false,
+                        use_heavy_ball_weight_modifier: false,
+                        use_level_ball_multiplier: false,
+                        require_same_species: false,
+                        require_same_gender: false,
+                        require_fast_species: false,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                guaranteed_capture_balls: BTreeSet::new(),
+                status_bonus: BTreeMap::new(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_capture_ball_item" && diagnostic.subject == "MOD_BALL"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_capture_ball_item" && diagnostic.subject == "POKE_BALL"
+        }));
+    }
+
+    #[test]
+    fn verifier_accepts_modpack_item_menu_ids_as_definitive_data() {
+        let mut mod_menu = test_item("MOD_MENU_ITEM");
+        mod_menu.field_menu = "ITEMMENU_MODDED".to_string();
+        mod_menu.battle_menu = "ITEMMENU_NOUSE".to_string();
+        let mut exact_menu = test_item("EXACT_MENU_ITEM");
+        exact_menu.field_menu = "ITEMMENU_CURRENT".to_string();
+        exact_menu.battle_menu = "ITEMMENU_PARTY".to_string();
+        let data = GameDataSet {
+            items: [
+                ("MOD_MENU_ITEM".to_string(), mod_menu),
+                ("EXACT_MENU_ITEM".to_string(), exact_menu),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_item_menu"
+                && (diagnostic.subject == "MOD_MENU_ITEM"
+                    || diagnostic.subject == "EXACT_MENU_ITEM")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_utility_item_payloads_without_effect_inference() {
+        let mut bad_poke_doll = test_item("BAD_POKE_DOLL");
+        bad_poke_doll.effect = "MOD_ESCAPE_ITEM".to_string();
+        bad_poke_doll.battle_escape_mode = Some("ANY_BATTLE".to_string());
+        let mut bad_repel = test_item("BAD_REPEL");
+        bad_repel.effect = "MOD_REPEL_ITEM".to_string();
+        bad_repel.repel_steps = Some(0);
+        let mut bad_rope = test_item("BAD_ESCAPE_ROPE");
+        bad_rope.effect = "ESCAPE_ROPE".to_string();
+        let mut exact_poke_doll = test_item("POKE_DOLL");
+        exact_poke_doll.effect = "MOD_ESCAPE_ITEM".to_string();
+        exact_poke_doll.battle_escape_mode = Some("WILD_BATTLE".to_string());
+        let mut exact_repel = test_item("REPEL");
+        exact_repel.effect = "MOD_REPEL_ITEM".to_string();
+        exact_repel.repel_steps = Some(100);
+        let mut exact_rope = test_item("ESCAPE_ROPE");
+        exact_rope.effect = "MOD_ESCAPE_ROPE".to_string();
+        exact_rope.escape_rope_mode = Some("MOD_WARP".to_string());
+        let data = GameDataSet {
+            items: [
+                ("BAD_POKE_DOLL".to_string(), bad_poke_doll),
+                ("BAD_REPEL".to_string(), bad_repel),
+                ("BAD_ESCAPE_ROPE".to_string(), bad_rope),
+                ("POKE_DOLL".to_string(), exact_poke_doll),
+                ("REPEL".to_string(), exact_repel),
+                ("ESCAPE_ROPE".to_string(), exact_rope),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("invalid_item_battle_escape_mode", "BAD_POKE_DOLL"),
+            ("invalid_item_repel_steps", "BAD_REPEL"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing diagnostic {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+        for subject in ["POKE_DOLL", "REPEL", "ESCAPE_ROPE"] {
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.subject == subject)
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_battle_item_payloads_without_effect_inference() {
+        let mut bad_restore_hp = test_item("BAD_RESTORE_HP");
+        bad_restore_hp.effect = "MOD_HEAL".to_string();
+        bad_restore_hp.parameter = -2;
+        let mut bad_status_heal = test_item("BAD_STATUS_HEAL");
+        bad_status_heal.effect = "STATUS_HEAL".to_string();
+        let mut bad_revive = test_item("BAD_REVIVE");
+        bad_revive.effect = "MOD_REVIVE".to_string();
+        bad_revive.revive_hp_percent = Some(0);
+        let mut bad_sacred_ash = test_item("BAD_SACRED_ASH");
+        bad_sacred_ash.effect = "MOD_PARTY_REVIVE".to_string();
+        bad_sacred_ash.party_revive_hp_percent = Some(0);
+        let mut bad_restore_pp = test_item("BAD_RESTORE_PP");
+        bad_restore_pp.effect = "MOD_RESTORE_PP".to_string();
+        bad_restore_pp.pp_restore_scope = Some("PARTY".to_string());
+        bad_restore_pp.pp_restore_points = Some(0);
+        let mut bad_pp_up = test_item("BAD_PP_UP");
+        bad_pp_up.effect = "MOD_PP_UP".to_string();
+        bad_pp_up.pp_up_stages = Some(4);
+        let mut bad_vitamin = test_item("BAD_VITAMIN");
+        bad_vitamin.effect = "MOD_VITAMIN".to_string();
+        bad_vitamin.vitamin_stat = Some("LUCK".to_string());
+        bad_vitamin.vitamin_stat_exp = Some(0);
+        bad_vitamin.vitamin_max_stat_exp = Some(0);
+        let mut bad_rare_candy = test_item("BAD_RARE_CANDY");
+        bad_rare_candy.effect = "MOD_CANDY".to_string();
+        bad_rare_candy.rare_candy_level_gain = Some(0);
+        let mut bad_x_item = test_item("BAD_X_ITEM");
+        bad_x_item.effect = "MOD_BATTLE_BOOST".to_string();
+        bad_x_item.battle_stat_boost_stat = Some("LUCK".to_string());
+        bad_x_item.battle_stat_boost_stages = Some(7);
+        let mut bad_guard_spec = test_item("BAD_GUARD_SPEC");
+        bad_guard_spec.effect = "MOD_GUARD".to_string();
+        bad_guard_spec.battle_stat_drop_guard = Some(false);
+        let mut bad_dire_hit = test_item("BAD_DIRE_HIT");
+        bad_dire_hit.effect = "MOD_FOCUS".to_string();
+        bad_dire_hit.battle_focus_energy = Some(false);
+        let mut bad_bitter_berry = test_item("BAD_BITTER_BERRY");
+        bad_bitter_berry.effect = "MOD_CONFUSION_HEAL".to_string();
+        bad_bitter_berry.confusion_heal = Some(false);
+
+        let mut exact_restore_hp = test_item("EXACT_RESTORE_HP");
+        exact_restore_hp.effect = "MOD_HEAL".to_string();
+        exact_restore_hp.parameter = 20;
+        let mut exact_status_heal = test_item("EXACT_STATUS_HEAL");
+        exact_status_heal.effect = "MOD_STATUS_HEAL".to_string();
+        exact_status_heal.status_heals = vec!["POISON".to_string()];
+        let mut exact_revive = test_item("EXACT_REVIVE");
+        exact_revive.effect = "MOD_REVIVE".to_string();
+        exact_revive.revive_hp_percent = Some(50);
+        let mut exact_sacred_ash = test_item("EXACT_SACRED_ASH");
+        exact_sacred_ash.effect = "MOD_PARTY_REVIVE".to_string();
+        exact_sacred_ash.party_revive_hp_percent = Some(100);
+        let mut exact_restore_pp = test_item("EXACT_RESTORE_PP");
+        exact_restore_pp.effect = "MOD_RESTORE_PP".to_string();
+        exact_restore_pp.pp_restore_scope = Some("MOVE".to_string());
+        exact_restore_pp.pp_restore_points = Some(10);
+        let mut exact_pp_up = test_item("EXACT_PP_UP");
+        exact_pp_up.effect = "MOD_PP_UP".to_string();
+        exact_pp_up.pp_up_stages = Some(1);
+        let mut exact_vitamin = test_item("EXACT_VITAMIN");
+        exact_vitamin.effect = "MOD_VITAMIN".to_string();
+        exact_vitamin.vitamin_stat = Some("SPECIAL".to_string());
+        exact_vitamin.vitamin_stat_exp = Some(2560);
+        exact_vitamin.vitamin_max_stat_exp = Some(25600);
+        let mut exact_rare_candy = test_item("EXACT_RARE_CANDY");
+        exact_rare_candy.effect = "MOD_CANDY".to_string();
+        exact_rare_candy.rare_candy_level_gain = Some(1);
+        let mut exact_x_item = test_item("EXACT_X_ITEM");
+        exact_x_item.effect = "MOD_BATTLE_BOOST".to_string();
+        exact_x_item.battle_stat_boost_stat = Some("SPECIAL_ATTACK".to_string());
+        exact_x_item.battle_stat_boost_stages = Some(1);
+        let mut exact_guard_spec = test_item("EXACT_GUARD_SPEC");
+        exact_guard_spec.effect = "MOD_GUARD".to_string();
+        exact_guard_spec.battle_stat_drop_guard = Some(true);
+        let mut exact_dire_hit = test_item("EXACT_DIRE_HIT");
+        exact_dire_hit.effect = "MOD_FOCUS".to_string();
+        exact_dire_hit.battle_focus_energy = Some(true);
+        let mut exact_bitter_berry = test_item("EXACT_BITTER_BERRY");
+        exact_bitter_berry.effect = "MOD_CONFUSION_HEAL".to_string();
+        exact_bitter_berry.confusion_heal = Some(true);
+
+        let data = GameDataSet {
+            items: [
+                ("BAD_RESTORE_HP".to_string(), bad_restore_hp),
+                ("BAD_STATUS_HEAL".to_string(), bad_status_heal),
+                ("BAD_REVIVE".to_string(), bad_revive),
+                ("BAD_SACRED_ASH".to_string(), bad_sacred_ash),
+                ("BAD_RESTORE_PP".to_string(), bad_restore_pp),
+                ("BAD_PP_UP".to_string(), bad_pp_up),
+                ("BAD_VITAMIN".to_string(), bad_vitamin),
+                ("BAD_RARE_CANDY".to_string(), bad_rare_candy),
+                ("BAD_X_ITEM".to_string(), bad_x_item),
+                ("BAD_GUARD_SPEC".to_string(), bad_guard_spec),
+                ("BAD_DIRE_HIT".to_string(), bad_dire_hit),
+                ("BAD_BITTER_BERRY".to_string(), bad_bitter_berry),
+                ("EXACT_RESTORE_HP".to_string(), exact_restore_hp),
+                ("EXACT_STATUS_HEAL".to_string(), exact_status_heal),
+                ("EXACT_REVIVE".to_string(), exact_revive),
+                ("EXACT_SACRED_ASH".to_string(), exact_sacred_ash),
+                ("EXACT_RESTORE_PP".to_string(), exact_restore_pp),
+                ("EXACT_PP_UP".to_string(), exact_pp_up),
+                ("EXACT_VITAMIN".to_string(), exact_vitamin),
+                ("EXACT_RARE_CANDY".to_string(), exact_rare_candy),
+                ("EXACT_X_ITEM".to_string(), exact_x_item),
+                ("EXACT_GUARD_SPEC".to_string(), exact_guard_spec),
+                ("EXACT_DIRE_HIT".to_string(), exact_dire_hit),
+                ("EXACT_BITTER_BERRY".to_string(), exact_bitter_berry),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("invalid_item_heal_amount", "BAD_RESTORE_HP"),
+            ("invalid_item_revive_hp_percent", "BAD_REVIVE"),
+            ("invalid_item_party_revive_hp_percent", "BAD_SACRED_ASH"),
+            ("invalid_item_pp_restore_scope", "BAD_RESTORE_PP"),
+            ("invalid_item_pp_restore_points", "BAD_RESTORE_PP"),
+            ("invalid_item_pp_up_stages", "BAD_PP_UP"),
+            ("invalid_item_vitamin_stat", "BAD_VITAMIN"),
+            ("invalid_item_vitamin_stat_exp", "BAD_VITAMIN"),
+            ("invalid_item_vitamin_max_stat_exp", "BAD_VITAMIN"),
+            ("invalid_item_rare_candy_level_gain", "BAD_RARE_CANDY"),
+            ("invalid_item_battle_stat_boost_stat", "BAD_X_ITEM"),
+            ("invalid_item_battle_stat_boost_stages", "BAD_X_ITEM"),
+            ("invalid_item_battle_stat_drop_guard", "BAD_GUARD_SPEC"),
+            ("invalid_item_battle_focus_energy", "BAD_DIRE_HIT"),
+            ("invalid_item_confusion_heal", "BAD_BITTER_BERRY"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing diagnostic {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+        for subject in [
+            "EXACT_RESTORE_HP",
+            "EXACT_STATUS_HEAL",
+            "EXACT_REVIVE",
+            "EXACT_SACRED_ASH",
+            "EXACT_RESTORE_PP",
+            "EXACT_PP_UP",
+            "EXACT_VITAMIN",
+            "EXACT_RARE_CANDY",
+            "EXACT_X_ITEM",
+            "EXACT_GUARD_SPEC",
+            "EXACT_DIRE_HIT",
+            "EXACT_BITTER_BERRY",
+        ] {
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.subject == subject),
+                "unexpected diagnostic for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_evolution_facts_without_case_coercion() {
         let mut source = species();
         source.id = "NEW_MON".to_string();
@@ -10872,7 +15627,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            items: [("THUNDERSTONE".to_string(), Item::new("THUNDERSTONE"))]
+            items: [("THUNDERSTONE".to_string(), test_item("THUNDERSTONE"))]
                 .into_iter()
                 .collect(),
             evolutions: EvolutionTable(
@@ -10985,9 +15740,46 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_unknown_species_held_items_without_case_coercion() {
+        let mut known_species = species();
+        known_species.tmhm_learnset.clear();
+        known_species.item1 = Some("potion".to_string());
+        known_species.item2 = Some("RARE_CANDY".to_string());
+        let species_id = known_species.id.clone();
+        let data = GameDataSet {
+            pokemon: [(species_id.clone(), known_species)].into_iter().collect(),
+            learnsets: [(species_id.clone(), Vec::new())].into_iter().collect(),
+            evolutions: EvolutionTable([(species_id.clone(), Vec::new())].into_iter().collect()),
+            items: [
+                ("POTION".to_string(), test_item("POTION")),
+                ("RARE_CANDY".to_string(), test_item("RARE_CANDY")),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_species_held_item"
+                && diagnostic.subject == species_id
+                && diagnostic.message.contains("potion")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_species_held_item"
+                && diagnostic.message.contains("RARE_CANDY")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_unknown_mart_items_without_case_coercion() {
         let data = GameDataSet {
-            items: [("POTION".to_string(), Item::new("POTION"))]
+            items: [("POTION".to_string(), test_item("POTION"))]
                 .into_iter()
                 .collect(),
             marts: MartCatalog(
@@ -11041,7 +15833,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             ),
-            items: [("POTION".to_string(), Item::new("POTION"))]
+            items: [("POTION".to_string(), test_item("POTION"))]
                 .into_iter()
                 .collect(),
             ..GameDataSet::default()
@@ -11081,7 +15873,7 @@ mod tests {
         }];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
-            items: [("POTION".to_string(), Item::new("POTION"))]
+            items: [("POTION".to_string(), test_item("POTION"))]
                 .into_iter()
                 .collect(),
             ..GameDataSet::default()
@@ -11116,8 +15908,8 @@ mod tests {
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             items: [
-                ("PASS".to_string(), Item::new("PASS")),
-                ("LOST_ITEM".to_string(), Item::new("LOST_ITEM")),
+                ("PASS".to_string(), test_item("PASS")),
+                ("LOST_ITEM".to_string(), test_item("LOST_ITEM")),
             ]
             .into_iter()
             .collect(),
@@ -11185,7 +15977,7 @@ mod tests {
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
-            items: [("POTION".to_string(), Item::new("POTION"))]
+            items: [("POTION".to_string(), test_item("POTION"))]
                 .into_iter()
                 .collect(),
             ..GameDataSet::default()
@@ -11224,7 +16016,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             ),
-            items: [("BERRY".to_string(), Item::new("BERRY"))]
+            items: [("BERRY".to_string(), test_item("BERRY"))]
                 .into_iter()
                 .collect(),
             ..GameDataSet::default()
@@ -11240,6 +16032,40 @@ mod tests {
             diagnostic.code == "unknown_fruit_tree_item"
                 && diagnostic.subject == "fruit_trees:FRUITTREE_ROUTE_29"
                 && diagnostic.message.contains("berry")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_referenced_fruit_tree_without_catalog() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.script_field_pickups = vec![ScriptFieldPickup {
+            command: "fruittree".to_string(),
+            item_id: None,
+            quantity: 1,
+            event_flag: None,
+            fruit_tree_id: Some("FRUITTREE_ROUTE_29".to_string()),
+            source_script: "Route29FruitTree".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: [("Route29".to_string(), module)].into_iter().collect(),
+            items: [("BERRY".to_string(), test_item("BERRY"))]
+                .into_iter()
+                .collect(),
+            fruit_trees: FruitTreeCatalog::default(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_field_fruit_tree"
+                && diagnostic.subject == "Route29:Route29FruitTree:0"
+                && diagnostic.message.contains("FRUITTREE_ROUTE_29")
         }));
     }
 
@@ -11277,6 +16103,64 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_money_mutation_without_pack_max_money() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_economy_commands = vec![ScriptEconomyCommand {
+            command: "takemoney".to_string(),
+            account: Some("YOUR_MONEY".to_string()),
+            amount_tokens: vec!["PRICE".to_string()],
+            source_script: "BuyScript".to_string(),
+            command_index: 4,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            currency_constants: CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect()),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_script_money_cap"
+                && diagnostic.subject == "Start:BuyScript:4"
+                && diagnostic.message.contains("MAX_MONEY")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_coin_mutation_without_pack_max_coins() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_economy_commands = vec![ScriptEconomyCommand {
+            command: "givecoins".to_string(),
+            account: None,
+            amount_tokens: vec!["PRICE".to_string()],
+            source_script: "PrizeScript".to_string(),
+            command_index: 5,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            currency_constants: CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect()),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_script_coin_cap"
+                && diagnostic.subject == "Start:PrizeScript:5"
+                && diagnostic.message.contains("MAX_COINS")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_unknown_gift_pokemon_facts_without_case_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.gift_pokemon_scripts = vec![GiftPokemonScript {
@@ -11284,16 +16168,19 @@ mod tests {
             level_token: "5".to_string(),
             level: 5,
             held_item_id: Some("berry".to_string()),
-            nickname_label: None,
-            ot_label: None,
+            nickname_label: Some("giftstartername".to_string()),
+            ot_label: Some(String::new()),
             source_script: "StarterScript".to_string(),
             command_index: 2,
             egg: false,
         }];
+        module
+            .scripts
+            .insert("GiftStarterName".to_string(), Value::Array(Vec::new()));
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             pokemon: [("CYNDAQUIL".to_string(), species())].into_iter().collect(),
-            items: [("BERRY".to_string(), Item::new("BERRY"))]
+            items: [("BERRY".to_string(), test_item("BERRY"))]
                 .into_iter()
                 .collect(),
             ..GameDataSet::default()
@@ -11314,6 +16201,15 @@ mod tests {
             diagnostic.code == "unknown_gift_pokemon_item"
                 && diagnostic.subject == "Start:StarterScript:2"
                 && diagnostic.message.contains("berry")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_gift_pokemon_label"
+                && diagnostic.subject == "Start:StarterScript:2"
+                && diagnostic.message.contains("giftstartername")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "empty_gift_pokemon_label"
+                && diagnostic.subject == "Start:StarterScript:2"
         }));
     }
 
@@ -11622,6 +16518,13 @@ mod tests {
                 source_script: "StartScript".to_string(),
                 command_index: 4,
             },
+            ScriptSceneCommand {
+                command: "setscene".to_string(),
+                map_id: None,
+                scene_id: Some("0".to_string()),
+                source_script: "StartScript".to_string(),
+                command_index: 5,
+            },
         ];
         let mut target = test_map_module("Route43Gate", "ROUTE_43_GATE", None);
         target.scenes = MapSceneTable {
@@ -11660,6 +16563,11 @@ mod tests {
             diagnostic.code == "unknown_script_scene_map"
                 && diagnostic.subject == "Start:StartScript:4"
                 && diagnostic.message.contains("Route43Gate")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_scene_id"
+                && diagnostic.subject == "Start:StartScript:5"
+                && diagnostic.message.contains("0")
         }));
     }
 
@@ -11758,6 +16666,69 @@ mod tests {
     }
 
     #[test]
+    fn verifier_requires_every_species_cry_metadata_and_declared_cry_audio() {
+        let mut lugia = species();
+        lugia.id = "LUGIA".to_string();
+        lugia.tmhm_learnset.clear();
+        let mut chikorita = species();
+        chikorita.id = "CHIKORITA".to_string();
+        chikorita.tmhm_learnset.clear();
+        let data = GameDataSet {
+            pokemon: [
+                ("LUGIA".to_string(), lugia),
+                ("CHIKORITA".to_string(), chikorita),
+            ]
+            .into_iter()
+            .collect(),
+            learnsets: [
+                ("LUGIA".to_string(), Vec::new()),
+                ("CHIKORITA".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+            evolutions: EvolutionTable(
+                [
+                    ("LUGIA".to_string(), Vec::new()),
+                    ("CHIKORITA".to_string(), Vec::new()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            pokemon_cries: [(
+                "LUGIA".to_string(),
+                PokemonCryMetadata {
+                    cry: "CRY_LUGIA".to_string(),
+                    pitch: 0,
+                    length: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            audio: vec![ModpackAudioAsset {
+                id: "CRY_HO_OH".to_string(),
+                path: "content-packs/test/cries/CRY_HO_OH.mid".to_string(),
+                kind: ModpackAudioKind::Cry,
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_species_cry_audio"
+                && diagnostic.subject == "LUGIA"
+                && diagnostic.message.contains("CRY_LUGIA")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_species_cry_metadata" && diagnostic.subject == "CHIKORITA"
+        }));
+    }
+
+    #[test]
     fn verifier_requires_script_audio_ids_declared_by_pack_not_path_aliases() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_audio_commands = vec![ScriptAudioCommand {
@@ -11787,6 +16758,461 @@ mod tests {
             diagnostic.code == "unknown_script_music_id"
                 && diagnostic.subject == "Start:AudioScript:1"
                 && diagnostic.message.contains("MUSIC_ROUTE_29")
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_map_music_declared_as_exact_music_asset() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.music = Some("MUSIC_ROUTE_29".to_string());
+        let wrong_kind_module = {
+            let mut module = test_map_module("WrongKind", "WRONG_KIND", None);
+            module.attributes.music = Some("SFX_TACKLE".to_string());
+            module
+        };
+        let data = GameDataSet {
+            maps: [
+                ("Start".to_string(), module),
+                ("WrongKind".to_string(), wrong_kind_module),
+            ]
+            .into_iter()
+            .collect(),
+            audio: vec![ModpackAudioAsset {
+                id: "SFX_TACKLE".to_string(),
+                path: "content-packs/test/sfx/SFX_TACKLE.mid".to_string(),
+                kind: ModpackAudioKind::SoundEffect,
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_map_music_id"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("MUSIC_ROUTE_29")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_map_music_id"
+                && diagnostic.subject == "WrongKind"
+                && diagnostic.message.contains("SFX_TACKLE")
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_music_none_to_be_declared_by_pack() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_audio_commands = vec![ScriptAudioCommand {
+            command: "musicfadeout".to_string(),
+            audio_id: Some("MUSIC_NONE".to_string()),
+            fade_frames: Some(2),
+            source_script: "FadeScript".to_string(),
+            command_index: 1,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            special_routines: ["FadeOutMusic".to_string()].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_music_id"
+                && diagnostic.subject == "Start:FadeScript:1"
+                && diagnostic.message.contains("MUSIC_NONE")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_special_routine_music_id"
+                && diagnostic.subject == "special_routines:FadeOutMusic"
+                && diagnostic.message.contains("MUSIC_NONE")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_init_roam_mons_without_roaming_pokemon_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["InitRoamMons".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_roaming_pokemon_definitions"
+                && diagnostic.subject == "special_routines:InitRoamMons"
+                && diagnostic.message.contains("roaming Pokemon")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_declared_special_routine_unknown_to_rust_runtime() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["ModpackOnlyRoutine".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_declared_special_routine"
+                && diagnostic.subject == "special_routines:ModpackOnlyRoutine"
+                && diagnostic
+                    .message
+                    .contains("is not implemented by the Rust runtime")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_buena_prize_without_buena_prize_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["BuenaPrize".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_buena_prize_definitions"
+                && diagnostic.subject == "special_routines:BuenaPrize"
+                && diagnostic.message.contains("Buena prize")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_buenas_password_without_buena_password_category_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["BuenasPassword".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_buena_password_categories"
+                && diagnostic.subject == "special_routines:BuenasPassword"
+                && diagnostic.message.contains("Buena password")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_select_apricorn_without_kurt_apricorn_recipe_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["SelectApricornForKurt".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_kurt_apricorn_recipes"
+                && diagnostic.subject == "special_routines:SelectApricornForKurt"
+                && diagnostic.message.contains("Kurt apricorn")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_shuckie_routines_without_shuckie_gift_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from([
+                "GiveShuckle".to_string(),
+                "ReturnShuckie".to_string(),
+            ]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_shuckie_gift"
+                && diagnostic.subject == "special_routines:Shuckie"
+                && diagnostic.message.contains("Shuckie gift")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_give_dratini_without_dratini_move_sets_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["GiveDratini".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_dratini_move_sets"
+                && diagnostic.subject == "special_routines:GiveDratini"
+                && diagnostic.message.contains("Dratini move sets")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_battle_tower_action_without_battle_tower_rules_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["BattleTowerAction".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_battle_tower_rules"
+                && diagnostic.subject == "special_routines:BattleTowerRules"
+                && diagnostic.message.contains("Battle Tower rules")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_battle_tower_rule_check_without_battle_tower_rules_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["CheckForBattleTowerRules".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_battle_tower_rules"
+                && diagnostic.subject == "special_routines:BattleTowerRules"
+                && diagnostic.message.contains("Battle Tower rules")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_prof_oaks_pc_without_oak_rating_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["ProfOaksPCBoot".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_oak_rating_table"
+                && diagnostic.subject == "special_routines:ProfOaksPCBoot"
+                && diagnostic.message.contains("Oak rating")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_oak_ratings_without_case_or_order_coercion() {
+        let mut chikorita = species();
+        chikorita.id = "CHIKORITA".to_string();
+        let mut cyndaquil = species();
+        cyndaquil.id = "CYNDAQUIL".to_string();
+        let data = GameDataSet {
+            pokemon: [
+                ("CHIKORITA".to_string(), chikorita),
+                ("CYNDAQUIL".to_string(), cyndaquil),
+            ]
+            .into_iter()
+            .collect(),
+            oak_ratings: vec![
+                OakRatingEntry {
+                    caught_count_limit: 1,
+                    fanfare: " SFX_DEX_FANFARE_LESS_THAN_20".to_string(),
+                    text_label: "OakRating01".to_string(),
+                },
+                OakRatingEntry {
+                    caught_count_limit: 1,
+                    fanfare: "SFX_DEX_FANFARE_LESS_THAN_20".to_string(),
+                    text_label: "".to_string(),
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_oak_rating_fanfare" && diagnostic.subject == "oak_ratings:0"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_oak_rating_text_label"
+                && diagnostic.subject == "oak_ratings:1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_oak_rating_order" && diagnostic.subject == "oak_ratings:1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "incomplete_oak_rating_coverage"
+                && diagnostic.subject == "oak_ratings"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_battle_tower_banned_species_without_case_coercion() {
+        let mut mewtwo = species();
+        mewtwo.id = "MEWTWO".to_string();
+        let data = GameDataSet {
+            pokemon: [("MEWTWO".to_string(), mewtwo)].into_iter().collect(),
+            battle_tower_rules: Some(BattleTowerRules {
+                banned_species: vec!["mewtwo".to_string(), " MEWTWO".to_string()],
+                required_party_count: 0,
+                challenge_streak_length: 0,
+                minimum_level_group: 2,
+                maximum_level_group: 1,
+                level_group_size: 0,
+                party_count_failure_text: " OnlyThreeMonMayBeEnteredText".to_string(),
+                duplicate_species_failure_text: "TheMonMustAllBeDifferentKindsText".to_string(),
+                duplicate_held_item_failure_text: "TheMonMustNotHoldTheSameItemsText".to_string(),
+                egg_failure_text: "".to_string(),
+            }),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_battle_tower_banned_species"
+                && diagnostic.subject == "battle_tower_rules:banned_species:0"
+                && diagnostic.message.contains("mewtwo")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_banned_species"
+                && diagnostic.subject == "battle_tower_rules:banned_species:1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_required_party_count"
+                && diagnostic.subject == "battle_tower_rules:required_party_count"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_challenge_streak_length"
+                && diagnostic.subject == "battle_tower_rules:challengeStreakLength"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_level_group_size"
+                && diagnostic.subject == "battle_tower_rules:levelGroupSize"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_level_group_range"
+                && diagnostic.subject == "battle_tower_rules:levelGroupRange"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_failure_text"
+                && diagnostic.subject == "battle_tower_rules:partyCountFailureText"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_tower_failure_text"
+                && diagnostic.subject == "battle_tower_rules:eggFailureText"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_give_odd_egg_without_odd_egg_pack_data() {
+        let data = GameDataSet {
+            special_routines: BTreeSet::from(["GiveOddEgg".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_odd_egg_definitions"
+                && diagnostic.subject == "special_routines:GiveOddEgg"
+                && diagnostic.message.contains("Odd Egg definitions")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_odd_egg_species_and_moves_without_case_coercion() {
+        let mut cleffa = species();
+        cleffa.id = "CLEFFA".to_string();
+        let data = GameDataSet {
+            pokemon: [("CLEFFA".to_string(), cleffa)].into_iter().collect(),
+            moves: [("POUND".to_string(), test_move("POUND"))]
+                .into_iter()
+                .collect(),
+            odd_egg_definitions: vec![OddEggDefinition {
+                species: "cleffa".to_string(),
+                moves: vec!["pound".to_string()],
+                original_trainer_id: 768,
+                dvs: [2, 10, 10, 10],
+                probability: 100,
+                level: 5,
+                experience: 125,
+                hatch_cycles: 20,
+                nickname: "EGG".to_string(),
+                original_trainer_name: "ODD".to_string(),
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_odd_egg_species"
+                && diagnostic.subject == "odd_egg_definitions:0"
+                && diagnostic.message.contains("cleffa")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_odd_egg_move"
+                && diagnostic.subject == "odd_egg_definitions:0:move:0"
+                && diagnostic.message.contains("pound")
         }));
     }
 
@@ -12067,6 +17493,85 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_unknown_phone_contact_maps_without_case_coercion() {
+        fn phone_contact(contact_id: &str, map_constant: Option<&str>) -> PhoneContactRecord {
+            PhoneContactRecord {
+                contact_id: contact_id.to_string(),
+                trainer_class: Some("TRAINER_NONE".to_string()),
+                trainer_label: Some(format!("PHONECONTACT_{contact_id}")),
+                lines: vec![format!("{contact_id}:")],
+                primary_label: contact_id.to_string(),
+                map_constant: map_constant.map(str::to_string),
+                callee_time_mask: 7,
+                callee_script: None,
+                caller_time_mask: 0,
+                caller_script: None,
+            }
+        }
+
+        let mut empty_lines = phone_contact("PHONE_LINES", None);
+        empty_lines.lines = vec![String::new()];
+        let mut mismatch = phone_contact("PHONE_MISMATCH", None);
+        mismatch.primary_label = "OTHER_LABEL".to_string();
+        let data = GameDataSet {
+            maps: [(
+                "ElmsLab".to_string(),
+                test_map_module("ElmsLab", "ELMS_LAB", None),
+            )]
+            .into_iter()
+            .collect(),
+            phone_contacts: PhoneContactCatalog(BTreeMap::from([
+                (
+                    "PHONE_ELM".to_string(),
+                    phone_contact("PHONE_ELM", Some("ELMS_LAB")),
+                ),
+                (
+                    "PHONE_CASE".to_string(),
+                    phone_contact("PHONE_CASE", Some("elms_lab")),
+                ),
+                (
+                    "PHONE_EMPTY".to_string(),
+                    phone_contact("PHONE_EMPTY", Some("")),
+                ),
+                ("PHONE_LINES".to_string(), empty_lines),
+                ("PHONE_MISMATCH".to_string(), mismatch),
+            ])),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_phone_contact_map"
+                && diagnostic.subject == "phone_contacts:PHONE_CASE"
+                && diagnostic.message.contains("elms_lab")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "empty_phone_contact_map"
+                && diagnostic.subject == "phone_contacts:PHONE_EMPTY"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_phone_contact_lines"
+                && diagnostic.subject == "phone_contacts:PHONE_LINES"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "phone_contact_primary_label_mismatch"
+                && diagnostic.subject == "phone_contacts:PHONE_MISMATCH"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            (diagnostic.code == "unknown_phone_contact_map"
+                || diagnostic.code == "empty_phone_contact_map"
+                || diagnostic.code == "invalid_phone_contact_lines"
+                || diagnostic.code == "phone_contact_primary_label_mismatch")
+                && diagnostic.subject == "phone_contacts:PHONE_ELM"
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_invalid_script_object_commands_without_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.objects = vec![
@@ -12265,8 +17770,8 @@ mod tests {
 
     #[test]
     fn modpack_tmhm_items_require_explicit_index_data() {
-        let mut tm = Item::new("TM_MUD_SLAP");
-        tm.pocket = ItemPocket::TmHm;
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
         let manifest = ModpackManifest {
             payload: ModpackPayload {
                 items: vec![tm],
@@ -12290,8 +17795,8 @@ mod tests {
 
     #[test]
     fn modpack_symbolic_tm_grants_validate_against_exact_item_data() {
-        let mut tm = Item::new("TM_MUD_SLAP");
-        tm.pocket = ItemPocket::TmHm;
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
         tm.tmhm_index = Some(30);
         let mut module = test_map_module("VioletGym", "VIOLET_GYM", None);
         module.script_item_grants = vec![ScriptItemGrant {
@@ -12368,6 +17873,8 @@ mod tests {
             .into_iter()
             .collect(),
             time_groups: Vec::new(),
+            swarm_rules: Vec::new(),
+            rod_items: Vec::new(),
         };
         let manifest = ModpackManifest {
             payload: ModpackPayload {
@@ -12455,6 +17962,22 @@ mod tests {
                     night_species: "staryu".to_string(),
                     night_level: 10,
                 }],
+                swarm_rules: vec![crystal_core::world::fishing::FishingSwarmRule {
+                    daily_flag_bit: 8,
+                    swarm: 1,
+                    base_group: "fishgroup_lake".to_string(),
+                    swarm_group: "FISHGROUP_MISSING".to_string(),
+                }],
+                rod_items: vec![
+                    crystal_core::world::fishing::FishingRodItemRule {
+                        item_id: "GOOD_ROD".to_string(),
+                        rod: "good_rod".to_string(),
+                    },
+                    crystal_core::world::fishing::FishingRodItemRule {
+                        item_id: "GOOD_ROD".to_string(),
+                        rod: crystal_core::world::fishing::ROD_GOOD.to_string(),
+                    },
+                ],
             },
             ..GameDataSet::default()
         };
@@ -12469,6 +17992,12 @@ mod tests {
             "unknown_map_fishing_group",
             "unknown_fishing_rod",
             "unknown_fishing_species",
+            "invalid_fishing_swarm_flag_bit",
+            "unknown_fishing_swarm_base_group",
+            "unknown_fishing_swarm_group",
+            "duplicate_fishing_rod_item_id",
+            "unknown_fishing_rod_item_rod",
+            "unknown_fishing_rod_item_id",
         ] {
             assert!(
                 report
@@ -12479,6 +18008,50 @@ mod tests {
                 report.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn verifier_rejects_referenced_fishing_group_without_catalog() {
+        let data = GameDataSet {
+            map_attributes: [(
+                "Lake".to_string(),
+                MapAttributes {
+                    tileset_name: "johto".to_string(),
+                    border_block: 0,
+                    width: 1,
+                    height: 1,
+                    connections: Vec::new(),
+                    time_of_day: None,
+                    phone_service: 0,
+                    phone_flag: false,
+                    environment: None,
+                    location: None,
+                    music: None,
+                    palette: None,
+                    fishing_group: Some("FISHGROUP_LAKE".to_string()),
+                    map_constant: Some("LAKE".to_string()),
+                    map_group_constant: None,
+                    blocks_label: None,
+                    map_scripts_label: None,
+                    map_events_label: None,
+                    connection_flags: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            fishing: FishingCatalog::default(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_fishing_catalog" && diagnostic.subject == "Lake"
+        }));
     }
 
     #[test]
@@ -12697,16 +18270,38 @@ mod tests {
                     name: "Key Card".to_string(),
                     description: "Opens a required gate.".to_string(),
                     effect: "NONE".to_string(),
+                    status_heals: Vec::new(),
+                    revive_hp_percent: None,
+                    party_revive_hp_percent: None,
+                    pp_restore_scope: None,
+                    pp_restore_points: None,
+                    pp_up_stages: None,
+                    vitamin_stat: None,
+                    vitamin_stat_exp: None,
+                    vitamin_max_stat_exp: None,
+                    rare_candy_level_gain: None,
+                    battle_stat_boost_stat: None,
+                    battle_stat_boost_stages: None,
+                    battle_escape_mode: None,
+                    battle_focus_energy: None,
+                    battle_stat_drop_guard: None,
+                    battle_stat_drop_guard_turns: None,
+                    confusion_heal: None,
+                    repel_steps: None,
+                    escape_rope_mode: None,
                     price: 0,
                     held_effect: "HELD_NONE".to_string(),
                     parameter: 0,
                     property: String::new(),
-                    pocket: ItemPocket::KeyItem,
-                    field_menu: String::new(),
-                    battle_menu: String::new(),
+                    pocket: item_pocket("KEY_ITEM"),
+                    field_menu: "ITEMMENU_NOUSE".to_string(),
+                    field_usable: false,
+                    battle_menu: "ITEMMENU_NOUSE".to_string(),
+                    battle_usable: false,
                     script_name: "KEY_CARD".to_string(),
                     consumable: false,
                     tmhm_index: None,
+                    tmhm_move: None,
                 },
             )]
             .into_iter()
@@ -12856,16 +18451,38 @@ mod tests {
             name: "Key Card".to_string(),
             description: "Opens a required gate.".to_string(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
-            pocket: ItemPocket::KeyItem,
-            field_menu: String::new(),
-            battle_menu: String::new(),
+            pocket: item_pocket("KEY_ITEM"),
+            field_menu: "ITEMMENU_NOUSE".to_string(),
+            field_usable: false,
+            battle_menu: "ITEMMENU_NOUSE".to_string(),
+            battle_usable: false,
             script_name: "KEY_CARD".to_string(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         };
         let mut start = test_map_module("Start", "START_MAP", Some("Goal"));
         start.attributes.height = 2;
@@ -13933,6 +19550,39 @@ mod tests {
         .expect("apply setscene");
         assert_eq!(outcome.scene_id, "SCENE_ROUTE43GATE_NOOP");
         assert_eq!(state.scenes.scene_name, "SCENE_ROUTE43GATE_NOOP");
+
+        assert_eq!(
+            route43
+                .scenes
+                .scenes
+                .iter()
+                .map(|scene| scene.scene_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0", "1"]
+        );
+        let route_setscene = gate
+            .script_scene_commands
+            .iter()
+            .find(|command| {
+                command.source_script == "Route43GateCheckIfRocketsCallback"
+                    && command.command == "setmapscene"
+                    && command.map_id.as_deref() == Some("ROUTE_43")
+                    && command.scene_id.as_deref() == Some("1")
+            })
+            .expect("Route43Gate setmapscene back to Route43")
+            .clone();
+        let outcome = apply_script_scene_command(
+            &mut state,
+            "Route43Gate",
+            Some("Route43"),
+            &route43.scenes,
+            route_setscene,
+        )
+        .expect("apply numeric Route43 setmapscene");
+        assert_eq!(outcome.map_name, "Route43");
+        assert_eq!(outcome.scene_id, "1");
+        assert_eq!(outcome.scene_index, 1);
+        assert_eq!(state.scenes.map_scenes["Route43"], "1");
     }
 
     #[test]
@@ -14871,6 +20521,7 @@ mod tests {
             &data.pokemon,
             &data.learnsets,
             &data.moves,
+            &data.growth_rates,
             &data.items,
             GiftPokemonRequest {
                 species_id: gift.species_id.clone(),
@@ -14920,11 +20571,10 @@ mod tests {
             money: 1_000,
             ..GameState::default()
         };
-        let constants = CurrencyCatalog(
-            [("ROUTE43GATE_TOLL".to_string(), 1_000)]
-                .into_iter()
-                .collect(),
-        );
+        assert_eq!(CurrencyCatalog::default().get("ROUTE43GATE_TOLL"), None);
+        let constants = economy_constants(&data);
+        assert_eq!(constants.get("ROUTE43GATE_TOLL"), Some(1_000));
+        assert_eq!(constants.get("route43gate_toll"), None);
         let account = MoneyAccount::from_script_id(check.account.as_deref().expect("account"))
             .expect("exact account");
         let outcome = check_money(&state, account, &check.amount_tokens, &constants)
@@ -14939,6 +20589,69 @@ mod tests {
             ),
             Ok(0)
         );
+    }
+
+    #[test]
+    fn parser_extracts_givemoney_from_exact_money_command_class() {
+        let scripts: BTreeMap<String, Value> = [(
+            "PrizeScript".to_string(),
+            serde_json::json!([
+                {
+                    "command": "givemoney",
+                    "args": ["MOMS_MONEY", "MAX_MONEY", "-", "1"]
+                },
+                {
+                    "command": "GiveMoney",
+                    "args": ["YOUR_MONEY", "1"]
+                }
+            ]),
+        )]
+        .into_iter()
+        .collect();
+
+        let commands =
+            parse_script_economy_commands("PrizeMap", &scripts).expect("parse economy commands");
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "givemoney");
+        assert_eq!(commands[0].account.as_deref(), Some("MOMS_MONEY"));
+        assert_eq!(commands[0].amount_tokens, vec!["MAX_MONEY", "-", "1"]);
+        assert_eq!(commands[0].source_script, "PrizeScript");
+        assert_eq!(commands[0].command_index, 0);
+    }
+
+    #[test]
+    fn parser_extracts_phone_commands_from_exact_command_classes() {
+        let scripts: BTreeMap<String, Value> = [(
+            "PhoneScript".to_string(),
+            serde_json::json!([
+                {
+                    "command": "checkcellnum",
+                    "args": ["PHONE_MOM"]
+                },
+                {
+                    "command": "askforphonenumber",
+                    "args": ["PHONE_JOEY"]
+                },
+                {
+                    "command": "CheckCellNum",
+                    "args": ["PHONE_ELM"]
+                }
+            ]),
+        )]
+        .into_iter()
+        .collect();
+
+        let commands =
+            parse_script_phone_commands("PhoneMap", &scripts).expect("parse phone commands");
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].command, "checkcellnum");
+        assert_eq!(commands[0].contact_id, "PHONE_MOM");
+        assert_eq!(commands[0].command_index, 0);
+        assert_eq!(commands[1].command, "askforphonenumber");
+        assert_eq!(commands[1].contact_id, "PHONE_JOEY");
+        assert_eq!(commands[1].command_index, 1);
     }
 
     #[test]
@@ -15279,6 +20992,8 @@ mod tests {
             let roll = session
                 .check_wild_encounter(
                     encounters,
+                    &data.encounter_slot_tables,
+                    &data.encounter_music_modifiers,
                     &mut rng,
                     EncounterCheckOptions {
                         time: TimeOfDay::Day,
@@ -15713,16 +21428,38 @@ mod tests {
             name: "Flash Step Charm".to_string(),
             description: "A modded item.".to_string(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 100,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
-            pocket: ItemPocket::Item,
+            pocket: item_pocket("ITEM"),
             field_menu: String::new(),
+            field_usable: true,
             battle_menu: String::new(),
+            battle_usable: true,
             script_name: String::new(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         };
         let manifest = ModpackManifest {
             payload: ModpackPayload {

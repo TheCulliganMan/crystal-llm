@@ -45,8 +45,6 @@ const GROWTH_RATE_VALUE_MAP: Record<string, number> = {
   [GrowthRate.GROWTH_MEDIUM_SLOW]: 3,
   [GrowthRate.GROWTH_FAST]: 4,
   [GrowthRate.GROWTH_SLOW]: 5,
-  [GrowthRate.GROWTH_ERRATIC]: 0, // Not in Gen 2
-  [GrowthRate.GROWTH_FLUCTUATING]: 0, // Not in Gen 2
 };
 
 const EGG_GROUP_VALUE_MAP: Record<string, number> = {

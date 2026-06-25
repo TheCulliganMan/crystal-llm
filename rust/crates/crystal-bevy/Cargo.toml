@@ -12,4 +12,5 @@ crystal-assets = { path = "../crystal-assets" }
 crystal-audio = { path = "../crystal-audio" }
 crystal-core = { path = "../crystal-core" }
 crystal-net = { path = "../crystal-net" }
+serde_json.workspace = true
 thiserror.workspace = true

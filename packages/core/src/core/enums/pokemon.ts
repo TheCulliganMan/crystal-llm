@@ -44,12 +44,10 @@ export const GrowthRate = {
     GROWTH_SLIGHTLY_SLOW: "GROWTH_SLIGHTLY_SLOW",
     GROWTH_MEDIUM_SLOW: "GROWTH_MEDIUM_SLOW",
     GROWTH_FAST: "GROWTH_FAST",
-    GROWTH_SLOW: "GROWTH_SLOW",
-    GROWTH_ERRATIC: "GROWTH_ERRATIC",
-    GROWTH_FLUCTUATING: "GROWTH_FLUCTUATING"
+    GROWTH_SLOW: "GROWTH_SLOW"
 } as const;
-export type GrowthRate = keyof typeof GrowthRate;
-export const GrowthRateSchema = z.nativeEnum(GrowthRate);
+export type GrowthRate = string;
+export const GrowthRateSchema = z.string().min(1);
 
 export const EggGroup = {
     EGG_NONE: "EGG_NONE",

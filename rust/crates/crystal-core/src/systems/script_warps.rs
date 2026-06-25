@@ -81,6 +81,37 @@ pub enum ScriptMapCommandError {
     UnexpectedMapSetup { command: String },
 }
 
+pub const SCRIPT_MAP_WARP_COMMANDS: &[&str] = &["warp"];
+pub const SCRIPT_MAP_FACING_WARP_COMMANDS: &[&str] = &["warpfacing"];
+pub const SCRIPT_MAP_WARP_CHECK_COMMANDS: &[&str] = &["warpcheck"];
+pub const SCRIPT_MAP_NEW_LOAD_COMMANDS: &[&str] = &["newloadmap"];
+pub const SCRIPT_MAP_RELOAD_COMMANDS: &[&str] =
+    &["reloadmap", "reloadmappart", "reloadmapafterbattle"];
+pub const SCRIPT_MAP_LOAD_COMMANDS: &[&str] = &[
+    "newloadmap",
+    "reloadmap",
+    "reloadmappart",
+    "reloadmapafterbattle",
+];
+pub const SCRIPT_MAP_SIMPLE_REFRESH_COMMANDS: &[&str] = &["refreshmap"];
+pub const SCRIPT_MAP_REANCHOR_COMMANDS: &[&str] = &["reanchormap"];
+pub const SCRIPT_MAP_REFRESH_COMMANDS: &[&str] = &["refreshmap", "reanchormap"];
+pub const SCRIPT_MAP_NO_PAYLOAD_COMMANDS: &[&str] = &[
+    "warpcheck",
+    "reloadmap",
+    "reloadmappart",
+    "reloadmapafterbattle",
+    "refreshmap",
+];
+
+pub fn is_known_script_map_command(command: &str) -> bool {
+    SCRIPT_MAP_WARP_COMMANDS.contains(&command)
+        || SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command)
+        || SCRIPT_MAP_WARP_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_MAP_LOAD_COMMANDS.contains(&command)
+        || SCRIPT_MAP_REFRESH_COMMANDS.contains(&command)
+}
+
 pub fn resolve_script_map_command(
     command: ScriptMapCommand,
     map_ids: &BTreeSet<String>,
@@ -411,6 +442,25 @@ mod tests {
             source_script: "WarpScript".to_string(),
             command_index: 4,
         }
+    }
+
+    #[test]
+    fn exported_map_command_sets_are_exact() {
+        assert!(SCRIPT_MAP_WARP_COMMANDS.contains(&"warp"));
+        assert!(SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&"warpfacing"));
+        assert!(SCRIPT_MAP_WARP_CHECK_COMMANDS.contains(&"warpcheck"));
+        assert!(SCRIPT_MAP_NEW_LOAD_COMMANDS.contains(&"newloadmap"));
+        assert!(SCRIPT_MAP_RELOAD_COMMANDS.contains(&"reloadmap"));
+        assert!(SCRIPT_MAP_LOAD_COMMANDS.contains(&"newloadmap"));
+        assert!(SCRIPT_MAP_LOAD_COMMANDS.contains(&"reloadmapafterbattle"));
+        assert!(SCRIPT_MAP_SIMPLE_REFRESH_COMMANDS.contains(&"refreshmap"));
+        assert!(SCRIPT_MAP_REANCHOR_COMMANDS.contains(&"reanchormap"));
+        assert!(SCRIPT_MAP_REFRESH_COMMANDS.contains(&"refreshmap"));
+        assert!(SCRIPT_MAP_REFRESH_COMMANDS.contains(&"reanchormap"));
+        assert!(SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&"reloadmappart"));
+        assert!(is_known_script_map_command("warpfacing"));
+        assert!(!is_known_script_map_command("Warp"));
+        assert!(!is_known_script_map_command("loadmap"));
     }
 
     #[test]

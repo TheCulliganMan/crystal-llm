@@ -1,30 +1,92 @@
-use crate::models::GrowthRate;
+use std::collections::BTreeMap;
 
-pub fn calculate_experience(growth_rate: GrowthRate, level: u8) -> i32 {
-    let n = level as i32;
-    match growth_rate {
-        GrowthRate::MediumFast => n * n * n,
-        GrowthRate::SlightlyFast => {
-            let n2 = n * n;
-            let n3 = n2 * n;
-            ((3 * n3) / 4) + (10 * n2) - 30
-        }
-        GrowthRate::SlightlySlow => {
-            let n2 = n * n;
-            let n3 = n2 * n;
-            ((3 * n3) / 4) + (20 * n2) - 70
-        }
-        GrowthRate::MediumSlow => {
-            let n2 = n * n;
-            let n3 = n2 * n;
-            ((6 * n3) / 5) - (15 * n2) + (100 * n) - 140
-        }
-        GrowthRate::Fast => (4 * n * n * n) / 5,
-        GrowthRate::Slow => (5 * n * n * n) / 4,
-        GrowthRate::Erratic | GrowthRate::Fluctuating => {
-            panic!("unsupported growth rate for Pokemon Crystal: {growth_rate:?}")
-        }
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrowthRateCurve {
+    pub id: String,
+    pub numerator: i32,
+    pub denominator: i32,
+    pub quadratic: i32,
+    pub linear: i32,
+    pub constant: i32,
+}
+
+pub type GrowthRateCatalog = BTreeMap<String, GrowthRateCurve>;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExperienceError {
+    #[error("missing growth-rate curve '{growth_rate}'")]
+    MissingGrowthRate { growth_rate: String },
+    #[error("growth-rate curve '{growth_rate}' has zero denominator")]
+    ZeroDenominator { growth_rate: String },
+    #[error("growth-rate curve '{growth_rate}' does not declare matching id '{declared_id}'")]
+    MismatchedGrowthRateId {
+        growth_rate: String,
+        declared_id: String,
+    },
+}
+
+pub fn calculate_experience(
+    catalog: &GrowthRateCatalog,
+    growth_rate: &str,
+    level: u8,
+) -> Result<i32, ExperienceError> {
+    let curve = catalog
+        .get(growth_rate)
+        .ok_or_else(|| ExperienceError::MissingGrowthRate {
+            growth_rate: growth_rate.to_string(),
+        })?;
+    if curve.id != growth_rate {
+        return Err(ExperienceError::MismatchedGrowthRateId {
+            growth_rate: growth_rate.to_string(),
+            declared_id: curve.id.clone(),
+        });
     }
+    if curve.denominator == 0 {
+        return Err(ExperienceError::ZeroDenominator {
+            growth_rate: growth_rate.to_string(),
+        });
+    }
+
+    let n = i32::from(level);
+    let n2 = n * n;
+    let n3 = n2 * n;
+    Ok(
+        ((curve.numerator * n3) / curve.denominator) + (curve.quadratic * n2) + (curve.linear * n)
+            - curve.constant,
+    )
+}
+
+#[cfg(test)]
+pub fn crystal_growth_rate_catalog_for_tests() -> GrowthRateCatalog {
+    [
+        ("GROWTH_MEDIUM_FAST", 1, 1, 0, 0, 0),
+        ("GROWTH_SLIGHTLY_FAST", 3, 4, 10, 0, 30),
+        ("GROWTH_SLIGHTLY_SLOW", 3, 4, 20, 0, 70),
+        ("GROWTH_MEDIUM_SLOW", 6, 5, -15, 100, 140),
+        ("GROWTH_FAST", 4, 5, 0, 0, 0),
+        ("GROWTH_SLOW", 5, 4, 0, 0, 0),
+    ]
+    .into_iter()
+    .map(
+        |(id, numerator, denominator, quadratic, linear, constant)| {
+            (
+                id.to_string(),
+                GrowthRateCurve {
+                    id: id.to_string(),
+                    numerator,
+                    denominator,
+                    quadratic,
+                    linear,
+                    constant,
+                },
+            )
+        },
+    )
+    .collect()
 }
 
 #[cfg(test)]
@@ -32,29 +94,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_typescript_experience_curve_cases() {
-        assert_eq!(calculate_experience(GrowthRate::MediumFast, 1), 1);
-        assert_eq!(calculate_experience(GrowthRate::MediumFast, 50), 125000);
-        assert_eq!(calculate_experience(GrowthRate::MediumFast, 100), 1000000);
+    fn matches_pokecrystal_growth_rate_table_cases() {
+        let catalog = crystal_growth_rate_catalog_for_tests();
 
-        assert_eq!(calculate_experience(GrowthRate::SlightlyFast, 1), -20);
-        assert_eq!(calculate_experience(GrowthRate::SlightlyFast, 50), 118720);
-        assert_eq!(calculate_experience(GrowthRate::SlightlyFast, 100), 849970);
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_MEDIUM_FAST", 1),
+            Ok(1)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_MEDIUM_FAST", 50),
+            Ok(125000)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_MEDIUM_FAST", 100),
+            Ok(1000000)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_SLIGHTLY_FAST", 50),
+            Ok(118720)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_SLIGHTLY_SLOW", 50),
+            Ok(143680)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_MEDIUM_SLOW", 50),
+            Ok(117360)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_FAST", 50),
+            Ok(100000)
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_SLOW", 50),
+            Ok(156250)
+        );
+    }
 
-        assert_eq!(calculate_experience(GrowthRate::SlightlySlow, 1), -50);
-        assert_eq!(calculate_experience(GrowthRate::SlightlySlow, 50), 143680);
-        assert_eq!(calculate_experience(GrowthRate::SlightlySlow, 100), 949930);
+    #[test]
+    fn rejects_missing_or_invalid_growth_rate_data_without_fallback() {
+        let catalog = crystal_growth_rate_catalog_for_tests();
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_CUSTOM", 5),
+            Err(ExperienceError::MissingGrowthRate {
+                growth_rate: "GROWTH_CUSTOM".to_string()
+            })
+        );
 
-        assert_eq!(calculate_experience(GrowthRate::MediumSlow, 1), -54);
-        assert_eq!(calculate_experience(GrowthRate::MediumSlow, 50), 117360);
-        assert_eq!(calculate_experience(GrowthRate::MediumSlow, 100), 1059860);
-
-        assert_eq!(calculate_experience(GrowthRate::Fast, 1), 0);
-        assert_eq!(calculate_experience(GrowthRate::Fast, 50), 100000);
-        assert_eq!(calculate_experience(GrowthRate::Fast, 100), 800000);
-
-        assert_eq!(calculate_experience(GrowthRate::Slow, 1), 1);
-        assert_eq!(calculate_experience(GrowthRate::Slow, 50), 156250);
-        assert_eq!(calculate_experience(GrowthRate::Slow, 100), 1250000);
+        let mut invalid = catalog;
+        invalid.insert(
+            "GROWTH_ZERO".to_string(),
+            GrowthRateCurve {
+                id: "GROWTH_ZERO".to_string(),
+                numerator: 1,
+                denominator: 0,
+                quadratic: 0,
+                linear: 0,
+                constant: 0,
+            },
+        );
+        assert_eq!(
+            calculate_experience(&invalid, "GROWTH_ZERO", 5),
+            Err(ExperienceError::ZeroDenominator {
+                growth_rate: "GROWTH_ZERO".to_string()
+            })
+        );
     }
 }

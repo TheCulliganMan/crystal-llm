@@ -50,6 +50,7 @@ export const applyTransformState = (attacker: Pokemon, defender: Pokemon): boole
   attacker.moves = defender.moves.map((move) => ({
     name: move.name,
     current_pp: move.name === MoveName.SKETCH ? 1 : 5,
+    pp_ups: 0,
   }));
   attacker.dvs = { ...defender.dvs };
   attacker.attack = defender.attack ?? 0;

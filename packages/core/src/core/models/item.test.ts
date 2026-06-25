@@ -1,144 +1,66 @@
-import { ItemSchema, normalizeItemEffectName } from './item';
-import { ItemEffect, ItemPocket } from '../enums';
+import { ItemSchema } from './item';
+import { ItemPocket } from '../enums';
 
-describe('Item', () => {
-    describe('normalizeItemEffectName', () => {
-        it('should not strip unicode alphanumeric characters', () => {
-            const result = normalizeItemEffectName('Pokéball');
-            expect(result).toContain('POKÉBALL');
-        });
+const itemFixture = (overrides: Partial<Record<string, unknown>> = {}) => ({
+  name: 'POTION',
+  script_name: 'POTION',
+  description: 'Restores HP.',
+  effect: 'RESTORE_HP',
+  status_heals: [],
+  revive_hp_percent: null,
+  party_revive_hp_percent: null,
+  pp_restore_scope: null,
+  pp_restore_points: null,
+  pp_up_stages: null,
+  vitamin_stat: null,
+  vitamin_stat_exp: null,
+  vitamin_max_stat_exp: null,
+  rare_candy_level_gain: null,
+  battle_stat_boost_stat: null,
+  battle_stat_boost_stages: null,
+  battle_escape_mode: null,
+  battle_focus_energy: null,
+  battle_stat_drop_guard: null,
+  battle_stat_drop_guard_turns: null,
+  confusion_heal: null,
+  repel_steps: null,
+  escape_rope_mode: null,
+  price: 300,
+  held_effect: 'HELD_NONE',
+  parameter: 20,
+  property: 'CANT_SELECT',
+  pocket: ItemPocket.ITEM,
+  field_menu: 'ITEMMENU_PARTY',
+  battle_menu: 'ITEMMENU_PARTY',
+  consumable: true,
+  tmhm_index: null,
+  tmhm_move: null,
+  ...overrides,
+});
 
-        it('should normalize readable names into enum keys', () => {
-            expect(normalizeItemEffectName('Status Healing')).toBe('STATUS_HEAL');
-            expect(normalizeItemEffectName('status heal')).toBe('STATUSHEAL');
-            expect(normalizeItemEffectName('statusHeal')).toBe('STATUS_HEAL');
-        });
+describe('ItemSchema', () => {
+  it('preserves definitive modpack item effect strings without enum validation', () => {
+    const item = ItemSchema.parse(itemFixture({ effect: 'MODDED_FIELD_EFFECT' }));
 
-        it('should normalize legacy or compact tokens', () => {
-            expect(normalizeItemEffectName('No Effect')).toBe('NONE');
-            expect(normalizeItemEffectName('NO_EFFECT')).toBe('NONE');
-            expect(normalizeItemEffectName('EnergyPowder')).toBe('ENERGY_POWDER');
-        });
-    });
+    expect(item.effect).toBe('MODDED_FIELD_EFFECT');
+  });
 
-    describe('ItemSchema', () => {
-        it('should derive script_name from spaced names', () => {
-            const item = ItemSchema.parse({
-                name: 'X SPECIAL'
-            });
-            expect(item.script_name).toBe('X_SPECIAL');
-        });
+  it('requires the exporter-provided script_name instead of deriving it from display name', () => {
+    expect(() => ItemSchema.parse(itemFixture({ script_name: undefined }))).toThrow(/script_name/);
+  });
 
-        it('should preserve scripted item names for HM and TM style items', () => {
-            const hm = ItemSchema.parse({
-                name: 'HM01'
-            });
-            expect(hm.script_name).toBe('HM01');
+  it('requires an explicit item effect instead of defaulting to NONE', () => {
+    expect(() => ItemSchema.parse(itemFixture({ effect: undefined }))).toThrow(/effect/);
+    expect(() => ItemSchema.parse(itemFixture({ effect: null }))).toThrow(/effect/);
+  });
 
-            const tm = ItemSchema.parse({
-                name: 'TM01'
-            });
-            expect(tm.script_name).toBe('TM01');
-        });
+  it('preserves effect spelling exactly instead of normalizing legacy aliases', () => {
+    const item = ItemSchema.parse(itemFixture({ effect: 'statusHeal' }));
 
-        it('should apply defaults for omitted optional metadata fields', () => {
-            const item = ItemSchema.parse({
-                name: 'Test Item'
-            });
-            expect(item.description).toBe('');
-            expect(item.effect).toBe(ItemEffect.NONE);
-            expect(item.price).toBe(0);
-            expect(item.held_effect).toBe('HELD_NONE');
-            expect(item.parameter).toBe(0);
-            expect(item.property).toBe('');
-            expect(item.pocket).toBe(ItemPocket.ITEM);
-            expect(item.field_menu).toBe('');
-            expect(item.battle_menu).toBe('');
-            expect(item.script_name).toBe('TEST_ITEM');
-        });
+    expect(item.effect).toBe('statusHeal');
+  });
 
-        it('should preserve held_effect, field_menu, and battle_menu', () => {
-            const item = ItemSchema.parse({
-                name: 'Quick Claw',
-                held_effect: 'HELD_QUICK_CLAW',
-                field_menu: 'ITEMMENU_PARTY',
-                battle_menu: 'BATTLEMENU_ITEM'
-            });
-            expect(item.held_effect).toBe('HELD_QUICK_CLAW');
-            expect(item.field_menu).toBe('ITEMMENU_PARTY');
-            expect(item.battle_menu).toBe('BATTLEMENU_ITEM');
-        });
-
-        it('should avoid silently accepting legacy param keys as parser defaults', () => {
-            const item = ItemSchema.parse({
-                name: 'POTION',
-                effect: ItemEffect.RESTORE_HP,
-                param: 20
-            });
-            expect(item.parameter).toBe(0);
-        });
-    });
-
-    describe('resolveItemEffect', () => {
-        it('should resolve valid string to ItemEffect', () => {
-            const item = ItemSchema.parse({
-                name: 'Test Item',
-                effect: 'STATUS_HEAL'
-            });
-            expect(item.effect).toBe(ItemEffect.STATUS_HEAL);
-        });
-
-        it('should resolve valid number to ItemEffect', () => {
-            const item = ItemSchema.parse({
-                name: 'Test Item',
-                effect: ItemEffect.STATUS_HEAL
-            });
-            expect(item.effect).toBe(ItemEffect.STATUS_HEAL);
-        });
-
-        it('should normalize and resolve a string to ItemEffect', () => {
-            const item = ItemSchema.parse({
-                name: 'Test Item',
-                effect: 'statusHeal'
-            });
-            expect(item.effect).toBe(ItemEffect.STATUS_HEAL);
-        });
-
-        it('should throw an error for an unknown item effect', () => {
-            expect(() => {
-                ItemSchema.parse({
-                    name: 'Test Item',
-                    effect: 'UNKNOWN_EFFECT'
-                });
-            }).toThrow('Unknown item effect: UNKNOWN_EFFECT');
-        });
-
-        it('should handle null and undefined by defaulting to NONE', () => {
-            const itemNull = ItemSchema.parse({
-                name: 'Test Item',
-                effect: null
-            });
-            expect(itemNull.effect).toBe(ItemEffect.NONE);
-
-            const itemUndefined = ItemSchema.parse({
-                name: 'Test Item',
-                effect: undefined
-            });
-            expect(itemUndefined.effect).toBe(ItemEffect.NONE);
-        });
-
-        it('should default empty strings and blank text to NONE', () => {
-            const itemEmpty = ItemSchema.parse({
-                name: 'Test Item',
-                effect: ''
-            });
-            expect(itemEmpty.effect).toBe(ItemEffect.NONE);
-
-            const itemSpaces = ItemSchema.parse({
-                name: 'Test Item',
-                effect: '   '
-            });
-            expect(itemSpaces.effect).toBe(ItemEffect.NONE);
-        });
-    });
+  it('rejects legacy param keys instead of stripping them', () => {
+    expect(() => ItemSchema.parse(itemFixture({ param: 20 }))).toThrow(/param/);
+  });
 });

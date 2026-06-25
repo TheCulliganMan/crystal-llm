@@ -68,6 +68,7 @@ export function createPokemon(
     (move) => ({
       name: move,
       current_pp: ppMap.get(move) ?? 0,
+      pp_ups: 0,
     })
   );
 

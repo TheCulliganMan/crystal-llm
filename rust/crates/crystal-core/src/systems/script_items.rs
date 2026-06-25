@@ -156,23 +156,45 @@ pub fn take_script_item(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ItemPocket, MAX_ITEM_STACK};
+    use crate::models::{ItemPocket, MAX_ITEM_STACK, item_pocket};
 
     fn item(id: &str, pocket: ItemPocket) -> Item {
         Item {
             name: id.replace('_', " "),
             description: String::new(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
             pocket,
             field_menu: String::new(),
+            field_usable: true,
             battle_menu: String::new(),
+            battle_usable: true,
             script_name: id.to_string(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         }
     }
 
@@ -204,7 +226,7 @@ mod tests {
     #[test]
     fn grants_exact_script_item_id() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("POTION", ItemPocket::Item)]);
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
 
         let outcome =
             grant_script_item(&mut state, &items, grant("POTION", 1)).expect("grant item");
@@ -225,7 +247,7 @@ mod tests {
     #[test]
     fn rejects_case_changed_item_id_without_mutating_bag() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("TM_MUD_SLAP", ItemPocket::TmHm)]);
+        let items = catalog(vec![item("TM_MUD_SLAP", item_pocket("TM_HM"))]);
 
         let error = grant_script_item(&mut state, &items, grant("tm_mud_slap", 1))
             .expect_err("case changed id is unknown");
@@ -242,7 +264,7 @@ mod tests {
     #[test]
     fn rejects_zero_quantity_without_mutating_bag() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("POTION", ItemPocket::Item)]);
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
 
         let error = grant_script_item(&mut state, &items, grant("POTION", 0))
             .expect_err("zero quantity is invalid");
@@ -254,7 +276,7 @@ mod tests {
     #[test]
     fn reports_bag_full_without_overfilling_stack() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("POTION", ItemPocket::Item)]);
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
         state.bag.items.insert("POTION".to_string(), MAX_ITEM_STACK);
 
         let outcome =
@@ -275,7 +297,7 @@ mod tests {
 
     #[test]
     fn grants_symbolic_tm_when_pack_declares_explicit_tmhm_index() {
-        let mut tm = item("TM_MUD_SLAP", ItemPocket::TmHm);
+        let mut tm = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         tm.tmhm_index = Some(30);
         let items = catalog(vec![tm]);
         let mut state = GameState::default();
@@ -299,7 +321,7 @@ mod tests {
     #[test]
     fn checks_exact_item_without_case_coercion() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("PASS", ItemPocket::KeyItem)]);
+        let items = catalog(vec![item("PASS", item_pocket("KEY_ITEM"))]);
         state.bag.add_item(&items["PASS"], 1).expect("add pass");
 
         let held = check_script_item(&state, &items, access("PASS")).expect("check exact item");
@@ -326,7 +348,7 @@ mod tests {
     #[test]
     fn takes_one_exact_item_without_removing_unknown_or_missing_items() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("BERRY", ItemPocket::Item)]);
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
         state.bag.add_item(&items["BERRY"], 2).expect("add berries");
 
         let first = take_script_item(&mut state, &items, access("BERRY")).expect("take berry");
@@ -341,7 +363,7 @@ mod tests {
 
     #[test]
     fn takes_symbolic_tm_only_when_pack_declares_tmhm_index() {
-        let mut tm = item("TM_MUD_SLAP", ItemPocket::TmHm);
+        let mut tm = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         tm.tmhm_index = Some(30);
         let items = catalog(vec![tm]);
         let mut state = GameState::default();

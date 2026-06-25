@@ -1,7 +1,13 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { exportMapAttributes, parseMapConstants, parseMapDefinitions, parseMapPhoneFlag } from "./export-map-attributes";
+import {
+  exportMapAttributes,
+  parseMapConstants,
+  parseMapDefinitions,
+  parseMapPhoneFlag,
+  resolveMapMusicAssetId,
+} from "./export-map-attributes";
 
 let mockDisassemblyRoot = "/mock/pokecrystal";
 let mockAssetsRoot = "/mock/assets";
@@ -24,6 +30,24 @@ describe("parseMapPhoneFlag", () => {
 
     expect(() => parseMapPhoneFlag("true")).toThrow("Unknown map phone flag token 'true'");
     expect(() => parseMapPhoneFlag("False")).toThrow("Unknown map phone flag token 'False'");
+  });
+});
+
+describe("resolveMapMusicAssetId", () => {
+  it("exports Crystal map-music selector encodings as concrete music asset ids", () => {
+    expect(resolveMapMusicAssetId("RADIO_TOWER_MUSIC | MUSIC_GOLDENROD_CITY", "RadioTower1F")).toBe(
+      "MUSIC_GOLDENROD_CITY"
+    );
+    expect(resolveMapMusicAssetId("MUSIC_MAHOGANY_MART", "MahoganyMart1F")).toBe("MUSIC_CHERRYGROVE_CITY");
+  });
+
+  it("rejects unsupported expressions instead of leaking them into the modpack", () => {
+    expect(() => resolveMapMusicAssetId("RADIO_TOWER_MUSIC | music_goldenrod_city", "RadioTower1F")).toThrow(
+      "Unsupported map music token"
+    );
+    expect(() => resolveMapMusicAssetId("MUSIC_ROUTE_29 | MUSIC_ROUTE_30", "Route29")).toThrow(
+      "Unsupported map music token"
+    );
   });
 });
 

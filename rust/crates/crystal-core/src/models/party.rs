@@ -43,7 +43,7 @@ impl Party {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::pokemon::{BaseStats, Dv, GrowthRate, PokemonSpecies};
+    use crate::models::pokemon::{BaseStats, Dv, PokemonSpecies, growth_rate};
 
     fn pokemon(id: &str) -> Pokemon {
         Pokemon::new_for_tests(
@@ -81,6 +81,6 @@ mod tests {
     #[test]
     fn test_fixture_uses_growth_rate_default() {
         let mon = pokemon("CYNDAQUIL");
-        assert_eq!(mon.species.growth_rate, GrowthRate::MediumSlow);
+        assert_eq!(mon.species.growth_rate, growth_rate("GROWTH_MEDIUM_SLOW"));
     }
 }

@@ -12,14 +12,14 @@ export type BattleSkillCoverageStatus =
 
 export interface BattleSkillAuditEntry {
   move_name: MoveName;
-  effect: MoveEffect;
+  effect: string;
   animation_label: string | null;
   status: BattleSkillCoverageStatus;
   mechanic_owner: 'move-effects' | 'move-execution' | 'shared-system' | 'incomplete';
   notes: string[];
 }
 
-const SHARED_EXECUTION_EFFECTS = new Set<MoveEffect>([
+const SHARED_EXECUTION_EFFECTS = new Set<string>([
   MoveEffect.ALWAYS_HIT,
   MoveEffect.COUNTER,
   MoveEffect.FALSE_SWIPE,
@@ -40,7 +40,7 @@ const SHARED_EXECUTION_EFFECTS = new Set<MoveEffect>([
   MoveEffect.THUNDER,
 ]);
 
-const KNOWN_INCOMPLETE_EFFECTS = new Set<MoveEffect>([
+const KNOWN_INCOMPLETE_EFFECTS = new Set<string>([
   MoveEffect.BATON_PASS,
   MoveEffect.BEAT_UP,
   MoveEffect.CONVERSION,
@@ -74,7 +74,7 @@ const KNOWN_INCOMPLETE_EFFECTS = new Set<MoveEffect>([
   MoveEffect.TWISTER,
 ]);
 
-const DIRECT_MOVE_EFFECTS = new Set<MoveEffect>(
+const DIRECT_MOVE_EFFECTS = new Set<string>(
   Object.values(MoveEffect).filter(
     (effect) =>
       !SHARED_EXECUTION_EFFECTS.has(effect) &&

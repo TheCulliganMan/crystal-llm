@@ -47,7 +47,7 @@ describe("parseBaseStats", () => {
     jest.restoreAllMocks();
   });
 
-  const baseStats = (type1 = "WATER"): string => [
+  const baseStats = (type1 = "WATER", eggGroup1 = "EGG_MONSTER"): string => [
     "\tdb TOTODILE ; species",
     "\tdb 50, 65, 64, 43, 44, 48",
     `\tdb ${type1}, WATER ; type`,
@@ -57,7 +57,7 @@ describe("parseBaseStats", () => {
     "\tdb GENDER_F50 ; gender ratio",
     "\tdb 20 ; step cycles to hatch",
     "\tdb GROWTH_MEDIUM_SLOW ; growth rate",
-    "\tdn EGG_MONSTER, EGG_WATER_1",
+    `\tdn ${eggGroup1}, EGG_WATER_1`,
     "\ttmhm SURF, CUT",
   ].join("\n");
 
@@ -73,12 +73,22 @@ describe("parseBaseStats", () => {
     expect(species).not.toHaveProperty("evolutions");
   });
 
-  it("throws on unknown enum tokens instead of defaulting species fields", () => {
+  it("exports Pokemon type ids as definitive modpack strings without enum fallback", () => {
     jest.spyOn(fs, "readFileSync").mockReturnValue(baseStats("GLITCH") as never);
 
-    expect(() => parseBaseStats("/mock/totodile.asm", { TOTODILE: 158 }, 210)).toThrow(
-      "Unknown Pokemon type GLITCH in /mock/totodile.asm"
-    );
+    const species = parseBaseStats("/mock/totodile.asm", { TOTODILE: 158 }, 210);
+
+    expect(species.type1).toBe("GLITCH");
+    expect(species.type2).toBe("WATER");
+  });
+
+  it("exports egg group ids as definitive modpack strings without enum fallback", () => {
+    jest.spyOn(fs, "readFileSync").mockReturnValue(baseStats("WATER", "EGG_CRYSTAL") as never);
+
+    const species = parseBaseStats("/mock/totodile.asm", { TOTODILE: 158 }, 210);
+
+    expect(species.egg_group1).toBe("EGG_CRYSTAL");
+    expect(species.egg_group2).toBe("EGG_WATER_1");
   });
 
   it("throws when a parsed species is missing its numeric id", () => {

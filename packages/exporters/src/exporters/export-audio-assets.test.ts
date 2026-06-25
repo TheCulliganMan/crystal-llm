@@ -28,6 +28,11 @@ describe("export-audio-assets", () => {
     expect(assets).toEqual(
       expect.arrayContaining([
         {
+          id: "MUSIC_NONE",
+          path: "content-packs/core-modular/music/MUSIC_NONE.mid",
+          kind: "music",
+        },
+        {
           id: "MUSIC_ROUTE_29",
           path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
           kind: "music",

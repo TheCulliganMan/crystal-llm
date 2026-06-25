@@ -78,7 +78,7 @@ export const buildLevelQueue = (pokemon: Pokemon, targetExp: number): LevelUpInf
   for (const [level, moveName] of learnset) {
     const moveData = moveMetadata.get(moveName);
     const pp = moveData ? moveData.pp : 0;
-    const learned: LearnedMove = { name: moveName, current_pp: pp };
+    const learned: LearnedMove = { name: moveName, current_pp: pp, pp_ups: 0 };
     if (!learnMap.has(level)) {
       learnMap.set(level, []);
     }

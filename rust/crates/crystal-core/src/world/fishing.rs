@@ -7,24 +7,19 @@ use crate::map::MapAttributes;
 use crate::state::{FishingRodState, GameState};
 use crate::world::encounters::{TimeOfDay, WildEncounter};
 
-const FISH_SWARM_FLAG_BIT: u8 = 1 << 2;
-const SWARM_QWILFISH: u8 = 1;
-const SWARM_REMORAID: u8 = 2;
-
 pub const ROD_OLD: &str = "OLD_ROD";
 pub const ROD_GOOD: &str = "GOOD_ROD";
 pub const ROD_SUPER: &str = "SUPER_ROD";
+pub const FISHING_RODS: &[&str] = &[ROD_OLD, ROD_GOOD, ROD_SUPER];
 pub const FISHGROUP_NONE: &str = "FISHGROUP_NONE";
-pub const FISHGROUP_QWILFISH: &str = "FISHGROUP_QWILFISH";
-pub const FISHGROUP_REMORAID: &str = "FISHGROUP_REMORAID";
-pub const FISHGROUP_QWILFISH_SWARM: &str = "FISHGROUP_QWILFISH_SWARM";
-pub const FISHGROUP_REMORAID_SWARM: &str = "FISHGROUP_REMORAID_SWARM";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FishingCatalog {
     pub groups: BTreeMap<String, FishingGroup>,
     pub time_groups: Vec<TimeFishEntry>,
+    pub swarm_rules: Vec<FishingSwarmRule>,
+    pub rod_items: Vec<FishingRodItemRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +51,22 @@ pub struct TimeFishEntry {
     pub day_level: u8,
     pub night_species: String,
     pub night_level: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FishingSwarmRule {
+    pub daily_flag_bit: u8,
+    pub swarm: u8,
+    pub base_group: String,
+    pub swarm_group: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FishingRodItemRule {
+    pub item_id: String,
+    pub rod: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +110,8 @@ pub enum FishingError {
         rod: String,
         slot_roll: u8,
     },
+    #[error("item id '{item_id}' is not a fishing rod item")]
+    UnknownRodItemId { item_id: String },
 }
 
 pub fn percent_to_byte(percent: u8) -> u8 {
@@ -114,20 +127,29 @@ pub fn threshold(percent: u8, add_one: bool) -> u8 {
     }
 }
 
-pub fn resolve_group_token(group: Option<&str>, state: Option<&GameState>) -> Option<String> {
+pub fn resolve_group_token(
+    group: Option<&str>,
+    state: Option<&GameState>,
+    catalog: Option<&FishingCatalog>,
+) -> Option<String> {
     let group = group?;
     if group.is_empty() || group == FISHGROUP_NONE {
         return None;
     }
-    let Some(state) = state else {
+    let (Some(state), Some(catalog)) = (state, catalog) else {
         return Some(group.to_string());
     };
-    let swarm_active = state.fishing.daily_flags1 & FISH_SWARM_FLAG_BIT != 0;
-    if swarm_active && group == FISHGROUP_QWILFISH && state.fishing.swarm_flag == SWARM_QWILFISH {
-        return Some(FISHGROUP_QWILFISH_SWARM.to_string());
-    }
-    if swarm_active && group == FISHGROUP_REMORAID && state.fishing.swarm_flag == SWARM_REMORAID {
-        return Some(FISHGROUP_REMORAID_SWARM.to_string());
+    for rule in &catalog.swarm_rules {
+        if rule.daily_flag_bit >= u8::BITS as u8 {
+            continue;
+        }
+        let flag_mask = 1u8 << rule.daily_flag_bit;
+        if state.fishing.daily_flags1 & flag_mask != 0
+            && state.fishing.swarm_flag == rule.swarm
+            && group == rule.base_group
+        {
+            return Some(rule.swarm_group.clone());
+        }
     }
     Some(group.to_string())
 }
@@ -136,9 +158,10 @@ pub fn resolve_group_for_map(
     attributes: &BTreeMap<String, MapAttributes>,
     map_name: &str,
     state: Option<&GameState>,
+    catalog: Option<&FishingCatalog>,
 ) -> Option<String> {
     let group = attributes.get(map_name)?.fishing_group.as_deref();
-    resolve_group_token(group, state)
+    resolve_group_token(group, state, catalog)
 }
 
 pub fn roll_fishing_encounter(
@@ -151,7 +174,7 @@ pub fn roll_fishing_encounter(
     slot_roll: u8,
 ) -> Result<FishingOutcome, FishingError> {
     validate_rod(rod)?;
-    let Some(group_name) = resolve_group_token(group, Some(state)) else {
+    let Some(group_name) = resolve_group_token(group, Some(state), Some(catalog)) else {
         return Ok(FishingOutcome {
             bite: false,
             encounter: None,
@@ -245,6 +268,21 @@ pub fn do_fishing(
     Ok(session)
 }
 
+pub fn fishing_rod_for_item_id<'a>(
+    catalog: &'a FishingCatalog,
+    item_id: &str,
+) -> Result<&'a str, FishingError> {
+    let rule = catalog
+        .rod_items
+        .iter()
+        .find(|rule| rule.item_id == item_id)
+        .ok_or_else(|| FishingError::UnknownRodItemId {
+            item_id: item_id.to_string(),
+        })?;
+    validate_rod(&rule.rod)?;
+    Ok(rule.rod.as_str())
+}
+
 pub fn fishing_bite(
     state: &mut GameState,
     session: &mut FishingSession,
@@ -295,7 +333,11 @@ fn resolve_time_group(
     }
 }
 
-fn validate_rod(rod: &str) -> Result<(), FishingError> {
+pub fn is_known_fishing_rod(rod: &str) -> bool {
+    FISHING_RODS.contains(&rod)
+}
+
+pub fn validate_rod(rod: &str) -> Result<(), FishingError> {
     rod_index(rod).map(|_| ())
 }
 
@@ -351,7 +393,33 @@ mod tests {
                 night_species: "STARYU".to_string(),
                 night_level: 20,
             }],
+            swarm_rules: vec![FishingSwarmRule {
+                daily_flag_bit: 2,
+                swarm: 1,
+                base_group: "FISHGROUP_QWILFISH".to_string(),
+                swarm_group: "FISHGROUP_QWILFISH_SWARM".to_string(),
+            }],
+            rod_items: vec![FishingRodItemRule {
+                item_id: "MOD_GOOD_ROD_ITEM".to_string(),
+                rod: ROD_GOOD.to_string(),
+            }],
         }
+    }
+
+    #[test]
+    fn exported_fishing_rod_set_is_exact() {
+        assert_eq!(FISHING_RODS, &[ROD_OLD, ROD_GOOD, ROD_SUPER]);
+        assert!(is_known_fishing_rod(ROD_OLD));
+        assert!(is_known_fishing_rod(ROD_GOOD));
+        assert!(is_known_fishing_rod(ROD_SUPER));
+        assert!(!is_known_fishing_rod("old_rod"));
+        assert!(!is_known_fishing_rod("GREAT_ROD"));
+        assert_eq!(
+            validate_rod("old_rod"),
+            Err(FishingError::UnknownRod {
+                rod: "old_rod".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -450,7 +518,9 @@ mod tests {
                   }
                 }
               },
-              "time_groups":[]
+              "time_groups":[],
+              "swarm_rules":[],
+              "rod_items":[]
             }"#,
         )
         .expect_err("fishing slots must not accept fallback species")
@@ -487,15 +557,16 @@ mod tests {
     #[test]
     fn swarm_flags_remap_exact_base_groups() {
         let mut state = GameState::default();
-        state.fishing.daily_flags1 = FISH_SWARM_FLAG_BIT;
-        state.fishing.swarm_flag = SWARM_QWILFISH;
+        state.fishing.daily_flags1 = 1 << 2;
+        state.fishing.swarm_flag = 1;
+        let catalog = catalog();
 
         assert_eq!(
-            resolve_group_token(Some(FISHGROUP_QWILFISH), Some(&state)),
-            Some(FISHGROUP_QWILFISH_SWARM.to_string())
+            resolve_group_token(Some("FISHGROUP_QWILFISH"), Some(&state), Some(&catalog)),
+            Some("FISHGROUP_QWILFISH_SWARM".to_string())
         );
         assert_eq!(
-            resolve_group_token(Some("fishgroup_qwilfish"), Some(&state)),
+            resolve_group_token(Some("fishgroup_qwilfish"), Some(&state), Some(&catalog)),
             Some("fishgroup_qwilfish".to_string())
         );
     }
@@ -527,5 +598,22 @@ mod tests {
         fishing_battle_trigger(&mut state);
         assert_eq!(state.fishing.rod_state, FishingRodState::Battle);
         assert_eq!(state.fishing.bites_remaining, 0);
+    }
+
+    #[test]
+    fn fishing_rod_items_are_resolved_from_exact_pack_rules() {
+        let catalog = catalog();
+
+        assert_eq!(
+            fishing_rod_for_item_id(&catalog, "MOD_GOOD_ROD_ITEM").expect("mod rod rule"),
+            ROD_GOOD
+        );
+        assert_eq!(
+            fishing_rod_for_item_id(&catalog, "GOOD_ROD")
+                .expect_err("canonical item id is not inferred"),
+            FishingError::UnknownRodItemId {
+                item_id: "GOOD_ROD".to_string(),
+            }
+        );
     }
 }

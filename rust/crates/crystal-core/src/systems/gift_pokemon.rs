@@ -6,6 +6,7 @@ use crate::models::{
     CaptureStorageLocation, Dv, Item, Move, Pokemon, PokemonBuildError, PokemonSpecies,
     PokemonStorage, create_pokemon_from_known_dvs,
 };
+use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
 
 pub const NO_ITEM: &str = "NO_ITEM";
@@ -65,6 +66,7 @@ pub fn give_gift_pokemon(
     species: &BTreeMap<String, PokemonSpecies>,
     learnsets: &SpeciesLearnsets,
     moves: &BTreeMap<String, Move>,
+    growth_rates: &GrowthRateCatalog,
     items: &BTreeMap<String, Item>,
     request: GiftPokemonRequest,
 ) -> Result<GiftPokemonOutcome, GiftPokemonError> {
@@ -87,9 +89,15 @@ pub fn give_gift_pokemon(
         });
     }
 
-    let mut pokemon =
-        create_pokemon_from_known_dvs(species_data, request.level, request.dvs, learnsets, moves)
-            .map_err(|error| GiftPokemonError::PokemonBuild { error })?;
+    let mut pokemon = create_pokemon_from_known_dvs(
+        species_data,
+        request.level,
+        request.dvs,
+        learnsets,
+        moves,
+        growth_rates,
+    )
+    .map_err(|error| GiftPokemonError::PokemonBuild { error })?;
     pokemon.original_trainer_name = request.original_trainer_name.clone();
     pokemon.original_trainer_id = request.original_trainer_id;
     pokemon.item = request.held_item_id.clone();
@@ -128,15 +136,20 @@ pub fn give_gift_pokemon(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, GrowthRate, ItemPocket, PokemonType};
+    use crate::models::{BaseStats, growth_rate, item_pocket, pokemon_type};
+    use crate::systems::experience::{GrowthRateCatalog, crystal_growth_rate_catalog_for_tests};
+
+    fn growth_rates() -> GrowthRateCatalog {
+        crystal_growth_rate_catalog_for_tests()
+    }
 
     fn species(id: &str) -> PokemonSpecies {
         PokemonSpecies {
             id: id.to_string(),
             int_id: 1,
             base_stats: BaseStats::new(45, 49, 65, 45, 49, 65),
-            type1: PokemonType::Grass,
-            type2: PokemonType::Grass,
+            type1: pokemon_type("GRASS"),
+            type2: pokemon_type("GRASS"),
             catch_rate: 45,
             base_exp: 64,
             item1: None,
@@ -144,11 +157,11 @@ mod tests {
             gender_ratio: 127,
             unknown1: 0,
             unknown2: 0,
-            growth_rate: GrowthRate::MediumSlow,
-            egg_group1: crate::models::EggGroup::Monster,
-            egg_group2: crate::models::EggGroup::Monster,
+            growth_rate: growth_rate("GROWTH_MEDIUM_SLOW"),
+            egg_group1: crate::models::egg_group("EGG_MONSTER"),
+            egg_group2: crate::models::egg_group("EGG_MONSTER"),
             tmhm_learnset: Vec::new(),
-            ability: crate::models::Ability::None,
+            ability: crate::models::ability("NONE"),
             pic_size: 0,
             front_pic: 0,
             back_pic: 0,
@@ -162,16 +175,38 @@ mod tests {
             name: id.to_string(),
             description: String::new(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
-            pocket: ItemPocket::Item,
+            pocket: item_pocket("ITEM"),
             field_menu: String::new(),
+            field_usable: true,
             battle_menu: String::new(),
+            battle_usable: true,
             script_name: id.to_string(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         }
     }
 
@@ -207,6 +242,7 @@ mod tests {
             &species_map,
             &learnsets("CYNDAQUIL"),
             &BTreeMap::new(),
+            &growth_rates(),
             &items,
             request,
         )
@@ -233,6 +269,7 @@ mod tests {
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
+                &growth_rates(),
                 &items,
                 bad_species,
             ),
@@ -246,6 +283,7 @@ mod tests {
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
+                &growth_rates(),
                 &items,
                 bad_item,
             ),
@@ -267,6 +305,7 @@ mod tests {
             &species_map,
             &learnsets("TOGEPI"),
             &BTreeMap::new(),
+            &growth_rates(),
             &BTreeMap::new(),
             request,
         )
@@ -297,6 +336,7 @@ mod tests {
                 &species_map,
                 &learnsets,
                 &BTreeMap::new(),
+                &growth_rates(),
                 &BTreeMap::new(),
                 request("CYNDAQUIL", 5),
             ),

@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::map::MapSceneTable;
 use crate::models::{Bag, PokedexState, Pokemon, PokemonStorage};
+use crate::systems::step_events::StepEventCounters;
+use crate::systems::time::TimeState;
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
@@ -12,6 +14,8 @@ use crate::world::session::OverworldSnapshot;
 #[serde(deny_unknown_fields)]
 pub struct GameState {
     pub options: Options,
+    pub player_name: String,
+    pub player_id: u16,
     pub party: PartyState,
     pub storage: PokemonStorage,
     pub bag: Bag,
@@ -23,9 +27,43 @@ pub struct GameState {
     pub badges: Badges,
     pub overworld: OverworldMemory,
     pub battle: BattleMemory,
+    pub battle_result: u8,
+    pub battle_active_party_index: Option<usize>,
+    pub battle_active_enemy_party_index: Option<usize>,
+    pub battle_rewarded_enemy_party_indices: BTreeSet<usize>,
+    pub battle_escape_attempts: u8,
+    pub battle_player_stat_drop_guard_turns: u8,
+    pub repel_steps_remaining: u16,
+    pub active_repel_item: Option<String>,
+    pub dig_warp_map_name: Option<String>,
+    pub dig_warp_index: Option<u16>,
+    pub last_spawn_identifier: Option<u16>,
+    pub kenji_break_timer: u8,
+    pub player_palette_id: u8,
     pub map_block_overrides: BTreeMap<String, BTreeMap<(u16, u16), u16>>,
+    pub map_object_overrides: BTreeMap<String, OverworldObjectMapMemory>,
     pub joypad: JoypadMemory,
     pub fishing: FishingMemory,
+    pub step_events: StepEventCounters,
+    pub time: TimeState,
+    pub lucky_number_show_flag: bool,
+    pub lucky_number_day: Option<u8>,
+    pub lucky_id_number: u16,
+    pub current_pc_box: usize,
+    pub roaming_pokemon: Vec<RoamingPokemonState>,
+    pub mystery_gift_unlocked: bool,
+    pub mystery_gift: MysteryGiftState,
+    pub blue_card_balance: u8,
+    pub buenas_password: BuenasPasswordState,
+    pub pending_special_battle_type: Option<String>,
+    pub magikarp_record: MagikarpRecordState,
+    pub day_care: DayCareState,
+    pub bug_contest: BugContestState,
+    pub link_session: LinkSessionState,
+    pub battle_tower: BattleTowerState,
+    pub mobile_link: MobileLinkState,
+    pub gs_healings: u16,
+    pub trainer_rankings_healings: u16,
     pub scenes: SceneMemory,
     pub flags: EventFlagMemory,
     pub script_runtime: ScriptRuntimeMemory,
@@ -38,6 +76,8 @@ impl Default for GameState {
     fn default() -> Self {
         Self {
             options: Options::default(),
+            player_name: String::new(),
+            player_id: 0,
             party: PartyState::default(),
             storage: PokemonStorage::default(),
             bag: Bag::default(),
@@ -49,9 +89,43 @@ impl Default for GameState {
             badges: Badges::default(),
             overworld: OverworldMemory::default(),
             battle: BattleMemory::default(),
+            battle_result: 0,
+            battle_active_party_index: None,
+            battle_active_enemy_party_index: None,
+            battle_rewarded_enemy_party_indices: BTreeSet::new(),
+            battle_escape_attempts: 0,
+            battle_player_stat_drop_guard_turns: 0,
+            repel_steps_remaining: 0,
+            active_repel_item: None,
+            dig_warp_map_name: None,
+            dig_warp_index: None,
+            last_spawn_identifier: None,
+            kenji_break_timer: 0,
+            player_palette_id: 0,
             map_block_overrides: BTreeMap::new(),
+            map_object_overrides: BTreeMap::new(),
             joypad: JoypadMemory::default(),
             fishing: FishingMemory::default(),
+            step_events: StepEventCounters::default(),
+            time: TimeState::default(),
+            lucky_number_show_flag: false,
+            lucky_number_day: None,
+            lucky_id_number: 0,
+            current_pc_box: 0,
+            roaming_pokemon: Vec::new(),
+            mystery_gift_unlocked: false,
+            mystery_gift: MysteryGiftState::default(),
+            blue_card_balance: 0,
+            buenas_password: BuenasPasswordState::default(),
+            pending_special_battle_type: None,
+            magikarp_record: MagikarpRecordState::default(),
+            day_care: DayCareState::default(),
+            bug_contest: BugContestState::default(),
+            link_session: LinkSessionState::default(),
+            battle_tower: BattleTowerState::default(),
+            mobile_link: MobileLinkState::default(),
+            gs_healings: 0,
+            trainer_rankings_healings: 0,
             scenes: SceneMemory::default(),
             flags: EventFlagMemory::default(),
             script_runtime: ScriptRuntimeMemory::default(),
@@ -60,6 +134,218 @@ impl Default for GameState {
             has_seen_intro: false,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkSessionState {
+    pub link_mode: u8,
+    pub player_link_action: u8,
+    pub chosen_cable_club_room: u8,
+    pub other_player_link_mode: u8,
+    pub serial_connection_status: LinkSerialConnectionStatus,
+    pub friend_ready: bool,
+    pub last_result: bool,
+    pub failed_link_to_past: bool,
+    pub quick_save_requested: bool,
+    pub active_room: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkSerialConnectionStatus {
+    #[default]
+    NotEstablished,
+    UsingExternalClock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BattleTowerState {
+    pub challenge_state: u8,
+    pub beaten_trainers: u8,
+    pub trainer_history: Vec<u8>,
+    pub level_group: u8,
+    pub reward_item: String,
+    pub reward_given: bool,
+    pub quick_saved: bool,
+    pub explanation_read: bool,
+    pub save_file_flags: u8,
+    pub gs_ball_flag: bool,
+    pub record_streaks: Vec<u8>,
+    pub record_outcomes: Vec<bool>,
+    pub record_days: Vec<u8>,
+    pub record_state: u8,
+    pub record_last_day: Option<u8>,
+    pub record_reset_counter: u8,
+    pub leaderboard_acknowledged: bool,
+    pub last_rule_failure: Option<String>,
+    pub loaded_trainer_id: Option<String>,
+    pub last_sprite_constant: Option<String>,
+    pub selected_party_indexes: Vec<usize>,
+    pub mobile_flags: BTreeSet<String>,
+}
+
+impl Default for BattleTowerState {
+    fn default() -> Self {
+        Self {
+            challenge_state: 0,
+            beaten_trainers: 0,
+            trainer_history: vec![0xff; 7],
+            level_group: 0,
+            reward_item: "POTION".to_string(),
+            reward_given: false,
+            quick_saved: false,
+            explanation_read: false,
+            save_file_flags: 0,
+            gs_ball_flag: false,
+            record_streaks: Vec::new(),
+            record_outcomes: Vec::new(),
+            record_days: Vec::new(),
+            record_state: 0,
+            record_last_day: None,
+            record_reset_counter: 0,
+            leaderboard_acknowledged: false,
+            last_rule_failure: None,
+            loaded_trainer_id: None,
+            last_sprite_constant: None,
+            selected_party_indexes: Vec::new(),
+            mobile_flags: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobileLinkState {
+    pub mode: Option<String>,
+    pub adapter_status: String,
+    pub adapter_secondary_status: String,
+    pub battle_timer: [u8; 3],
+    pub login_password: String,
+    pub handshakes: u32,
+    pub leaderboard: Vec<MobileBattleTowerRecord>,
+    pub terminated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobileBattleTowerRecord {
+    pub streak: u8,
+    pub outcome: String,
+    pub day: u8,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BugContestState {
+    pub park_balls_remaining: u8,
+    pub timer_active: bool,
+    pub timer_minutes_remaining: u8,
+    pub timer_seconds_remaining: u8,
+    pub party_backup: Vec<Pokemon>,
+    pub second_party_species: Option<String>,
+    pub caught_mon: Option<Pokemon>,
+    pub caught_species: Option<String>,
+    pub caught_level: Option<u8>,
+    pub selected_contestant_flags: Vec<String>,
+    pub last_rank: Option<u8>,
+    pub last_result: Option<u8>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MagikarpRecordState {
+    pub current_feet: u8,
+    pub current_inches: u8,
+    pub best_feet: u8,
+    pub best_inches: u8,
+    pub best_owner_name: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DayCareState {
+    pub man: DayCareResidentState,
+    pub lady: DayCareResidentState,
+    pub compatibility_score: u8,
+    pub egg_present: bool,
+    pub steps_until_next_egg: u16,
+    pub steps_since_last_egg: u8,
+    pub last_interaction: Option<DayCareInteractionState>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DayCareResidentState {
+    pub pokemon: Option<Pokemon>,
+    pub initial_experience: i32,
+    pub initial_level: u8,
+    pub steps: u32,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DayCareInteractionState {
+    pub caretaker: String,
+    pub action: String,
+    pub success: bool,
+    pub pokemon: Option<String>,
+    pub level: Option<u8>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MysteryGiftState {
+    pub stored_item: Option<String>,
+    pub backup_item: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuenasPasswordState {
+    pub category_index: usize,
+    pub option_index: usize,
+    pub generation_day: u8,
+    pub generated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoamingPokemonState {
+    pub species: String,
+    pub level: u8,
+    pub map_group: u16,
+    pub map_number: u16,
+    pub hp: u16,
+    pub dvs: u16,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldObjectMapMemory {
+    pub objects: BTreeMap<String, OverworldObjectMemory>,
+    pub hidden_object_identifiers: BTreeSet<String>,
+    pub following: Option<OverworldFollowMemory>,
+    pub last_talked_object_identifier: Option<String>,
+    pub player_hidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldObjectMemory {
+    pub x: u16,
+    pub y: u16,
+    pub facing: Option<Direction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldFollowMemory {
+    pub leader_object_id: String,
+    pub follower_object_id: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +459,7 @@ pub struct ScriptRuntimeMemory {
     pub teleport_from_queued: bool,
     pub hall_of_fame_requested: bool,
     pub credits_requested: bool,
+    pub reset_requested: bool,
     pub menu_2d_requested: bool,
     pub version_check_requested: bool,
     pub blackout_mod: Option<String>,
@@ -185,6 +472,9 @@ pub struct ScriptRuntimeMemory {
     pub current_music: Option<String>,
     pub pending_music_fade: Option<ScriptMusicFade>,
     pub waiting_for_sound_effect: bool,
+    pub graphics_events: Vec<ScriptGraphicsRuntimeEvent>,
+    pub pending_screen_fade: Option<ScriptScreenFade>,
+    pub money_events: Vec<ScriptMoneyRuntimeEvent>,
     pub map_events: Vec<ScriptMapRuntimeEvent>,
     pub pending_script_warp: Option<ScriptWarpRequest>,
     pub pending_map_load: Option<ScriptMapLoadRequest>,
@@ -209,12 +499,6 @@ pub struct ScriptRuntimeMemory {
 #[serde(deny_unknown_fields)]
 pub struct ItemUseRuntimeEvent {
     pub item_id: String,
-    pub effect: String,
-    pub held_effect: String,
-    pub parameter: i16,
-    pub property: String,
-    pub field_menu: String,
-    pub battle_menu: String,
     pub context: String,
     pub consumed: bool,
 }
@@ -312,6 +596,88 @@ pub struct ScriptMusicFade {
     pub fade_frames: u16,
     pub source_script: String,
     pub command_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptGraphicsRuntimeEvent {
+    pub command: String,
+    pub kind: ScriptGraphicsRuntimeKind,
+    pub color: Option<ScriptFadeColor>,
+    pub direction: Option<ScriptFadeDirection>,
+    pub frames: Option<u16>,
+    pub source_script: String,
+    pub command_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptGraphicsRuntimeKind {
+    ScreenFade,
+    ClearBgPalettesBufferScreen,
+    ClearBgPalettes,
+    UpdateTimePals,
+    ClearTilemap,
+    LoadMapPalettes,
+    RefreshSprites,
+    UpdateSprites,
+    ReloadSpritesNoPalettes,
+    BattleTowerFade,
+    UpdatePlayerSprite,
+    HealMachineAnim,
+    SurfStartStep,
+    LoadUsedSpritesGfx,
+    ToggleMaptileDecorations,
+    ToggleDecorationsVisibility,
+    MagnetTrain,
+    Diploma,
+    PrintDiploma,
+    UnownPuzzle,
+    OmanyteChamber,
+    DisplayUnownWords,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptScreenFade {
+    pub color: ScriptFadeColor,
+    pub direction: ScriptFadeDirection,
+    pub frames: u16,
+    pub source_script: String,
+    pub command_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFadeColor {
+    White,
+    Black,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFadeDirection {
+    Out,
+    In,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptMoneyRuntimeEvent {
+    pub command: String,
+    pub kind: ScriptMoneyRuntimeKind,
+    pub money: u32,
+    pub coins: Option<u16>,
+    pub source_script: String,
+    pub command_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptMoneyRuntimeKind {
+    PlaceMoneyTopRight,
+    DisplayMoneyAndCoinBalance,
+    DisplayCoinCaseBalance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -933,6 +1299,8 @@ mod tests {
     fn initial_state_matches_typescript_defaults_that_affect_gameplay() {
         let state = GameState::default();
         assert_eq!(state.options.text_speed, TextSpeed::Fast);
+        assert_eq!(state.player_name, "");
+        assert_eq!(state.player_id, 0);
         assert_eq!(state.options.battle_scene, BattleScene::On);
         assert_eq!(state.options.battle_style, BattleStyle::Shift);
         assert_eq!(state.options.sound, Sound::Stereo);
@@ -945,6 +1313,26 @@ mod tests {
         assert_eq!(state.badges.johto, [false; 8]);
         assert_eq!(state.badges.kanto, [false; 8]);
         assert_eq!(state.overworld, OverworldMemory::Inactive);
+        assert_eq!(state.battle_active_party_index, None);
+        assert_eq!(state.battle_active_enemy_party_index, None);
+        assert!(state.battle_rewarded_enemy_party_indices.is_empty());
+        assert_eq!(state.battle_escape_attempts, 0);
+        assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
+        assert_eq!(state.repel_steps_remaining, 0);
+        assert_eq!(state.active_repel_item, None);
+        assert_eq!(state.dig_warp_map_name, None);
+        assert_eq!(state.dig_warp_index, None);
+        assert_eq!(state.kenji_break_timer, 0);
+        assert_eq!(state.player_palette_id, 0);
+        assert_eq!(state.step_events, StepEventCounters::default());
+        assert_eq!(state.time, TimeState::default());
+        assert!(!state.lucky_number_show_flag);
+        assert_eq!(state.lucky_number_day, None);
+        assert_eq!(state.lucky_id_number, 0);
+        assert_eq!(state.current_pc_box, 0);
+        assert_eq!(state.gs_healings, 0);
+        assert_eq!(state.trainer_rankings_healings, 0);
+        assert!(!state.script_runtime.reset_requested);
         assert_eq!(state.scenes, SceneMemory::default());
         assert_eq!(state.flags, EventFlagMemory::default());
         assert_eq!(state.frame_counter, 0);

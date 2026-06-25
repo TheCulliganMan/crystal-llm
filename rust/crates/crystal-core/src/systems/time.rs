@@ -14,6 +14,7 @@ pub const RTC_DAYS_EXCEED_139: u8 = 0x20;
 pub const B_RAMB_RTC_DH_HIGH: u8 = 0;
 pub const B_RAMB_RTC_DH_HALT: u8 = 6;
 pub const B_RAMB_RTC_DH_CARRY: u8 = 7;
+pub const DEFAULT_RTC_ANCHOR: GameDate = GameDate::new(2000, 1, 1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +73,7 @@ pub struct TimeState {
     pub current_day: u8,
     pub day_of_week: u8,
     pub time_of_day: TimeOfDay,
+    pub dst: bool,
     pub rtc_status_flags: u8,
     pub game_time_seconds: u8,
     pub game_time_minutes: u8,
@@ -89,6 +91,7 @@ impl TimeState {
             current_day: 0,
             day_of_week: 0,
             time_of_day: TimeOfDay::Night,
+            dst: false,
             rtc_status_flags: 0,
             game_time_seconds: 0,
             game_time_minutes: 0,
@@ -208,6 +211,12 @@ impl TimeState {
     }
 }
 
+impl Default for TimeState {
+    fn default() -> Self {
+        Self::new(DEFAULT_RTC_ANCHOR)
+    }
+}
+
 pub fn time_of_day_for_hour(hour: u8) -> TimeOfDay {
     let hour = hour % MAX_HOUR;
     if hour < MORN_HOUR {
@@ -261,6 +270,7 @@ mod tests {
         assert_eq!(state.registers.rtc_seconds, 0);
         assert_eq!(state.time_of_day, TimeOfDay::Day);
         assert_eq!(state.game_time_hours, 12);
+        assert!(!state.dst);
     }
 
     #[test]

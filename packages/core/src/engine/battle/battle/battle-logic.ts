@@ -83,7 +83,7 @@ import type { Surface } from '@pokecrystal/core/ui/surface';
 	  }
 
 const AMULET_COIN_ITEM = "AMULET_COIN";
-const PARTY_TARGET_BATTLE_ITEM_EFFECTS = new Set<ItemEffect>([
+const PARTY_TARGET_BATTLE_ITEM_EFFECTS = new Set<string>([
   ItemEffect.STATUS_HEAL,
   ItemEffect.BITTER_BERRY,
   ItemEffect.FULL_RESTORE,

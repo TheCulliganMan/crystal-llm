@@ -159,6 +159,7 @@ export const learnMove = (
   const learnt: LearnedMove = {
     name: move,
     current_pp: taughtMovePp(move, moveData),
+    pp_ups: 0,
   };
 
   const currentMoves = [...pokemon.moves];
@@ -200,10 +201,7 @@ export const tmhmItemName = (index: number): string => {
   if (index < 0 || index >= TMHM_MOVES.length) {
     throw new TMHMResolutionError(`TM/HM index ${index} is out of range`);
   }
-  if (index < TM_COUNT) {
-    return `TM${(index + 1).toString().padStart(2, "0")}`;
-  }
-  return `HM${(index - TM_COUNT + 1).toString().padStart(2, "0")}`;
+  return `TM_HM_${(index + 1).toString().padStart(2, "0")}`;
 };
 
 export const isHmIndex = (index: number): boolean => {

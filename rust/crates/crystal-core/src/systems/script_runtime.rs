@@ -12,7 +12,6 @@ use crate::state::{
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeCommand {
     pub command: String,
-    #[serde(default)]
     pub args: Vec<String>,
     pub source_script: String,
     pub command_index: usize,
@@ -135,7 +134,7 @@ pub fn apply_script_runtime_command(
 pub fn validate_script_runtime_command(
     command: &ScriptRuntimeCommand,
 ) -> Result<(), ScriptRuntimeCommandError> {
-    let expected = expected_arg_counts()
+    let expected = script_runtime_command_arg_counts()
         .get(command.command.as_str())
         .copied()
         .ok_or_else(|| ScriptRuntimeCommandError::UnknownCommand {
@@ -510,7 +509,7 @@ fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeComma
         })
 }
 
-fn expected_arg_counts() -> BTreeMap<&'static str, usize> {
+pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("special", 1),
         ("pause", 1),
@@ -588,6 +587,28 @@ mod tests {
             source_script: "RuntimeScript".to_string(),
             command_index: 4,
         }
+    }
+
+    #[test]
+    fn exported_runtime_command_arity_table_is_validation_source() {
+        let counts = script_runtime_command_arg_counts();
+        assert_eq!(counts.get("special"), Some(&1));
+        assert_eq!(counts.get("checkver"), Some(&0));
+        assert_eq!(counts.get("givepokemail"), Some(&1));
+        assert!(!counts.contains_key("SPECIAL"));
+
+        assert_eq!(
+            validate_script_runtime_command(&command("checkver", &[])),
+            Ok(())
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command("checkver", &["EXTRA"])),
+            Err(ScriptRuntimeCommandError::WrongArgCount {
+                command: "checkver".to_string(),
+                expected: 0,
+                actual: 1,
+            })
+        );
     }
 
     #[test]
@@ -1043,6 +1064,39 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::EmptyStack)
         ));
+    }
+
+    #[test]
+    fn runtime_command_schema_requires_explicit_args_even_when_empty() {
+        let missing_args = serde_json::from_str::<ScriptRuntimeCommand>(
+            r#"{
+              "command":"verticalmenu",
+              "source_script":"RuntimeScript",
+              "command_index":4
+            }"#,
+        )
+        .expect_err("missing args must not default to empty")
+        .to_string();
+
+        assert!(
+            missing_args.contains("missing field `args`"),
+            "{missing_args}"
+        );
+
+        let explicit_empty_args = serde_json::from_str::<ScriptRuntimeCommand>(
+            r#"{
+              "command":"verticalmenu",
+              "args":[],
+              "source_script":"RuntimeScript",
+              "command_index":4
+            }"#,
+        )
+        .expect("zero-arg commands must declare an explicit empty args array");
+
+        assert_eq!(explicit_empty_args.command, "verticalmenu");
+        assert!(explicit_empty_args.args.is_empty());
+        assert_eq!(explicit_empty_args.source_script, "RuntimeScript");
+        assert_eq!(explicit_empty_args.command_index, 4);
     }
 
     fn default_inputs() -> ScriptRuntimeInputs {

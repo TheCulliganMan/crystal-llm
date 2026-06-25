@@ -41,6 +41,8 @@ describe("export-wild-encounters", () => {
 
     expect(entry.map_name).toBe("Route29");
     expect(entry.grass?.morning[0]).toEqual({ level: 2, species: "PIDGEY" });
+    expect(entry.water).toBeNull();
+    expect(entry.water_rate).toBeNull();
   });
 
   it("merges grass and water data but rejects duplicate surfaces for a map", () => {
@@ -49,13 +51,13 @@ describe("export-wild-encounters", () => {
       grass_rates: { morning: 10, day: 10, night: 10 },
       water_rate: null,
       grass: { morning: [{ level: 2, species: "PIDGEY" }], day: [], night: [] },
-      water: { morning: [], day: [], night: [] },
+      water: null,
     };
     const water = {
       map_name: "Route29",
       grass_rates: null,
       water_rate: 5,
-      grass: { morning: [], day: [], night: [] },
+      grass: null,
       water: { morning: [{ level: 10, species: "MAGIKARP" }], day: [{ level: 10, species: "MAGIKARP" }], night: [{ level: 10, species: "MAGIKARP" }] },
     };
 
@@ -64,6 +66,8 @@ describe("export-wild-encounters", () => {
         map_name: "Route29",
         grass_rates: { morning: 10, day: 10, night: 10 },
         water_rate: 5,
+        grass: grass.grass,
+        water: water.water,
       }),
     ]);
     expect(() => mergeWildEncounterData([[grass], [grass]])).toThrow(

@@ -89,6 +89,14 @@ pub enum ScriptPhoneError {
     PermanentContactsExceedCapacity { capacity: usize },
 }
 
+pub const SCRIPT_PHONE_REGISTRATION_COMMANDS: &[&str] = &["askforphonenumber"];
+pub const SCRIPT_PHONE_CHECK_COMMANDS: &[&str] = &["checkcellnum"];
+
+pub fn is_known_script_phone_command(command: &str) -> bool {
+    SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&command)
+        || SCRIPT_PHONE_CHECK_COMMANDS.contains(&command)
+}
+
 pub fn apply_script_phone_command(
     state: &mut GameState,
     command: ScriptPhoneCommand,
@@ -332,6 +340,15 @@ mod tests {
             source_script: "PhoneScript".to_string(),
             command_index: 8,
         }
+    }
+
+    #[test]
+    fn exported_phone_command_sets_are_exact() {
+        assert!(SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&"askforphonenumber"));
+        assert!(SCRIPT_PHONE_CHECK_COMMANDS.contains(&"checkcellnum"));
+        assert!(is_known_script_phone_command("checkcellnum"));
+        assert!(!is_known_script_phone_command("CheckCellNum"));
+        assert!(!is_known_script_phone_command("deletecellnum"));
     }
 
     #[test]

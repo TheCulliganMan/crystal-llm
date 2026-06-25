@@ -443,6 +443,14 @@ pub enum BattleSyncError {
 pub enum LockstepSyncError {
     #[error("lockstep player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("lockstep frame {actual} does not match expected frame {expected}")]
+    FrameOutOfOrder { expected: u64, actual: u64 },
+    #[error("lockstep frame {frame} is missing input for player {player_id}")]
+    MissingPlayerInput { frame: u64, player_id: PlayerId },
+    #[error("lockstep frame {frame} includes non-roster player {player_id}")]
+    NonRosterPlayerInput { frame: u64, player_id: PlayerId },
+    #[error("lockstep frame cursor overflowed at frame {frame}")]
+    FrameCursorOverflow { frame: u64 },
 }
 
 pub type TradeId = String;
@@ -793,12 +801,12 @@ impl LinkCableState {
     }
 
     pub fn sync_frame(&mut self, now_tick: u64) -> LinkClockSyncFrame {
-        self.local_clock = self.local_clock.max(now_tick);
+        self.local_clock = self.local_clock.saturating_add(1).max(now_tick);
         LinkClockSyncFrame {
             player_id: self.local_player,
-            t0: now_tick,
-            t1: now_tick,
-            t2: now_tick,
+            t0: self.local_clock,
+            t1: self.local_clock,
+            t2: self.local_clock,
         }
     }
 
@@ -994,6 +1002,10 @@ pub struct LockstepFrame {
 }
 
 impl LockstepFrame {
+    pub fn joypad_mask_for(&self, player_id: PlayerId) -> Option<u8> {
+        self.inputs.get(&player_id).copied()
+    }
+
     pub fn ordered_inputs(&self, players: &[PlayerId]) -> Option<Vec<u8>> {
         players
             .iter()
@@ -1108,18 +1120,27 @@ impl BattleActionSyncBuffer {
         self.actions
             .get(&turn)
             .map(|actions| {
-                self.players
-                    .iter()
-                    .all(|player_id| actions.contains_key(player_id))
+                actions.len() == self.players.len()
+                    && self
+                        .players
+                        .iter()
+                        .all(|player_id| actions.contains_key(player_id))
             })
             .unwrap_or(false)
     }
 
     pub fn turn(&self, turn: u64) -> Option<BattleActionTurn> {
-        self.is_turn_ready(turn).then(|| BattleActionTurn {
+        if !self.is_turn_ready(turn) {
+            return None;
+        }
+        let state_hashes = match self.state_hashes.get(&turn) {
+            Some(state_hashes) => state_hashes.clone(),
+            None => BTreeMap::new(),
+        };
+        Some(BattleActionTurn {
             turn,
-            actions: self.actions.get(&turn).cloned().unwrap_or_default(),
-            state_hashes: self.state_hashes.get(&turn).cloned().unwrap_or_default(),
+            actions: self.actions.get(&turn)?.clone(),
+            state_hashes,
         })
     }
 
@@ -1194,17 +1215,22 @@ impl LockstepBuffer {
         self.inputs
             .get(&frame)
             .map(|inputs| {
-                self.players
-                    .iter()
-                    .all(|player_id| inputs.contains_key(player_id))
+                inputs.len() == self.players.len()
+                    && self
+                        .players
+                        .iter()
+                        .all(|player_id| inputs.contains_key(player_id))
             })
             .unwrap_or(false)
     }
 
     pub fn frame(&self, frame: u64) -> Option<LockstepFrame> {
-        self.is_frame_ready(frame).then(|| LockstepFrame {
+        if !self.is_frame_ready(frame) {
+            return None;
+        }
+        Some(LockstepFrame {
             frame,
-            inputs: self.inputs.get(&frame).cloned().unwrap_or_default(),
+            inputs: self.inputs.get(&frame)?.clone(),
         })
     }
 
@@ -1255,6 +1281,120 @@ impl LockstepBuffer {
                 .collect()
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeterministicLockstep {
+    pub local_player_id: PlayerId,
+    pub players: BTreeSet<PlayerId>,
+    pub next_frame: u64,
+    pub previous_local_joypad_mask: u8,
+}
+
+impl DeterministicLockstep {
+    pub fn new(
+        players: impl IntoIterator<Item = PlayerId>,
+        local_player_id: PlayerId,
+    ) -> Result<Self, LockstepSyncError> {
+        let players = players.into_iter().collect::<BTreeSet<_>>();
+        if !players.contains(&local_player_id) {
+            return Err(LockstepSyncError::UnknownPlayer {
+                player_id: local_player_id,
+            });
+        }
+        Ok(Self {
+            local_player_id,
+            players,
+            next_frame: 0,
+            previous_local_joypad_mask: 0,
+        })
+    }
+
+    pub fn from_lobby(
+        lobby: &LinkLobby,
+        local_player_id: PlayerId,
+    ) -> Result<Self, LockstepSyncError> {
+        Self::new(lobby.player_ids(), local_player_id)
+    }
+
+    pub fn players(&self) -> Vec<PlayerId> {
+        self.players.iter().copied().collect()
+    }
+
+    pub fn apply_frame(
+        &mut self,
+        frame: LockstepFrame,
+    ) -> Result<AppliedLockstepFrame, LockstepSyncError> {
+        self.validate_frame(&frame)?;
+        let local_joypad_mask = frame.joypad_mask_for(self.local_player_id).ok_or(
+            LockstepSyncError::MissingPlayerInput {
+                frame: frame.frame,
+                player_id: self.local_player_id,
+            },
+        )?;
+        let local_pressed_mask =
+            (local_joypad_mask ^ self.previous_local_joypad_mask) & local_joypad_mask;
+        let mut ordered_inputs = Vec::with_capacity(self.players.len());
+        for player_id in &self.players {
+            ordered_inputs.push(frame.joypad_mask_for(*player_id).ok_or(
+                LockstepSyncError::MissingPlayerInput {
+                    frame: frame.frame,
+                    player_id: *player_id,
+                },
+            )?);
+        }
+        self.previous_local_joypad_mask = local_joypad_mask;
+        self.next_frame =
+            self.next_frame
+                .checked_add(1)
+                .ok_or(LockstepSyncError::FrameCursorOverflow {
+                    frame: self.next_frame,
+                })?;
+        Ok(AppliedLockstepFrame {
+            frame: frame.frame,
+            local_player_id: self.local_player_id,
+            local_joypad_mask,
+            local_pressed_mask,
+            ordered_inputs,
+        })
+    }
+
+    fn validate_frame(&self, frame: &LockstepFrame) -> Result<(), LockstepSyncError> {
+        if frame.frame != self.next_frame {
+            return Err(LockstepSyncError::FrameOutOfOrder {
+                expected: self.next_frame,
+                actual: frame.frame,
+            });
+        }
+        for player_id in frame.inputs.keys() {
+            if !self.players.contains(player_id) {
+                return Err(LockstepSyncError::NonRosterPlayerInput {
+                    frame: frame.frame,
+                    player_id: *player_id,
+                });
+            }
+        }
+        for player_id in &self.players {
+            if !frame.inputs.contains_key(player_id) {
+                return Err(LockstepSyncError::MissingPlayerInput {
+                    frame: frame.frame,
+                    player_id: *player_id,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedLockstepFrame {
+    pub frame: u64,
+    pub local_player_id: PlayerId,
+    pub local_joypad_mask: u8,
+    pub local_pressed_mask: u8,
+    pub ordered_inputs: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1855,6 +1995,23 @@ mod tests {
     }
 
     #[test]
+    fn battle_action_sync_requires_exact_roster_cardinality_for_ready_turns() {
+        let mut sync = BattleActionSyncBuffer::new([1, 2]);
+        sync.actions.insert(
+            4,
+            BTreeMap::from([
+                (1, BattleAction::Move { slot: 0 }),
+                (2, BattleAction::Move { slot: 1 }),
+                (3, BattleAction::Run),
+            ]),
+        );
+
+        assert!(!sync.is_turn_ready(4));
+        assert_eq!(sync.turn(4), None);
+        assert_eq!(sync.next_ready_turn(4), None);
+    }
+
+    #[test]
     fn battle_action_link_message_carries_exact_modpack_item_ids() {
         let message = LinkMessage::BattleAction(BattleActionFrame::new(
             2,
@@ -2197,6 +2354,30 @@ mod tests {
     }
 
     #[test]
+    fn link_cable_sync_frames_are_monotonic_when_caller_tick_stalls() {
+        let mut host = LinkCableState::new(1, 2).expect("host");
+        let mut client = LinkCableState::new(2, 1).expect("client");
+
+        let first = host.sync_frame(7);
+        let second = host.sync_frame(7);
+        let third = host.sync_frame(6);
+
+        assert_eq!(first.t2, 7);
+        assert_eq!(second.t2, 8);
+        assert_eq!(third.t2, 9);
+        client
+            .receive_sync_frame(first, 12)
+            .expect("first sync accepted");
+        client
+            .receive_sync_frame(second, 13)
+            .expect("stalled tick sync accepted");
+        client
+            .receive_sync_frame(third, 14)
+            .expect("regressed tick sync accepted");
+        assert_eq!(client.remote_clock(), 9);
+    }
+
+    #[test]
     fn link_byte_messages_are_transport_neutral_json() {
         let message = LinkMessage::LinkByte(LinkByteFrame {
             player_id: 2,
@@ -2258,6 +2439,121 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_lockstep_applies_ready_frames_in_roster_order() {
+        let mut lockstep = DeterministicLockstep::new([4, 2], 4).expect("lockstep");
+        assert_eq!(lockstep.players(), vec![2, 4]);
+
+        let first = lockstep
+            .apply_frame(LockstepFrame {
+                frame: 0,
+                inputs: BTreeMap::from([(4, 0b0001_0001), (2, 0b1000_0000)]),
+            })
+            .expect("apply first");
+
+        assert_eq!(
+            first,
+            AppliedLockstepFrame {
+                frame: 0,
+                local_player_id: 4,
+                local_joypad_mask: 0b0001_0001,
+                local_pressed_mask: 0b0001_0001,
+                ordered_inputs: vec![0b1000_0000, 0b0001_0001],
+            }
+        );
+        assert_eq!(lockstep.next_frame, 1);
+        assert_eq!(lockstep.previous_local_joypad_mask, 0b0001_0001);
+
+        let held_right = lockstep
+            .apply_frame(LockstepFrame {
+                frame: 1,
+                inputs: BTreeMap::from([(2, 0), (4, 0b0000_0001)]),
+            })
+            .expect("apply second");
+
+        assert_eq!(held_right.local_joypad_mask, 0b0000_0001);
+        assert_eq!(held_right.local_pressed_mask, 0);
+        assert_eq!(held_right.ordered_inputs, vec![0, 0b0000_0001]);
+        assert_eq!(lockstep.next_frame, 2);
+    }
+
+    #[test]
+    fn deterministic_lockstep_serializes_exact_saveable_cursor() {
+        let mut lockstep = DeterministicLockstep::new([1, 2], 1).expect("lockstep");
+        lockstep
+            .apply_frame(LockstepFrame {
+                frame: 0,
+                inputs: BTreeMap::from([(1, 0x10), (2, 0x20)]),
+            })
+            .expect("apply");
+
+        let json = serde_json::to_string(&lockstep).expect("serialize lockstep");
+
+        assert_eq!(
+            json,
+            r#"{"local_player_id":1,"players":[1,2],"next_frame":1,"previous_local_joypad_mask":16}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<DeterministicLockstep>(&json).expect("deserialize lockstep"),
+            lockstep
+        );
+    }
+
+    #[test]
+    fn deterministic_lockstep_rejects_drift_without_roster_or_frame_fallbacks() {
+        assert_eq!(
+            DeterministicLockstep::new([1, 2], 3),
+            Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
+        );
+
+        let mut lockstep = DeterministicLockstep::new([1, 2], 1).expect("lockstep");
+        assert_eq!(
+            lockstep.apply_frame(LockstepFrame {
+                frame: 1,
+                inputs: BTreeMap::from([(1, 0), (2, 0)]),
+            }),
+            Err(LockstepSyncError::FrameOutOfOrder {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(lockstep.next_frame, 0);
+
+        assert_eq!(
+            lockstep.apply_frame(LockstepFrame {
+                frame: 0,
+                inputs: BTreeMap::from([(1, 0)]),
+            }),
+            Err(LockstepSyncError::MissingPlayerInput {
+                frame: 0,
+                player_id: 2,
+            })
+        );
+        assert_eq!(lockstep.next_frame, 0);
+
+        assert_eq!(
+            lockstep.apply_frame(LockstepFrame {
+                frame: 0,
+                inputs: BTreeMap::from([(1, 0), (2, 0), (3, 0)]),
+            }),
+            Err(LockstepSyncError::NonRosterPlayerInput {
+                frame: 0,
+                player_id: 3,
+            })
+        );
+        assert_eq!(lockstep.next_frame, 0);
+
+        lockstep.next_frame = u64::MAX;
+        assert_eq!(
+            lockstep.apply_frame(LockstepFrame {
+                frame: u64::MAX,
+                inputs: BTreeMap::from([(1, 0), (2, 0)]),
+            }),
+            Err(LockstepSyncError::FrameCursorOverflow { frame: u64::MAX })
+        );
+        assert_eq!(lockstep.next_frame, u64::MAX);
+    }
+
+    #[test]
     fn lockstep_buffer_reports_duplicates_and_conflicts() {
         let mut buffer = LockstepBuffer::new([1, 2]);
         let input = PlayerInputFrame::new(1, Frame(3), 0x10);
@@ -2308,6 +2604,18 @@ mod tests {
             Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
         );
         assert_eq!(buffer.players(), vec![1, 2]);
+    }
+
+    #[test]
+    fn lockstep_buffer_requires_exact_roster_cardinality_for_ready_frames() {
+        let mut buffer = LockstepBuffer::new([1, 2]);
+        buffer
+            .inputs
+            .insert(8, BTreeMap::from([(1, 0x10), (2, 0x20), (3, 0x30)]));
+
+        assert!(!buffer.is_frame_ready(8));
+        assert_eq!(buffer.frame(8), None);
+        assert_eq!(buffer.next_ready_frame(8), None);
     }
 
     #[test]

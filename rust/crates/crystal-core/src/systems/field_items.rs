@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::Item;
 use crate::state::{EventFlagError, GameState};
+use crate::systems::script_objects::is_hideable_object_event_flag;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +95,72 @@ impl ScriptFieldPickup {
             source: FieldItemSource::FruitTree,
         })
     }
+}
+
+pub const SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS: &[&str] = &["itemball"];
+pub const SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS: &[&str] = &["hiddenitem"];
+pub const SCRIPT_FIELD_ITEM_PICKUP_COMMANDS: &[&str] = &["itemball", "hiddenitem"];
+pub const SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS: &[&str] = &["fruittree"];
+
+pub fn is_known_script_field_pickup_command(command: &str) -> bool {
+    SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&command)
+        || SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS.contains(&command)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFieldPickupIssue {
+    MissingItem,
+    UnknownItem,
+    InvalidQuantity,
+    MissingEvent,
+    InvalidCollectibleFlag,
+    MissingFruitTree,
+    EmptyFruitTree,
+    UnknownFruitTree,
+    MalformedFruitTree,
+    UnknownCommand,
+}
+
+pub fn script_field_pickup_issues(
+    pickup: &ScriptFieldPickup,
+    item_catalog: &BTreeMap<String, Item>,
+    fruit_trees: &FruitTreeCatalog,
+) -> Vec<ScriptFieldPickupIssue> {
+    let mut issues = Vec::new();
+    if SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&pickup.command.as_str()) {
+        match pickup.item_id.as_deref() {
+            Some(item_id) if item_catalog.contains_key(item_id) => {}
+            Some(_) => issues.push(ScriptFieldPickupIssue::UnknownItem),
+            None => issues.push(ScriptFieldPickupIssue::MissingItem),
+        }
+        if pickup.quantity == 0 {
+            issues.push(ScriptFieldPickupIssue::InvalidQuantity);
+        }
+        match pickup.event_flag.as_deref() {
+            Some(event_flag) if validate_collectible_flag(event_flag).is_ok() => {}
+            Some(_) => issues.push(ScriptFieldPickupIssue::InvalidCollectibleFlag),
+            None => issues.push(ScriptFieldPickupIssue::MissingEvent),
+        }
+    } else if SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS.contains(&pickup.command.as_str()) {
+        match pickup.fruit_tree_id.as_deref() {
+            Some(fruit_tree_id) if fruit_tree_id.trim().is_empty() => {
+                issues.push(ScriptFieldPickupIssue::EmptyFruitTree);
+                if !fruit_trees.0.contains_key(fruit_tree_id) {
+                    issues.push(ScriptFieldPickupIssue::UnknownFruitTree);
+                }
+            }
+            Some(fruit_tree_id) if fruit_trees.0.contains_key(fruit_tree_id) => {}
+            Some(_) => issues.push(ScriptFieldPickupIssue::UnknownFruitTree),
+            None => issues.push(ScriptFieldPickupIssue::MissingFruitTree),
+        }
+        if pickup.item_id.is_some() || pickup.event_flag.is_some() {
+            issues.push(ScriptFieldPickupIssue::MalformedFruitTree);
+        }
+    } else if !is_known_script_field_pickup_command(&pickup.command) {
+        issues.push(ScriptFieldPickupIssue::UnknownCommand);
+    }
+    issues
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,7 +275,7 @@ pub fn fruit_tree_collected_flag(fruit_tree_id: &str) -> String {
 }
 
 fn validate_collectible_flag(event_flag: &str) -> Result<(), FieldItemError> {
-    if event_flag.is_empty() || event_flag == "-1" || event_flag == "0" {
+    if !is_hideable_object_event_flag(event_flag) {
         return Err(FieldItemError::InvalidCollectibleFlag {
             event_flag: event_flag.to_string(),
         });
@@ -219,23 +286,45 @@ fn validate_collectible_flag(event_flag: &str) -> Result<(), FieldItemError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ItemPocket, MAX_ITEM_STACK};
+    use crate::models::{ItemPocket, MAX_ITEM_STACK, item_pocket};
 
     fn item(id: &str, pocket: ItemPocket) -> Item {
         Item {
             name: id.replace('_', " "),
             description: String::new(),
             effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
             price: 0,
             held_effect: "HELD_NONE".to_string(),
             parameter: 0,
             property: String::new(),
             pocket,
             field_menu: String::new(),
+            field_usable: true,
             battle_menu: String::new(),
+            battle_usable: true,
             script_name: id.to_string(),
             consumable: false,
             tmhm_index: None,
+            tmhm_move: None,
         }
     }
 
@@ -268,9 +357,21 @@ mod tests {
     }
 
     #[test]
+    fn exported_field_pickup_command_sets_are_exact() {
+        assert!(SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&"itemball"));
+        assert!(SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&"hiddenitem"));
+        assert!(SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS.contains(&"itemball"));
+        assert!(SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS.contains(&"hiddenitem"));
+        assert!(SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS.contains(&"fruittree"));
+        assert!(is_known_script_field_pickup_command("hiddenitem"));
+        assert!(!is_known_script_field_pickup_command("HiddenItem"));
+        assert!(!is_known_script_field_pickup_command("berrytree"));
+    }
+
+    #[test]
     fn itemball_pickup_adds_exact_item_and_sets_exact_event_flag() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+        let items = catalog(vec![item("ANTIDOTE", item_pocket("ITEM"))]);
 
         let outcome = pickup_field_item(
             &mut state,
@@ -306,7 +407,7 @@ mod tests {
             .flags
             .set_event_flag("EVENT_GOT_HIDDEN_ANTIDOTE", true)
             .expect("set preexisting flag");
-        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+        let items = catalog(vec![item("ANTIDOTE", item_pocket("ITEM"))]);
 
         let outcome = pickup_field_item(
             &mut state,
@@ -332,7 +433,7 @@ mod tests {
     #[test]
     fn full_bag_does_not_set_collection_flag() {
         let mut state = GameState::default();
-        let antidote = item("ANTIDOTE", ItemPocket::Item);
+        let antidote = item("ANTIDOTE", item_pocket("ITEM"));
         state
             .bag
             .add_item(&antidote, MAX_ITEM_STACK)
@@ -368,7 +469,7 @@ mod tests {
     #[test]
     fn pickup_requires_exact_catalog_item_id_without_case_coercion() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+        let items = catalog(vec![item("ANTIDOTE", item_pocket("ITEM"))]);
 
         assert_eq!(
             pickup_field_item(
@@ -389,7 +490,7 @@ mod tests {
     #[test]
     fn pickup_rejects_unhideable_event_flags() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("ANTIDOTE", ItemPocket::Item)]);
+        let items = catalog(vec![item("ANTIDOTE", item_pocket("ITEM"))]);
 
         assert_eq!(
             pickup_field_item(
@@ -413,12 +514,50 @@ mod tests {
                 command: "giveitem".to_string(),
             })
         );
+        assert_eq!(
+            script_field_pickup_issues(&pickup, &BTreeMap::new(), &FruitTreeCatalog::default()),
+            vec![ScriptFieldPickupIssue::UnknownCommand]
+        );
+    }
+
+    #[test]
+    fn script_pickup_issue_collector_reports_exact_pack_shape_errors() {
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
+        let fruit_trees = FruitTreeCatalog(
+            [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        let mut bad_item = script_pickup("itemball");
+        bad_item.quantity = 0;
+        bad_item.event_flag = Some("-1".to_string());
+        assert_eq!(
+            script_field_pickup_issues(&bad_item, &items, &fruit_trees),
+            vec![
+                ScriptFieldPickupIssue::MissingItem,
+                ScriptFieldPickupIssue::InvalidQuantity,
+                ScriptFieldPickupIssue::InvalidCollectibleFlag,
+            ]
+        );
+
+        let mut bad_fruit = script_pickup("fruittree");
+        bad_fruit.fruit_tree_id = Some(String::new());
+        bad_fruit.item_id = Some("BERRY".to_string());
+        assert_eq!(
+            script_field_pickup_issues(&bad_fruit, &items, &fruit_trees),
+            vec![
+                ScriptFieldPickupIssue::EmptyFruitTree,
+                ScriptFieldPickupIssue::UnknownFruitTree,
+                ScriptFieldPickupIssue::MalformedFruitTree,
+            ]
+        );
     }
 
     #[test]
     fn fruit_tree_pickup_uses_exact_catalog_item_and_collected_flag() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("BERRY", ItemPocket::Item)]);
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
         let fruit_trees = FruitTreeCatalog(
             [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
                 .into_iter()
@@ -451,7 +590,7 @@ mod tests {
     #[test]
     fn fruit_tree_pickup_rejects_unknown_or_case_changed_tree_id_without_item_fallback() {
         let mut state = GameState::default();
-        let items = catalog(vec![item("BERRY", ItemPocket::Item)]);
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
         let fruit_trees = FruitTreeCatalog(
             [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
                 .into_iter()

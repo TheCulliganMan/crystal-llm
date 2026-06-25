@@ -201,7 +201,7 @@ export const move_tutor = (
     let target_slot = target_slot_from_runner ?? mon.moves.length;
     target_slot = Math.max(0, Math.min(target_slot, 3));
 
-    const learned_move: LearnedMove = { name: move, current_pp: _default_move_pp(move) };
+    const learned_move: LearnedMove = { name: move, current_pp: _default_move_pp(move), pp_ups: 0 };
 
     if (target_slot < mon.moves.length) {
         mon.moves[target_slot] = learned_move;

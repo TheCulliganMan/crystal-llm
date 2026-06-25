@@ -19,6 +19,7 @@ pub struct Move {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pokemon::pokemon_type;
     use super::*;
 
     #[test]
@@ -39,8 +40,28 @@ mod tests {
         .expect("parse move");
 
         assert_eq!(value.name, "POUND");
-        assert_eq!(value.move_type, PokemonType::Normal);
+        assert_eq!(value.move_type, pokemon_type("NORMAL"));
         assert_eq!(value.pp, 35);
+    }
+
+    #[test]
+    fn move_type_ids_are_modpack_owned_strings_not_core_enums() {
+        let value: Move = serde_json::from_str(
+            r#"{
+              "name":"AETHER_PULSE",
+              "type":"AETHER",
+              "power":60,
+              "accuracy":100,
+              "pp":15,
+              "effect":"NORMAL_HIT",
+              "effect_chance":0,
+              "stat":null,
+              "amount":null
+            }"#,
+        )
+        .expect("modded move type ids are exact data");
+
+        assert_eq!(value.move_type, pokemon_type("AETHER"));
     }
 
     #[test]

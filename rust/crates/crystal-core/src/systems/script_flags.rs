@@ -39,10 +39,37 @@ pub enum ScriptFlagError {
     Flag { error: EventFlagError },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFlagCommandIssue {
+    UnknownCommand,
+    EmptyFlagId,
+}
+
 impl From<EventFlagError> for ScriptFlagError {
     fn from(error: EventFlagError) -> Self {
         Self::Flag { error }
     }
+}
+
+pub const SCRIPT_FLAG_MUTATION_COMMANDS: &[&str] =
+    &["setevent", "clearevent", "setflag", "clearflag"];
+pub const SCRIPT_FLAG_CHECK_COMMANDS: &[&str] = &["checkevent", "checkflag"];
+
+pub fn is_known_script_flag_command(command: &str) -> bool {
+    SCRIPT_FLAG_MUTATION_COMMANDS.contains(&command)
+        || SCRIPT_FLAG_CHECK_COMMANDS.contains(&command)
+}
+
+pub fn script_flag_command_issues(command: &ScriptFlagCommand) -> Vec<ScriptFlagCommandIssue> {
+    let mut issues = Vec::new();
+    if !is_known_script_flag_command(&command.command) {
+        issues.push(ScriptFlagCommandIssue::UnknownCommand);
+    }
+    if command.flag_id.is_empty() {
+        issues.push(ScriptFlagCommandIssue::EmptyFlagId);
+    }
+    issues
 }
 
 pub fn apply_script_flag_mutation(
@@ -121,6 +148,32 @@ mod tests {
             source_script: "RouteScript".to_string(),
             command_index: 3,
         }
+    }
+
+    #[test]
+    fn exported_flag_command_sets_are_exact() {
+        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"setevent"));
+        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"clearflag"));
+        assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkevent"));
+        assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkflag"));
+        assert!(is_known_script_flag_command("setflag"));
+        assert!(!is_known_script_flag_command("SetFlag"));
+        assert!(!is_known_script_flag_command("toggleevent"));
+    }
+
+    #[test]
+    fn script_flag_issue_collector_reports_exact_pack_shape_errors() {
+        assert_eq!(
+            script_flag_command_issues(&command("SetEvent", "")),
+            vec![
+                ScriptFlagCommandIssue::UnknownCommand,
+                ScriptFlagCommandIssue::EmptyFlagId,
+            ]
+        );
+        assert_eq!(
+            script_flag_command_issues(&command("setevent", "EVENT_ROUTE_29_POTION")),
+            Vec::<ScriptFlagCommandIssue>::new()
+        );
     }
 
     #[test]

@@ -18,23 +18,23 @@ import { calculateDamage, TYPE_CHART } from "@pokecrystal/core/engine/battle/bat
 const NUM_MOVES = 4;
 const DEFAULT_SCORE = 20;
 const UNUSABLE_SCORE = 80;
-const STATUS_ONLY_EFFECTS = new Set<MoveEffect>([
+const STATUS_ONLY_EFFECTS = new Set<string>([
   MoveEffect.SLEEP,
   MoveEffect.TOXIC,
   MoveEffect.POISON,
   MoveEffect.PARALYZE,
 ]);
-const RISKY_EFFECTS = new Set<MoveEffect>([
+const RISKY_EFFECTS = new Set<string>([
   MoveEffect.SELFDESTRUCT,
   MoveEffect.OHKO,
 ]);
-const RECKLESS_EFFECTS = new Set<MoveEffect>([
+const RECKLESS_EFFECTS = new Set<string>([
   MoveEffect.SELFDESTRUCT,
   MoveEffect.RAMPAGE,
   MoveEffect.MULTI_HIT,
   MoveEffect.DOUBLE_HIT,
 ]);
-const CONSTANT_DAMAGE_EFFECTS = new Set<MoveEffect>([
+const CONSTANT_DAMAGE_EFFECTS = new Set<string>([
   MoveEffect.STATIC_DAMAGE,
   MoveEffect.LEVEL_DAMAGE,
   MoveEffect.PSYWAVE,
@@ -276,7 +276,7 @@ const typeEffectiveness = (move: Move, defenderTypes: PokemonType[]): number => 
   return effectiveness;
 };
 
-const enemyHasEffect = (state: AIScoringState, effects: Iterable<MoveEffect>): boolean => {
+const enemyHasEffect = (state: AIScoringState, effects: Iterable<string>): boolean => {
   const effectSet = new Set(effects);
   for (const slot of state.iterSlots()) {
     if (effectSet.has(slot.move.effect)) {
@@ -321,7 +321,7 @@ const scoreSetup = (state: AIScoringState): void => {
   const enemy = state.context.enemyPokemon;
   const player = state.context.playerPokemon;
 
-  const statUpEffects = new Set<MoveEffect>([
+  const statUpEffects = new Set<string>([
     MoveEffect.ATTACK_UP,
     MoveEffect.DEFENSE_UP,
     MoveEffect.SPEED_UP,
@@ -337,7 +337,7 @@ const scoreSetup = (state: AIScoringState): void => {
     MoveEffect.ACCURACY_UP_2,
     MoveEffect.EVASION_UP_2,
   ]);
-  const statDownEffects = new Set<MoveEffect>([
+  const statDownEffects = new Set<string>([
     MoveEffect.ATTACK_DOWN,
     MoveEffect.DEFENSE_DOWN,
     MoveEffect.SPEED_DOWN,
@@ -489,7 +489,7 @@ const smartToxicOrLeechSeed = (state: AIScoringState, slot: MoveSlot): void => {
     return;
   }
 
-  const isToxic = new Set([
+  const isToxic = new Set<string>([
     MoveEffect.TOXIC,
     MoveEffect.POISON,
     MoveEffect.POISON_HIT,
@@ -649,7 +649,7 @@ const smartHyperBeam = (state: AIScoringState, slot: MoveSlot): void => {
   }
 };
 
-const SMART_HANDLERS = new Map<MoveEffect, (state: AIScoringState, slot: MoveSlot) => void>([
+const SMART_HANDLERS = new Map<string, (state: AIScoringState, slot: MoveSlot) => void>([
   [MoveEffect.SLEEP, smartSleep],
   [MoveEffect.DREAM_EATER, smartDreamEater],
   [MoveEffect.HEAL, smartHeal],

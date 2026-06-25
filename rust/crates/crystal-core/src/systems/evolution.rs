@@ -17,14 +17,35 @@ pub const METHOD_ITEM: &str = "ITEM";
 pub const METHOD_HAPPINESS: &str = "HAPPINESS";
 pub const METHOD_TRADE: &str = "TRADE";
 pub const METHOD_STAT: &str = "STAT";
+pub const EVOLUTION_METHODS: &[&str] = &[
+    METHOD_LEVEL,
+    METHOD_ITEM,
+    METHOD_HAPPINESS,
+    METHOD_TRADE,
+    METHOD_STAT,
+];
 
 pub const HAPPINESS_ANYTIME: &str = "TR_ANYTIME";
 pub const HAPPINESS_MORNDAY: &str = "TR_MORNDAY";
 pub const HAPPINESS_NITE: &str = "TR_NITE";
+pub const HAPPINESS_WINDOWS: &[&str] = &[HAPPINESS_ANYTIME, HAPPINESS_MORNDAY, HAPPINESS_NITE];
 
 pub const STAT_ATK_GT_DEF: &str = "ATK_GT_DEF";
 pub const STAT_ATK_LT_DEF: &str = "ATK_LT_DEF";
 pub const STAT_ATK_EQ_DEF: &str = "ATK_EQ_DEF";
+pub const STAT_EVOLUTION_RATIOS: &[&str] = &[STAT_ATK_GT_DEF, STAT_ATK_LT_DEF, STAT_ATK_EQ_DEF];
+
+pub fn is_known_evolution_method(method: &str) -> bool {
+    EVOLUTION_METHODS.contains(&method)
+}
+
+pub fn is_known_happiness_window(window: &str) -> bool {
+    HAPPINESS_WINDOWS.contains(&window)
+}
+
+pub fn is_known_stat_evolution_ratio(ratio: &str) -> bool {
+    STAT_EVOLUTION_RATIOS.contains(&ratio)
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvolutionTable(pub BTreeMap<String, Vec<EvolutionEntry>>);
@@ -36,6 +57,13 @@ impl EvolutionTable {
                 species_id: species_id.to_string(),
             }
         })
+    }
+
+    pub fn contains_item_evolution(&self, item_id: &str) -> bool {
+        self.0
+            .values()
+            .flatten()
+            .any(|entry| entry.method == METHOD_ITEM && entry.item.as_deref() == Some(item_id))
     }
 }
 
@@ -256,12 +284,13 @@ pub fn find_evolution_candidate<'a>(
                         return Ok(Some(entry));
                     }
                     HAPPINESS_NITE => {}
-                    _ => {
+                    _ if !is_known_happiness_window(window) => {
                         return Err(EvolutionError::UnknownHappinessWindow {
                             species_id: species_id.to_string(),
                             window: window.to_string(),
                         });
                     }
+                    _ => {}
                 }
             }
             METHOD_STAT => {
@@ -439,6 +468,7 @@ fn learn_evolution_moves(
         let entry = LearnedMove {
             name: move_name.clone(),
             current_pp: move_data.pp,
+            pp_ups: 0,
         };
         current.push(entry.clone());
         learned.push(entry);
@@ -454,14 +484,14 @@ fn is_holding_everstone(pokemon: &Pokemon) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, Dv, GrowthRate, PokemonType};
+    use crate::models::{BaseStats, Dv, growth_rate, pokemon_type};
 
     fn species(id: &str, hp: u16, attack: u16, defense: u16) -> PokemonSpecies {
         let mut species =
             PokemonSpecies::new_for_tests(id, BaseStats::new(hp, attack, defense, 45, 65, 65));
-        species.growth_rate = GrowthRate::MediumFast;
-        species.type1 = PokemonType::Normal;
-        species.type2 = PokemonType::Normal;
+        species.growth_rate = growth_rate("GROWTH_MEDIUM_FAST");
+        species.type1 = pokemon_type("NORMAL");
+        species.type2 = pokemon_type("NORMAL");
         species
     }
 
@@ -476,7 +506,7 @@ mod tests {
     fn move_data(name: &str, pp: u8) -> Move {
         Move {
             name: name.to_string(),
-            move_type: PokemonType::Normal,
+            move_type: pokemon_type("NORMAL"),
             power: 40,
             accuracy: 100,
             pp,
@@ -692,6 +722,7 @@ mod tests {
             vec![LearnedMove {
                 name: "IRON_TAIL".to_string(),
                 current_pp: 15,
+                pp_ups: 0,
             }]
         );
         assert_eq!(
@@ -797,6 +828,36 @@ mod tests {
             .expect_err("missing level must not deserialize as None")
             .to_string();
         assert!(error.contains("missing field `level`"), "{error}");
+    }
+
+    #[test]
+    fn evolution_vocabularies_are_exact_pack_values() {
+        assert_eq!(
+            EVOLUTION_METHODS,
+            &[
+                METHOD_LEVEL,
+                METHOD_ITEM,
+                METHOD_HAPPINESS,
+                METHOD_TRADE,
+                METHOD_STAT
+            ]
+        );
+        assert!(is_known_evolution_method(METHOD_LEVEL));
+        assert!(!is_known_evolution_method("level"));
+
+        assert_eq!(
+            HAPPINESS_WINDOWS,
+            &[HAPPINESS_ANYTIME, HAPPINESS_MORNDAY, HAPPINESS_NITE]
+        );
+        assert!(is_known_happiness_window(HAPPINESS_MORNDAY));
+        assert!(!is_known_happiness_window("MORNING"));
+
+        assert_eq!(
+            STAT_EVOLUTION_RATIOS,
+            &[STAT_ATK_GT_DEF, STAT_ATK_LT_DEF, STAT_ATK_EQ_DEF]
+        );
+        assert!(is_known_stat_evolution_ratio(STAT_ATK_EQ_DEF));
+        assert!(!is_known_stat_evolution_ratio("ATTACKIER"));
     }
 
     #[test]

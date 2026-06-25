@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::battle::stats::apply_stage;
+use crate::battle::stats::{BattleStatMultiplierTables, apply_stage};
 use crate::models::{Move, Pokemon, PokemonType, Stat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,61 @@ pub enum Weather {
     Sun,
 }
 
+impl Weather {
+    pub const fn asm_id(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Rain => Some("WEATHER_RAIN"),
+            Self::Sun => Some("WEATHER_SUN"),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherModifiers {
+    pub type_modifiers: Vec<WeatherTypeModifier>,
+    pub move_effect_modifiers: Vec<WeatherMoveEffectModifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherTypeModifier {
+    pub weather: String,
+    pub move_type: PokemonType,
+    pub multiplier: TypeMultiplier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherMoveEffectModifier {
+    pub weather: String,
+    pub move_effect: String,
+    pub multiplier: TypeMultiplier,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeEffectivenessTable {
+    pub matchups: Vec<TypeEffectivenessEntry>,
+    pub foresight_matchups: Vec<TypeEffectivenessEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeEffectivenessEntry {
+    pub attacker: PokemonType,
+    pub defender: PokemonType,
+    pub multiplier: TypeMultiplier,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeCategories {
+    pub physical: Vec<String>,
+    pub special: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DamageContext {
@@ -79,106 +134,86 @@ pub struct DamageResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageCalculationError {
-    MissingStat { pokemon_id: String, stat: Stat },
-    MissingStatStage { pokemon_id: String, stat: Stat },
+    MissingStat {
+        pokemon_id: String,
+        stat: Stat,
+    },
+    MissingStatStage {
+        pokemon_id: String,
+        stat: Stat,
+    },
+    MissingStatMultiplier {
+        stage: i8,
+    },
+    MissingWeatherModifier {
+        weather: Weather,
+        move_type: PokemonType,
+    },
+    MissingTypeEffectivenessTable,
+    MissingTypeEffectiveness {
+        attacker: PokemonType,
+        defender: PokemonType,
+    },
+    MissingTypeCategoryTable,
+    MissingTypeCategory {
+        move_type: PokemonType,
+    },
 }
 
-pub fn is_physical_type(move_type: PokemonType) -> bool {
-    matches!(
-        move_type,
-        PokemonType::Normal
-            | PokemonType::Fighting
-            | PokemonType::Flying
-            | PokemonType::Ground
-            | PokemonType::Rock
-            | PokemonType::Bug
-            | PokemonType::Ghost
-            | PokemonType::Poison
-            | PokemonType::Steel
-    )
-}
-
-pub fn type_effectiveness(move_type: PokemonType, defender_type: PokemonType) -> TypeMultiplier {
-    use PokemonType::*;
-    match (move_type, defender_type) {
-        (Normal, Rock) | (Normal, Steel) => half(),
-        (Normal, Ghost) => TypeMultiplier::zero(),
-        (Fire, Fire) | (Fire, Water) | (Fire, Rock) | (Fire, Dragon) => half(),
-        (Fire, Grass) | (Fire, Ice) | (Fire, Bug) | (Fire, Steel) => double(),
-        (Water, Fire) | (Water, Ground) | (Water, Rock) => double(),
-        (Water, Water) | (Water, Grass) | (Water, Dragon) => half(),
-        (Grass, Water) | (Grass, Ground) | (Grass, Rock) => double(),
-        (Grass, Fire)
-        | (Grass, Grass)
-        | (Grass, Poison)
-        | (Grass, Flying)
-        | (Grass, Bug)
-        | (Grass, Dragon)
-        | (Grass, Steel) => half(),
-        (Electric, Water) | (Electric, Flying) => double(),
-        (Electric, Grass) | (Electric, Electric) | (Electric, Dragon) => half(),
-        (Electric, Ground) => TypeMultiplier::zero(),
-        (Ice, Grass) | (Ice, Ground) | (Ice, Flying) | (Ice, Dragon) => double(),
-        (Ice, Fire) | (Ice, Water) | (Ice, Ice) | (Ice, Steel) => half(),
-        (Fighting, Normal)
-        | (Fighting, Ice)
-        | (Fighting, Rock)
-        | (Fighting, Dark)
-        | (Fighting, Steel) => double(),
-        (Fighting, Poison) | (Fighting, Flying) | (Fighting, PsychicType) | (Fighting, Bug) => {
-            half()
-        }
-        (Fighting, Ghost) => TypeMultiplier::zero(),
-        (Poison, Grass) => double(),
-        (Poison, Poison) | (Poison, Ground) | (Poison, Rock) | (Poison, Ghost) => half(),
-        (Poison, Steel) => TypeMultiplier::zero(),
-        (Ground, Fire)
-        | (Ground, Electric)
-        | (Ground, Poison)
-        | (Ground, Rock)
-        | (Ground, Steel) => double(),
-        (Ground, Grass) | (Ground, Bug) => half(),
-        (Ground, Flying) => TypeMultiplier::zero(),
-        (Flying, Grass) | (Flying, Fighting) | (Flying, Bug) => double(),
-        (Flying, Electric) | (Flying, Rock) | (Flying, Steel) => half(),
-        (PsychicType, Fighting) | (PsychicType, Poison) => double(),
-        (PsychicType, PsychicType) | (PsychicType, Steel) => half(),
-        (PsychicType, Dark) => TypeMultiplier::zero(),
-        (Bug, Grass) | (Bug, PsychicType) | (Bug, Dark) => double(),
-        (Bug, Fire)
-        | (Bug, Fighting)
-        | (Bug, Poison)
-        | (Bug, Flying)
-        | (Bug, Ghost)
-        | (Bug, Steel) => half(),
-        (Rock, Fire) | (Rock, Ice) | (Rock, Flying) | (Rock, Bug) => double(),
-        (Rock, Fighting) | (Rock, Ground) | (Rock, Steel) => half(),
-        (Ghost, PsychicType) | (Ghost, Ghost) => double(),
-        (Ghost, Normal) => TypeMultiplier::zero(),
-        (Ghost, Dark) | (Ghost, Steel) => half(),
-        (Dragon, Dragon) => double(),
-        (Dragon, Steel) => half(),
-        (Dark, PsychicType) | (Dark, Ghost) => double(),
-        (Dark, Fighting) | (Dark, Dark) | (Dark, Steel) => half(),
-        (Steel, Ice) | (Steel, Rock) => double(),
-        (Steel, Fire) | (Steel, Water) | (Steel, Electric) | (Steel, Steel) => half(),
-        _ => TypeMultiplier::one(),
+pub fn is_physical_type(
+    categories: &TypeCategories,
+    move_type: impl AsRef<str>,
+) -> Result<bool, DamageCalculationError> {
+    if categories.physical.is_empty() || categories.special.is_empty() {
+        return Err(DamageCalculationError::MissingTypeCategoryTable);
     }
+    let move_type = move_type.as_ref();
+    if categories.physical.iter().any(|entry| entry == move_type) {
+        return Ok(true);
+    }
+    if categories.special.iter().any(|entry| entry == move_type) {
+        return Ok(false);
+    }
+    Err(DamageCalculationError::MissingTypeCategory {
+        move_type: move_type.to_string(),
+    })
+}
+
+pub fn type_effectiveness(
+    table: &TypeEffectivenessTable,
+    move_type: impl AsRef<str>,
+    defender_type: impl AsRef<str>,
+) -> Result<TypeMultiplier, DamageCalculationError> {
+    if table.matchups.is_empty() {
+        return Err(DamageCalculationError::MissingTypeEffectivenessTable);
+    }
+    let move_type = move_type.as_ref();
+    let defender_type = defender_type.as_ref();
+    table
+        .matchups
+        .iter()
+        .find(|entry| entry.attacker == move_type && entry.defender == defender_type)
+        .map(|entry| entry.multiplier)
+        .ok_or_else(|| DamageCalculationError::MissingTypeEffectiveness {
+            attacker: move_type.to_string(),
+            defender: defender_type.to_string(),
+        })
 }
 
 pub fn calculate_type_effectiveness_multiplier(
-    move_type: PokemonType,
+    table: &TypeEffectivenessTable,
+    move_type: impl AsRef<str>,
     defender_types: &[PokemonType],
-) -> TypeMultiplier {
+) -> Result<TypeMultiplier, DamageCalculationError> {
+    let move_type = move_type.as_ref();
     defender_types
         .iter()
-        .copied()
-        .fold(TypeMultiplier::one(), |acc, defender_type| {
-            let next = type_effectiveness(move_type, defender_type);
+        .try_fold(TypeMultiplier::one(), |acc, defender_type| {
+            let next = type_effectiveness(table, move_type, defender_type)?;
             if next.numerator == 0 {
-                TypeMultiplier::zero()
+                Ok(TypeMultiplier::zero())
             } else {
-                acc.multiply(next)
+                Ok(acc.multiply(next))
             }
         })
 }
@@ -187,6 +222,10 @@ pub fn calculate_damage(
     attacker: &Pokemon,
     defender: &Pokemon,
     move_data: &Move,
+    stat_multipliers: &BattleStatMultiplierTables,
+    type_categories: &TypeCategories,
+    type_effectiveness: &TypeEffectivenessTable,
+    weather_modifiers: &WeatherModifiers,
     context: DamageContext,
 ) -> Result<DamageResult, DamageCalculationError> {
     if move_data.power == 0 {
@@ -196,7 +235,7 @@ pub fn calculate_damage(
         });
     }
 
-    let physical = is_physical_type(move_data.move_type);
+    let physical = is_physical_type(type_categories, &move_data.move_type)?;
     let attack_stat = if physical {
         Stat::Attack
     } else {
@@ -235,12 +274,24 @@ pub fn calculate_damage(
     let attack_value = if context.is_critical && defense_stage > attack_stage {
         clamp_stat(base_attack)
     } else {
-        clamp_stat(apply_stage(base_attack, attack_stage))
+        clamp_stat(
+            apply_stage(stat_multipliers, base_attack, attack_stage).ok_or(
+                DamageCalculationError::MissingStatMultiplier {
+                    stage: attack_stage,
+                },
+            )?,
+        )
     };
     let defense_value = if context.is_critical && defense_stage > attack_stage {
         clamp_stat(base_defense)
     } else {
-        clamp_stat(apply_stage(base_defense, defense_stage))
+        clamp_stat(
+            apply_stage(stat_multipliers, base_defense, defense_stage).ok_or(
+                DamageCalculationError::MissingStatMultiplier {
+                    stage: defense_stage,
+                },
+            )?,
+        )
     }
     .max(1);
 
@@ -253,13 +304,12 @@ pub fn calculate_damage(
     }
     damage = damage.min(997) + 2;
 
-    damage = match (context.weather, move_data.move_type) {
-        (Weather::Rain, PokemonType::Water) | (Weather::Sun, PokemonType::Fire) => {
-            ((damage as u32 * 3) / 2) as u16
-        }
-        (Weather::Rain, PokemonType::Fire) | (Weather::Sun, PokemonType::Water) => damage / 2,
-        _ => damage,
-    };
+    damage = apply_weather_type_modifier(
+        damage,
+        context.weather,
+        &move_data.move_type,
+        weather_modifiers,
+    )?;
 
     if !context.is_confusion_damage
         && (move_data.move_type == attacker.species.type1
@@ -272,7 +322,11 @@ pub fn calculate_damage(
     let type_multiplier = if context.is_confusion_damage || move_data.name == "STRUGGLE" {
         TypeMultiplier::one()
     } else {
-        calculate_type_effectiveness_multiplier(move_data.move_type, &defender_types)
+        calculate_type_effectiveness_multiplier(
+            type_effectiveness,
+            &move_data.move_type,
+            &defender_types,
+        )?
     };
     if type_multiplier.numerator == 0 {
         return Ok(DamageResult {
@@ -291,30 +345,39 @@ pub fn calculate_damage(
     })
 }
 
+pub fn apply_weather_type_modifier(
+    damage: u16,
+    weather: Weather,
+    move_type: impl AsRef<str>,
+    weather_modifiers: &WeatherModifiers,
+) -> Result<u16, DamageCalculationError> {
+    let Some(weather_id) = weather.asm_id() else {
+        return Ok(damage);
+    };
+    let move_type = move_type.as_ref();
+    let Some(entry) = weather_modifiers
+        .type_modifiers
+        .iter()
+        .find(|entry| entry.weather == weather_id && entry.move_type == move_type)
+    else {
+        return Err(DamageCalculationError::MissingWeatherModifier {
+            weather,
+            move_type: move_type.to_string(),
+        });
+    };
+    Ok(entry.multiplier.apply_floor(damage))
+}
+
 fn distinct_defender_types(defender: &Pokemon) -> Vec<PokemonType> {
-    let mut types = vec![defender.species.type1];
+    let mut types = vec![defender.species.type1.clone()];
     if defender.species.type2 != defender.species.type1 {
-        types.push(defender.species.type2);
+        types.push(defender.species.type2.clone());
     }
     types
 }
 
 fn clamp_stat(value: u16) -> u16 {
     value.clamp(1, 999)
-}
-
-const fn half() -> TypeMultiplier {
-    TypeMultiplier {
-        numerator: 1,
-        denominator: 2,
-    }
-}
-
-const fn double() -> TypeMultiplier {
-    TypeMultiplier {
-        numerator: 2,
-        denominator: 1,
-    }
 }
 
 const fn gcd(mut a: u16, mut b: u16) -> u16 {
@@ -331,16 +394,217 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::models::{BaseStats, Dv, GrowthRate, PokemonSpecies, create_pokemon_from_known_dvs};
+    use crate::battle::stats::BattleStatMultiplier;
+    use crate::models::{
+        BaseStats, Dv, PokemonSpecies, create_pokemon_from_known_dvs, growth_rate, pokemon_type,
+    };
+    use crate::systems::experience::crystal_growth_rate_catalog_for_tests;
+
+    fn stat_multipliers() -> BattleStatMultiplierTables {
+        BattleStatMultiplierTables {
+            stat: vec![
+                BattleStatMultiplier {
+                    numerator: 25,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 28,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 33,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 40,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 50,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 66,
+                    denominator: 100,
+                },
+                BattleStatMultiplier {
+                    numerator: 1,
+                    denominator: 1,
+                },
+                BattleStatMultiplier {
+                    numerator: 15,
+                    denominator: 10,
+                },
+                BattleStatMultiplier {
+                    numerator: 2,
+                    denominator: 1,
+                },
+                BattleStatMultiplier {
+                    numerator: 25,
+                    denominator: 10,
+                },
+                BattleStatMultiplier {
+                    numerator: 3,
+                    denominator: 1,
+                },
+                BattleStatMultiplier {
+                    numerator: 35,
+                    denominator: 10,
+                },
+                BattleStatMultiplier {
+                    numerator: 4,
+                    denominator: 1,
+                },
+            ],
+            accuracy: vec![],
+        }
+    }
+
+    fn weather_modifiers() -> WeatherModifiers {
+        WeatherModifiers {
+            type_modifiers: vec![
+                WeatherTypeModifier {
+                    weather: "WEATHER_RAIN".to_string(),
+                    move_type: pokemon_type("WATER"),
+                    multiplier: TypeMultiplier {
+                        numerator: 3,
+                        denominator: 2,
+                    },
+                },
+                WeatherTypeModifier {
+                    weather: "WEATHER_RAIN".to_string(),
+                    move_type: pokemon_type("FIRE"),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                },
+                WeatherTypeModifier {
+                    weather: "WEATHER_SUN".to_string(),
+                    move_type: pokemon_type("FIRE"),
+                    multiplier: TypeMultiplier {
+                        numerator: 3,
+                        denominator: 2,
+                    },
+                },
+                WeatherTypeModifier {
+                    weather: "WEATHER_SUN".to_string(),
+                    move_type: pokemon_type("WATER"),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                },
+            ],
+            move_effect_modifiers: vec![],
+        }
+    }
+
+    fn type_effectiveness_table() -> TypeEffectivenessTable {
+        TypeEffectivenessTable {
+            matchups: vec![
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("NORMAL"),
+                    defender: pokemon_type("NORMAL"),
+                    multiplier: TypeMultiplier::one(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("GHOST"),
+                    defender: pokemon_type("STEEL"),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("DARK"),
+                    defender: pokemon_type("STEEL"),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("ELECTRIC"),
+                    defender: pokemon_type("GROUND"),
+                    multiplier: TypeMultiplier::zero(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("ICE"),
+                    defender: pokemon_type("GRASS"),
+                    multiplier: TypeMultiplier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("ICE"),
+                    defender: pokemon_type("FLYING"),
+                    multiplier: TypeMultiplier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("FIRE"),
+                    defender: pokemon_type("GRASS"),
+                    multiplier: TypeMultiplier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                },
+            ],
+            foresight_matchups: vec![
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("NORMAL"),
+                    defender: pokemon_type("GHOST"),
+                    multiplier: TypeMultiplier::zero(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("FIGHTING"),
+                    defender: pokemon_type("GHOST"),
+                    multiplier: TypeMultiplier::zero(),
+                },
+            ],
+        }
+    }
+
+    fn type_categories() -> TypeCategories {
+        TypeCategories {
+            physical: vec![
+                "NORMAL".to_string(),
+                "FIGHTING".to_string(),
+                "FLYING".to_string(),
+                "POISON".to_string(),
+                "GROUND".to_string(),
+                "ROCK".to_string(),
+                "BUG".to_string(),
+                "GHOST".to_string(),
+                "STEEL".to_string(),
+            ],
+            special: vec![
+                "FIRE".to_string(),
+                "WATER".to_string(),
+                "GRASS".to_string(),
+                "ELECTRIC".to_string(),
+                "PSYCHIC_TYPE".to_string(),
+                "ICE".to_string(),
+                "DRAGON".to_string(),
+                "DARK".to_string(),
+            ],
+        }
+    }
+
     fn species(id: &str, pokemon_type: PokemonType, stats: BaseStats) -> PokemonSpecies {
         let mut species = PokemonSpecies::new_for_tests(id, stats);
-        species.type1 = pokemon_type;
+        species.type1 = pokemon_type.clone();
         species.type2 = pokemon_type;
-        species.growth_rate = GrowthRate::MediumFast;
+        species.growth_rate = growth_rate("GROWTH_MEDIUM_FAST");
         species
     }
 
     fn pokemon(id: &str, pokemon_type: PokemonType, stats: BaseStats, level: u8) -> Pokemon {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
         let learnsets = [(id.to_string(), Vec::new())].into_iter().collect();
         create_pokemon_from_known_dvs(
             &species(id, pokemon_type, stats),
@@ -348,6 +612,7 @@ mod tests {
             Dv::from_non_hp(10, 10, 10, 10),
             &learnsets,
             &BTreeMap::new(),
+            &growth_rates,
         )
         .expect("test Pokemon builds from explicit empty learnset")
     }
@@ -369,28 +634,45 @@ mod tests {
     #[test]
     fn gen_two_type_chart_includes_steel_dark_and_immunities() {
         assert_eq!(
-            calculate_type_effectiveness_multiplier(PokemonType::Ghost, &[PokemonType::Steel]),
+            calculate_type_effectiveness_multiplier(
+                &type_effectiveness_table(),
+                pokemon_type("GHOST"),
+                &[pokemon_type("STEEL")]
+            )
+            .expect("type effectiveness calculates"),
             TypeMultiplier {
                 numerator: 1,
                 denominator: 2
             }
         );
         assert_eq!(
-            calculate_type_effectiveness_multiplier(PokemonType::Dark, &[PokemonType::Steel]),
+            calculate_type_effectiveness_multiplier(
+                &type_effectiveness_table(),
+                pokemon_type("DARK"),
+                &[pokemon_type("STEEL")]
+            )
+            .expect("type effectiveness calculates"),
             TypeMultiplier {
                 numerator: 1,
                 denominator: 2
             }
         );
         assert_eq!(
-            calculate_type_effectiveness_multiplier(PokemonType::Electric, &[PokemonType::Ground]),
+            calculate_type_effectiveness_multiplier(
+                &type_effectiveness_table(),
+                pokemon_type("ELECTRIC"),
+                &[pokemon_type("GROUND")]
+            )
+            .expect("type effectiveness calculates"),
             TypeMultiplier::zero()
         );
         assert_eq!(
             calculate_type_effectiveness_multiplier(
-                PokemonType::Ice,
-                &[PokemonType::Grass, PokemonType::Flying]
-            ),
+                &type_effectiveness_table(),
+                pokemon_type("ICE"),
+                &[pokemon_type("GRASS"), pokemon_type("FLYING")]
+            )
+            .expect("type effectiveness calculates"),
             TypeMultiplier {
                 numerator: 4,
                 denominator: 1
@@ -399,31 +681,53 @@ mod tests {
     }
 
     #[test]
+    fn type_effectiveness_requires_explicit_neutral_rows() {
+        let error = calculate_type_effectiveness_multiplier(
+            &type_effectiveness_table(),
+            pokemon_type("NORMAL"),
+            &[pokemon_type("GRASS")],
+        )
+        .expect_err("missing neutral row must not default to one");
+
+        assert_eq!(
+            error,
+            DamageCalculationError::MissingTypeEffectiveness {
+                attacker: pokemon_type("NORMAL"),
+                defender: pokemon_type("GRASS"),
+            }
+        );
+    }
+
+    #[test]
     fn physical_type_split_matches_gen_two() {
-        assert!(is_physical_type(PokemonType::Ghost));
-        assert!(is_physical_type(PokemonType::Steel));
-        assert!(!is_physical_type(PokemonType::Fire));
-        assert!(!is_physical_type(PokemonType::Dark));
+        assert!(is_physical_type(&type_categories(), pokemon_type("GHOST")).expect("known type"));
+        assert!(is_physical_type(&type_categories(), pokemon_type("STEEL")).expect("known type"));
+        assert!(!is_physical_type(&type_categories(), pokemon_type("FIRE")).expect("known type"));
+        assert!(!is_physical_type(&type_categories(), pokemon_type("DARK")).expect("known type"));
     }
 
     #[test]
     fn damage_applies_stab_type_multiplier_and_random_roll_deterministically() {
         let attacker = pokemon(
             "ATTACKER",
-            PokemonType::Fire,
+            pokemon_type("FIRE"),
             BaseStats::new(80, 84, 78, 100, 109, 85),
             50,
         );
         let defender = pokemon(
             "DEFENDER",
-            PokemonType::Grass,
+            pokemon_type("GRASS"),
             BaseStats::new(80, 82, 83, 80, 100, 100),
             50,
         );
         let result = calculate_damage(
             &attacker,
             &defender,
-            &tackle(PokemonType::Fire, 60),
+            &tackle(pokemon_type("FIRE"), 60),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
             DamageContext::default(),
         )
         .expect("damage calculates");
@@ -442,13 +746,13 @@ mod tests {
     fn zero_effectiveness_returns_zero_damage() {
         let attacker = pokemon(
             "ATTACKER",
-            PokemonType::Electric,
+            pokemon_type("ELECTRIC"),
             BaseStats::new(35, 55, 40, 90, 50, 50),
             30,
         );
         let defender = pokemon(
             "DEFENDER",
-            PokemonType::Ground,
+            pokemon_type("GROUND"),
             BaseStats::new(50, 50, 95, 35, 40, 50),
             30,
         );
@@ -456,7 +760,11 @@ mod tests {
         let result = calculate_damage(
             &attacker,
             &defender,
-            &tackle(PokemonType::Electric, 40),
+            &tackle(pokemon_type("ELECTRIC"), 40),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
             DamageContext::default(),
         )
         .expect("damage calculates");
@@ -469,13 +777,13 @@ mod tests {
     fn damage_requires_explicit_battle_stat_stages_without_zero_fallback() {
         let mut attacker = pokemon(
             "ATTACKER",
-            PokemonType::Normal,
+            pokemon_type("NORMAL"),
             BaseStats::new(80, 84, 78, 100, 109, 85),
             50,
         );
         let defender = pokemon(
             "DEFENDER",
-            PokemonType::Normal,
+            pokemon_type("NORMAL"),
             BaseStats::new(80, 82, 83, 80, 100, 100),
             50,
         );
@@ -484,7 +792,11 @@ mod tests {
         let error = calculate_damage(
             &attacker,
             &defender,
-            &tackle(PokemonType::Normal, 60),
+            &tackle(pokemon_type("NORMAL"), 60),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
             DamageContext::default(),
         )
         .expect_err("missing attack stage must not default to zero");

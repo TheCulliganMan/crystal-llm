@@ -212,6 +212,7 @@ const buildFreshTrainerMoves = (
     return defaultMovesForLevel(speciesId, level).map((name) => ({
       name,
       current_pp: moveData[name]?.pp ?? DEFAULT_FALLBACK_MOVE_PP,
+      pp_ups: 0,
     }));
   }
 
