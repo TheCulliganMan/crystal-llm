@@ -44,6 +44,7 @@ pub enum ScriptFlagError {
 pub enum ScriptFlagCommandIssue {
     UnknownCommand,
     EmptyFlagId,
+    InvalidFlagId,
 }
 
 impl From<EventFlagError> for ScriptFlagError {
@@ -68,6 +69,8 @@ pub fn script_flag_command_issues(command: &ScriptFlagCommand) -> Vec<ScriptFlag
     }
     if command.flag_id.is_empty() {
         issues.push(ScriptFlagCommandIssue::EmptyFlagId);
+    } else if command.flag_id.trim() != command.flag_id {
+        issues.push(ScriptFlagCommandIssue::InvalidFlagId);
     }
     issues
 }
@@ -169,6 +172,10 @@ mod tests {
                 ScriptFlagCommandIssue::UnknownCommand,
                 ScriptFlagCommandIssue::EmptyFlagId,
             ]
+        );
+        assert_eq!(
+            script_flag_command_issues(&command("setevent", " EVENT_ROUTE_29_POTION")),
+            vec![ScriptFlagCommandIssue::InvalidFlagId]
         );
         assert_eq!(
             script_flag_command_issues(&command("setevent", "EVENT_ROUTE_29_POTION")),

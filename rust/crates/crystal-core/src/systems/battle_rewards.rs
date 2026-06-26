@@ -32,6 +32,73 @@ impl Default for BattleRewardRules {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BattleRewardRulesField {
+    MaxLevel,
+    WildExpDivisor,
+    TrainerExpNumerator,
+    TrainerExpDenominator,
+}
+
+impl BattleRewardRulesField {
+    pub const fn subject(self) -> &'static str {
+        match self {
+            Self::MaxLevel => "battle_reward_rules:max_level",
+            Self::WildExpDivisor => "battle_reward_rules:wild_exp_divisor",
+            Self::TrainerExpNumerator => "battle_reward_rules:trainer_exp_numerator",
+            Self::TrainerExpDenominator => "battle_reward_rules:trainer_exp_denominator",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BattleRewardRulesIssue {
+    MissingMaxLevel,
+    InvalidWildExpDivisor { value: i32 },
+    InvalidTrainerExpNumerator { value: i32 },
+    InvalidTrainerExpDenominator { value: i32 },
+}
+
+impl BattleRewardRulesIssue {
+    pub const fn field(&self) -> BattleRewardRulesField {
+        match self {
+            Self::MissingMaxLevel => BattleRewardRulesField::MaxLevel,
+            Self::InvalidWildExpDivisor { .. } => BattleRewardRulesField::WildExpDivisor,
+            Self::InvalidTrainerExpNumerator { .. } => BattleRewardRulesField::TrainerExpNumerator,
+            Self::InvalidTrainerExpDenominator { .. } => {
+                BattleRewardRulesField::TrainerExpDenominator
+            }
+        }
+    }
+}
+
+pub fn battle_reward_rules_issues(rules: &BattleRewardRules) -> Vec<BattleRewardRulesIssue> {
+    if rules == &BattleRewardRules::default() {
+        return Vec::new();
+    }
+
+    let mut issues = Vec::new();
+    if rules.max_level == 0 {
+        issues.push(BattleRewardRulesIssue::MissingMaxLevel);
+    }
+    if rules.wild_exp_divisor <= 0 {
+        issues.push(BattleRewardRulesIssue::InvalidWildExpDivisor {
+            value: rules.wild_exp_divisor,
+        });
+    }
+    if rules.trainer_exp_numerator <= 0 {
+        issues.push(BattleRewardRulesIssue::InvalidTrainerExpNumerator {
+            value: rules.trainer_exp_numerator,
+        });
+    }
+    if rules.trainer_exp_denominator <= 0 {
+        issues.push(BattleRewardRulesIssue::InvalidTrainerExpDenominator {
+            value: rules.trainer_exp_denominator,
+        });
+    }
+    issues
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BattleRewardOutcome {
     pub defeated_species: String,
@@ -366,6 +433,38 @@ mod tests {
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
         }
+    }
+
+    #[test]
+    fn battle_reward_rules_issues_validate_declared_rules() {
+        assert_eq!(
+            battle_reward_rules_issues(&BattleRewardRules::default()),
+            []
+        );
+
+        let rules = BattleRewardRules {
+            max_level: 0,
+            wild_exp_divisor: 0,
+            trainer_exp_numerator: -1,
+            trainer_exp_denominator: 0,
+        };
+        assert_eq!(
+            battle_reward_rules_issues(&rules),
+            vec![
+                BattleRewardRulesIssue::MissingMaxLevel,
+                BattleRewardRulesIssue::InvalidWildExpDivisor { value: 0 },
+                BattleRewardRulesIssue::InvalidTrainerExpNumerator { value: -1 },
+                BattleRewardRulesIssue::InvalidTrainerExpDenominator { value: 0 },
+            ],
+        );
+        assert_eq!(
+            BattleRewardRulesIssue::InvalidTrainerExpDenominator { value: 0 }.field(),
+            BattleRewardRulesField::TrainerExpDenominator,
+        );
+        assert_eq!(
+            BattleRewardRulesField::TrainerExpDenominator.subject(),
+            "battle_reward_rules:trainer_exp_denominator",
+        );
     }
 
     #[test]

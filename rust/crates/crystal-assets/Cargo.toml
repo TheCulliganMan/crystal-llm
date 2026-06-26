@@ -12,3 +12,6 @@ ciborium.workspace = true
 crystal-core = { path = "../crystal-core" }
 serde.workspace = true
 serde_json.workspace = true
+
+[features]
+test-fixtures = []

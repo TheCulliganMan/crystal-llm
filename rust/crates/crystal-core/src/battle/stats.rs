@@ -44,6 +44,100 @@ pub struct BattleStatMultiplierTables {
     pub accuracy: Vec<BattleStatMultiplier>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BattleStatMultiplierTableKind {
+    Stat,
+    Accuracy,
+}
+
+impl BattleStatMultiplierTableKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stat => "stat",
+            Self::Accuracy => "accuracy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BattleStatMultiplierTableIssue {
+    InvalidLength {
+        table: BattleStatMultiplierTableKind,
+        actual: usize,
+    },
+    InvalidNumerator {
+        table: BattleStatMultiplierTableKind,
+        stage: i8,
+        numerator: i32,
+    },
+    InvalidDenominator {
+        table: BattleStatMultiplierTableKind,
+        stage: i8,
+        denominator: i32,
+    },
+}
+
+impl BattleStatMultiplierTableIssue {
+    pub fn table(&self) -> BattleStatMultiplierTableKind {
+        match self {
+            Self::InvalidLength { table, .. }
+            | Self::InvalidNumerator { table, .. }
+            | Self::InvalidDenominator { table, .. } => *table,
+        }
+    }
+}
+
+pub fn battle_stat_multiplier_table_issues(
+    tables: &BattleStatMultiplierTables,
+    required: bool,
+) -> Vec<BattleStatMultiplierTableIssue> {
+    if !required {
+        return Vec::new();
+    }
+    let mut issues = Vec::new();
+    push_battle_stat_multiplier_table_issues(
+        BattleStatMultiplierTableKind::Stat,
+        &tables.stat,
+        &mut issues,
+    );
+    push_battle_stat_multiplier_table_issues(
+        BattleStatMultiplierTableKind::Accuracy,
+        &tables.accuracy,
+        &mut issues,
+    );
+    issues
+}
+
+fn push_battle_stat_multiplier_table_issues(
+    table: BattleStatMultiplierTableKind,
+    entries: &[BattleStatMultiplier],
+    issues: &mut Vec<BattleStatMultiplierTableIssue>,
+) {
+    if entries.len() != 13 {
+        issues.push(BattleStatMultiplierTableIssue::InvalidLength {
+            table,
+            actual: entries.len(),
+        });
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let stage = index as i8 - 6;
+        if entry.numerator <= 0 {
+            issues.push(BattleStatMultiplierTableIssue::InvalidNumerator {
+                table,
+                stage,
+                numerator: entry.numerator,
+            });
+        }
+        if entry.denominator <= 0 {
+            issues.push(BattleStatMultiplierTableIssue::InvalidDenominator {
+                table,
+                stage,
+                denominator: entry.denominator,
+            });
+        }
+    }
+}
+
 pub fn stage_multiplier(tables: &BattleStatMultiplierTables, stage: i8) -> Option<Fraction> {
     table_stage_multiplier(&tables.stat, stage)
 }
@@ -185,6 +279,58 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn battle_stat_multiplier_table_issues_validate_exact_pack_tables() {
+        let tables = BattleStatMultiplierTables {
+            stat: vec![
+                BattleStatMultiplier {
+                    numerator: 1,
+                    denominator: 1,
+                };
+                12
+            ],
+            accuracy: vec![
+                BattleStatMultiplier {
+                    numerator: 1,
+                    denominator: 1,
+                },
+                BattleStatMultiplier {
+                    numerator: 0,
+                    denominator: 1,
+                },
+                BattleStatMultiplier {
+                    numerator: 1,
+                    denominator: 0,
+                },
+            ],
+        };
+
+        assert_eq!(
+            battle_stat_multiplier_table_issues(&tables, true),
+            vec![
+                BattleStatMultiplierTableIssue::InvalidLength {
+                    table: BattleStatMultiplierTableKind::Stat,
+                    actual: 12,
+                },
+                BattleStatMultiplierTableIssue::InvalidLength {
+                    table: BattleStatMultiplierTableKind::Accuracy,
+                    actual: 3,
+                },
+                BattleStatMultiplierTableIssue::InvalidNumerator {
+                    table: BattleStatMultiplierTableKind::Accuracy,
+                    stage: -5,
+                    numerator: 0,
+                },
+                BattleStatMultiplierTableIssue::InvalidDenominator {
+                    table: BattleStatMultiplierTableKind::Accuracy,
+                    stage: -4,
+                    denominator: 0,
+                },
+            ]
+        );
+        assert_eq!(battle_stat_multiplier_table_issues(&tables, false), []);
     }
 
     #[test]

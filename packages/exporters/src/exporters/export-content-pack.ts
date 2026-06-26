@@ -860,6 +860,9 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   }
 
   for (const item of payload.items) {
+    if (item.script_name === "$00") {
+      continue;
+    }
     writeCorePackEntry(files.items, "items", item.name, item);
   }
   if (payload.marts && Object.keys(payload.marts).length > 0) {
@@ -965,6 +968,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   }
   files.story_events.push(...collectJsonFiles("story_events"));
   files.phone_scripts.push(...collectJsonFiles("phone_scripts"));
+  files.tilesets.push(...collectJsonFiles("tilesets"));
 
   const compiledPath = "content-packs/core-modular.compiled.json";
   writeJsonToTargets(compiledPath, buildCompiledCorePack(files, writtenPayloads), { indent: 0 });

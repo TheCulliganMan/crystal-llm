@@ -321,7 +321,14 @@ const mockExportPlayability = jest.fn(() => {
 });
 const mockExportAudioAssets = jest.fn(() => {
   mockCalls.push("exportAudioAssets");
-  return [{ id: "MUSIC_ROUTE_29", path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid", kind: "music" }];
+  return [{
+    id: "MUSIC_ROUTE_29",
+    path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+    kind: "music",
+    source: "midi",
+    sample_rate_hz: null,
+    channels: null,
+  }];
 });
 const mockExportPokemonCryMetadataFromAsm = jest.fn(() => {
   mockCalls.push("exportPokemonCryMetadataFromAsm");
@@ -706,7 +713,14 @@ describe("exportCoreData", () => {
       npcData: {},
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
       playability: { start_maps: ["PlayersHouse2F"] },
-      audioAssets: [{ id: "MUSIC_ROUTE_29", path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid", kind: "music" }],
+      audioAssets: [{
+        id: "MUSIC_ROUTE_29",
+        path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+        kind: "music",
+        source: "midi",
+        sample_rate_hz: null,
+        channels: null,
+      }],
     });
   });
 });

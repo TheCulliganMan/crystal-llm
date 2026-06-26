@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::{
     GameState, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
@@ -24,6 +24,83 @@ pub struct ScriptRuntimeInputs {
     pub game_version: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoryEventScriptConstants {
+    pub global: BTreeMap<String, i64>,
+    pub maps: BTreeMap<String, BTreeMap<String, i64>>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InitializeEventsConfig {
+    pub event_flags: Vec<String>,
+    pub engine_flags: Vec<String>,
+    pub variable_sprites: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitializeEventsIssue {
+    InvalidFlag { flag: String },
+    InvalidVariableSprite { sprite: String },
+}
+
+pub fn initialize_events_issues(config: &InitializeEventsConfig) -> Vec<InitializeEventsIssue> {
+    let mut issues = Vec::new();
+
+    for flag in config.event_flags.iter().chain(config.engine_flags.iter()) {
+        if !is_exact_nonempty_runtime_token(flag) {
+            issues.push(InitializeEventsIssue::InvalidFlag { flag: flag.clone() });
+        }
+    }
+    for (sprite, replacement) in &config.variable_sprites {
+        if !is_exact_nonempty_runtime_token(sprite) || !is_exact_nonempty_runtime_token(replacement)
+        {
+            issues.push(InitializeEventsIssue::InvalidVariableSprite {
+                sprite: sprite.clone(),
+            });
+        }
+    }
+
+    issues
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoryEventScriptConstantIssue {
+    InvalidGlobalConstant { key: String },
+    InvalidMap { map_name: String },
+    InvalidMapConstant { map_name: String, key: String },
+}
+
+pub fn story_event_script_constant_issues(
+    constants: &StoryEventScriptConstants,
+) -> Vec<StoryEventScriptConstantIssue> {
+    let mut issues = Vec::new();
+
+    for key in constants.global.keys() {
+        if !is_exact_nonempty_runtime_token(key) {
+            issues.push(StoryEventScriptConstantIssue::InvalidGlobalConstant { key: key.clone() });
+        }
+    }
+    for (map_name, constants) in &constants.maps {
+        if !is_exact_nonempty_runtime_token(map_name) {
+            issues.push(StoryEventScriptConstantIssue::InvalidMap {
+                map_name: map_name.clone(),
+            });
+        }
+        for key in constants.keys() {
+            if !is_exact_nonempty_runtime_token(key) {
+                issues.push(StoryEventScriptConstantIssue::InvalidMapConstant {
+                    map_name: map_name.clone(),
+                    key: key.clone(),
+                });
+            }
+        }
+    }
+
+    issues
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptRuntimeOutcome {
@@ -42,6 +119,10 @@ pub enum ScriptRuntimeOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum ScriptRuntimeCommandError {
+    #[error("script runtime command name is empty")]
+    EmptyCommand,
+    #[error("script runtime command name is whitespace-padded '{command}'")]
+    PaddedCommand { command: String },
     #[error("unknown script runtime command '{command}'")]
     UnknownCommand { command: String },
     #[error("script runtime command '{command}' expects {expected} args but found {actual}")]
@@ -66,6 +147,217 @@ pub enum ScriptRuntimeCommandError {
     MissingGameVersion,
     #[error("script runtime command 'pop' cannot pop an empty runtime stack")]
     EmptyStack,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptRuntimeReferenceCatalog {
+    pub special_routines: BTreeSet<String>,
+    pub trainer_classes: BTreeMap<String, String>,
+    pub items: BTreeSet<String>,
+    pub pokemon: BTreeSet<String>,
+    pub phone_contacts: BTreeSet<String>,
+    pub special_phone_calls: BTreeSet<String>,
+    pub npc_trades: BTreeSet<String>,
+    pub script_labels: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptRuntimeCommandIssue {
+    InvalidCommand {
+        error: ScriptRuntimeCommandError,
+    },
+    UnknownSpecialRoutine {
+        special_id: String,
+    },
+    UnknownTrainer {
+        trainer_id: String,
+    },
+    TrainerClassMismatch {
+        trainer_id: String,
+        expected_class: String,
+        actual_class: String,
+    },
+    UnknownItem {
+        item_id: String,
+    },
+    UnknownSpecies {
+        species_id: String,
+    },
+    UnknownPhoneContact {
+        contact_id: String,
+    },
+    UnknownSpecialPhoneCall {
+        call_id: String,
+    },
+    UnknownNpcTrade {
+        trade_id: String,
+    },
+    UnknownTarget {
+        target_label: String,
+    },
+}
+
+pub const SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID: &str = "USE_SCRIPT_VAR";
+pub const SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID: &str = "ITEM_FROM_MEM";
+pub const SCRIPT_RUNTIME_CURRENT_BANK_TARGET: &str = "BANK(@)";
+
+fn is_exact_nonempty_runtime_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
+pub fn script_runtime_command_issues(
+    command: &ScriptRuntimeCommand,
+    catalog: &ScriptRuntimeReferenceCatalog,
+) -> Vec<ScriptRuntimeCommandIssue> {
+    let mut issues = Vec::new();
+    if let Err(error) = validate_script_runtime_command(command) {
+        issues.push(ScriptRuntimeCommandIssue::InvalidCommand { error });
+        return issues;
+    }
+    match command.command.as_str() {
+        "special" => {
+            let special_id = &command.args[0];
+            if !catalog.special_routines.contains(special_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownSpecialRoutine {
+                    special_id: special_id.clone(),
+                });
+            }
+        }
+        "gettrainername" => {
+            let trainer_class = &command.args[1];
+            let trainer_id = &command.args[2];
+            match catalog.trainer_classes.get(trainer_id) {
+                Some(actual_class) if actual_class == trainer_class => {}
+                Some(actual_class) => {
+                    issues.push(ScriptRuntimeCommandIssue::TrainerClassMismatch {
+                        trainer_id: trainer_id.clone(),
+                        expected_class: trainer_class.clone(),
+                        actual_class: actual_class.clone(),
+                    })
+                }
+                None => issues.push(ScriptRuntimeCommandIssue::UnknownTrainer {
+                    trainer_id: trainer_id.clone(),
+                }),
+            }
+        }
+        "getitemname" => {
+            let item_id = &command.args[1];
+            if item_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID
+                && item_id != SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID
+                && !catalog.items.contains(item_id)
+            {
+                issues.push(ScriptRuntimeCommandIssue::UnknownItem {
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+        "getmonname" => {
+            let species_id = &command.args[1];
+            if species_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID
+                && !catalog.pokemon.contains(species_id)
+            {
+                issues.push(ScriptRuntimeCommandIssue::UnknownSpecies {
+                    species_id: species_id.clone(),
+                });
+            }
+        }
+        "addcellnum" => {
+            let contact_id = &command.args[0];
+            if !catalog.phone_contacts.contains(contact_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownPhoneContact {
+                    contact_id: contact_id.clone(),
+                });
+            }
+        }
+        "specialphonecall" => {
+            let call_id = &command.args[0];
+            if !catalog.special_phone_calls.contains(call_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall {
+                    call_id: call_id.clone(),
+                });
+            }
+        }
+        "checkpoke" | "pokepic" => {
+            let species_id = &command.args[0];
+            if !catalog.pokemon.contains(species_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownSpecies {
+                    species_id: species_id.clone(),
+                });
+            }
+        }
+        "trade" => {
+            let trade_id = &command.args[0];
+            if !catalog.npc_trades.contains(trade_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownNpcTrade {
+                    trade_id: trade_id.clone(),
+                });
+            }
+        }
+        "cmdqueue" | "writecmdqueue" | "elevator" | "callasm" | "dba" | "dw" | "checkpokemail"
+        | "givepokemail" => {
+            let target_label = if command.command == "cmdqueue" {
+                &command.args[1]
+            } else {
+                &command.args[0]
+            };
+            push_unknown_runtime_target_issue(command, target_label, catalog, &mut issues);
+        }
+        "stonetable" => {
+            push_unknown_runtime_target_issue(command, &command.args[2], catalog, &mut issues);
+        }
+        "conditional_event" => {
+            push_unknown_runtime_target_issue(command, &command.args[1], catalog, &mut issues);
+        }
+        _ => {}
+    }
+    issues
+}
+
+fn push_unknown_runtime_target_issue(
+    command: &ScriptRuntimeCommand,
+    target_label: &str,
+    catalog: &ScriptRuntimeReferenceCatalog,
+    issues: &mut Vec<ScriptRuntimeCommandIssue>,
+) {
+    if target_label != SCRIPT_RUNTIME_CURRENT_BANK_TARGET
+        && resolve_script_runtime_target_label(
+            &catalog.script_labels,
+            &command.source_script,
+            target_label,
+        )
+        .is_none()
+    {
+        issues.push(ScriptRuntimeCommandIssue::UnknownTarget {
+            target_label: target_label.to_string(),
+        });
+    }
+}
+
+pub fn resolve_script_runtime_target_label(
+    script_labels: &BTreeSet<String>,
+    source_script: &str,
+    target_label: &str,
+) -> Option<String> {
+    if script_labels.contains(target_label) {
+        return Some(target_label.to_string());
+    }
+    if target_label.starts_with('.') {
+        let parent_script = script_label_parent(source_script);
+        let local = format!("{target_label}@{parent_script}");
+        if script_labels.contains(&local) {
+            return Some(local);
+        }
+    }
+    None
+}
+
+pub fn script_label_parent(source_script: &str) -> &str {
+    source_script
+        .rsplit_once('@')
+        .map(|(_, parent)| parent)
+        .unwrap_or(source_script)
 }
 
 pub fn apply_script_runtime_command(
@@ -134,6 +426,14 @@ pub fn apply_script_runtime_command(
 pub fn validate_script_runtime_command(
     command: &ScriptRuntimeCommand,
 ) -> Result<(), ScriptRuntimeCommandError> {
+    if command.command.is_empty() {
+        return Err(ScriptRuntimeCommandError::EmptyCommand);
+    }
+    if command.command.trim() != command.command {
+        return Err(ScriptRuntimeCommandError::PaddedCommand {
+            command: command.command.clone(),
+        });
+    }
     let expected = script_runtime_command_arg_counts()
         .get(command.command.as_str())
         .copied()
@@ -612,6 +912,158 @@ mod tests {
     }
 
     #[test]
+    fn command_issues_validate_exact_runtime_references() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            special_routines: BTreeSet::from(["FadeOutMusic".to_string()]),
+            trainer_classes: BTreeMap::from([("FALKNER1".to_string(), "FALKNER".to_string())]),
+            items: BTreeSet::from(["POTION".to_string()]),
+            pokemon: BTreeSet::from(["PIKACHU".to_string()]),
+            phone_contacts: BTreeSet::from(["PHONE_ELM".to_string()]),
+            special_phone_calls: BTreeSet::from(["SPECIALCALL_MASTERBALL".to_string()]),
+            npc_trades: BTreeSet::from(["NPC_TRADE_MIKE".to_string()]),
+            script_labels: BTreeSet::from([
+                "MainScript".to_string(),
+                ".Done@MainScript".to_string(),
+            ]),
+        };
+
+        assert_eq!(
+            script_runtime_command_issues(&command("special", &["fadeoutmusic"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::UnknownSpecialRoutine {
+                special_id: "fadeoutmusic".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "gettrainername",
+                    &["STRING_BUFFER_4", "BUG_CATCHER", "FALKNER1"]
+                ),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::TrainerClassMismatch {
+                trainer_id: "FALKNER1".to_string(),
+                expected_class: "BUG_CATCHER".to_string(),
+                actual_class: "FALKNER".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "gettrainername",
+                    &["STRING_BUFFER_4", "FALKNER", "falkner1"]
+                ),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownTrainer {
+                trainer_id: "falkner1".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("getitemname", &["BUFFER_1", "potion"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownItem {
+                item_id: "potion".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "getitemname",
+                    &["BUFFER_1", SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID]
+                ),
+                &catalog
+            ),
+            []
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("getmonname", &["BUFFER_1", "pikachu"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownSpecies {
+                species_id: "pikachu".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("addcellnum", &["phone_elm"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::UnknownPhoneContact {
+                contact_id: "phone_elm".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("specialphonecall", &["specialcall_masterball"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall {
+                call_id: "specialcall_masterball".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("trade", &["npc_trade_mike"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::UnknownNpcTrade {
+                trade_id: "npc_trade_mike".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn command_issues_resolve_exact_script_targets_without_fallbacks() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            script_labels: BTreeSet::from([
+                "AsmScript".to_string(),
+                ".Local@AsmScript".to_string(),
+                "GlobalTarget".to_string(),
+            ]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+
+        assert_eq!(
+            resolve_script_runtime_target_label(
+                &catalog.script_labels,
+                ".Nested@AsmScript",
+                ".Local"
+            ),
+            Some(".Local@AsmScript".to_string())
+        );
+        let mut local_call = command("callasm", &[".Local"]);
+        local_call.source_script = ".Nested@AsmScript".to_string();
+        assert_eq!(script_runtime_command_issues(&local_call, &catalog), []);
+        assert_eq!(
+            script_runtime_command_issues(&command("callasm", &["GlobalTarget"]), &catalog),
+            []
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "cmdqueue",
+                    &[SCRIPT_RUNTIME_CURRENT_BANK_TARGET, ".Missing"]
+                ),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownTarget {
+                target_label: ".Missing".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "cmdqueue",
+                    &[
+                        SCRIPT_RUNTIME_CURRENT_BANK_TARGET,
+                        SCRIPT_RUNTIME_CURRENT_BANK_TARGET
+                    ],
+                ),
+                &catalog
+            ),
+            []
+        );
+    }
+
+    #[test]
     fn records_exact_runtime_effects_without_command_enums() {
         let mut state = GameState::default();
         apply_script_runtime_command(
@@ -1041,6 +1493,18 @@ mod tests {
             Err(ScriptRuntimeCommandError::UnknownCommand { .. })
         ));
         assert!(matches!(
+            apply_script_runtime_command(&mut state, command("", &["HealParty"]), default_inputs()),
+            Err(ScriptRuntimeCommandError::EmptyCommand)
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command(" special", &["HealParty"]),
+                default_inputs()
+            ),
+            Err(ScriptRuntimeCommandError::PaddedCommand { .. })
+        ));
+        assert!(matches!(
             apply_script_runtime_command(
                 &mut state,
                 command("special", &[" HealParty"]),
@@ -1097,6 +1561,154 @@ mod tests {
         assert!(explicit_empty_args.args.is_empty());
         assert_eq!(explicit_empty_args.source_script, "RuntimeScript");
         assert_eq!(explicit_empty_args.command_index, 4);
+    }
+
+    #[test]
+    fn story_event_script_constants_require_explicit_maps_field() {
+        let missing_maps = serde_json::from_str::<StoryEventScriptConstants>(r#"{"global":{}}"#)
+            .expect_err("story event constants must declare map constants explicitly")
+            .to_string();
+
+        assert!(missing_maps.contains("missing field `maps`"));
+    }
+
+    #[test]
+    fn initialize_events_require_explicit_variable_sprites_field() {
+        let missing_variable_sprites =
+            serde_json::from_str::<InitializeEventsConfig>(r#"{"eventFlags":[],"engineFlags":[]}"#)
+                .expect_err("initialize event buckets must all be explicit")
+                .to_string();
+
+        assert!(missing_variable_sprites.contains("missing field `variableSprites`"));
+    }
+
+    #[test]
+    fn story_event_script_constants_reject_unknown_pack_fields() {
+        let unknown_field = serde_json::from_str::<StoryEventScriptConstants>(
+            r#"{"global":{},"maps":{},"legacy":{}}"#,
+        )
+        .expect_err("story event constants reject unknown pack fields")
+        .to_string();
+
+        assert!(unknown_field.contains("unknown field"));
+    }
+
+    #[test]
+    fn initialize_events_reject_unknown_pack_fields() {
+        let unknown_field = serde_json::from_str::<InitializeEventsConfig>(
+            r#"{"eventFlags":[],"engineFlags":[],"variableSprites":{},"legacy":true}"#,
+        )
+        .expect_err("initialize events reject unknown pack fields")
+        .to_string();
+
+        assert!(unknown_field.contains("unknown field"));
+    }
+
+    #[test]
+    fn initialize_events_issues_require_nonempty_flags_and_variable_sprites() {
+        let config = InitializeEventsConfig {
+            event_flags: vec![
+                "EVENT_GOT_STARTER".to_string(),
+                String::new(),
+                " EVENT_PADDED".to_string(),
+            ],
+            engine_flags: vec![" ".to_string(), "ENGINE_POKEGEAR".to_string()],
+            variable_sprites: [
+                (" PADDED_SPRITE".to_string(), "SPRITE_ELM".to_string()),
+                (
+                    "PADDED_REPLACEMENT".to_string(),
+                    " SPRITE_SILVER".to_string(),
+                ),
+                ("SPRITE_ELM".to_string(), String::new()),
+                (String::new(), "SPRITE_SILVER".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        assert_eq!(
+            initialize_events_issues(&config),
+            vec![
+                InitializeEventsIssue::InvalidFlag {
+                    flag: String::new(),
+                },
+                InitializeEventsIssue::InvalidFlag {
+                    flag: " EVENT_PADDED".to_string(),
+                },
+                InitializeEventsIssue::InvalidFlag {
+                    flag: " ".to_string(),
+                },
+                InitializeEventsIssue::InvalidVariableSprite {
+                    sprite: String::new(),
+                },
+                InitializeEventsIssue::InvalidVariableSprite {
+                    sprite: " PADDED_SPRITE".to_string(),
+                },
+                InitializeEventsIssue::InvalidVariableSprite {
+                    sprite: "PADDED_REPLACEMENT".to_string(),
+                },
+                InitializeEventsIssue::InvalidVariableSprite {
+                    sprite: "SPRITE_ELM".to_string(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn story_event_script_constant_issues_require_nonempty_keys() {
+        let constants = StoryEventScriptConstants {
+            global: [
+                ("".to_string(), 1),
+                (" TRUE".to_string(), 1),
+                ("TRUE".to_string(), 1),
+            ]
+            .into_iter()
+            .collect(),
+            maps: [
+                (
+                    "".to_string(),
+                    BTreeMap::from([("EVENT_ONE".to_string(), 1)]),
+                ),
+                (
+                    " ROUTE_30".to_string(),
+                    BTreeMap::from([("EVENT_THREE".to_string(), 4)]),
+                ),
+                (
+                    "ROUTE_29".to_string(),
+                    BTreeMap::from([
+                        ("".to_string(), 2),
+                        (" EVENT_PADDED".to_string(), 4),
+                        ("EVENT_TWO".to_string(), 3),
+                    ]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        assert_eq!(
+            story_event_script_constant_issues(&constants),
+            vec![
+                StoryEventScriptConstantIssue::InvalidGlobalConstant { key: String::new() },
+                StoryEventScriptConstantIssue::InvalidGlobalConstant {
+                    key: " TRUE".to_string(),
+                },
+                StoryEventScriptConstantIssue::InvalidMap {
+                    map_name: String::new(),
+                },
+                StoryEventScriptConstantIssue::InvalidMap {
+                    map_name: " ROUTE_30".to_string(),
+                },
+                StoryEventScriptConstantIssue::InvalidMapConstant {
+                    map_name: "ROUTE_29".to_string(),
+                    key: String::new(),
+                },
+                StoryEventScriptConstantIssue::InvalidMapConstant {
+                    map_name: "ROUTE_29".to_string(),
+                    key: " EVENT_PADDED".to_string(),
+                },
+            ],
+        );
     }
 
     fn default_inputs() -> ScriptRuntimeInputs {

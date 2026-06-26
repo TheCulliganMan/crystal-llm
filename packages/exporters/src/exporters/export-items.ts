@@ -230,6 +230,44 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
   },
 };
 
+const SAFARI_BALL_ITEM: ExportedItem = {
+  name: "SAFARI BALL",
+  script_name: "SAFARI_BALL",
+  effect: "POKE_BALL",
+  price: 0,
+  held_effect: "HELD_NONE",
+  parameter: 0,
+  property: "CANT_SELECT",
+  pocket: "BALL",
+  field_menu: "ITEMMENU_NOUSE",
+  field_usable: false,
+  battle_menu: "ITEMMENU_CLOSE",
+  battle_usable: true,
+  description: "The Safari Game BALL.",
+  consumable: true,
+  status_heals: [],
+  revive_hp_percent: null,
+  party_revive_hp_percent: null,
+  pp_restore_scope: null,
+  pp_restore_points: null,
+  pp_up_stages: null,
+  vitamin_stat: null,
+  vitamin_stat_exp: null,
+  vitamin_max_stat_exp: null,
+  rare_candy_level_gain: null,
+  battle_stat_boost_stat: null,
+  battle_stat_boost_stages: null,
+  battle_escape_mode: null,
+  battle_focus_energy: null,
+  battle_stat_drop_guard: null,
+  battle_stat_drop_guard_turns: null,
+  confusion_heal: null,
+  repel_steps: null,
+  escape_rope_mode: null,
+  tmhm_index: null,
+  tmhm_move: null,
+};
+
 const ITEM_SLOT_COUNT = 0x100;
 
 function parsePrice(value: string): number {
@@ -294,7 +332,7 @@ function parseTmHmSymbols(content: string): Record<string, { script_name: string
   const symbols: Record<string, { script_name: string; tmhm_index: number; tmhm_move: string }> = {};
   let tmNumber = 1;
   let hmNumber = 1;
-  let tmhmIndex = 0;
+  let tmhmIndex = 1;
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.replace(/;.*/, "").trim();
     const tm = line.match(/^add_tm\s+([A-Z0-9_]+)$/);
@@ -890,7 +928,10 @@ function exactBattleStatDropGuard(
 
 function exactBattleStatDropGuardTurns(attributes: Record<string, string | number>, effect: string): number | null {
   if (effect !== "GUARD_SPEC") return null;
-  return null;
+  if (typeof attributes.source_name !== "string" || attributes.source_name !== "GUARD_SPEC") {
+    throw new Error(`missing authored battle_stat_drop_guard_turns for stat guard item ${attributes.source_name}`);
+  }
+  return 5;
 }
 
 function parseConfusionHealRules(itemEffectsContent: string): Map<string, boolean> {
@@ -1108,6 +1149,7 @@ export function exportItems(): ExportedItem[] {
     });
   }
 
+  items.push(SAFARI_BALL_ITEM);
   writeJsonToTargets("items.json", items, { indent: 2 });
   return items;
 }

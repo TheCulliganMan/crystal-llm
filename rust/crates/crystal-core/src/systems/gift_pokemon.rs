@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,73 @@ pub enum GiftPokemonError {
     InvalidLevel { level: u8 },
     StorageFull { species_id: String },
     PokemonBuild { error: PokemonBuildError },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GiftPokemonScriptIssue {
+    UnknownSpecies { species_id: String },
+    UnknownHeldItem { item_id: String },
+    EmptyLabel { field: &'static str },
+    InvalidLabel { field: &'static str, label: String },
+    UnknownLabel { field: &'static str, label: String },
+}
+
+pub fn gift_pokemon_script_issues(
+    gift: &GiftPokemonScript,
+    species: &BTreeMap<String, PokemonSpecies>,
+    items: &BTreeMap<String, Item>,
+    script_labels: &BTreeSet<String>,
+) -> Vec<GiftPokemonScriptIssue> {
+    let mut issues = Vec::new();
+    if !species.contains_key(&gift.species_id) {
+        issues.push(GiftPokemonScriptIssue::UnknownSpecies {
+            species_id: gift.species_id.clone(),
+        });
+    }
+    if let Some(item_id) = gift.held_item_id.as_deref()
+        && !items.contains_key(item_id)
+    {
+        issues.push(GiftPokemonScriptIssue::UnknownHeldItem {
+            item_id: item_id.to_string(),
+        });
+    }
+    push_label_issue(
+        "nickname",
+        gift.nickname_label.as_deref(),
+        script_labels,
+        &mut issues,
+    );
+    push_label_issue(
+        "original trainer",
+        gift.ot_label.as_deref(),
+        script_labels,
+        &mut issues,
+    );
+    issues
+}
+
+fn push_label_issue(
+    field: &'static str,
+    label: Option<&str>,
+    script_labels: &BTreeSet<String>,
+    issues: &mut Vec<GiftPokemonScriptIssue>,
+) {
+    let Some(label) = label else {
+        return;
+    };
+    if label.is_empty() {
+        issues.push(GiftPokemonScriptIssue::EmptyLabel { field });
+    } else if label.trim() != label {
+        issues.push(GiftPokemonScriptIssue::InvalidLabel {
+            field,
+            label: label.to_string(),
+        });
+    } else if !script_labels.contains(label) {
+        issues.push(GiftPokemonScriptIssue::UnknownLabel {
+            field,
+            label: label.to_string(),
+        });
+    }
 }
 
 pub fn give_gift_pokemon(
@@ -227,6 +294,44 @@ mod tests {
 
     fn learnsets(species_id: &str) -> SpeciesLearnsets {
         [(species_id.to_string(), Vec::new())].into_iter().collect()
+    }
+
+    #[test]
+    fn gift_pokemon_script_issues_validate_exact_ids_and_labels() {
+        let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
+        let items = BTreeMap::from([("BERRY".to_string(), item("BERRY"))]);
+        let labels = ["GiftNicknameText".to_string()].into_iter().collect();
+        let gift = GiftPokemonScript {
+            species_id: "cyndaquil".to_string(),
+            level_token: "5".to_string(),
+            level: 5,
+            held_item_id: Some("berry".to_string()),
+            nickname_label: Some("giftnicknametext".to_string()),
+            ot_label: Some(" GiftOtText".to_string()),
+            source_script: "GiftScript".to_string(),
+            command_index: 4,
+            egg: false,
+        };
+
+        assert_eq!(
+            gift_pokemon_script_issues(&gift, &species_map, &items, &labels),
+            vec![
+                GiftPokemonScriptIssue::UnknownSpecies {
+                    species_id: "cyndaquil".to_string(),
+                },
+                GiftPokemonScriptIssue::UnknownHeldItem {
+                    item_id: "berry".to_string(),
+                },
+                GiftPokemonScriptIssue::UnknownLabel {
+                    field: "nickname",
+                    label: "giftnicknametext".to_string(),
+                },
+                GiftPokemonScriptIssue::InvalidLabel {
+                    field: "original trainer",
+                    label: " GiftOtText".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

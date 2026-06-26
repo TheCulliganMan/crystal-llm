@@ -25,6 +25,40 @@ impl Default for BattleEscapeRules {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BattleEscapeRulesIssue {
+    Missing,
+    MissingPlayerSpeedMultiplier,
+    MissingEnemySpeedDivisor,
+    InvalidRngRollValues { rng_roll_values: u16 },
+}
+
+pub fn battle_escape_rules_issues(
+    rules: &BattleEscapeRules,
+    required: bool,
+) -> Vec<BattleEscapeRulesIssue> {
+    if !required {
+        return Vec::new();
+    }
+    if rules == &BattleEscapeRules::default() {
+        return vec![BattleEscapeRulesIssue::Missing];
+    }
+
+    let mut issues = Vec::new();
+    if rules.player_speed_multiplier == 0 {
+        issues.push(BattleEscapeRulesIssue::MissingPlayerSpeedMultiplier);
+    }
+    if rules.enemy_speed_divisor == 0 {
+        issues.push(BattleEscapeRulesIssue::MissingEnemySpeedDivisor);
+    }
+    if rules.rng_roll_values == 0 || rules.rng_roll_values > u16::from(u8::MAX) + 1 {
+        issues.push(BattleEscapeRulesIssue::InvalidRngRollValues {
+            rng_roll_values: rules.rng_roll_values,
+        });
+    }
+    issues
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleEscapeAttempt {
     pub escaped: bool,
@@ -216,6 +250,35 @@ mod tests {
             failed_attempt_bonus: 30,
             rng_roll_values: 256,
         }
+    }
+
+    #[test]
+    fn battle_escape_rules_issues_require_definitive_rules_when_pokemon_exist() {
+        assert_eq!(
+            battle_escape_rules_issues(&BattleEscapeRules::default(), true),
+            vec![BattleEscapeRulesIssue::Missing]
+        );
+        assert_eq!(
+            battle_escape_rules_issues(&BattleEscapeRules::default(), false),
+            []
+        );
+
+        let rules = BattleEscapeRules {
+            player_speed_multiplier: 0,
+            enemy_speed_divisor: 0,
+            failed_attempt_bonus: 30,
+            rng_roll_values: 257,
+        };
+        assert_eq!(
+            battle_escape_rules_issues(&rules, true),
+            vec![
+                BattleEscapeRulesIssue::MissingPlayerSpeedMultiplier,
+                BattleEscapeRulesIssue::MissingEnemySpeedDivisor,
+                BattleEscapeRulesIssue::InvalidRngRollValues {
+                    rng_roll_values: 257,
+                },
+            ],
+        );
     }
 
     #[test]

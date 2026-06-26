@@ -1,6 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::state::{EventFlagError, GameState};
+use crate::systems::script_runtime::script_label_parent;
 use crate::world::session::{OverworldFollowState, OverworldSession};
 use crate::world::{
     map::{Direction, TilePosition},
@@ -124,6 +127,81 @@ pub enum ScriptObjectCommandError {
     EventFlag { error: EventFlagError },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptMovementStepIssue {
+    UnexpectedDirection,
+    MissingDirection,
+    UnknownDirection { direction: String },
+    UnsupportedCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptObjectCommandIssue {
+    MissingObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    UnknownObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        object_id: String,
+    },
+    UnhideableObject {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        object_id: String,
+        event_flag: String,
+    },
+    MissingCoordinates {
+        source_script: String,
+        command_index: usize,
+    },
+    MissingDirection {
+        source_script: String,
+        command_index: usize,
+    },
+    UnknownDirection {
+        source_script: String,
+        command_index: usize,
+        direction: String,
+    },
+    MissingTargetObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    UnknownTargetObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        object_id: String,
+    },
+    MissingMovement {
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    UnknownMovement {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        movement: String,
+    },
+    MissingEmote {
+        source_script: String,
+        command_index: usize,
+    },
+    UnknownCommand {
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+}
+
 pub const SCRIPT_OBJECT_VISIBILITY_COMMANDS: &[&str] = &["appear", "disappear"];
 pub const SCRIPT_OBJECT_COORDINATE_COMMANDS: &[&str] = &["moveobject"];
 pub const SCRIPT_OBJECT_DIRECTION_COMMANDS: &[&str] = &["turnobject"];
@@ -185,6 +263,199 @@ pub fn is_known_script_object_command(command: &str) -> bool {
 
 pub fn is_known_script_movement_command(command: &str) -> bool {
     SCRIPT_MOVEMENT_COMMANDS.contains(&command)
+}
+
+pub fn script_object_command_issues(
+    command: &ScriptObjectCommand,
+    object_event_flags: &BTreeMap<String, String>,
+    hideable_event_flags: &BTreeSet<String>,
+    movements: &BTreeSet<(String, Option<String>)>,
+) -> Vec<ScriptObjectCommandIssue> {
+    let mut issues = Vec::new();
+    if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
+    } else if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command.command.as_str()) {
+        let Some(object_id) = command.object_id.as_deref() else {
+            issues.push(missing_object_id(command));
+            return issues;
+        };
+        if object_id == "LAST_TALKED" || object_id == "PLAYER" {
+            return issues;
+        }
+        let Some(event_flag) = object_event_flags.get(object_id) else {
+            issues.push(unknown_object_id(command, object_id));
+            return issues;
+        };
+        if event_flag != "-1" && !hideable_event_flags.contains(event_flag) {
+            issues.push(ScriptObjectCommandIssue::UnhideableObject {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                command: command.command.clone(),
+                object_id: object_id.to_string(),
+                event_flag: event_flag.clone(),
+            });
+        }
+    } else if SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command.command.as_str()) {
+        collect_required_object_id_issue(command, object_event_flags, false, &mut issues);
+        if command.x.is_none() || command.y.is_none() {
+            issues.push(ScriptObjectCommandIssue::MissingCoordinates {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            });
+        }
+    } else if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str())
+        || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str())
+    {
+        collect_required_object_id_issue(command, object_event_flags, true, &mut issues);
+        if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str()) {
+            collect_direction_issue(command, &mut issues);
+        }
+        if SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str()) {
+            collect_required_target_object_id_issue(command, object_event_flags, true, &mut issues);
+        }
+    } else if SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
+        if SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
+            collect_required_object_id_issue(command, object_event_flags, true, &mut issues);
+        }
+        let Some(movement) = command.movement.as_deref() else {
+            issues.push(ScriptObjectCommandIssue::MissingMovement {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                command: command.command.clone(),
+            });
+            return issues;
+        };
+        let movement_source = script_label_parent(&command.source_script);
+        if !movements.contains(&(movement.to_string(), None))
+            && !movements.contains(&(movement.to_string(), Some(movement_source.to_string())))
+        {
+            issues.push(ScriptObjectCommandIssue::UnknownMovement {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                command: command.command.clone(),
+                movement: movement.to_string(),
+            });
+        }
+    } else if SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command.command.as_str()) {
+        collect_required_object_id_issue(command, object_event_flags, true, &mut issues);
+        if command.emote.is_none() || command.duration.is_none() {
+            issues.push(ScriptObjectCommandIssue::MissingEmote {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            });
+        }
+    } else if !is_known_script_object_command(&command.command) {
+        issues.push(ScriptObjectCommandIssue::UnknownCommand {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            command: command.command.clone(),
+        });
+    }
+    issues
+}
+
+fn collect_required_object_id_issue(
+    command: &ScriptObjectCommand,
+    object_event_flags: &BTreeMap<String, String>,
+    allow_player: bool,
+    issues: &mut Vec<ScriptObjectCommandIssue>,
+) {
+    let Some(object_id) = command.object_id.as_deref() else {
+        issues.push(missing_object_id(command));
+        return;
+    };
+    if (allow_player && object_id == "PLAYER") || object_id == "LAST_TALKED" {
+        return;
+    }
+    if !object_event_flags.contains_key(object_id) {
+        issues.push(unknown_object_id(command, object_id));
+    }
+}
+
+fn collect_required_target_object_id_issue(
+    command: &ScriptObjectCommand,
+    object_event_flags: &BTreeMap<String, String>,
+    allow_player: bool,
+    issues: &mut Vec<ScriptObjectCommandIssue>,
+) {
+    let Some(object_id) = command.target_object_id.as_deref() else {
+        issues.push(ScriptObjectCommandIssue::MissingTargetObjectId {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            command: command.command.clone(),
+        });
+        return;
+    };
+    if (allow_player && object_id == "PLAYER") || object_id == "LAST_TALKED" {
+        return;
+    }
+    if !object_event_flags.contains_key(object_id) {
+        issues.push(ScriptObjectCommandIssue::UnknownTargetObjectId {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            command: command.command.clone(),
+            object_id: object_id.to_string(),
+        });
+    }
+}
+
+fn collect_direction_issue(
+    command: &ScriptObjectCommand,
+    issues: &mut Vec<ScriptObjectCommandIssue>,
+) {
+    let Some(direction) = command.direction.as_deref() else {
+        issues.push(ScriptObjectCommandIssue::MissingDirection {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+        return;
+    };
+    if parse_script_direction(direction).is_err() {
+        issues.push(ScriptObjectCommandIssue::UnknownDirection {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            direction: direction.to_string(),
+        });
+    }
+}
+
+fn missing_object_id(command: &ScriptObjectCommand) -> ScriptObjectCommandIssue {
+    ScriptObjectCommandIssue::MissingObjectId {
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+        command: command.command.clone(),
+    }
+}
+
+fn unknown_object_id(command: &ScriptObjectCommand, object_id: &str) -> ScriptObjectCommandIssue {
+    ScriptObjectCommandIssue::UnknownObjectId {
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+        command: command.command.clone(),
+        object_id: object_id.to_string(),
+    }
+}
+
+pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
+    let command = step.command.as_str();
+    if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
+        || SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS.contains(&command)
+    {
+        if step.direction.is_some() {
+            vec![ScriptMovementStepIssue::UnexpectedDirection]
+        } else {
+            Vec::new()
+        }
+    } else if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) {
+        match step.direction.as_deref() {
+            Some(direction) if parse_script_direction(direction).is_ok() => Vec::new(),
+            Some(direction) => vec![ScriptMovementStepIssue::UnknownDirection {
+                direction: direction.to_string(),
+            }],
+            None => vec![ScriptMovementStepIssue::MissingDirection],
+        }
+    } else {
+        vec![ScriptMovementStepIssue::UnsupportedCommand]
+    }
 }
 
 pub fn apply_script_object_mutation(
@@ -930,6 +1201,57 @@ mod tests {
     }
 
     #[test]
+    fn movement_step_issues_require_exact_payload_shapes() {
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }),
+            vec![ScriptMovementStepIssue::MissingDirection]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("north".to_string()),
+                duration: None,
+                index: 1,
+            }),
+            vec![ScriptMovementStepIssue::UnknownDirection {
+                direction: "north".to_string()
+            }]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step_end".to_string(),
+                direction: Some("DOWN".to_string()),
+                duration: None,
+                index: 2,
+            }),
+            vec![ScriptMovementStepIssue::UnexpectedDirection]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "spin_forever".to_string(),
+                direction: None,
+                duration: None,
+                index: 3,
+            }),
+            vec![ScriptMovementStepIssue::UnsupportedCommand]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "turn_head".to_string(),
+                direction: Some("LEFT".to_string()),
+                duration: None,
+                index: 4,
+            }),
+            Vec::<ScriptMovementStepIssue>::new()
+        );
+    }
+
+    #[test]
     fn disappear_and_appear_toggle_exact_event_flag() {
         let mut state = GameState::default();
         let mut session = session(vec![object(
@@ -1439,6 +1761,131 @@ mod tests {
                 command: "spin_forever".to_string(),
                 index: 0,
             }
+        );
+    }
+
+    #[test]
+    fn script_object_command_issues_validate_exact_object_payloads() {
+        let object_event_flags = BTreeMap::from([
+            ("NPC".to_string(), "EVENT_HIDE_NPC".to_string()),
+            ("ROCK".to_string(), "-1".to_string()),
+            ("STATUE".to_string(), "EVENT_STATIC_STATUE".to_string()),
+        ]);
+        let hideable_event_flags = BTreeSet::from(["EVENT_HIDE_NPC".to_string()]);
+        let movements = BTreeSet::from([
+            ("GlobalWalk".to_string(), None),
+            ("LocalWalk".to_string(), Some("SceneScript".to_string())),
+        ]);
+
+        let mut missing_visibility = command("appear", "NPC");
+        missing_visibility.object_id = None;
+        assert_eq!(
+            script_object_command_issues(
+                &missing_visibility,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::MissingObjectId {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "appear".to_string(),
+            }]
+        );
+
+        let unhideable = command("disappear", "STATUE");
+        assert_eq!(
+            script_object_command_issues(
+                &unhideable,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::UnhideableObject {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "disappear".to_string(),
+                object_id: "STATUE".to_string(),
+                event_flag: "EVENT_STATIC_STATUE".to_string(),
+            }]
+        );
+
+        let mut turn = command("turnobject", "NPC");
+        turn.direction = Some("sideways".to_string());
+        assert!(
+            script_object_command_issues(
+                &turn,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            )
+            .contains(&ScriptObjectCommandIssue::UnknownDirection {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                direction: "sideways".to_string(),
+            })
+        );
+
+        let mut face = command("faceobject", "NPC");
+        face.target_object_id = Some("MISSING".to_string());
+        assert!(
+            script_object_command_issues(
+                &face,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            )
+            .contains(&ScriptObjectCommandIssue::UnknownTargetObjectId {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "faceobject".to_string(),
+                object_id: "MISSING".to_string(),
+            })
+        );
+
+        let mut local_movement = command("applymovement", "NPC");
+        local_movement.source_script = ".branch@SceneScript".to_string();
+        local_movement.movement = Some("LocalWalk".to_string());
+        assert!(
+            script_object_command_issues(
+                &local_movement,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            )
+            .is_empty()
+        );
+
+        let mut missing_movement = command("applymovement", "NPC");
+        missing_movement.movement = Some("MissingWalk".to_string());
+        assert_eq!(
+            script_object_command_issues(
+                &missing_movement,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::UnknownMovement {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "applymovement".to_string(),
+                movement: "MissingWalk".to_string(),
+            }]
+        );
+
+        let unknown = command("spinobject", "NPC");
+        assert_eq!(
+            script_object_command_issues(
+                &unknown,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::UnknownCommand {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "spinobject".to_string(),
+            }]
         );
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -45,6 +45,217 @@ pub fn is_known_happiness_window(window: &str) -> bool {
 
 pub fn is_known_stat_evolution_ratio(ratio: &str) -> bool {
     STAT_EVOLUTION_RATIOS.contains(&ratio)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvolutionTableIssue {
+    MissingSpeciesEvolutions {
+        species_id: String,
+    },
+    InvalidSourceSpecies {
+        species_id: String,
+    },
+    UnknownSourceSpecies {
+        species_id: String,
+    },
+    InvalidTargetSpecies {
+        source_species_id: String,
+        target_species_id: String,
+    },
+    UnknownTargetSpecies {
+        source_species_id: String,
+        target_species_id: String,
+    },
+    MissingLevel {
+        source_species_id: String,
+    },
+    MissingItem {
+        source_species_id: String,
+    },
+    InvalidItem {
+        source_species_id: String,
+        item_id: String,
+    },
+    UnknownItem {
+        source_species_id: String,
+        item_id: String,
+    },
+    MissingHappinessWindow {
+        source_species_id: String,
+    },
+    InvalidHappinessWindow {
+        source_species_id: String,
+        window: String,
+    },
+    UnknownHappinessWindow {
+        source_species_id: String,
+        window: String,
+    },
+    InvalidTradeItem {
+        source_species_id: String,
+        item_id: String,
+    },
+    UnknownTradeItem {
+        source_species_id: String,
+        item_id: String,
+    },
+    MissingStatLevel {
+        source_species_id: String,
+    },
+    MissingStatRatio {
+        source_species_id: String,
+    },
+    InvalidStatRatio {
+        source_species_id: String,
+        ratio: String,
+    },
+    UnknownStatRatio {
+        source_species_id: String,
+        ratio: String,
+    },
+    InvalidMethod {
+        source_species_id: String,
+        method: String,
+    },
+    UnknownMethod {
+        source_species_id: String,
+        method: String,
+    },
+}
+
+pub fn evolution_table_issues(
+    table: &EvolutionTable,
+    species_ids: &BTreeSet<String>,
+    item_ids: &BTreeSet<String>,
+) -> Vec<EvolutionTableIssue> {
+    let mut issues = Vec::new();
+    for species_id in species_ids {
+        if !table.0.contains_key(species_id) {
+            issues.push(EvolutionTableIssue::MissingSpeciesEvolutions {
+                species_id: species_id.clone(),
+            });
+        }
+    }
+    for (source_species_id, entries) in &table.0 {
+        if !is_exact_nonempty_evolution_token(source_species_id) {
+            issues.push(EvolutionTableIssue::InvalidSourceSpecies {
+                species_id: source_species_id.clone(),
+            });
+        } else if !species_ids.contains(source_species_id) {
+            issues.push(EvolutionTableIssue::UnknownSourceSpecies {
+                species_id: source_species_id.clone(),
+            });
+        }
+        for entry in entries {
+            if !is_exact_nonempty_evolution_token(&entry.species) {
+                issues.push(EvolutionTableIssue::InvalidTargetSpecies {
+                    source_species_id: source_species_id.clone(),
+                    target_species_id: entry.species.clone(),
+                });
+            } else if !species_ids.contains(&entry.species) {
+                issues.push(EvolutionTableIssue::UnknownTargetSpecies {
+                    source_species_id: source_species_id.clone(),
+                    target_species_id: entry.species.clone(),
+                });
+            }
+            match entry.method.as_str() {
+                METHOD_LEVEL => {
+                    if entry.level.is_none() {
+                        issues.push(EvolutionTableIssue::MissingLevel {
+                            source_species_id: source_species_id.clone(),
+                        });
+                    }
+                }
+                METHOD_ITEM => match entry.item.as_deref() {
+                    Some(item_id) if item_ids.contains(item_id) => {}
+                    Some(item_id) if !is_exact_nonempty_evolution_token(item_id) => {
+                        issues.push(EvolutionTableIssue::InvalidItem {
+                            source_species_id: source_species_id.clone(),
+                            item_id: item_id.to_string(),
+                        });
+                    }
+                    Some(item_id) => issues.push(EvolutionTableIssue::UnknownItem {
+                        source_species_id: source_species_id.clone(),
+                        item_id: item_id.to_string(),
+                    }),
+                    None => issues.push(EvolutionTableIssue::MissingItem {
+                        source_species_id: source_species_id.clone(),
+                    }),
+                },
+                METHOD_HAPPINESS => match entry.happiness.as_deref() {
+                    Some(window) if is_known_happiness_window(window) => {}
+                    Some(window) if !is_exact_nonempty_evolution_token(window) => {
+                        issues.push(EvolutionTableIssue::InvalidHappinessWindow {
+                            source_species_id: source_species_id.clone(),
+                            window: window.to_string(),
+                        });
+                    }
+                    Some(window) => issues.push(EvolutionTableIssue::UnknownHappinessWindow {
+                        source_species_id: source_species_id.clone(),
+                        window: window.to_string(),
+                    }),
+                    None => issues.push(EvolutionTableIssue::MissingHappinessWindow {
+                        source_species_id: source_species_id.clone(),
+                    }),
+                },
+                METHOD_TRADE => {
+                    if let Some(item_id) = entry.held_item.as_deref() {
+                        if item_id != TRADE_ANY_ITEM
+                            && !is_exact_nonempty_evolution_token(item_id)
+                        {
+                            issues.push(EvolutionTableIssue::InvalidTradeItem {
+                                source_species_id: source_species_id.clone(),
+                                item_id: item_id.to_string(),
+                            });
+                        } else if item_id != TRADE_ANY_ITEM && !item_ids.contains(item_id) {
+                            issues.push(EvolutionTableIssue::UnknownTradeItem {
+                                source_species_id: source_species_id.clone(),
+                                item_id: item_id.to_string(),
+                            });
+                        }
+                    }
+                }
+                METHOD_STAT => {
+                    if entry.level.is_none() {
+                        issues.push(EvolutionTableIssue::MissingStatLevel {
+                            source_species_id: source_species_id.clone(),
+                        });
+                    }
+                    match entry.stat_ratio.as_deref() {
+                        Some(ratio) if is_known_stat_evolution_ratio(ratio) => {}
+                        Some(ratio) if !is_exact_nonempty_evolution_token(ratio) => {
+                            issues.push(EvolutionTableIssue::InvalidStatRatio {
+                                source_species_id: source_species_id.clone(),
+                                ratio: ratio.to_string(),
+                            });
+                        }
+                        Some(ratio) => issues.push(EvolutionTableIssue::UnknownStatRatio {
+                            source_species_id: source_species_id.clone(),
+                            ratio: ratio.to_string(),
+                        }),
+                        None => issues.push(EvolutionTableIssue::MissingStatRatio {
+                            source_species_id: source_species_id.clone(),
+                        }),
+                    }
+                }
+                method if !is_exact_nonempty_evolution_token(method) => {
+                    issues.push(EvolutionTableIssue::InvalidMethod {
+                        source_species_id: source_species_id.clone(),
+                        method: method.to_string(),
+                    });
+                }
+                method => issues.push(EvolutionTableIssue::UnknownMethod {
+                    source_species_id: source_species_id.clone(),
+                    method: method.to_string(),
+                }),
+            }
+        }
+    }
+    issues
+}
+
+fn is_exact_nonempty_evolution_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +726,156 @@ mod tests {
             stat: None,
             amount: None,
         }
+    }
+
+    #[test]
+    fn evolution_table_issues_validate_exact_modpack_ids_without_coercion() {
+        let species_ids = ["CHIKORITA".to_string(), "BAYLEEF".to_string()]
+            .into_iter()
+            .collect();
+        let item_ids = ["THUNDERSTONE".to_string()].into_iter().collect();
+        let table = EvolutionTable(
+            [
+                (
+                    " chikorita".to_string(),
+                    vec![EvolutionEntry::level("BAYLEEF", 16)],
+                ),
+                (
+                    "chikorita".to_string(),
+                    vec![EvolutionEntry::level("BAYLEEF", 16)],
+                ),
+                (
+                    "CHIKORITA".to_string(),
+                    vec![
+                        EvolutionEntry {
+                            method: METHOD_LEVEL.to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: None,
+                        },
+                        EvolutionEntry::item(" BAYLEEF", " THUNDERSTONE"),
+                        EvolutionEntry::item("bayleef", "thunderstone"),
+                        EvolutionEntry::happiness("BAYLEEF", " MORNING"),
+                        EvolutionEntry::happiness("BAYLEEF", "MORNING"),
+                        EvolutionEntry::trade("BAYLEEF", Some(" kings_rock")),
+                        EvolutionEntry::trade("BAYLEEF", Some("kings_rock")),
+                        EvolutionEntry {
+                            method: METHOD_STAT.to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: Some(" ATTACKIER".to_string()),
+                        },
+                        EvolutionEntry {
+                            method: METHOD_STAT.to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: Some("ATTACKIER".to_string()),
+                        },
+                        EvolutionEntry {
+                            method: " MOON_PHASE".to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: None,
+                        },
+                        EvolutionEntry {
+                            method: "MOON_PHASE".to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: None,
+                        },
+                    ],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            evolution_table_issues(&table, &species_ids, &item_ids),
+            vec![
+                EvolutionTableIssue::MissingSpeciesEvolutions {
+                    species_id: "BAYLEEF".to_string(),
+                },
+                EvolutionTableIssue::InvalidSourceSpecies {
+                    species_id: " chikorita".to_string(),
+                },
+                EvolutionTableIssue::MissingLevel {
+                    source_species_id: "CHIKORITA".to_string(),
+                },
+                EvolutionTableIssue::InvalidTargetSpecies {
+                    source_species_id: "CHIKORITA".to_string(),
+                    target_species_id: " BAYLEEF".to_string(),
+                },
+                EvolutionTableIssue::InvalidItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: " THUNDERSTONE".to_string(),
+                },
+                EvolutionTableIssue::UnknownTargetSpecies {
+                    source_species_id: "CHIKORITA".to_string(),
+                    target_species_id: "bayleef".to_string(),
+                },
+                EvolutionTableIssue::UnknownItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: "thunderstone".to_string(),
+                },
+                EvolutionTableIssue::InvalidHappinessWindow {
+                    source_species_id: "CHIKORITA".to_string(),
+                    window: " MORNING".to_string(),
+                },
+                EvolutionTableIssue::UnknownHappinessWindow {
+                    source_species_id: "CHIKORITA".to_string(),
+                    window: "MORNING".to_string(),
+                },
+                EvolutionTableIssue::InvalidTradeItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: " kings_rock".to_string(),
+                },
+                EvolutionTableIssue::UnknownTradeItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: "kings_rock".to_string(),
+                },
+                EvolutionTableIssue::MissingStatLevel {
+                    source_species_id: "CHIKORITA".to_string(),
+                },
+                EvolutionTableIssue::InvalidStatRatio {
+                    source_species_id: "CHIKORITA".to_string(),
+                    ratio: " ATTACKIER".to_string(),
+                },
+                EvolutionTableIssue::MissingStatLevel {
+                    source_species_id: "CHIKORITA".to_string(),
+                },
+                EvolutionTableIssue::UnknownStatRatio {
+                    source_species_id: "CHIKORITA".to_string(),
+                    ratio: "ATTACKIER".to_string(),
+                },
+                EvolutionTableIssue::InvalidMethod {
+                    source_species_id: "CHIKORITA".to_string(),
+                    method: " MOON_PHASE".to_string(),
+                },
+                EvolutionTableIssue::UnknownMethod {
+                    source_species_id: "CHIKORITA".to_string(),
+                    method: "MOON_PHASE".to_string(),
+                },
+                EvolutionTableIssue::UnknownSourceSpecies {
+                    species_id: "chikorita".to_string(),
+                },
+            ]
+        );
     }
 
     fn context<'a>(

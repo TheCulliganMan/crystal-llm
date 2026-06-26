@@ -89,6 +89,113 @@ pub enum ScriptPhoneError {
     PermanentContactsExceedCapacity { capacity: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPhoneCommandIssue {
+    pub source_script: String,
+    pub command_index: usize,
+    pub contact_id: String,
+    pub error: ScriptPhoneError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhoneContactCatalogIssue {
+    EmptyContactId {
+        contact_id: String,
+    },
+    InvalidContactId {
+        contact_id: String,
+    },
+    ContactIdMismatch {
+        contact_id: String,
+        record_contact_id: String,
+    },
+    EmptyPrimaryLabel {
+        contact_id: String,
+    },
+    InvalidLines {
+        contact_id: String,
+    },
+    PrimaryLabelMismatch {
+        contact_id: String,
+        primary_label: String,
+        first_line: String,
+    },
+    EmptyMapConstant {
+        contact_id: String,
+    },
+    UnknownMapConstant {
+        contact_id: String,
+        map_constant: String,
+    },
+    UnknownPermanentContact {
+        contact_id: String,
+    },
+}
+
+pub fn phone_contact_catalog_issues(
+    catalog: &PhoneContactCatalog,
+    permanent_phone_numbers: &[String],
+    map_constants: &BTreeMap<String, String>,
+) -> Vec<PhoneContactCatalogIssue> {
+    let mut issues = Vec::new();
+    for (contact_id, record) in &catalog.0 {
+        if contact_id.trim().is_empty() {
+            issues.push(PhoneContactCatalogIssue::EmptyContactId {
+                contact_id: contact_id.clone(),
+            });
+        } else if contact_id.trim() != contact_id {
+            issues.push(PhoneContactCatalogIssue::InvalidContactId {
+                contact_id: contact_id.clone(),
+            });
+        }
+        if record.contact_id != *contact_id {
+            issues.push(PhoneContactCatalogIssue::ContactIdMismatch {
+                contact_id: contact_id.clone(),
+                record_contact_id: record.contact_id.clone(),
+            });
+        }
+        if record.primary_label.trim().is_empty() {
+            issues.push(PhoneContactCatalogIssue::EmptyPrimaryLabel {
+                contact_id: contact_id.clone(),
+            });
+        }
+        if record.lines.is_empty() || record.lines.iter().any(|line| line.trim().is_empty()) {
+            issues.push(PhoneContactCatalogIssue::InvalidLines {
+                contact_id: contact_id.clone(),
+            });
+        } else if let Some(first_line) = record.lines.first() {
+            let expected_primary = first_line.trim_end_matches(':').trim();
+            if expected_primary != record.primary_label {
+                issues.push(PhoneContactCatalogIssue::PrimaryLabelMismatch {
+                    contact_id: contact_id.clone(),
+                    primary_label: record.primary_label.clone(),
+                    first_line: first_line.clone(),
+                });
+            }
+        }
+        if let Some(map_constant) = record.map_constant.as_deref() {
+            if map_constant.trim().is_empty() {
+                issues.push(PhoneContactCatalogIssue::EmptyMapConstant {
+                    contact_id: contact_id.clone(),
+                });
+            } else if !map_constants.contains_key(map_constant) {
+                issues.push(PhoneContactCatalogIssue::UnknownMapConstant {
+                    contact_id: contact_id.clone(),
+                    map_constant: map_constant.to_string(),
+                });
+            }
+        }
+    }
+    for contact_id in permanent_phone_numbers {
+        if !catalog.0.contains_key(contact_id) {
+            issues.push(PhoneContactCatalogIssue::UnknownPermanentContact {
+                contact_id: contact_id.clone(),
+            });
+        }
+    }
+    issues
+}
+
 pub const SCRIPT_PHONE_REGISTRATION_COMMANDS: &[&str] = &["askforphonenumber"];
 pub const SCRIPT_PHONE_CHECK_COMMANDS: &[&str] = &["checkcellnum"];
 
@@ -236,6 +343,31 @@ pub fn validate_script_phone_command(
     }
 }
 
+pub fn script_phone_command_issues(
+    commands: &[ScriptPhoneCommand],
+    catalog: &PhoneContactCatalog,
+) -> Vec<ScriptPhoneCommandIssue> {
+    commands
+        .iter()
+        .filter_map(
+            |command| match validate_script_phone_command(command, catalog) {
+                Err(
+                    error @ (ScriptPhoneError::UnknownCommand { .. }
+                    | ScriptPhoneError::UnknownContact { .. }
+                    | ScriptPhoneError::EmptyContact { .. }
+                    | ScriptPhoneError::PaddedContact { .. }),
+                ) => Some(ScriptPhoneCommandIssue {
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                    contact_id: command.contact_id.clone(),
+                    error,
+                }),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 fn has_phone_number(
     state: &GameState,
     permanent_phone_numbers: &[String],
@@ -343,12 +475,132 @@ mod tests {
     }
 
     #[test]
+    fn phone_contact_catalog_issues_validate_exact_ids_and_map_constants() {
+        let mut mismatch = record("PHONE_MISMATCH_RECORD");
+        mismatch.primary_label = "PHONE_MISMATCH".to_string();
+        mismatch.lines = vec!["PHONE_MISMATCH:".to_string()];
+        let mut bad_lines = record("PHONE_BAD_LINES");
+        bad_lines.lines = vec![String::new()];
+        let mut label_mismatch = record("PHONE_LABEL");
+        label_mismatch.primary_label = "OTHER".to_string();
+        label_mismatch.lines = vec!["PHONE_LABEL:".to_string()];
+        let mut empty_map = record("PHONE_EMPTY_MAP");
+        empty_map.map_constant = Some(String::new());
+        let mut unknown_map = record("PHONE_UNKNOWN_MAP");
+        unknown_map.map_constant = Some("elms_lab".to_string());
+        let catalog = PhoneContactCatalog(BTreeMap::from([
+            ("".to_string(), record("")),
+            (" PHONE_PADDED".to_string(), record(" PHONE_PADDED")),
+            ("PHONE_MISMATCH".to_string(), mismatch),
+            ("PHONE_BAD_LINES".to_string(), bad_lines),
+            ("PHONE_LABEL".to_string(), label_mismatch),
+            ("PHONE_EMPTY_MAP".to_string(), empty_map),
+            ("PHONE_UNKNOWN_MAP".to_string(), unknown_map),
+        ]));
+        let permanent = vec!["phone_mom".to_string()];
+        let map_constants = BTreeMap::from([("ELMS_LAB".to_string(), "ElmsLab".to_string())]);
+
+        assert_eq!(
+            phone_contact_catalog_issues(&catalog, &permanent, &map_constants),
+            vec![
+                PhoneContactCatalogIssue::EmptyContactId {
+                    contact_id: String::new(),
+                },
+                PhoneContactCatalogIssue::EmptyPrimaryLabel {
+                    contact_id: String::new(),
+                },
+                PhoneContactCatalogIssue::InvalidContactId {
+                    contact_id: " PHONE_PADDED".to_string(),
+                },
+                PhoneContactCatalogIssue::PrimaryLabelMismatch {
+                    contact_id: " PHONE_PADDED".to_string(),
+                    primary_label: " PHONE_PADDED".to_string(),
+                    first_line: " PHONE_PADDED:".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidLines {
+                    contact_id: "PHONE_BAD_LINES".to_string(),
+                },
+                PhoneContactCatalogIssue::EmptyMapConstant {
+                    contact_id: "PHONE_EMPTY_MAP".to_string(),
+                },
+                PhoneContactCatalogIssue::PrimaryLabelMismatch {
+                    contact_id: "PHONE_LABEL".to_string(),
+                    primary_label: "OTHER".to_string(),
+                    first_line: "PHONE_LABEL:".to_string(),
+                },
+                PhoneContactCatalogIssue::ContactIdMismatch {
+                    contact_id: "PHONE_MISMATCH".to_string(),
+                    record_contact_id: "PHONE_MISMATCH_RECORD".to_string(),
+                },
+                PhoneContactCatalogIssue::UnknownMapConstant {
+                    contact_id: "PHONE_UNKNOWN_MAP".to_string(),
+                    map_constant: "elms_lab".to_string(),
+                },
+                PhoneContactCatalogIssue::UnknownPermanentContact {
+                    contact_id: "phone_mom".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn exported_phone_command_sets_are_exact() {
         assert!(SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&"askforphonenumber"));
         assert!(SCRIPT_PHONE_CHECK_COMMANDS.contains(&"checkcellnum"));
         assert!(is_known_script_phone_command("checkcellnum"));
         assert!(!is_known_script_phone_command("CheckCellNum"));
         assert!(!is_known_script_phone_command("deletecellnum"));
+    }
+
+    #[test]
+    fn script_phone_command_issues_preserve_exact_source_positions() {
+        let commands = vec![
+            command("checkcellnum", "PHONE_MOM"),
+            command("CheckCellNum", "PHONE_MOM"),
+            command("checkcellnum", "phone_mom"),
+            command("askforphonenumber", ""),
+            command("askforphonenumber", " PHONE_MOM"),
+        ];
+
+        assert_eq!(
+            script_phone_command_issues(&commands, &catalog()),
+            vec![
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: "PHONE_MOM".to_string(),
+                    error: ScriptPhoneError::UnknownCommand {
+                        command: "CheckCellNum".to_string(),
+                    },
+                },
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: "phone_mom".to_string(),
+                    error: ScriptPhoneError::UnknownContact {
+                        command: "checkcellnum".to_string(),
+                        contact_id: "phone_mom".to_string(),
+                    },
+                },
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: String::new(),
+                    error: ScriptPhoneError::EmptyContact {
+                        command: "askforphonenumber".to_string(),
+                    },
+                },
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: " PHONE_MOM".to_string(),
+                    error: ScriptPhoneError::PaddedContact {
+                        command: "askforphonenumber".to_string(),
+                        contact_id: " PHONE_MOM".to_string(),
+                    },
+                },
+            ]
+        );
     }
 
     #[test]

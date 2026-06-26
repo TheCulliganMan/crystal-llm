@@ -50,6 +50,40 @@ impl MartCatalog {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MartCatalogIssue {
+    EmptyMartId { mart_id: String },
+    InvalidMartId { mart_id: String },
+    UnknownItem { mart_id: String, item_id: String },
+}
+
+pub fn mart_catalog_issues(
+    catalog: &MartCatalog,
+    items: &BTreeMap<String, Item>,
+) -> Vec<MartCatalogIssue> {
+    let mut issues = Vec::new();
+    for (mart_id, item_ids) in &catalog.0 {
+        if mart_id.trim().is_empty() {
+            issues.push(MartCatalogIssue::EmptyMartId {
+                mart_id: mart_id.clone(),
+            });
+        } else if mart_id.trim() != mart_id {
+            issues.push(MartCatalogIssue::InvalidMartId {
+                mart_id: mart_id.clone(),
+            });
+        }
+        for item_id in item_ids {
+            if !items.contains_key(item_id) {
+                issues.push(MartCatalogIssue::UnknownItem {
+                    mart_id: mart_id.clone(),
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+    }
+    issues
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MartItem {
@@ -90,6 +124,10 @@ pub enum ShopError {
     QuantityTooLarge { quantity: u32 },
     #[error("unknown script mart type '{mart_type}'")]
     UnknownMartType { mart_type: String },
+    #[error("invalid script mart type '{mart_type}'")]
+    InvalidMartType { mart_type: String },
+    #[error("invalid mart id '{mart_id}'")]
+    InvalidMartId { mart_id: String },
     #[error("mart type '{mart_type}' cannot use explicit mart id 0")]
     InvalidZeroMart { mart_type: String },
     #[error("shop money mutation requires currency constant '{constant}'")]
@@ -98,6 +136,38 @@ pub enum ShopError {
     Bag { message: String },
     #[error("unsupported item pocket '{pocket}'")]
     UnsupportedPocket { pocket: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptShopCommandIssue {
+    pub source_script: String,
+    pub command_index: usize,
+    pub error: ShopError,
+}
+
+pub fn script_shop_command_issues(
+    catalog: &MartCatalog,
+    commands: &[ScriptShopCommand],
+) -> Vec<ScriptShopCommandIssue> {
+    commands
+        .iter()
+        .filter_map(
+            |command| match validate_script_shop_command(catalog, command) {
+                Err(
+                    error @ (ShopError::InvalidMartType { .. }
+                    | ShopError::UnknownMartType { .. }
+                    | ShopError::InvalidMartId { .. }
+                    | ShopError::InvalidZeroMart { .. }
+                    | ShopError::UnknownMart { .. }),
+                ) => Some(ScriptShopCommandIssue {
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                    error,
+                }),
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 pub fn apply_script_shop_command(
@@ -149,6 +219,10 @@ pub fn validate_script_shop_command(
     validate_script_mart_type(&command.mart_type)?;
     if command.mart_id == "0" {
         validate_zero_mart(&command.mart_type)
+    } else if command.mart_id.trim().is_empty() || command.mart_id.trim() != command.mart_id {
+        Err(ShopError::InvalidMartId {
+            mart_id: command.mart_id.clone(),
+        })
     } else {
         catalog.inventory_ids(&command.mart_id).map(|_| ())
     }
@@ -159,7 +233,11 @@ pub fn format_price(value: u32) -> String {
 }
 
 fn validate_script_mart_type(mart_type: &str) -> Result<(), ShopError> {
-    if is_known_script_mart_type(mart_type) {
+    if mart_type.trim().is_empty() || mart_type.trim() != mart_type {
+        Err(ShopError::InvalidMartType {
+            mart_type: mart_type.to_string(),
+        })
+    } else if is_known_script_mart_type(mart_type) {
         Ok(())
     } else {
         Err(ShopError::UnknownMartType {
@@ -453,6 +531,38 @@ mod tests {
     }
 
     #[test]
+    fn mart_catalog_issues_reject_empty_ids_and_unknown_exact_items() {
+        let catalog = MartCatalog(
+            [
+                ("".to_string(), vec!["POTION".to_string()]),
+                (" CHERRYGROVE_MART".to_string(), vec!["POTION".to_string()]),
+                (
+                    "CHERRYGROVE_MART".to_string(),
+                    vec!["POTION".to_string(), "potion".to_string()],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            mart_catalog_issues(&catalog, &items()),
+            vec![
+                MartCatalogIssue::EmptyMartId {
+                    mart_id: String::new(),
+                },
+                MartCatalogIssue::InvalidMartId {
+                    mart_id: " CHERRYGROVE_MART".to_string(),
+                },
+                MartCatalogIssue::UnknownItem {
+                    mart_id: "CHERRYGROVE_MART".to_string(),
+                    item_id: "potion".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn exported_shop_command_and_mart_type_sets_are_exact() {
         assert!(SCRIPT_SHOP_COMMANDS.contains(&"pokemart"));
         assert!(SCRIPT_SHOP_STANDARD_MART_TYPES.contains(&"MARTTYPE_STANDARD"));
@@ -628,6 +738,12 @@ mod tests {
             })
         );
         assert_eq!(
+            validate_script_shop_command(&catalog, &shop_command(" MARTTYPE_STANDARD", "MART")),
+            Err(ShopError::InvalidMartType {
+                mart_type: " MARTTYPE_STANDARD".to_string()
+            })
+        );
+        assert_eq!(
             validate_script_shop_command(&catalog, &shop_command("MARTTYPE_STANDARD", "0")),
             Err(ShopError::InvalidZeroMart {
                 mart_type: "MARTTYPE_STANDARD".to_string()
@@ -638,6 +754,70 @@ mod tests {
             Err(ShopError::UnknownMart {
                 mart_id: "mart".to_string()
             })
+        );
+        assert_eq!(
+            validate_script_shop_command(&catalog, &shop_command("MARTTYPE_STANDARD", " MART")),
+            Err(ShopError::InvalidMartId {
+                mart_id: " MART".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn script_shop_command_issues_preserve_exact_source_positions() {
+        let catalog = MartCatalog(
+            [("MART_CHERRYGROVE".to_string(), vec!["POTION".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let commands = vec![
+            shop_command("MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
+            shop_command("marttype_standard", "MART_CHERRYGROVE"),
+            shop_command(" MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
+            shop_command("MARTTYPE_STANDARD", "0"),
+            shop_command("MARTTYPE_STANDARD", "mart_cherrygrove"),
+            shop_command("MARTTYPE_STANDARD", " MART_CHERRYGROVE"),
+        ];
+
+        assert_eq!(
+            script_shop_command_issues(&catalog, &commands),
+            vec![
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::UnknownMartType {
+                        mart_type: "marttype_standard".to_string(),
+                    },
+                },
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::InvalidMartType {
+                        mart_type: " MARTTYPE_STANDARD".to_string(),
+                    },
+                },
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::InvalidZeroMart {
+                        mart_type: "MARTTYPE_STANDARD".to_string(),
+                    },
+                },
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::UnknownMart {
+                        mart_id: "mart_cherrygrove".to_string(),
+                    },
+                },
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::InvalidMartId {
+                        mart_id: " MART_CHERRYGROVE".to_string(),
+                    },
+                },
+            ]
         );
     }
 

@@ -37,6 +37,18 @@ pub enum ScriptSceneError {
     Scene { error: SceneError },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptSceneCommandIssue {
+    UnknownCommand,
+    MissingTargetMap,
+    InvalidTargetMap,
+    UnexpectedTargetMap,
+    MissingSceneId,
+    InvalidSceneId,
+    UnexpectedSceneId,
+}
+
 impl From<SceneError> for ScriptSceneError {
     fn from(error: SceneError) -> Self {
         Self::Scene { error }
@@ -51,6 +63,47 @@ pub fn is_known_script_scene_command(command: &str) -> bool {
     SCRIPT_SCENE_CHECK_COMMANDS.contains(&command)
         || SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command)
         || SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command)
+}
+
+pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSceneCommandIssue> {
+    let mut issues = Vec::new();
+    if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
+        if command.map_id.is_some() {
+            issues.push(ScriptSceneCommandIssue::UnexpectedTargetMap);
+        }
+        if command.scene_id.is_some() {
+            issues.push(ScriptSceneCommandIssue::UnexpectedSceneId);
+        }
+    } else if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command.command.as_str()) {
+        if command.map_id.is_some() {
+            issues.push(ScriptSceneCommandIssue::UnexpectedTargetMap);
+        }
+        match command.scene_id.as_deref() {
+            Some(scene_id) if scene_id.trim().is_empty() || scene_id.trim() != scene_id => {
+                issues.push(ScriptSceneCommandIssue::InvalidSceneId);
+            }
+            Some(_) => {}
+            None => issues.push(ScriptSceneCommandIssue::MissingSceneId),
+        }
+    } else if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command.command.as_str()) {
+        match command.map_id.as_deref() {
+            Some(map_id) if map_id.trim().is_empty() || map_id.trim() != map_id => {
+                issues.push(ScriptSceneCommandIssue::InvalidTargetMap);
+            }
+            Some(_) => {}
+            None => issues.push(ScriptSceneCommandIssue::MissingTargetMap),
+        }
+        match command.scene_id.as_deref() {
+            Some(scene_id) if scene_id.trim().is_empty() || scene_id.trim() != scene_id => {
+                issues.push(ScriptSceneCommandIssue::InvalidSceneId);
+            }
+            Some(_) => {}
+            None => issues.push(ScriptSceneCommandIssue::MissingSceneId),
+        }
+    } else {
+        issues.push(ScriptSceneCommandIssue::UnknownCommand);
+    }
+    issues
 }
 
 pub fn apply_script_scene_command(
@@ -207,6 +260,54 @@ mod tests {
         assert!(is_known_script_scene_command("setscene"));
         assert!(!is_known_script_scene_command("SetScene"));
         assert!(!is_known_script_scene_command("resetscene"));
+    }
+
+    #[test]
+    fn script_scene_issue_collector_reports_exact_pack_shape_errors() {
+        assert_eq!(
+            script_scene_command_issues(&command(
+                "checkscene",
+                Some("ROUTE_43"),
+                Some("SCENE_ROUTE43GATE_NOOP")
+            )),
+            vec![
+                ScriptSceneCommandIssue::UnexpectedTargetMap,
+                ScriptSceneCommandIssue::UnexpectedSceneId,
+            ]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command("setscene", Some("ROUTE_43"), None)),
+            vec![
+                ScriptSceneCommandIssue::UnexpectedTargetMap,
+                ScriptSceneCommandIssue::MissingSceneId,
+            ]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command("setmapscene", None, None)),
+            vec![
+                ScriptSceneCommandIssue::MissingTargetMap,
+                ScriptSceneCommandIssue::MissingSceneId,
+            ]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command(
+                "setmapscene",
+                Some(" ROUTE_43"),
+                Some(" SCENE_ROUTE_43_OPEN"),
+            )),
+            vec![
+                ScriptSceneCommandIssue::InvalidTargetMap,
+                ScriptSceneCommandIssue::InvalidSceneId,
+            ]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command("setscene", None, Some(" SCENE_START_OPEN"))),
+            vec![ScriptSceneCommandIssue::InvalidSceneId]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command("resetscene", None, None)),
+            vec![ScriptSceneCommandIssue::UnknownCommand]
+        );
     }
 
     #[test]

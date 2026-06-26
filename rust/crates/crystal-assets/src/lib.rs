@@ -4,124 +4,190 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use crystal_core::battle::capture::{
-    CaptureBallRuleIssue, CaptureWobbleProbability, capture_ball_rule_issues,
+    capture_rules_issues, capture_wobble_probability_issues, CaptureBallRuleIssue,
+    CaptureRulesIssue, CaptureWobbleProbability, CaptureWobbleProbabilityIssue,
 };
-use crystal_core::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
+use crystal_core::battle::damage::{
+    type_category_issues, type_effectiveness_table_issues, weather_modifier_issues, TypeCategories,
+    TypeCategoryIssue, TypeEffectivenessTable, TypeEffectivenessTableIssue,
+    TypeEffectivenessTableKind, WeatherModifierIssue, WeatherModifiers,
+};
 use crystal_core::battle::start::{
+    static_wild_battle_start, trainer_battle_start, wild_battle_start_from_encounter,
     StaticWildBattleRequest, StaticWildBattleStart, TrainerBattleRequest, TrainerBattleStartStatus,
-    WildBattleStart, static_wild_battle_start, trainer_battle_start,
-    wild_battle_start_from_encounter,
+    WildBattleStart,
 };
-use crystal_core::battle::stats::BattleStatMultiplierTables;
-use crystal_core::battle::turn::MovePriorityTable;
+use crystal_core::battle::stats::{
+    battle_stat_multiplier_table_issues, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
+};
+use crystal_core::battle::turn::{
+    move_priority_table_issues, MovePriorityTable, MovePriorityTableIssue,
+};
 use crystal_core::map::{
-    BackgroundEvent, CoordEvent, MapAttributes, MapConnection, MapEventSectionCommand, MapEvents,
-    MapScene, MapSceneTable, MapScriptSectionCommand, ObjectEvent, WarpEvent,
-    map_event_section_command_arg_counts, map_script_section_command_arg_counts,
+    map_event_section_command_arg_counts, map_event_section_command_issues,
+    map_script_section_command_arg_counts, map_script_section_command_issues, BackgroundEvent,
+    CoordEvent, MapAttributes, MapConnection, MapEventSectionCommand, MapEventSectionCommandIssue,
+    MapEvents, MapScene, MapSceneTable, MapScriptSectionCommand, MapScriptSectionCommandIssue,
+    ObjectEvent, WarpEvent,
 };
 #[cfg(test)]
 use crystal_core::models::FrontpicAnimCommand;
+pub use crystal_core::models::RuntimePokedexEntry;
 use crystal_core::models::{
-    Dv, FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_TM_HM, Item,
-    Move, Pokemon, PokemonSpecies, Trainer, TrainerCatalog, create_pokemon_from_known_dvs,
-    frontpic_anim_command_issue,
+    battle_animation_catalog_issues, create_pokemon_from_known_dvs, frontpic_anim_catalog_issues,
+    menu_icon_catalog_issues, move_name_catalog_issues, move_payload_issues,
+    pc_string_catalog_issues, pokedex_entry_catalog_issues, pokegear_landmark_issues,
+    pokegear_town_map_palette_issues, runtime_bundle_issues, sprite_palette_default_issues,
+    trainer_catalog_issues, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue,
+    FrontpicAnimCommandIssue, FrontpicAnimProgram, Item, MenuIconCatalogIssue, Move,
+    MoveNameCatalogIssue, MovePayloadIssue, PcStringCatalogIssue, PokedexEntryCatalogIssue,
+    PokegearLandmarkIssue, PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies,
+    RuntimeBundleIssue, SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
+    ITEM_POCKET_BALL,
 };
+pub use crystal_core::models::{PokegearLandmark, PokegearLandmarksPayload};
 use crystal_core::random::Random;
-use crystal_core::systems::battle_escape::BattleEscapeRules;
-use crystal_core::systems::battle_rewards::BattleRewardRules;
+use crystal_core::systems::battle_escape::{
+    battle_escape_rules_issues, BattleEscapeRules, BattleEscapeRulesIssue,
+};
+use crystal_core::systems::battle_items::{
+    item_payload_issues, item_reference_issues, ItemPayloadIssue, ItemReferenceIssue,
+};
+use crystal_core::systems::battle_rewards::{
+    battle_reward_rules_issues, BattleRewardRules, BattleRewardRulesIssue,
+};
 use crystal_core::systems::economy::{
-    CurrencyCatalog, MoneyAccount, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
-    SCRIPT_MONEY_CHECK_COMMANDS, SCRIPT_MONEY_MUTATION_COMMANDS, ScriptEconomyCommand,
-    is_known_script_economy_command, resolve_amount,
+    script_economy_command_issues, CurrencyCatalog, ScriptEconomyCommand,
+    ScriptEconomyCommandIssue, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
+    SCRIPT_MONEY_CHECK_COMMANDS, SCRIPT_MONEY_MUTATION_COMMANDS,
 };
 use crystal_core::systems::evolution::{
-    EvolutionEntry, EvolutionTable, METHOD_HAPPINESS, METHOD_ITEM, METHOD_LEVEL, METHOD_STAT,
-    METHOD_TRADE, TRADE_ANY_ITEM, is_known_happiness_window, is_known_stat_evolution_ratio,
+    evolution_table_issues, EvolutionEntry, EvolutionTable, EvolutionTableIssue,
 };
 use crystal_core::systems::field_items::{
-    FruitTreeCatalog, SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS,
-    SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
-    SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS, ScriptFieldPickup, ScriptFieldPickupIssue,
-    script_field_pickup_issues,
+    fruit_tree_catalog_issues, script_field_pickup_issues, FruitTreeCatalog, FruitTreeCatalogIssue,
+    ScriptFieldPickup, ScriptFieldPickupIssue, SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS,
+    SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS,
+    SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
 };
 use crystal_core::systems::field_moves::{
-    FieldItemRule, FieldMoveBlockRule, FieldMoveCatalog, FieldMoveFlagRule, FieldMoveMoveRule,
-    FieldMoveRule, FieldMoveTravelRule,
+    field_move_catalog_issues, FieldMoveCatalog, FieldMoveCatalogIssue,
 };
-use crystal_core::systems::gift_pokemon::{GiftPokemonScript, NO_ITEM};
-use crystal_core::systems::learnsets::{LearnsetEntry, SpeciesLearnsets};
+#[cfg(test)]
+use crystal_core::systems::field_moves::{FieldItemRule, FieldMoveRule};
+pub use crystal_core::systems::flee_mons::FleeMonTables;
+use crystal_core::systems::flee_mons::{flee_mon_catalog_issues, FleeMonCatalogIssue};
+use crystal_core::systems::gift_pokemon::{
+    gift_pokemon_script_issues, GiftPokemonScript, GiftPokemonScriptIssue, NO_ITEM,
+};
+use crystal_core::systems::learnsets::{
+    learnset_catalog_issues, LearnsetCatalogIssue, LearnsetEntry, SpeciesLearnsets,
+};
 use crystal_core::systems::phone::{
-    PhoneContactCatalog, SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_REGISTRATION_COMMANDS,
-    ScriptPhoneCommand, ScriptPhoneError, validate_script_phone_command,
+    phone_contact_catalog_issues, script_phone_command_issues, PhoneContactCatalog,
+    PhoneContactCatalogIssue, ScriptPhoneCommand, ScriptPhoneCommandIssue, ScriptPhoneError,
+    SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_REGISTRATION_COMMANDS,
+};
+use crystal_core::systems::runtime_pack::{
+    runtime_pack_presence_issues, RuntimePackPresenceIssue, RuntimePackSections,
 };
 use crystal_core::systems::script_audio::{
-    ScriptAudioCommand, ScriptAudioCommandIssue, script_audio_command_issues,
+    script_audio_command_issues, ScriptAudioCommand, ScriptAudioCommandIssue,
 };
-use crystal_core::systems::script_blocks::{CHANGE_BLOCK_COORD_STRIDE, ScriptBlockChange};
+use crystal_core::systems::script_blocks::{
+    script_block_change_issues, ScriptBlockChange, ScriptBlockChangeIssue,
+};
 use crystal_core::systems::script_control::{
-    ScriptControlCommand, validate_script_control_command,
+    script_control_command_issues, ScriptControlCommand, ScriptControlCommandIssue,
 };
 use crystal_core::systems::script_flags::{
-    ScriptFlagCommand, ScriptFlagCommandIssue, is_known_script_flag_command,
-    script_flag_command_issues,
+    is_known_script_flag_command, script_flag_command_issues, ScriptFlagCommand,
+    ScriptFlagCommandIssue,
 };
-use crystal_core::systems::script_items::{ScriptItemAccess, ScriptItemGrant};
+use crystal_core::systems::script_items::{
+    script_item_access_issues, script_item_grant_issues, ScriptItemAccess, ScriptItemAccessIssue,
+    ScriptItemGrant, ScriptItemGrantIssue,
+};
 use crystal_core::systems::script_objects::{
-    SCRIPT_MOVEMENT_DIRECTION_COMMANDS, SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
-    SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, SCRIPT_OBJECT_COORDINATE_COMMANDS,
-    SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_DIRECTION_COMMANDS,
+    is_hideable_object_event_flag, is_known_script_movement_command, script_movement_step_issues,
+    script_object_command_issues, ScriptMovement, ScriptMovementStep, ScriptMovementStepIssue,
+    ScriptObjectCommand, ScriptObjectCommandIssue, SCRIPT_MOVEMENT_DIRECTION_COMMANDS,
+    SCRIPT_MOVEMENT_NO_ARG_COMMANDS, SCRIPT_OBJECT_COORDINATE_COMMANDS,
+    SCRIPT_OBJECT_DIRECTION_COMMANDS, SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS,
     SCRIPT_OBJECT_EMOTE_COMMANDS, SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS,
     SCRIPT_OBJECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS,
-    SCRIPT_OBJECT_TARGET_COMMANDS, SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement,
-    ScriptMovementStep, ScriptObjectCommand, is_hideable_object_event_flag,
-    is_known_script_movement_command, is_known_script_object_command, parse_script_direction,
+    SCRIPT_OBJECT_TARGET_COMMANDS, SCRIPT_OBJECT_VISIBILITY_COMMANDS,
 };
 use crystal_core::systems::script_runtime::{
-    ScriptRuntimeCommand, ScriptRuntimeCommandError, script_runtime_command_arg_counts,
-    validate_script_runtime_command,
+    initialize_events_issues, script_runtime_command_arg_counts, script_runtime_command_issues,
+    story_event_script_constant_issues, InitializeEventsIssue, ScriptRuntimeCommand,
+    ScriptRuntimeCommandError, ScriptRuntimeCommandIssue, ScriptRuntimeReferenceCatalog,
+    StoryEventScriptConstantIssue,
+};
+pub use crystal_core::systems::script_runtime::{
+    InitializeEventsConfig, StoryEventScriptConstants,
 };
 use crystal_core::systems::script_scenes::{
+    script_scene_command_issues, ScriptSceneCommand, ScriptSceneCommandIssue,
     SCRIPT_SCENE_CHECK_COMMANDS, SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS,
-    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS, ScriptSceneCommand, is_known_script_scene_command,
+    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS,
 };
 use crystal_core::systems::script_text::{
-    SCRIPT_TEXT_LABEL_COMMANDS, SCRIPT_TEXT_NO_LABEL_COMMANDS, ScriptMenuCommand,
-    ScriptMenuDefinition, ScriptTextBody, ScriptTextBodyCommand, ScriptTextCommand,
-    is_known_script_text_command, menu_definition_command_arg_counts, text_body_command_arg_counts,
+    asm_text_catalog_issues, menu_definition_command_arg_counts, script_menu_definition_issues,
+    script_text_body_issues, script_text_command_issues, text_body_command_arg_counts,
+    AsmTextCatalogIssue, ScriptMenuCommand, ScriptMenuDefinition, ScriptMenuDefinitionIssue,
+    ScriptTextBody, ScriptTextBodyCommand, ScriptTextBodyIssue, ScriptTextCommand,
+    ScriptTextCommandError, SCRIPT_TEXT_LABEL_COMMANDS, SCRIPT_TEXT_NO_LABEL_COMMANDS,
 };
 use crystal_core::systems::script_variables::{
-    ScriptVariableCommand, validate_script_variable_command,
+    script_variable_command_issues, ScriptVariableCommand, ScriptVariableCommandIssue,
 };
 use crystal_core::systems::script_warps::{
+    script_map_command_issues, ScriptMapCommand, ScriptMapCommandError,
     SCRIPT_MAP_FACING_WARP_COMMANDS, SCRIPT_MAP_NEW_LOAD_COMMANDS, SCRIPT_MAP_NO_PAYLOAD_COMMANDS,
-    SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS, ScriptMapCommand,
-    is_known_script_map_command, parse_script_warp_facing,
+    SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS,
 };
 use crystal_core::systems::shop::{
-    MartCatalog, SCRIPT_SHOP_COMMANDS, ScriptShopCommand, ShopError, validate_script_shop_command,
+    mart_catalog_issues, script_shop_command_issues, MartCatalog, MartCatalogIssue,
+    ScriptShopCommand, ScriptShopCommandIssue, ShopError, SCRIPT_SHOP_COMMANDS,
 };
+pub use crystal_core::systems::special_routines::RuntimeSpawnPointRef as RuntimeSpawnPoint;
 use crystal_core::systems::special_routines::{
-    BUENA_PASSWORD_CATEGORY_ITEM, BUENA_PASSWORD_CATEGORY_MON, BUENA_PASSWORD_CATEGORY_MOVE,
-    BattleTowerRules, BuenaPasswordCategoryDefinition, BuenaPrizeDefinition, BugContestConfig,
-    DratiniMoveSetDefinition, HappinessData, KurtApricornRecipe, MagikarpLengthEntry,
-    OakRatingEntry, OddEggDefinition, RoamingPokemonDefinition, ShuckieGiftDefinition,
-    is_known_buena_password_category_type, is_known_special_routine,
+    battle_tower_rules_issues, buena_password_category_issues, buena_prize_definition_issues,
+    bug_contest_config_issues, dratini_move_set_issues, happiness_data_issues,
+    kurt_apricorn_recipe_issues, magikarp_length_table_issues, oak_rating_table_issues,
+    odd_egg_definition_issues, roaming_pokemon_definition_issues,
+    runtime_spawn_point_catalog_issues, shuckie_gift_issues, special_routine_catalog_issues,
+    BattleTowerRules, BattleTowerRulesIssue, BuenaPasswordCategoryDefinition,
+    BuenaPasswordCategoryIssue, BuenaPrizeDefinition, BuenaPrizeDefinitionIssue, BugContestConfig,
+    BugContestConfigIssue, DratiniMoveSetDefinition, DratiniMoveSetIssue, HappinessData,
+    HappinessDataIssue, KurtApricornRecipe, KurtApricornRecipeIssue, MagikarpLengthEntry,
+    MagikarpLengthTableIssue, OakRatingEntry, OakRatingTableIssue, OddEggDefinition,
+    OddEggDefinitionIssue, RoamingPokemonDefinition, RoamingPokemonDefinitionIssue,
+    RuntimeSpawnPointCatalogIssue, ShuckieGiftDefinition, ShuckieGiftIssue,
+    SpecialRoutineCatalogIssue,
 };
-use crystal_core::systems::step_events::StepEventRules;
+use crystal_core::systems::step_events::{
+    step_event_rules_issues, StepEventRules, StepEventRulesIssue,
+};
 use crystal_core::world::collision::{
-    MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile,
-    is_permission_passable, permissions, sample_collision,
+    can_enter_tile, is_permission_passable, permissions, sample_collision, MetatileCollision,
+    PlayerTraversalState, TilesetCollision,
 };
 use crystal_core::world::encounters::{
-    ENCOUNTER_TIME_KEYS, EncounterMusicModifiers, EncounterSlotTables, FieldEncounterData,
-    FieldEncounterEntry, WildEncounterData, resolve_encounter_time_key,
+    encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
+    wild_encounter_catalog_issues, EncounterMusicModifierIssue, EncounterMusicModifiers,
+    EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
+    FieldEncounterData, WildEncounterCatalogIssue, WildEncounterData,
 };
-use crystal_core::world::fishing::{FishingCatalog, is_known_fishing_rod};
-use crystal_core::world::map::{Direction, OverworldMapData, TilePosition};
+use crystal_core::world::fishing::{fishing_catalog_issues, FishingCatalog, FishingCatalogIssue};
+pub use crystal_core::world::map::RuntimeMapMetadata;
+use crystal_core::world::map::{
+    runtime_map_metadata_issues, Direction, OverworldMapData, RuntimeMapMetadataIssue, TilePosition,
+};
 use crystal_core::world::session::{
-    ConnectionDestination, ConnectionTransition, ConnectionTrigger, WarpDestination,
-    WarpTransition, WarpTrigger, WildEncounterRoll, object_event_initial_facing,
-    warp_tile_position,
+    object_event_initial_facing, warp_tile_position, ConnectionDestination, ConnectionTransition,
+    ConnectionTrigger, WarpDestination, WarpTransition, WarpTrigger, WildEncounterRoll,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -172,15 +238,17 @@ pub mod modpack {
     pub use crystal_core::world::fishing::FishingCatalog;
 
     pub use super::{
-        COMPILED_GAME_PACK_EXTENSION, COMPILED_GAME_PACK_FORMAT_VERSION, CompiledContentPack,
-        CompiledGamePack, CompiledModpack, ContentPack, ContentPackCategory, ContentPackFiles,
-        ContentPackIndex, GameDataSet, LoadedCompiledGamePack, MapAccessRule, MapModule,
-        ModpackAudioAsset, ModpackAudioKind, ModpackCompileOptions, ModpackCompileReport,
-        ModpackCompiler, ModpackManifest, ModpackMetadata, ModpackPayload, PlayabilityGraphEdge,
-        PlayabilityRules, PlayabilityStart, ProgressionGrants, ProgressionRequirements,
-        ProgressionRule, VerificationError, VerificationSeverity, read_compiled_game_pack,
-        read_loaded_compiled_game_pack, write_compiled_game_pack,
+        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
+        CompiledContentPack, CompiledGamePack, CompiledModpack, ContentPack, ContentPackCategory,
+        ContentPackFiles, ContentPackIndex, GameDataSet, LoadedCompiledGamePack, MapAccessRule,
+        MapModule, ModpackAudioAsset, ModpackAudioKind, ModpackAudioSource, ModpackCompileOptions,
+        ModpackCompileReport, ModpackCompiler, ModpackManifest, ModpackMetadata, ModpackPayload,
+        PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart, ProgressionGrants,
+        ProgressionRequirements, ProgressionRule, VerificationError, VerificationSeverity,
+        COMPILED_GAME_PACK_EXTENSION, COMPILED_GAME_PACK_FORMAT_VERSION,
     };
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub use super::write_compiled_game_pack_for_tests;
     pub use crystal_core::models::{Trainer, TrainerCatalog};
     pub use crystal_core::systems::special_routines::{
         BattleTowerRules, BuenaPasswordCategoryDefinition, BuenaPrizeDefinition, BugContestConfig,
@@ -264,7 +332,7 @@ impl AssetRoot {
         read_json_file(&self.repository_root.join(relative_path))
     }
 
-    pub fn load_base_game_data(&self) -> Result<GameDataSet> {
+    pub(crate) fn load_base_game_data(&self) -> Result<GameDataSet> {
         GameDataSet::load_base_json(self)
     }
 
@@ -276,7 +344,8 @@ impl AssetRoot {
         ModpackCompiler::new(self).compile(manifests, options)
     }
 
-    pub fn load_compiled_game_pack(
+    #[cfg(test)]
+    fn load_compiled_game_pack(
         &self,
         relative_path: impl AsRef<Path>,
     ) -> Result<CompiledGamePack> {
@@ -286,7 +355,8 @@ impl AssetRoot {
         )?)
     }
 
-    pub fn load_loaded_compiled_game_pack(
+    #[cfg(test)]
+    fn load_loaded_compiled_game_pack(
         &self,
         relative_path: impl AsRef<Path>,
     ) -> Result<LoadedCompiledGamePack> {
@@ -296,8 +366,31 @@ impl AssetRoot {
         )?)
     }
 
-    pub fn load_compiled_game_data(&self, relative_path: impl AsRef<Path>) -> Result<GameDataSet> {
-        Ok(self.load_compiled_game_pack(relative_path)?.data)
+    pub fn load_verified_compiled_game_pack(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<CompiledGamePack> {
+        read_verified_compiled_game_pack(resolve_compiled_game_pack_data_path(
+            self,
+            relative_path.as_ref(),
+        )?)
+    }
+
+    pub fn load_loaded_verified_compiled_game_pack(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<LoadedCompiledGamePack> {
+        read_loaded_verified_compiled_game_pack(resolve_compiled_game_pack_data_path(
+            self,
+            relative_path.as_ref(),
+        )?)
+    }
+
+    pub fn load_verified_compiled_game_data(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<GameDataSet> {
+        Ok(self.load_verified_compiled_game_pack(relative_path)?.data)
     }
 
     pub fn load_tileset_collision(&self, tileset_name: &str) -> Result<TilesetCollision> {
@@ -819,90 +912,104 @@ impl ContentPackIndex {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledContentPack {
-    pub version: u16,
+    version: u16,
     #[serde(rename = "packId")]
-    pub pack_id: String,
-    pub categories: CompiledContentPackCategories,
+    pack_id: String,
+    categories: CompiledContentPackCategories,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledContentPackCategories {
-    pub pokemon: Vec<Value>,
-    pub moves: Vec<Value>,
-    pub growth_rates: Vec<Value>,
-    pub learnsets: Vec<Value>,
-    pub level_up_moves: Vec<Value>,
-    pub egg_moves: Vec<Value>,
-    pub evolutions: Vec<Value>,
-    pub maps: Vec<Value>,
-    pub map_blocks: Vec<Value>,
-    pub map_attributes: Vec<Value>,
-    pub map_dimensions: Vec<Value>,
-    pub wild_encounters: Vec<Value>,
-    pub field_encounters: Vec<Value>,
-    pub runtime_spawn_points: Vec<Value>,
-    pub runtime_map_metadata: Vec<Value>,
-    pub flee_mons: Vec<Value>,
-    pub roaming_pokemon: Vec<Value>,
-    pub buena_password_categories: Vec<Value>,
-    pub buena_prizes: Vec<Value>,
-    pub kurt_apricorn_recipes: Vec<Value>,
-    pub shuckie_gift: Vec<Value>,
-    pub dratini_move_sets: Vec<Value>,
-    pub bug_contest_config: Vec<Value>,
-    pub battle_tower_rules: Vec<Value>,
-    pub oak_ratings: Vec<Value>,
-    pub odd_egg_definitions: Vec<Value>,
-    pub magikarp_lengths: Vec<Value>,
-    pub happiness_data: Vec<Value>,
-    pub encounter_slot_tables: Vec<Value>,
-    pub encounter_music_modifiers: Vec<Value>,
-    pub battle_stat_multipliers: Vec<Value>,
-    pub capture_wobble_probabilities: Vec<Value>,
-    pub capture_rules: Vec<Value>,
-    pub battle_escape_rules: Vec<Value>,
-    pub move_priorities: Vec<Value>,
-    pub type_categories: Vec<Value>,
-    pub type_effectiveness: Vec<Value>,
-    pub weather_modifiers: Vec<Value>,
-    pub battle_reward_rules: Vec<Value>,
-    pub step_event_rules: Vec<Value>,
-    pub fishing: Vec<Value>,
-    pub fruit_trees: Vec<Value>,
-    pub field_moves: Vec<Value>,
-    pub npcs: Vec<Value>,
-    pub pokegear_landmarks: Vec<Value>,
-    pub pc_strings: Vec<Value>,
-    pub menu_icons: Vec<Value>,
-    pub items: Vec<Value>,
-    pub marts: Vec<Value>,
-    pub currency_constants: Vec<Value>,
-    pub trainers: Vec<Value>,
-    pub pokedex: Vec<Value>,
-    pub pokedex_entries: Vec<Value>,
-    pub pokemon_frontpic_anim: Vec<Value>,
-    pub initialize_events: Vec<Value>,
-    pub story_event_script_constants: Vec<Value>,
-    pub story_events: Vec<Value>,
-    pub phone_scripts: Vec<Value>,
-    pub phone_contacts: Vec<Value>,
-    pub permanent_phone_numbers: Vec<Value>,
-    pub special_phone_calls: Vec<Value>,
-    pub npc_trades: Vec<Value>,
-    pub special_routines: Vec<Value>,
-    pub asm_text: Vec<Value>,
-    pub move_names: Vec<Value>,
-    pub battle_animations: Vec<Value>,
-    pub battle_animation_table: Vec<Value>,
-    pub battle_anim_bundle: Vec<Value>,
-    pub sprite_anim_bundle: Vec<Value>,
-    pub sprite_palette_defaults: Vec<Value>,
-    pub pokegear_town_map_palette_map: Vec<Value>,
-    pub pokemon_cries: Vec<Value>,
-    pub audio: Vec<Value>,
-    pub tilesets: Vec<Value>,
-    pub playability: Vec<Value>,
+    pokemon: Vec<Value>,
+    moves: Vec<Value>,
+    growth_rates: Vec<Value>,
+    learnsets: Vec<Value>,
+    level_up_moves: Vec<Value>,
+    egg_moves: Vec<Value>,
+    evolutions: Vec<Value>,
+    maps: Vec<Value>,
+    map_blocks: Vec<Value>,
+    map_attributes: Vec<Value>,
+    map_dimensions: Vec<Value>,
+    wild_encounters: Vec<Value>,
+    field_encounters: Vec<Value>,
+    runtime_spawn_points: Vec<Value>,
+    runtime_map_metadata: Vec<Value>,
+    flee_mons: Vec<Value>,
+    roaming_pokemon: Vec<Value>,
+    buena_password_categories: Vec<Value>,
+    buena_prizes: Vec<Value>,
+    kurt_apricorn_recipes: Vec<Value>,
+    shuckie_gift: Vec<Value>,
+    dratini_move_sets: Vec<Value>,
+    bug_contest_config: Vec<Value>,
+    battle_tower_rules: Vec<Value>,
+    oak_ratings: Vec<Value>,
+    odd_egg_definitions: Vec<Value>,
+    magikarp_lengths: Vec<Value>,
+    happiness_data: Vec<Value>,
+    encounter_slot_tables: Vec<Value>,
+    encounter_music_modifiers: Vec<Value>,
+    battle_stat_multipliers: Vec<Value>,
+    capture_wobble_probabilities: Vec<Value>,
+    capture_rules: Vec<Value>,
+    battle_escape_rules: Vec<Value>,
+    move_priorities: Vec<Value>,
+    type_categories: Vec<Value>,
+    type_effectiveness: Vec<Value>,
+    weather_modifiers: Vec<Value>,
+    battle_reward_rules: Vec<Value>,
+    step_event_rules: Vec<Value>,
+    fishing: Vec<Value>,
+    fruit_trees: Vec<Value>,
+    field_moves: Vec<Value>,
+    npcs: Vec<Value>,
+    pokegear_landmarks: Vec<Value>,
+    pc_strings: Vec<Value>,
+    menu_icons: Vec<Value>,
+    items: Vec<Value>,
+    marts: Vec<Value>,
+    currency_constants: Vec<Value>,
+    trainers: Vec<Value>,
+    pokedex: Vec<Value>,
+    pokedex_entries: Vec<Value>,
+    pokemon_frontpic_anim: Vec<Value>,
+    initialize_events: Vec<Value>,
+    story_event_script_constants: Vec<Value>,
+    story_events: Vec<Value>,
+    phone_scripts: Vec<Value>,
+    phone_contacts: Vec<Value>,
+    permanent_phone_numbers: Vec<Value>,
+    special_phone_calls: Vec<Value>,
+    npc_trades: Vec<Value>,
+    special_routines: Vec<Value>,
+    asm_text: Vec<Value>,
+    move_names: Vec<Value>,
+    battle_animations: Vec<Value>,
+    battle_animation_table: Vec<Value>,
+    battle_anim_bundle: Vec<Value>,
+    sprite_anim_bundle: Vec<Value>,
+    sprite_palette_defaults: Vec<Value>,
+    pokegear_town_map_palette_map: Vec<Value>,
+    pokemon_cries: Vec<Value>,
+    audio: Vec<Value>,
+    tilesets: Vec<Value>,
+    playability: Vec<Value>,
+}
+
+impl CompiledContentPack {
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn pack_id(&self) -> &str {
+        &self.pack_id
+    }
+
+    pub fn categories(&self) -> &CompiledContentPackCategories {
+        &self.categories
+    }
 }
 
 impl CompiledContentPackCategories {
@@ -1096,95 +1203,12 @@ pub struct ModpackPayload {
     pub playability: PlayabilityRules,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FleeMonTables {
-    pub always: Vec<String>,
-    pub often: Vec<String>,
-    pub sometimes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeSpawnPoint {
-    pub identifier: u16,
-    pub map_constant: String,
-    pub map_name: String,
-    pub group_id: i16,
-    pub map_id: i16,
-    pub tile_x: i16,
-    pub tile_y: i16,
-    pub group_name: String,
-    pub metatile_x: i16,
-    pub metatile_y: i16,
-    pub subtile_x: i16,
-    pub subtile_y: i16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeMapMetadata {
-    pub constant: String,
-    pub name: String,
-    pub group_name: String,
-    pub group_id: u16,
-    pub map_id: u16,
-    pub width: u16,
-    pub height: u16,
-    pub environment: String,
-    pub phone_service: u8,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PokegearLandmarksPayload {
-    pub landmarks: Vec<PokegearLandmark>,
-    pub map_to_landmark: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PokegearLandmark {
-    pub id: u16,
-    pub constant: String,
-    pub label: String,
-    pub name: String,
-    pub x: i16,
-    pub y: i16,
-    pub region: String,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InitializeEventsConfig {
-    pub event_flags: Vec<String>,
-    pub engine_flags: Vec<String>,
-    pub variable_sprites: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoryEventScriptConstants {
-    pub global: BTreeMap<String, i64>,
-    pub maps: BTreeMap<String, BTreeMap<String, i64>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokemonCryMetadata {
     pub cry: String,
     pub pitch: i16,
     pub length: i16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimePokedexEntry {
-    pub species: String,
-    pub classification: String,
-    pub height_digits: u16,
-    pub weight_digits: u16,
-    pub pages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1195,12 +1219,22 @@ pub enum ModpackAudioKind {
     Cry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModpackAudioSource {
+    Midi,
+    Pcm,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackAudioAsset {
     pub id: String,
     pub path: String,
     pub kind: ModpackAudioKind,
+    pub source: ModpackAudioSource,
+    pub sample_rate_hz: Option<u32>,
+    pub channels: Option<u16>,
 }
 
 impl ModpackAudioAsset {
@@ -1209,6 +1243,9 @@ impl ModpackAudioAsset {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1219,6 +1256,9 @@ impl ModpackAudioAsset {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::Cry,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1229,6 +1269,61 @@ impl ModpackAudioAsset {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::SoundEffect,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
+        };
+        asset.validate()?;
+        Ok(asset)
+    }
+
+    pub fn music_pcm(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        sample_rate_hz: u32,
+        channels: u16,
+    ) -> Result<Self> {
+        Self::pcm(id, path, ModpackAudioKind::Music, sample_rate_hz, channels)
+    }
+
+    pub fn sound_effect_pcm(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        sample_rate_hz: u32,
+        channels: u16,
+    ) -> Result<Self> {
+        Self::pcm(
+            id,
+            path,
+            ModpackAudioKind::SoundEffect,
+            sample_rate_hz,
+            channels,
+        )
+    }
+
+    pub fn cry_pcm(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        sample_rate_hz: u32,
+        channels: u16,
+    ) -> Result<Self> {
+        Self::pcm(id, path, ModpackAudioKind::Cry, sample_rate_hz, channels)
+    }
+
+    fn pcm(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        kind: ModpackAudioKind,
+        sample_rate_hz: u32,
+        channels: u16,
+    ) -> Result<Self> {
+        let asset = Self {
+            id: id.into(),
+            path: path.into(),
+            kind,
+            source: ModpackAudioSource::Pcm,
+            sample_rate_hz: Some(sample_rate_hz),
+            channels: Some(channels),
         };
         asset.validate()?;
         Ok(asset)
@@ -1250,11 +1345,41 @@ impl ModpackAudioAsset {
                 format!("audio file path '{path}' must live under music, sfx, or cries")
             })?;
         match parent {
-            "music" => Self::music(stem.to_string(), path),
-            "sfx" => Self::sound_effect(stem.to_string(), path),
-            "cries" => Self::cry(stem.to_string(), path),
+            "music" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::Music),
+            "sfx" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::SoundEffect),
+            "cries" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::Cry),
             _ => anyhow::bail!("audio file path '{path}' must live under music, sfx, or cries"),
         }
+    }
+
+    fn from_content_pack_path_parts(
+        id: String,
+        path: String,
+        kind: ModpackAudioKind,
+    ) -> Result<Self> {
+        let extension = Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .with_context(|| format!("audio file path '{path}' must have a file extension"))?;
+        let source = match extension {
+            "mid" => ModpackAudioSource::Midi,
+            "pcm" => ModpackAudioSource::Pcm,
+            _ => anyhow::bail!(
+                "audio asset '{}' has unsupported extension '{}'; expected .mid or explicit .pcm metadata",
+                id,
+                extension
+            ),
+        };
+        let asset = Self {
+            id,
+            path,
+            kind,
+            source,
+            sample_rate_hz: None,
+            channels: None,
+        };
+        asset.validate()?;
+        Ok(asset)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1296,14 +1421,36 @@ impl ModpackAudioAsset {
             .ok_or_else(|| {
                 anyhow::anyhow!("audio asset '{}' path must have a file extension", self.id)
             })?;
-        match self.kind {
-            ModpackAudioKind::Music | ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry
-                if extension == "mid" =>
-            {
+        match self.source {
+            ModpackAudioSource::Midi if extension == "mid" => {
+                if self.sample_rate_hz.is_some() || self.channels.is_some() {
+                    anyhow::bail!(
+                        "MIDI audio asset '{}' must not declare PCM sample metadata",
+                        self.id
+                    );
+                }
                 Ok(())
             }
-            ModpackAudioKind::Music | ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry => {
-                anyhow::bail!("audio asset '{}' must use a .mid file", self.id)
+            ModpackAudioSource::Midi => {
+                anyhow::bail!("MIDI audio asset '{}' must use a .mid file", self.id)
+            }
+            ModpackAudioSource::Pcm if extension == "pcm" => {
+                let sample_rate_hz = self.sample_rate_hz.ok_or_else(|| {
+                    anyhow::anyhow!("PCM audio asset '{}' must declare sample_rate_hz", self.id)
+                })?;
+                if sample_rate_hz == 0 {
+                    anyhow::bail!("PCM audio asset '{}' has invalid sample_rate_hz 0", self.id);
+                }
+                let channels = self.channels.ok_or_else(|| {
+                    anyhow::anyhow!("PCM audio asset '{}' must declare channels", self.id)
+                })?;
+                if channels == 0 {
+                    anyhow::bail!("PCM audio asset '{}' has invalid channels 0", self.id);
+                }
+                Ok(())
+            }
+            ModpackAudioSource::Pcm => {
+                anyhow::bail!("PCM audio asset '{}' must use a .pcm file", self.id)
             }
         }
     }
@@ -1452,11 +1599,19 @@ pub struct MapAccessRule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledModpack {
-    pub data: GameDataSet,
-    pub report: ModpackCompileReport,
+    data: GameDataSet,
+    report: ModpackCompileReport,
 }
 
 impl CompiledModpack {
+    pub fn data(&self) -> &GameDataSet {
+        &self.data
+    }
+
+    pub fn report(&self) -> &ModpackCompileReport {
+        &self.report
+    }
+
     pub fn into_game_pack(self) -> CompiledGamePack {
         CompiledGamePack {
             format_version: COMPILED_GAME_PACK_FORMAT_VERSION,
@@ -1480,26 +1635,61 @@ impl CompiledModpack {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledGamePack {
-    pub format_version: u16,
-    pub data: GameDataSet,
-    pub report: ModpackCompileReport,
+    format_version: u16,
+    data: GameDataSet,
+    report: ModpackCompileReport,
 }
 
 impl CompiledGamePack {
-    pub fn new(data: GameDataSet, report: ModpackCompileReport) -> Self {
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(data: GameDataSet, report: ModpackCompileReport) -> Self {
         Self {
             format_version: COMPILED_GAME_PACK_FORMAT_VERSION,
             data,
             report,
         }
     }
+
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub fn data(&self) -> &GameDataSet {
+        &self.data
+    }
+
+    pub fn report(&self) -> &ModpackCompileReport {
+        &self.report
+    }
+
+    pub fn into_parts(self) -> (u16, GameDataSet, ModpackCompileReport) {
+        (self.format_version, self.data, self.report)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedCompiledGamePack {
-    pub path: PathBuf,
-    pub bytes: Vec<u8>,
-    pub pack: CompiledGamePack,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    pack: CompiledGamePack,
+}
+
+impl LoadedCompiledGamePack {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn pack(&self) -> &CompiledGamePack {
+        &self.pack
+    }
+
+    pub fn into_parts(self) -> (PathBuf, Vec<u8>, CompiledGamePack) {
+        (self.path, self.bytes, self.pack)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1592,7 +1782,6 @@ impl<'a> ModpackCompiler<'a> {
         manifests: &[ModpackManifest],
         options: ModpackCompileOptions,
     ) -> Result<CompiledModpack> {
-        let mut data = self.asset_root.load_base_game_data()?;
         let mut seen_manifest_ids = BTreeSet::new();
         for manifest in manifests {
             validate_manifest_shape(manifest)?;
@@ -1611,6 +1800,7 @@ impl<'a> ModpackCompiler<'a> {
                 }
             }
         }
+        let mut data = self.asset_root.load_base_game_data()?;
         let mut manifests_sorted: Vec<&ModpackManifest> = manifests.iter().collect();
         manifests_sorted
             .sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id().cmp(b.id())));
@@ -1659,16 +1849,48 @@ fn validate_manifest_shape(manifest: &ModpackManifest) -> Result<()> {
             manifest.id()
         );
     }
-    if manifest.id().trim().is_empty() {
-        anyhow::bail!("modpack metadata.id is required");
+    if !is_exact_manifest_id_token(manifest.id()) {
+        anyhow::bail!("modpack metadata.id must be an exact non-empty value");
     }
-    if manifest.metadata.name.trim().is_empty() {
-        anyhow::bail!("modpack '{}' metadata.name is required", manifest.id());
+    if !is_exact_nonempty_manifest_token(&manifest.metadata.name) {
+        anyhow::bail!(
+            "modpack '{}' metadata.name must be an exact non-empty value",
+            manifest.id()
+        );
     }
-    if manifest.metadata.version.trim().is_empty() {
-        anyhow::bail!("modpack '{}' metadata.version is required", manifest.id());
+    if !is_exact_nonempty_manifest_token(&manifest.metadata.version) {
+        anyhow::bail!(
+            "modpack '{}' metadata.version must be an exact non-empty value",
+            manifest.id()
+        );
+    }
+    if let Some(dependency) = manifest
+        .dependencies
+        .iter()
+        .find(|dependency| !is_exact_manifest_id_token(dependency))
+    {
+        anyhow::bail!(
+            "modpack '{}' dependency '{}' must be an exact non-empty value",
+            manifest.id(),
+            dependency
+        );
     }
     Ok(())
+}
+
+fn is_exact_manifest_id_token(value: &str) -> bool {
+    is_exact_nonempty_manifest_token(value) && !value.contains('+')
+}
+
+fn is_exact_nonempty_manifest_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
+fn optional_id_for_diagnostic(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("{value:?}"),
+        None => "<missing>".to_string(),
+    }
 }
 
 fn verify_game_data(
@@ -1683,6 +1905,7 @@ fn verify_game_data(
     verify_items(data, &mut diagnostics);
     verify_evolutions(data, &mut diagnostics);
     verify_encounters(data, &map_names, &mut diagnostics);
+    verify_trainers(data, &mut diagnostics);
     verify_audio_assets(asset_root, data, &mut diagnostics);
     verify_map_music(data, &mut diagnostics);
     verify_trainer_encounter_music(data, &mut diagnostics);
@@ -1704,6 +1927,7 @@ fn verify_game_data(
     verify_marts(data, &mut diagnostics);
     verify_fruit_trees(data, &mut diagnostics);
     verify_script_item_grants(data, &mut diagnostics);
+    verify_map_command_source_scripts(data, &mut diagnostics);
     verify_script_economy_commands(data, &mut diagnostics);
     verify_gift_pokemon_scripts(data, &mut diagnostics);
     verify_script_flag_commands(data, &mut diagnostics);
@@ -1808,58 +2032,125 @@ fn materialize_runtime_map_modules(data: &mut GameDataSet) -> Result<()> {
 }
 
 fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    for (species_id, species) in &data.pokemon {
-        if !data.learnsets.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "missing_species_learnset",
-                species_id,
-                "Pokemon species is missing an explicit level-up learnset",
-            ));
-        }
-        for item_id in [species.item1.as_deref(), species.item2.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if !data.items.contains_key(item_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_species_held_item",
-                    species_id,
-                    format!("Pokemon species references missing held item '{item_id}'"),
-                ));
-            }
-        }
-        for move_name in &species.tmhm_learnset {
-            if !data.moves.contains_key(move_name) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_tmhm_move",
-                    species_id,
-                    format!("TM/HM learnset references missing move '{move_name}'"),
-                ));
-            }
+    let item_ids: BTreeSet<String> = data.items.keys().cloned().collect();
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    for (move_id, move_data) in &data.moves {
+        for issue in move_payload_issues(move_data) {
+            diagnostics.push(move_payload_issue_diagnostic(move_id, issue));
         }
     }
-    for (species, learnset) in &data.learnsets {
-        if !data.pokemon.contains_key(species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_learnset_species",
-                species,
-                "learnset references a species that is not loaded",
-            ));
-        }
-        for entry in learnset {
-            let move_name = &entry.1;
-            if !data.moves.contains_key(move_name) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_level_move",
-                    species,
-                    format!("level-up learnset references missing move '{move_name}'"),
-                ));
-            }
-        }
+    diagnostics.extend(
+        learnset_catalog_issues(&data.pokemon, &data.learnsets, &item_ids, &move_ids)
+            .into_iter()
+            .map(learnset_catalog_issue_diagnostic),
+    );
+}
+
+fn move_payload_issue_diagnostic(move_id: &str, issue: MovePayloadIssue) -> VerificationError {
+    match issue {
+        MovePayloadIssue::MissingName => VerificationError::error(
+            "missing_move_name",
+            move_id,
+            "moves must declare explicit nonempty name ids",
+        ),
+        MovePayloadIssue::InvalidName { name } => VerificationError::error(
+            "invalid_move_name",
+            move_id,
+            format!("moves must declare exact name ids, found '{name}'"),
+        ),
+        MovePayloadIssue::MissingType => VerificationError::error(
+            "missing_move_type",
+            move_id,
+            "moves must declare explicit nonempty type ids",
+        ),
+        MovePayloadIssue::InvalidType { move_type } => VerificationError::error(
+            "invalid_move_type",
+            move_id,
+            format!("moves must declare exact type ids, found '{move_type}'"),
+        ),
+        MovePayloadIssue::MissingEffect => VerificationError::error(
+            "missing_move_effect",
+            move_id,
+            "moves must declare explicit nonempty effect ids",
+        ),
+        MovePayloadIssue::InvalidEffect { effect } => VerificationError::error(
+            "invalid_move_effect",
+            move_id,
+            format!("moves must declare exact effect ids, found '{effect}'"),
+        ),
+    }
+}
+
+fn learnset_catalog_issue_diagnostic(issue: LearnsetCatalogIssue) -> VerificationError {
+    match issue {
+        LearnsetCatalogIssue::MissingSpeciesLearnset { species_id } => VerificationError::error(
+            "missing_species_learnset",
+            species_id,
+            "Pokemon species is missing an explicit level-up learnset",
+        ),
+        LearnsetCatalogIssue::InvalidSpeciesHeldItem {
+            species_id,
+            item_id,
+        } => VerificationError::error(
+            "invalid_species_held_item",
+            species_id,
+            format!("Pokemon species held item '{item_id}' must be an exact nonempty item id"),
+        ),
+        LearnsetCatalogIssue::UnknownSpeciesHeldItem {
+            species_id,
+            item_id,
+        } => VerificationError::error(
+            "unknown_species_held_item",
+            species_id,
+            format!("Pokemon species references missing held item '{item_id}'"),
+        ),
+        LearnsetCatalogIssue::InvalidTmHmMove {
+            species_id,
+            move_id,
+        } => VerificationError::error(
+            "invalid_tmhm_move",
+            species_id,
+            format!("TM/HM learnset move '{move_id}' must be an exact nonempty move id"),
+        ),
+        LearnsetCatalogIssue::UnknownTmHmMove {
+            species_id,
+            move_id,
+        } => VerificationError::error(
+            "unknown_tmhm_move",
+            species_id,
+            format!("TM/HM learnset references missing move '{move_id}'"),
+        ),
+        LearnsetCatalogIssue::InvalidLearnsetSpecies { species_id } => VerificationError::error(
+            "invalid_learnset_species",
+            species_id,
+            "learnset species id must be an exact nonempty species id",
+        ),
+        LearnsetCatalogIssue::UnknownLearnsetSpecies { species_id } => VerificationError::error(
+            "unknown_learnset_species",
+            species_id,
+            "learnset references a species that is not loaded",
+        ),
+        LearnsetCatalogIssue::InvalidLevelMove {
+            species_id,
+            move_id,
+        } => VerificationError::error(
+            "invalid_level_move",
+            species_id,
+            format!("level-up learnset move '{move_id}' must be an exact nonempty move id"),
+        ),
+        LearnsetCatalogIssue::UnknownLevelMove {
+            species_id,
+            move_id,
+        } => VerificationError::error(
+            "unknown_level_move",
+            species_id,
+            format!("level-up learnset references missing move '{move_id}'"),
+        ),
     }
 }
 
 fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
     for (item_id, item) in &data.items {
         if item.pocket == ITEM_POCKET_BALL
             && !data
@@ -1880,359 +2171,447 @@ fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
                 ),
             ));
         }
-        verify_item_payload_fields(item_id, item, diagnostics);
+        for issue in item_payload_issues(item) {
+            diagnostics.push(item_payload_issue_diagnostic(item_id, item, issue));
+        }
+        for issue in item_reference_issues(item, &move_ids) {
+            diagnostics.push(item_reference_issue_diagnostic(item_id, issue));
+        }
     }
 }
 
-fn verify_item_payload_fields(
+fn item_payload_issue_diagnostic(
     item_id: &str,
     item: &Item,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if item.parameter != 0 {
-        verify_item_heal_amount(item_id, item, diagnostics);
-    }
-    if item.revive_hp_percent.is_some() {
-        verify_item_percent(
+    issue: ItemPayloadIssue,
+) -> VerificationError {
+    match issue {
+        ItemPayloadIssue::MissingName => VerificationError::error(
+            "missing_item_name",
             item_id,
-            item.revive_hp_percent,
-            "revive_hp_percent",
-            "invalid_item_revive_hp_percent",
-            diagnostics,
-        );
-    }
-    if item.party_revive_hp_percent.is_some() {
-        verify_item_percent(
-            item_id,
-            item.party_revive_hp_percent,
-            "party_revive_hp_percent",
-            "invalid_item_party_revive_hp_percent",
-            diagnostics,
-        );
-    }
-    if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
-        verify_item_pp_restore_payload(item_id, item, diagnostics);
-    }
-    if let Some(stages) = item.pp_up_stages {
-        if !(1..=3).contains(&stages) {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_pp_up_stages",
-                item_id,
-                format!("pp_up_stages must be from 1 to 3, found {stages}"),
-            ));
-        }
-    }
-    if item.vitamin_stat.is_some()
-        || item.vitamin_stat_exp.is_some()
-        || item.vitamin_max_stat_exp.is_some()
-    {
-        verify_item_vitamin_payload(item_id, item, diagnostics);
-    }
-    if let Some(level_gain) = item.rare_candy_level_gain {
-        if level_gain == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_rare_candy_level_gain",
-                item_id,
-                format!("rare_candy_level_gain must be positive, found {level_gain}"),
-            ));
-        }
-    }
-    if item.battle_stat_boost_stat.is_some() || item.battle_stat_boost_stages.is_some() {
-        verify_item_battle_stat_boost_payload(item_id, item, diagnostics);
-    }
-    if let Some(guard) = item.battle_stat_drop_guard {
-        if !guard {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_battle_stat_drop_guard",
-                item_id,
-                "battle_stat_drop_guard must be true when declared",
-            ));
-        }
-    }
-    if let Some(mode) = item.battle_escape_mode.as_deref() {
-        if mode != "WILD_BATTLE" {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_battle_escape_mode",
-                item_id,
-                format!("battle_escape_mode must be 'WILD_BATTLE' when declared, found '{mode}'"),
-            ));
-        }
-    }
-    if let Some(steps) = item.repel_steps {
-        if steps == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_repel_steps",
-                item_id,
-                format!("repel_steps must be positive when declared, found {steps}"),
-            ));
-        }
-    }
-    if let Some(focus) = item.battle_focus_energy {
-        if !focus {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_battle_focus_energy",
-                item_id,
-                "battle_focus_energy must be true when declared",
-            ));
-        }
-    }
-    if let Some(confusion_heal) = item.confusion_heal {
-        if !confusion_heal {
-            diagnostics.push(VerificationError::error(
-                "invalid_item_confusion_heal",
-                item_id,
-                "confusion_heal must be true when declared",
-            ));
-        }
-    }
-}
-
-fn verify_item_heal_amount(item_id: &str, item: &Item, diagnostics: &mut Vec<VerificationError>) {
-    if item.parameter == -1 || item.parameter > 0 {
-        return;
-    }
-    diagnostics.push(VerificationError::error(
-        "invalid_item_heal_amount",
-        item_id,
-        format!(
-            "{} requires parameter -1 or a positive HP amount, found {}",
-            item.effect, item.parameter
+            "items must declare explicit nonempty display names",
         ),
-    ));
-}
-
-fn verify_item_percent(
-    item_id: &str,
-    percent: Option<u8>,
-    field_name: &str,
-    invalid_code: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    match percent {
-        Some(percent) if (1..=100).contains(&percent) => {}
-        Some(percent) => diagnostics.push(VerificationError::error(
-            invalid_code,
+        ItemPayloadIssue::InvalidName { name } => VerificationError::error(
+            "invalid_item_name",
             item_id,
-            format!("{field_name} must be from 1 to 100, found {percent}"),
-        )),
-        None => {}
-    }
-}
-
-fn verify_item_pp_restore_payload(
-    item_id: &str,
-    item: &Item,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    match item.pp_restore_scope.as_deref() {
-        Some("MOVE" | "POKEMON") => {}
-        Some(scope) => diagnostics.push(VerificationError::error(
-            "invalid_item_pp_restore_scope",
+            format!("items must declare exact display names, found '{name}'"),
+        ),
+        ItemPayloadIssue::MissingDescription => VerificationError::error(
+            "missing_item_description",
             item_id,
-            format!("RESTORE_PP requires pp_restore_scope 'MOVE' or 'POKEMON', found '{scope}'"),
-        )),
-        None => diagnostics.push(VerificationError::error(
+            "items must declare explicit nonempty descriptions",
+        ),
+        ItemPayloadIssue::InvalidDescription { description } => VerificationError::error(
+            "invalid_item_description",
+            item_id,
+            format!("items must declare exact descriptions, found '{description}'"),
+        ),
+        ItemPayloadIssue::MissingScriptName => VerificationError::error(
+            "missing_item_script_name",
+            item_id,
+            "items must declare explicit nonempty script_name ids",
+        ),
+        ItemPayloadIssue::InvalidScriptName { script_name } => VerificationError::error(
+            "invalid_item_script_name",
+            item_id,
+            format!("items must declare exact script_name ids, found '{script_name}'"),
+        ),
+        ItemPayloadIssue::MissingPocket => VerificationError::error(
+            "missing_item_pocket",
+            item_id,
+            "items must declare explicit nonempty pocket ids",
+        ),
+        ItemPayloadIssue::InvalidPocket { pocket } => VerificationError::error(
+            "invalid_item_pocket",
+            item_id,
+            format!("items must declare exact pocket ids, found '{pocket}'"),
+        ),
+        ItemPayloadIssue::MissingEffect => VerificationError::error(
+            "missing_item_effect",
+            item_id,
+            "items must declare explicit nonempty effect ids",
+        ),
+        ItemPayloadIssue::InvalidEffect { effect } => VerificationError::error(
+            "invalid_item_effect",
+            item_id,
+            format!("items must declare exact effect ids, found '{effect}'"),
+        ),
+        ItemPayloadIssue::MissingHeldEffect => VerificationError::error(
+            "missing_item_held_effect",
+            item_id,
+            "items must declare explicit nonempty held_effect ids",
+        ),
+        ItemPayloadIssue::InvalidHeldEffect { held_effect } => VerificationError::error(
+            "invalid_item_held_effect",
+            item_id,
+            format!("items must declare exact held_effect ids, found '{held_effect}'"),
+        ),
+        ItemPayloadIssue::InvalidProperty { property } => VerificationError::error(
+            "invalid_item_property",
+            item_id,
+            format!("items must declare exact nonempty property ids, found '{property}'"),
+        ),
+        ItemPayloadIssue::MissingFieldMenu => VerificationError::error(
+            "missing_item_field_menu",
+            item_id,
+            "items must declare explicit nonempty field_menu ids",
+        ),
+        ItemPayloadIssue::InvalidFieldMenu { menu } => VerificationError::error(
+            "invalid_item_field_menu",
+            item_id,
+            format!("items must declare exact field_menu ids, found '{menu}'"),
+        ),
+        ItemPayloadIssue::MissingBattleMenu => VerificationError::error(
+            "missing_item_battle_menu",
+            item_id,
+            "items must declare explicit nonempty battle_menu ids",
+        ),
+        ItemPayloadIssue::InvalidBattleMenu { menu } => VerificationError::error(
+            "invalid_item_battle_menu",
+            item_id,
+            format!("items must declare exact battle_menu ids, found '{menu}'"),
+        ),
+        ItemPayloadIssue::InvalidStatusHeal { index, status } => VerificationError::error(
+            "invalid_item_status_heal",
+            item_id,
+            format!("status_heals:{index} must be an exact nonempty status id, found '{status}'"),
+        ),
+        ItemPayloadIssue::InvalidHealAmount { amount } => VerificationError::error(
+            "invalid_item_heal_amount",
+            item_id,
+            format!(
+                "{} requires parameter -1 or a positive HP amount, found {amount}",
+                item.effect
+            ),
+        ),
+        ItemPayloadIssue::InvalidReviveHpPercent { percent } => VerificationError::error(
+            "invalid_item_revive_hp_percent",
+            item_id,
+            format!("revive_hp_percent must be from 1 to 100, found {percent}"),
+        ),
+        ItemPayloadIssue::InvalidPartyReviveHpPercent { percent } => VerificationError::error(
+            "invalid_item_party_revive_hp_percent",
+            item_id,
+            format!("party_revive_hp_percent must be from 1 to 100, found {percent}"),
+        ),
+        ItemPayloadIssue::MissingPpRestoreScope => VerificationError::error(
             "missing_item_pp_restore_scope",
             item_id,
             "RESTORE_PP requires explicit pp_restore_scope",
-        )),
-    }
-    if let Some(0) = item.pp_restore_points {
-        diagnostics.push(VerificationError::error(
+        ),
+        ItemPayloadIssue::InvalidPpRestoreScope { scope } => VerificationError::error(
+            "invalid_item_pp_restore_scope",
+            item_id,
+            format!("RESTORE_PP requires pp_restore_scope 'MOVE' or 'POKEMON', found '{scope}'"),
+        ),
+        ItemPayloadIssue::InvalidPpRestorePoints { .. } => VerificationError::error(
             "invalid_item_pp_restore_points",
             item_id,
             "RESTORE_PP pp_restore_points must be positive when present",
-        ));
-    }
-}
-
-fn verify_item_vitamin_payload(
-    item_id: &str,
-    item: &Item,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    match item.vitamin_stat.as_deref() {
-        Some("HP" | "ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL") => {}
-        Some(stat) => diagnostics.push(VerificationError::error(
-            "invalid_item_vitamin_stat",
+        ),
+        ItemPayloadIssue::InvalidPpUpStages { stages } => VerificationError::error(
+            "invalid_item_pp_up_stages",
             item_id,
-            format!("VITAMIN uses unknown vitamin_stat '{stat}'"),
-        )),
-        None => diagnostics.push(VerificationError::error(
+            format!("pp_up_stages must be from 1 to 3, found {stages}"),
+        ),
+        ItemPayloadIssue::MissingVitaminStat => VerificationError::error(
             "missing_item_vitamin_stat",
             item_id,
             "VITAMIN requires explicit vitamin_stat",
-        )),
-    }
-    match item.vitamin_stat_exp {
-        Some(amount) if amount > 0 => {}
-        Some(amount) => diagnostics.push(VerificationError::error(
-            "invalid_item_vitamin_stat_exp",
+        ),
+        ItemPayloadIssue::InvalidVitaminStat { stat } => VerificationError::error(
+            "invalid_item_vitamin_stat",
             item_id,
-            format!("VITAMIN requires positive vitamin_stat_exp, found {amount}"),
-        )),
-        None => diagnostics.push(VerificationError::error(
+            format!("VITAMIN uses unknown vitamin_stat '{stat}'"),
+        ),
+        ItemPayloadIssue::MissingVitaminStatExp => VerificationError::error(
             "missing_item_vitamin_stat_exp",
             item_id,
             "VITAMIN requires explicit vitamin_stat_exp",
-        )),
-    }
-    match (item.vitamin_max_stat_exp, item.vitamin_stat_exp) {
-        (Some(max), Some(amount)) if max >= amount && max > 0 => {}
-        (Some(max), _) => diagnostics.push(VerificationError::error(
-            "invalid_item_vitamin_max_stat_exp",
+        ),
+        ItemPayloadIssue::InvalidVitaminStatExp { amount } => VerificationError::error(
+            "invalid_item_vitamin_stat_exp",
             item_id,
-            format!("VITAMIN requires vitamin_max_stat_exp >= vitamin_stat_exp and positive, found {max}"),
-        )),
-        (None, _) => diagnostics.push(VerificationError::error(
+            format!("VITAMIN requires positive vitamin_stat_exp, found {amount}"),
+        ),
+        ItemPayloadIssue::MissingVitaminMaxStatExp => VerificationError::error(
             "missing_item_vitamin_max_stat_exp",
             item_id,
             "VITAMIN requires explicit vitamin_max_stat_exp",
-        )),
-    }
-}
-
-fn verify_item_battle_stat_boost_payload(
-    item_id: &str,
-    item: &Item,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    match item.battle_stat_boost_stat.as_deref() {
-        Some("ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL_ATTACK" | "ACCURACY") => {}
-        Some(stat) => diagnostics.push(VerificationError::error(
+        ),
+        ItemPayloadIssue::InvalidVitaminMaxStatExp { max } => VerificationError::error(
+            "invalid_item_vitamin_max_stat_exp",
+            item_id,
+            format!(
+                "VITAMIN requires vitamin_max_stat_exp >= vitamin_stat_exp and positive, found {max}"
+            ),
+        ),
+        ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain } => VerificationError::error(
+            "invalid_item_rare_candy_level_gain",
+            item_id,
+            format!("rare_candy_level_gain must be positive, found {level_gain}"),
+        ),
+        ItemPayloadIssue::MissingBattleStatBoostStat => VerificationError::error(
+            "missing_item_battle_stat_boost_stat",
+            item_id,
+            format!("{} requires explicit battle_stat_boost_stat", item.effect),
+        ),
+        ItemPayloadIssue::InvalidBattleStatBoostStat { stat } => VerificationError::error(
             "invalid_item_battle_stat_boost_stat",
             item_id,
             format!(
                 "{} uses unknown battle_stat_boost_stat '{stat}'",
                 item.effect
             ),
-        )),
-        None => diagnostics.push(VerificationError::error(
-            "missing_item_battle_stat_boost_stat",
+        ),
+        ItemPayloadIssue::MissingBattleStatBoostStages => VerificationError::error(
+            "missing_item_battle_stat_boost_stages",
             item_id,
-            format!("{} requires explicit battle_stat_boost_stat", item.effect),
-        )),
-    }
-    match item.battle_stat_boost_stages {
-        Some(stages) if (1..=6).contains(&stages) => {}
-        Some(stages) => diagnostics.push(VerificationError::error(
+            format!("{} requires explicit battle_stat_boost_stages", item.effect),
+        ),
+        ItemPayloadIssue::InvalidBattleStatBoostStages { stages } => VerificationError::error(
             "invalid_item_battle_stat_boost_stages",
             item_id,
             format!(
                 "{} requires battle_stat_boost_stages from 1 to 6, found {stages}",
                 item.effect
             ),
-        )),
-        None => diagnostics.push(VerificationError::error(
-            "missing_item_battle_stat_boost_stages",
+        ),
+        ItemPayloadIssue::MissingBattleStatDropGuard => VerificationError::error(
+            "missing_item_battle_stat_drop_guard",
             item_id,
-            format!("{} requires explicit battle_stat_boost_stages", item.effect),
-        )),
+            "battle_stat_drop_guard_turns requires explicit battle_stat_drop_guard",
+        ),
+        ItemPayloadIssue::InvalidBattleStatDropGuard => VerificationError::error(
+            "invalid_item_battle_stat_drop_guard",
+            item_id,
+            "battle_stat_drop_guard must be true when declared",
+        ),
+        ItemPayloadIssue::MissingBattleStatDropGuardTurns => VerificationError::error(
+            "missing_item_battle_stat_drop_guard_turns",
+            item_id,
+            "battle_stat_drop_guard requires explicit battle_stat_drop_guard_turns",
+        ),
+        ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns } => VerificationError::error(
+            "invalid_item_battle_stat_drop_guard_turns",
+            item_id,
+            format!("battle_stat_drop_guard_turns must be positive, found {turns}"),
+        ),
+        ItemPayloadIssue::InvalidBattleEscapeMode { mode } => VerificationError::error(
+            "invalid_item_battle_escape_mode",
+            item_id,
+            format!("battle_escape_mode must be 'WILD_BATTLE' when declared, found '{mode}'"),
+        ),
+        ItemPayloadIssue::InvalidRepelSteps { steps } => VerificationError::error(
+            "invalid_item_repel_steps",
+            item_id,
+            format!("repel_steps must be positive when declared, found {steps}"),
+        ),
+        ItemPayloadIssue::InvalidBattleFocusEnergy => VerificationError::error(
+            "invalid_item_battle_focus_energy",
+            item_id,
+            "battle_focus_energy must be true when declared",
+        ),
+        ItemPayloadIssue::InvalidConfusionHeal => VerificationError::error(
+            "invalid_item_confusion_heal",
+            item_id,
+            "confusion_heal must be true when declared",
+        ),
+        ItemPayloadIssue::MissingTmhmIndex => VerificationError::error(
+            "missing_item_tmhm_index",
+            item_id,
+            "TM/HM items must declare explicit tmhm_index",
+        ),
+        ItemPayloadIssue::InvalidTmhmIndex { index } => VerificationError::error(
+            "invalid_item_tmhm_index",
+            item_id,
+            format!("TM/HM item tmhm_index must be positive, found {index}"),
+        ),
+        ItemPayloadIssue::MissingTmhmMove => VerificationError::error(
+            "missing_item_tmhm_move",
+            item_id,
+            "TM/HM items must declare explicit tmhm_move",
+        ),
+        ItemPayloadIssue::InvalidTmhmMove { move_id } => VerificationError::error(
+            "invalid_item_tmhm_move",
+            item_id,
+            format!("TM/HM item tmhm_move must be an exact move id, found '{move_id}'"),
+        ),
+        ItemPayloadIssue::InvalidFieldUsableMenu { menu, usable } => VerificationError::error(
+            "invalid_item_field_usable_menu",
+            item_id,
+            format!("field_usable {usable} contradicts field_menu '{menu}'"),
+        ),
+        ItemPayloadIssue::InvalidBattleUsableMenu { menu, usable } => VerificationError::error(
+            "invalid_item_battle_usable_menu",
+            item_id,
+            format!("battle_usable {usable} contradicts battle_menu '{menu}'"),
+        ),
+    }
+}
+
+fn item_reference_issue_diagnostic(item_id: &str, issue: ItemReferenceIssue) -> VerificationError {
+    match issue {
+        ItemReferenceIssue::UnknownTmhmMove { move_id } => VerificationError::error(
+            "unknown_item_tmhm_move",
+            item_id,
+            format!("TM/HM item references missing move '{move_id}'"),
+        ),
     }
 }
 
 fn verify_evolutions(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    for species_id in data.pokemon.keys() {
-        if !data.evolutions.0.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "missing_species_evolutions",
-                species_id,
-                "Pokemon species is missing an explicit evolution table entry",
-            ));
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    let item_ids: BTreeSet<String> = data.items.keys().cloned().collect();
+    diagnostics.extend(
+        evolution_table_issues(&data.evolutions, &species_ids, &item_ids)
+            .into_iter()
+            .map(evolution_table_issue_diagnostic),
+    );
+}
+
+fn evolution_table_issue_diagnostic(issue: EvolutionTableIssue) -> VerificationError {
+    match issue {
+        EvolutionTableIssue::MissingSpeciesEvolutions { species_id } => VerificationError::error(
+            "missing_species_evolutions",
+            species_id,
+            "Pokemon species is missing an explicit evolution table entry",
+        ),
+        EvolutionTableIssue::InvalidSourceSpecies { species_id } => VerificationError::error(
+            "invalid_evolution_source_species",
+            species_id,
+            "evolution table source species must be an exact nonempty species id",
+        ),
+        EvolutionTableIssue::UnknownSourceSpecies { species_id } => VerificationError::error(
+            "unknown_evolution_source_species",
+            species_id,
+            "evolution table references a source species that is not loaded",
+        ),
+        EvolutionTableIssue::InvalidTargetSpecies {
+            source_species_id,
+            target_species_id,
+        } => VerificationError::error(
+            "invalid_evolution_target_species",
+            source_species_id,
+            format!(
+                "evolution target species '{target_species_id}' must be an exact nonempty species id"
+            ),
+        ),
+        EvolutionTableIssue::UnknownTargetSpecies {
+            source_species_id,
+            target_species_id,
+        } => VerificationError::error(
+            "unknown_evolution_target_species",
+            source_species_id,
+            format!("evolution target species '{target_species_id}' is not loaded"),
+        ),
+        EvolutionTableIssue::MissingLevel { source_species_id } => VerificationError::error(
+            "missing_evolution_level",
+            source_species_id,
+            "LEVEL evolution requires an exact level",
+        ),
+        EvolutionTableIssue::MissingItem { source_species_id } => VerificationError::error(
+            "missing_evolution_item",
+            source_species_id,
+            "ITEM evolution requires an exact item id",
+        ),
+        EvolutionTableIssue::InvalidItem {
+            source_species_id,
+            item_id,
+        } => VerificationError::error(
+            "invalid_evolution_item",
+            source_species_id,
+            format!("ITEM evolution item '{item_id}' must be an exact nonempty item id"),
+        ),
+        EvolutionTableIssue::UnknownItem {
+            source_species_id,
+            item_id,
+        } => VerificationError::error(
+            "unknown_evolution_item",
+            source_species_id,
+            format!("ITEM evolution references missing item '{item_id}'"),
+        ),
+        EvolutionTableIssue::MissingHappinessWindow { source_species_id } => {
+            VerificationError::error(
+                "missing_evolution_happiness_window",
+                source_species_id,
+                "HAPPINESS evolution requires an exact time window",
+            )
         }
-    }
-    for (species_id, entries) in &data.evolutions.0 {
-        if !data.pokemon.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_evolution_source_species",
-                species_id,
-                "evolution table references a source species that is not loaded",
-            ));
-        }
-        for entry in entries {
-            if !data.pokemon.contains_key(&entry.species) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_evolution_target_species",
-                    species_id,
-                    format!("evolution target species '{}' is not loaded", entry.species),
-                ));
-            }
-            match entry.method.as_str() {
-                METHOD_LEVEL => {
-                    if entry.level.is_none() {
-                        diagnostics.push(VerificationError::error(
-                            "missing_evolution_level",
-                            species_id,
-                            "LEVEL evolution requires an exact level",
-                        ));
-                    }
-                }
-                METHOD_ITEM => match entry.item.as_deref() {
-                    Some(item_id) if data.items.contains_key(item_id) => {}
-                    Some(item_id) => diagnostics.push(VerificationError::error(
-                        "unknown_evolution_item",
-                        species_id,
-                        format!("ITEM evolution references missing item '{item_id}'"),
-                    )),
-                    None => diagnostics.push(VerificationError::error(
-                        "missing_evolution_item",
-                        species_id,
-                        "ITEM evolution requires an exact item id",
-                    )),
-                },
-                METHOD_HAPPINESS => match entry.happiness.as_deref() {
-                    Some(window) if is_known_happiness_window(window) => {}
-                    Some(window) => diagnostics.push(VerificationError::error(
-                        "unknown_evolution_happiness_window",
-                        species_id,
-                        format!("HAPPINESS evolution uses unknown window '{window}'"),
-                    )),
-                    None => diagnostics.push(VerificationError::error(
-                        "missing_evolution_happiness_window",
-                        species_id,
-                        "HAPPINESS evolution requires an exact time window",
-                    )),
-                },
-                METHOD_TRADE => {
-                    if let Some(item_id) = entry.held_item.as_deref() {
-                        if item_id != TRADE_ANY_ITEM && !data.items.contains_key(item_id) {
-                            diagnostics.push(VerificationError::error(
-                                "unknown_trade_evolution_item",
-                                species_id,
-                                format!("TRADE evolution references missing held item '{item_id}'"),
-                            ));
-                        }
-                    }
-                }
-                METHOD_STAT => {
-                    if entry.level.is_none() {
-                        diagnostics.push(VerificationError::error(
-                            "missing_stat_evolution_level",
-                            species_id,
-                            "STAT evolution requires an exact level",
-                        ));
-                    }
-                    match entry.stat_ratio.as_deref() {
-                        Some(ratio) if is_known_stat_evolution_ratio(ratio) => {}
-                        Some(ratio) => diagnostics.push(VerificationError::error(
-                            "unknown_evolution_stat_ratio",
-                            species_id,
-                            format!("STAT evolution uses unknown ratio '{ratio}'"),
-                        )),
-                        None => diagnostics.push(VerificationError::error(
-                            "missing_evolution_stat_ratio",
-                            species_id,
-                            "STAT evolution requires an exact stat ratio",
-                        )),
-                    }
-                }
-                method => diagnostics.push(VerificationError::error(
-                    "unknown_evolution_method",
-                    species_id,
-                    format!("evolution uses unknown method '{method}'"),
-                )),
-            }
-        }
+        EvolutionTableIssue::InvalidHappinessWindow {
+            source_species_id,
+            window,
+        } => VerificationError::error(
+            "invalid_evolution_happiness_window",
+            source_species_id,
+            format!("HAPPINESS evolution window '{window}' must be an exact nonempty time window"),
+        ),
+        EvolutionTableIssue::UnknownHappinessWindow {
+            source_species_id,
+            window,
+        } => VerificationError::error(
+            "unknown_evolution_happiness_window",
+            source_species_id,
+            format!("HAPPINESS evolution uses unknown window '{window}'"),
+        ),
+        EvolutionTableIssue::UnknownTradeItem {
+            source_species_id,
+            item_id,
+        } => VerificationError::error(
+            "unknown_trade_evolution_item",
+            source_species_id,
+            format!("TRADE evolution references missing held item '{item_id}'"),
+        ),
+        EvolutionTableIssue::InvalidTradeItem {
+            source_species_id,
+            item_id,
+        } => VerificationError::error(
+            "invalid_trade_evolution_item",
+            source_species_id,
+            format!("TRADE evolution held item '{item_id}' must be an exact nonempty item id"),
+        ),
+        EvolutionTableIssue::MissingStatLevel { source_species_id } => VerificationError::error(
+            "missing_stat_evolution_level",
+            source_species_id,
+            "STAT evolution requires an exact level",
+        ),
+        EvolutionTableIssue::MissingStatRatio { source_species_id } => VerificationError::error(
+            "missing_evolution_stat_ratio",
+            source_species_id,
+            "STAT evolution requires an exact stat ratio",
+        ),
+        EvolutionTableIssue::InvalidStatRatio {
+            source_species_id,
+            ratio,
+        } => VerificationError::error(
+            "invalid_evolution_stat_ratio",
+            source_species_id,
+            format!("STAT evolution ratio '{ratio}' must be an exact nonempty stat ratio"),
+        ),
+        EvolutionTableIssue::UnknownStatRatio {
+            source_species_id,
+            ratio,
+        } => VerificationError::error(
+            "unknown_evolution_stat_ratio",
+            source_species_id,
+            format!("STAT evolution uses unknown ratio '{ratio}'"),
+        ),
+        EvolutionTableIssue::InvalidMethod {
+            source_species_id,
+            method,
+        } => VerificationError::error(
+            "invalid_evolution_method",
+            source_species_id,
+            format!("evolution method '{method}' must be an exact nonempty method id"),
+        ),
+        EvolutionTableIssue::UnknownMethod {
+            source_species_id,
+            method,
+        } => VerificationError::error(
+            "unknown_evolution_method",
+            source_species_id,
+            format!("evolution uses unknown method '{method}'"),
+        ),
     }
 }
 
@@ -2241,201 +2620,160 @@ fn verify_encounters(
     map_names: &BTreeSet<String>,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    for (map_name, encounters) in &data.wild_encounters {
-        if !map_names.contains(map_name) {
-            diagnostics.push(VerificationError::error(
-                "unknown_encounter_map",
-                map_name,
-                "wild encounters reference a map that is not loaded",
-            ));
-        }
-        for species in encounter_species(encounters) {
-            if !data.pokemon.contains_key(&species) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_encounter_species",
-                    map_name,
-                    format!("wild encounters reference missing species '{species}'"),
-                ));
-            }
-        }
-        verify_wild_encounter_rates_and_tables(map_name, encounters, diagnostics);
-    }
-    for (map_name, encounters) in &data.field_encounters {
-        if !map_names.contains(map_name) {
-            diagnostics.push(VerificationError::error(
-                "unknown_field_encounter_map",
-                map_name,
-                "field encounters reference a map that is not loaded",
-            ));
-        }
-        for species in field_encounter_species(encounters) {
-            if !data.pokemon.contains_key(&species) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_field_encounter_species",
-                    map_name,
-                    format!("field encounters reference missing species '{species}'"),
-                ));
-            }
-        }
-        verify_field_encounter_tables(map_name, encounters, diagnostics);
-    }
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        wild_encounter_catalog_issues(&data.wild_encounters, map_names, &species_ids)
+            .into_iter()
+            .map(wild_encounter_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        field_encounter_catalog_issues(&data.field_encounters, map_names, &species_ids)
+            .into_iter()
+            .map(field_encounter_catalog_issue_diagnostic),
+    );
 }
 
-fn verify_field_encounter_tables(
-    map_name: &str,
-    encounters: &FieldEncounterData,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if let Some(headbutt) = encounters.headbutt.as_ref() {
-        verify_field_encounter_bucket(
+fn wild_encounter_catalog_issue_diagnostic(issue: WildEncounterCatalogIssue) -> VerificationError {
+    match issue {
+        WildEncounterCatalogIssue::InvalidMap { map_name } => VerificationError::error(
+            "invalid_encounter_map",
             map_name,
-            "headbutt",
-            "common",
-            &headbutt.common,
-            diagnostics,
-        );
-        verify_field_encounter_bucket(map_name, "headbutt", "rare", &headbutt.rare, diagnostics);
-    }
-    if let Some(rock_smash) = encounters.rock_smash.as_ref() {
-        verify_field_encounter_bucket(
+            "wild encounter map id must be an exact nonempty map id",
+        ),
+        WildEncounterCatalogIssue::UnknownMap { map_name } => VerificationError::error(
+            "unknown_encounter_map",
             map_name,
-            "rock_smash",
-            "common",
-            &rock_smash.common,
-            diagnostics,
-        );
-    }
-}
-
-fn verify_field_encounter_bucket(
-    map_name: &str,
-    kind: &'static str,
-    bucket: &'static str,
-    entries: &[FieldEncounterEntry],
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    let subject = format!("{map_name}:{kind}:{bucket}");
-    if entries.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "empty_field_encounter_bucket",
-            &subject,
-            format!("{kind} field encounters require a non-empty {bucket} bucket"),
-        ));
-        return;
-    }
-
-    for (index, entry) in entries.iter().enumerate() {
-        if entry.weight == 0 {
-            diagnostics.push(VerificationError::error(
-                "zero_weight_field_encounter",
-                &format!("{subject}:{index}"),
-                format!(
-                    "{kind} field encounter {bucket} entry for '{}' has zero weight",
-                    entry.species
-                ),
-            ));
+            "wild encounters reference a map that is not loaded",
+        ),
+        WildEncounterCatalogIssue::InvalidSpecies {
+            map_name,
+            species_id,
+        } => VerificationError::error(
+            "invalid_encounter_species",
+            map_name,
+            format!("wild encounter species '{species_id}' must be an exact nonempty species id"),
+        ),
+        WildEncounterCatalogIssue::UnknownSpecies {
+            map_name,
+            species_id,
+        } => VerificationError::error(
+            "unknown_encounter_species",
+            map_name,
+            format!("wild encounters reference missing species '{species_id}'"),
+        ),
+        WildEncounterCatalogIssue::InvalidGrassRateTime { map_name, time_key } => {
+            VerificationError::error(
+                "invalid_grass_encounter_rate_time",
+                map_name,
+                format!("grass encounter rate time key '{time_key}' must be exact"),
+            )
         }
-    }
-
-    let total_weight: u16 = entries.iter().map(|entry| u16::from(entry.weight)).sum();
-    if total_weight != 100 {
-        diagnostics.push(VerificationError::error(
-            "invalid_field_encounter_weight_total",
-            &subject,
-            format!("{kind} field encounter {bucket} weights total {total_weight}, expected 100"),
-        ));
-    }
-}
-
-fn verify_wild_encounter_rates_and_tables(
-    map_name: &str,
-    encounters: &WildEncounterData,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if let Some(rates) = encounters.grass_rates.as_ref() {
-        for time in rates.keys() {
-            if !ENCOUNTER_TIME_KEYS.contains(&time.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_grass_encounter_rate_time",
-                    map_name,
-                    format!("grass encounter rate uses unknown exact time key '{time}'"),
-                ));
-            }
+        WildEncounterCatalogIssue::UnknownGrassRateTime { map_name, time_key } => {
+            VerificationError::error(
+                "unknown_grass_encounter_rate_time",
+                map_name,
+                format!("grass encounter rate uses unknown exact time key '{time_key}'"),
+            )
         }
-    }
-
-    if let Some(grass) = encounters.grass.as_ref() {
-        for time in ENCOUNTER_TIME_KEYS {
-            let time_of_day =
-                resolve_encounter_time_key(time).expect("core encounter time key must resolve");
-            let slots = grass.slots(time_of_day);
-            let rate = encounters
-                .grass_rates
-                .as_ref()
-                .and_then(|rates| rates.get(*time))
-                .copied();
-
-            if rate.is_none() {
-                diagnostics.push(VerificationError::error(
-                    "missing_grass_encounter_rate",
-                    map_name,
-                    format!("grass encounters for '{time}' require an exact grass rate"),
-                ));
-            }
-            if let Some(rate) = rate {
-                if rate > 0 && slots.is_empty() {
-                    diagnostics.push(VerificationError::error(
-                        "empty_grass_encounter_slots",
-                        map_name,
-                        format!("grass encounter rate for '{time}' has no slots"),
-                    ));
-                }
-            }
+        WildEncounterCatalogIssue::MissingGrassRate { map_name, time_key } => {
+            VerificationError::error(
+                "missing_grass_encounter_rate",
+                map_name,
+                format!("grass encounters for '{time_key}' require an exact grass rate"),
+            )
         }
-    } else if encounters
-        .grass_rates
-        .as_ref()
-        .is_some_and(|rates| rates.values().any(|rate| *rate > 0))
-    {
-        diagnostics.push(VerificationError::error(
+        WildEncounterCatalogIssue::EmptyGrassSlots { map_name, time_key } => {
+            VerificationError::error(
+                "empty_grass_encounter_slots",
+                map_name,
+                format!("grass encounter rate for '{time_key}' has no slots"),
+            )
+        }
+        WildEncounterCatalogIssue::MissingGrassTable { map_name } => VerificationError::error(
             "missing_grass_encounter_table",
             map_name,
             "positive grass encounter rates require a grass encounter table",
-        ));
+        ),
+        WildEncounterCatalogIssue::MissingWaterRate { map_name } => VerificationError::error(
+            "missing_water_encounter_rate",
+            map_name,
+            "water encounters require an exact water rate",
+        ),
+        WildEncounterCatalogIssue::EmptyWaterSlots { map_name, time_key } => {
+            VerificationError::error(
+                "empty_water_encounter_slots",
+                map_name,
+                format!("water encounter rate has no slots for '{time_key}'"),
+            )
+        }
+        WildEncounterCatalogIssue::MissingWaterTable { map_name } => VerificationError::error(
+            "missing_water_encounter_table",
+            map_name,
+            "positive water encounter rate requires a water encounter table",
+        ),
     }
+}
 
-    if let Some(water) = encounters.water.as_ref() {
-        if encounters.water_rate.is_none() {
-            diagnostics.push(VerificationError::error(
-                "missing_water_encounter_rate",
-                map_name,
-                "water encounters require an exact water rate",
-            ));
-        }
-        if let Some(water_rate) = encounters.water_rate {
-            if water_rate > 0 {
-                for time in ENCOUNTER_TIME_KEYS {
-                    let time_of_day = resolve_encounter_time_key(time)
-                        .expect("core encounter time key must resolve");
-                    let slots = water.slots(time_of_day);
-                    if slots.is_empty() {
-                        diagnostics.push(VerificationError::error(
-                            "empty_water_encounter_slots",
-                            map_name,
-                            format!("water encounter rate has no slots for '{time}'"),
-                        ));
-                    }
-                }
-            }
-        }
-    } else if let Some(water_rate) = encounters.water_rate {
-        if water_rate > 0 {
-            diagnostics.push(VerificationError::error(
-                "missing_water_encounter_table",
-                map_name,
-                "positive water encounter rate requires a water encounter table",
-            ));
-        }
+fn field_encounter_catalog_issue_diagnostic(
+    issue: FieldEncounterCatalogIssue,
+) -> VerificationError {
+    match issue {
+        FieldEncounterCatalogIssue::InvalidMap { map_name } => VerificationError::error(
+            "invalid_field_encounter_map",
+            map_name,
+            "field encounter map id must be an exact nonempty map id",
+        ),
+        FieldEncounterCatalogIssue::UnknownMap { map_name } => VerificationError::error(
+            "unknown_field_encounter_map",
+            map_name,
+            "field encounters reference a map that is not loaded",
+        ),
+        FieldEncounterCatalogIssue::InvalidSpecies {
+            map_name,
+            species_id,
+        } => VerificationError::error(
+            "invalid_field_encounter_species",
+            map_name,
+            format!("field encounter species '{species_id}' must be an exact nonempty species id"),
+        ),
+        FieldEncounterCatalogIssue::UnknownSpecies {
+            map_name,
+            species_id,
+        } => VerificationError::error(
+            "unknown_field_encounter_species",
+            map_name,
+            format!("field encounters reference missing species '{species_id}'"),
+        ),
+        FieldEncounterCatalogIssue::EmptyBucket {
+            map_name,
+            kind,
+            bucket,
+        } => VerificationError::error(
+            "empty_field_encounter_bucket",
+            format!("{map_name}:{kind}:{bucket}"),
+            format!("{kind} field encounters require a non-empty {bucket} bucket"),
+        ),
+        FieldEncounterCatalogIssue::ZeroWeight {
+            map_name,
+            kind,
+            bucket,
+            entry_index,
+            species_id,
+        } => VerificationError::error(
+            "zero_weight_field_encounter",
+            format!("{map_name}:{kind}:{bucket}:{entry_index}"),
+            format!("{kind} field encounter {bucket} entry for '{species_id}' has zero weight"),
+        ),
+        FieldEncounterCatalogIssue::InvalidWeightTotal {
+            map_name,
+            kind,
+            bucket,
+            total_weight,
+        } => VerificationError::error(
+            "invalid_field_encounter_weight_total",
+            format!("{map_name}:{kind}:{bucket}"),
+            format!("{kind} field encounter {bucket} weights total {total_weight}, expected 100"),
+        ),
     }
 }
 
@@ -2473,12 +2811,20 @@ fn verify_audio_assets(
             continue;
         }
         match std::fs::read(&path) {
-            Ok(bytes) if bytes.starts_with(b"MThd") => {}
-            Ok(_) => diagnostics.push(VerificationError::error(
-                "invalid_midi_file",
-                &audio_asset.id,
-                format!("audio file '{}' is not a MIDI file", audio_asset.path),
-            )),
+            Ok(bytes) => match audio_asset.source {
+                ModpackAudioSource::Midi if bytes.starts_with(b"MThd") => {}
+                ModpackAudioSource::Midi => diagnostics.push(VerificationError::error(
+                    "invalid_midi_file",
+                    &audio_asset.id,
+                    format!("audio file '{}' is not a MIDI file", audio_asset.path),
+                )),
+                ModpackAudioSource::Pcm if !bytes.is_empty() => {}
+                ModpackAudioSource::Pcm => diagnostics.push(VerificationError::error(
+                    "invalid_pcm_file",
+                    &audio_asset.id,
+                    format!("audio file '{}' is an empty PCM file", audio_asset.path),
+                )),
+            },
             Err(error) => diagnostics.push(VerificationError::error(
                 "unreadable_audio_file",
                 &audio_asset.id,
@@ -2504,6 +2850,263 @@ fn verify_map_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>
                 format!("map music references missing music audio id '{music_id}'"),
             ));
         }
+    }
+}
+
+fn verify_trainers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    let item_ids: BTreeSet<String> = data.items.keys().cloned().collect();
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    diagnostics.extend(
+        trainer_catalog_issues(&data.trainers, &species_ids, &item_ids, &move_ids)
+            .into_iter()
+            .map(trainer_catalog_issue_diagnostic),
+    );
+    verify_scripted_battle_requests(data, diagnostics);
+}
+
+fn verify_scripted_battle_requests(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    for (map_name, module) in &data.maps {
+        for (source_script, request) in &module.trainer_scripts {
+            verify_trainer_battle_request(
+                map_name,
+                source_script,
+                None,
+                request,
+                &data.trainers,
+                diagnostics,
+            );
+        }
+        for battle in &module.scripted_trainer_battles {
+            verify_trainer_battle_request(
+                map_name,
+                &battle.source_script,
+                Some(battle.loadtrainer_command_index),
+                &battle.request,
+                &data.trainers,
+                diagnostics,
+            );
+        }
+        for battle in &module.scripted_wild_battles {
+            verify_static_wild_battle_request(
+                map_name,
+                &battle.source_script,
+                battle.loadwildmon_command_index,
+                &battle.request,
+                &data.pokemon,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn verify_trainer_battle_request(
+    map_name: &str,
+    source_script: &str,
+    command_index: Option<usize>,
+    request: &TrainerBattleRequest,
+    trainers: &TrainerCatalog,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let subject = battle_request_subject(map_name, source_script, command_index);
+    if request.trainer_id.is_empty() || request.trainer_id.trim() != request.trainer_id {
+        diagnostics.push(VerificationError::error(
+            "invalid_scripted_trainer_id",
+            &subject,
+            format!(
+                "trainer battle request trainer_id must be exact and nonempty, found {:?}",
+                request.trainer_id
+            ),
+        ));
+        return;
+    }
+    if request.trainer_class.is_empty() || request.trainer_class.trim() != request.trainer_class {
+        diagnostics.push(VerificationError::error(
+            "invalid_scripted_trainer_class",
+            &subject,
+            format!(
+                "trainer battle request trainer_class must be exact and nonempty, found {:?}",
+                request.trainer_class
+            ),
+        ));
+        return;
+    }
+    let Some(trainer) = trainers.get(&request.trainer_id) else {
+        diagnostics.push(VerificationError::error(
+            "unknown_scripted_trainer",
+            &subject,
+            format!(
+                "trainer battle request references missing trainer '{}'",
+                request.trainer_id
+            ),
+        ));
+        return;
+    };
+    if trainer.trainer_class != request.trainer_class {
+        diagnostics.push(VerificationError::error(
+            "scripted_trainer_class_mismatch",
+            &subject,
+            format!(
+                "trainer battle request class '{}' does not match trainer '{}' class '{}'",
+                request.trainer_class, request.trainer_id, trainer.trainer_class
+            ),
+        ));
+    }
+}
+
+fn verify_static_wild_battle_request(
+    map_name: &str,
+    source_script: &str,
+    command_index: usize,
+    request: &StaticWildBattleRequest,
+    species: &BTreeMap<String, PokemonSpecies>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let subject = battle_request_subject(map_name, source_script, Some(command_index));
+    if request.species.is_empty() || request.species.trim() != request.species {
+        diagnostics.push(VerificationError::error(
+            "invalid_scripted_wild_species",
+            &subject,
+            format!(
+                "static wild battle request species must be exact and nonempty, found {:?}",
+                request.species
+            ),
+        ));
+    } else if !species.contains_key(&request.species) {
+        diagnostics.push(VerificationError::error(
+            "unknown_scripted_wild_species",
+            &subject,
+            format!(
+                "static wild battle request references missing species '{}'",
+                request.species
+            ),
+        ));
+    }
+    if request.level == 0 {
+        diagnostics.push(VerificationError::error(
+            "invalid_scripted_wild_level",
+            &subject,
+            format!(
+                "static wild battle request for species '{}' has zero level",
+                request.species
+            ),
+        ));
+    }
+}
+
+fn battle_request_subject(
+    map_name: &str,
+    source_script: &str,
+    command_index: Option<usize>,
+) -> String {
+    match command_index {
+        Some(command_index) => format!("{map_name}:{source_script}:{command_index}"),
+        None => format!("{map_name}:{source_script}"),
+    }
+}
+
+fn trainer_catalog_issue_diagnostic(issue: TrainerCatalogIssue) -> VerificationError {
+    match issue {
+        TrainerCatalogIssue::KeyMismatch { key, trainer_id } => VerificationError::error(
+            "trainer_catalog_key_mismatch",
+            key,
+            format!("trainer catalog key does not match trainer_id '{trainer_id}'"),
+        ),
+        TrainerCatalogIssue::InvalidTrainerId { trainer_id } => VerificationError::error(
+            "invalid_trainer_id",
+            trainer_id,
+            "trainer_id must be an exact nonempty id",
+        ),
+        TrainerCatalogIssue::MissingTrainerClass { trainer_id } => VerificationError::error(
+            "missing_trainer_class",
+            trainer_id,
+            "trainer must declare an exact trainer class",
+        ),
+        TrainerCatalogIssue::InvalidTrainerClass {
+            trainer_id,
+            trainer_class,
+        } => VerificationError::error(
+            "invalid_trainer_class",
+            trainer_id,
+            format!("trainer class '{trainer_class}' must be an exact nonempty id"),
+        ),
+        TrainerCatalogIssue::EmptyParty { trainer_id } => VerificationError::error(
+            "empty_trainer_party",
+            trainer_id,
+            "trainer must declare an explicit nonempty party",
+        ),
+        TrainerCatalogIssue::InvalidPartySpecies {
+            trainer_id,
+            slot,
+            species,
+        } => VerificationError::error(
+            "invalid_trainer_party_species",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party species '{species}' must be an exact nonempty species id"),
+        ),
+        TrainerCatalogIssue::UnknownPartySpecies {
+            trainer_id,
+            slot,
+            species,
+        } => VerificationError::error(
+            "unknown_trainer_party_species",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party references missing species '{species}'"),
+        ),
+        TrainerCatalogIssue::InvalidPartyItem {
+            trainer_id,
+            slot,
+            item_id,
+        } => VerificationError::error(
+            "invalid_trainer_party_item",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party item '{item_id}' must be an exact nonempty item id"),
+        ),
+        TrainerCatalogIssue::UnknownPartyItem {
+            trainer_id,
+            slot,
+            item_id,
+        } => VerificationError::error(
+            "unknown_trainer_party_item",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party references missing item '{item_id}'"),
+        ),
+        TrainerCatalogIssue::InvalidBattleItem {
+            trainer_id,
+            slot,
+            item_id,
+        } => VerificationError::error(
+            "invalid_trainer_battle_item",
+            format!("{trainer_id}:item:{slot}"),
+            format!("trainer battle item '{item_id}' must be an exact nonempty item id"),
+        ),
+        TrainerCatalogIssue::UnknownBattleItem {
+            trainer_id,
+            slot,
+            item_id,
+        } => VerificationError::error(
+            "unknown_trainer_battle_item",
+            format!("{trainer_id}:item:{slot}"),
+            format!("trainer battle item references missing item '{item_id}'"),
+        ),
+        TrainerCatalogIssue::InvalidPartyMove {
+            trainer_id,
+            slot,
+            move_id,
+        } => VerificationError::error(
+            "invalid_trainer_party_move",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party move '{move_id}' must be an exact nonempty move id"),
+        ),
+        TrainerCatalogIssue::UnknownPartyMove {
+            trainer_id,
+            slot,
+            move_id,
+        } => VerificationError::error(
+            "unknown_trainer_party_move",
+            format!("{trainer_id}:party:{slot}"),
+            format!("trainer party references missing move '{move_id}'"),
+        ),
     }
 }
 
@@ -2533,61 +3136,88 @@ fn verify_trainer_encounter_music(data: &GameDataSet, diagnostics: &mut Vec<Veri
 }
 
 fn verify_capture_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data
+    let ball_item_ids: BTreeSet<String> = data
         .items
         .values()
-        .any(|item| item.pocket == ITEM_POCKET_BALL)
-        && data.capture_rules.ball_rules.is_empty()
-    {
-        diagnostics.push(VerificationError::error(
+        .filter(|item| item.pocket == ITEM_POCKET_BALL)
+        .map(|item| item.script_name.clone())
+        .collect();
+    let has_ball_pocket_items = data
+        .items
+        .values()
+        .any(|item| item.pocket == ITEM_POCKET_BALL);
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        capture_rules_issues(
+            &data.capture_rules,
+            &species_ids,
+            &ball_item_ids,
+            has_ball_pocket_items,
+        )
+        .into_iter()
+        .map(capture_rules_issue_diagnostic),
+    );
+}
+
+fn capture_rules_issue_diagnostic(issue: CaptureRulesIssue) -> VerificationError {
+    match issue {
+        CaptureRulesIssue::MissingBallRules => VerificationError::error(
             "missing_capture_ball_rules",
             "capture_rules:ball_rules",
             "capture ball rules must be declared when BALL pocket items exist",
-        ));
-    }
-    for species in &data.capture_rules.fast_ball_species {
-        if !data.pokemon.contains_key(species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_fast_ball_species",
-                species,
-                "Fast Ball rule references a species that is not loaded",
-            ));
+        ),
+        CaptureRulesIssue::UnknownFastBallSpecies { species } => VerificationError::error(
+            "unknown_fast_ball_species",
+            &species,
+            "Fast Ball rule references a species that is not loaded",
+        ),
+        CaptureRulesIssue::UnknownHeavyBallSpecies { species } => VerificationError::error(
+            "unknown_heavy_ball_species",
+            &species,
+            "Heavy Ball rule references a species that is not loaded",
+        ),
+        CaptureRulesIssue::UnknownBallRuleItem { ball_id } => VerificationError::error(
+            "unknown_capture_ball_rule_item",
+            format!("capture_rules:ball_rules:{ball_id}"),
+            format!("capture ball rule references missing BALL pocket item '{ball_id}'"),
+        ),
+        CaptureRulesIssue::InvalidGuaranteedCaptureBall { ball_id } => VerificationError::error(
+            "invalid_guaranteed_capture_ball",
+            "capture_rules:guaranteed_capture_balls",
+            format!("guaranteed capture ball id must be exact and nonempty, found {ball_id:?}"),
+        ),
+        CaptureRulesIssue::UnknownGuaranteedCaptureBall { ball_id } => VerificationError::error(
+            "unknown_guaranteed_capture_ball",
+            "capture_rules:guaranteed_capture_balls",
+            format!("guaranteed capture ball references missing BALL pocket item '{ball_id}'"),
+        ),
+        CaptureRulesIssue::InvalidBallRule { ball_id, issue } => {
+            capture_ball_rule_issue_diagnostic(&ball_id, issue)
         }
     }
-    for species in data.capture_rules.heavy_ball_modifiers.keys() {
-        if !data.pokemon.contains_key(species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_heavy_ball_species",
-                species,
-                "Heavy Ball rule references a species that is not loaded",
-            ));
-        }
-    }
-    for (ball_id, rule) in &data.capture_rules.ball_rules {
-        let subject = format!("capture_rules:ball_rules:{ball_id}");
-        for issue in capture_ball_rule_issues(ball_id, rule) {
-            match issue {
-                CaptureBallRuleIssue::InvalidBallId => diagnostics.push(VerificationError::error(
-                    "invalid_capture_ball_id",
-                    &subject,
-                    "capture ball id must be an exact nonempty id",
-                )),
-                CaptureBallRuleIssue::InvalidBattleType => {
-                    diagnostics.push(VerificationError::error(
-                        "invalid_capture_ball_battle_type",
-                        &subject,
-                        "capture ball battle type must be exact when present",
-                    ));
-                }
-                CaptureBallRuleIssue::InvalidMultiplierDenominator => {
-                    diagnostics.push(VerificationError::error(
-                        "invalid_capture_ball_multiplier",
-                        &subject,
-                        "capture ball multiplier denominator must be nonzero",
-                    ));
-                }
-            }
-        }
+}
+
+fn capture_ball_rule_issue_diagnostic(
+    ball_id: &str,
+    issue: CaptureBallRuleIssue,
+) -> VerificationError {
+    let subject = format!("capture_rules:ball_rules:{ball_id}");
+    match issue {
+        CaptureBallRuleIssue::InvalidBallId => VerificationError::error(
+            "invalid_capture_ball_id",
+            &subject,
+            "capture ball id must be an exact nonempty id",
+        ),
+        CaptureBallRuleIssue::InvalidBattleType => VerificationError::error(
+            "invalid_capture_ball_battle_type",
+            &subject,
+            "capture ball battle type must be exact when present",
+        ),
+        CaptureBallRuleIssue::InvalidMultiplierDenominator => VerificationError::error(
+            "invalid_capture_ball_multiplier",
+            &subject,
+            "capture ball multiplier denominator must be nonzero",
+        ),
     }
 }
 
@@ -2595,105 +3225,116 @@ fn verify_capture_wobble_probabilities(
     data: &GameDataSet,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    if !data
+    let has_ball_pocket_items = data
         .items
         .values()
-        .any(|item| item.pocket == ITEM_POCKET_BALL)
-    {
-        return;
-    }
-    if data.capture_wobble_probabilities.is_empty() {
-        diagnostics.push(VerificationError::error(
+        .any(|item| item.pocket == ITEM_POCKET_BALL);
+    diagnostics.extend(
+        capture_wobble_probability_issues(
+            &data.capture_wobble_probabilities,
+            has_ball_pocket_items,
+        )
+        .into_iter()
+        .map(capture_wobble_probability_issue_diagnostic),
+    );
+}
+
+fn capture_wobble_probability_issue_diagnostic(
+    issue: CaptureWobbleProbabilityIssue,
+) -> VerificationError {
+    match issue {
+        CaptureWobbleProbabilityIssue::MissingTable => VerificationError::error(
             "missing_capture_wobble_probabilities",
             "capture_wobble_probabilities",
             "capture wobble probabilities must be declared when capture balls exist",
-        ));
-        return;
-    }
-    let mut previous = 0;
-    for entry in &data.capture_wobble_probabilities {
-        if entry.catch_rate == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_capture_wobble_catch_rate",
-                "capture_wobble_probabilities",
-                "capture wobble catch rates must be in 1..=255",
-            ));
-        }
-        if entry.catch_rate < previous {
-            diagnostics.push(VerificationError::error(
-                "unordered_capture_wobble_probability",
-                "capture_wobble_probabilities",
-                format!(
-                    "capture wobble catch rate {} appears after {}",
-                    entry.catch_rate, previous
-                ),
-            ));
-        }
-        previous = entry.catch_rate;
-    }
-    if previous != u8::MAX {
-        diagnostics.push(VerificationError::error(
+        ),
+        CaptureWobbleProbabilityIssue::InvalidCatchRate => VerificationError::error(
+            "invalid_capture_wobble_catch_rate",
+            "capture_wobble_probabilities",
+            "capture wobble catch rates must be in 1..=255",
+        ),
+        CaptureWobbleProbabilityIssue::UnorderedCatchRate {
+            catch_rate,
+            previous,
+        } => VerificationError::error(
+            "unordered_capture_wobble_probability",
+            "capture_wobble_probabilities",
+            format!("capture wobble catch rate {catch_rate} appears after {previous}"),
+        ),
+        CaptureWobbleProbabilityIssue::IncompleteTable => VerificationError::error(
             "incomplete_capture_wobble_probabilities",
             "capture_wobble_probabilities",
             "capture wobble probabilities must end at catch rate 255",
-        ));
+        ),
     }
 }
 
 fn verify_marts(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    for (mart_id, item_ids) in &data.marts.0 {
-        if mart_id.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_mart_id",
-                mart_id,
-                "mart id is required",
-            ));
+    diagnostics.extend(
+        mart_catalog_issues(&data.marts, &data.items)
+            .into_iter()
+            .map(mart_catalog_issue_diagnostic),
+    );
+}
+
+fn mart_catalog_issue_diagnostic(issue: MartCatalogIssue) -> VerificationError {
+    match issue {
+        MartCatalogIssue::EmptyMartId { mart_id } => {
+            VerificationError::error("empty_mart_id", mart_id, "mart id is required")
         }
-        for item_id in item_ids {
-            if !data.items.contains_key(item_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_mart_item",
-                    mart_id,
-                    format!("mart references missing item '{item_id}'"),
-                ));
-            }
-        }
+        MartCatalogIssue::InvalidMartId { mart_id } => VerificationError::error(
+            "invalid_mart_id",
+            &mart_id,
+            format!("mart id must be exact and untrimmed, found {mart_id:?}"),
+        ),
+        MartCatalogIssue::UnknownItem { mart_id, item_id } => VerificationError::error(
+            "unknown_mart_item",
+            mart_id,
+            format!("mart references missing item '{item_id}'"),
+        ),
     }
 }
 
 fn verify_fruit_trees(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    for (fruit_tree_id, item_id) in &data.fruit_trees.0 {
-        let subject = format!("fruit_trees:{fruit_tree_id}");
-        if fruit_tree_id.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_fruit_tree_id",
-                &subject,
-                "fruit tree id must not be empty",
-            ));
-        }
-        if !data.items.contains_key(item_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_fruit_tree_item",
-                &subject,
-                format!("fruit tree references missing item '{item_id}'"),
-            ));
-        }
+    diagnostics.extend(
+        fruit_tree_catalog_issues(&data.fruit_trees, &data.items)
+            .into_iter()
+            .map(fruit_tree_catalog_issue_diagnostic),
+    );
+}
+
+fn fruit_tree_catalog_issue_diagnostic(issue: FruitTreeCatalogIssue) -> VerificationError {
+    match issue {
+        FruitTreeCatalogIssue::EmptyFruitTreeId { fruit_tree_id } => VerificationError::error(
+            "empty_fruit_tree_id",
+            format!("fruit_trees:{fruit_tree_id}"),
+            "fruit tree id must not be empty",
+        ),
+        FruitTreeCatalogIssue::InvalidFruitTreeId { fruit_tree_id } => VerificationError::error(
+            "invalid_fruit_tree_id",
+            format!("fruit_trees:{fruit_tree_id}"),
+            format!("fruit tree id must be exact and untrimmed, found {fruit_tree_id:?}"),
+        ),
+        FruitTreeCatalogIssue::UnknownItem {
+            fruit_tree_id,
+            item_id,
+        } => VerificationError::error(
+            "unknown_fruit_tree_item",
+            format!("fruit_trees:{fruit_tree_id}"),
+            format!("fruit tree references missing item '{item_id}'"),
+        ),
     }
 }
 
 fn verify_script_item_grants(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
         for grant in &module.script_item_grants {
-            if grant.item_id != "ITEM_FROM_MEM" && !data.items.contains_key(&grant.item_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_item_grant_item",
-                    format!("{map_name}:{}:{}", grant.source_script, grant.command_index),
-                    format!(
-                        "script item grant references missing item '{}'",
-                        grant.item_id
-                    ),
-                ));
-            }
+            let subject = format!("{map_name}:{}:{}", grant.source_script, grant.command_index);
+            diagnostics.extend(
+                script_item_grant_issues(grant, &data.items)
+                    .into_iter()
+                    .map(|issue| script_item_grant_issue_diagnostic(&subject, issue)),
+            );
         }
         for access in &module.script_item_checks {
             verify_script_item_access(data, diagnostics, map_name, access, "checkitem");
@@ -2711,16 +3352,306 @@ fn verify_script_item_access(
     access: &ScriptItemAccess,
     command: &str,
 ) {
-    if !data.items.contains_key(&access.item_id) {
-        diagnostics.push(VerificationError::error(
-            "unknown_script_item_access_item",
-            format!(
-                "{map_name}:{}:{}",
-                access.source_script, access.command_index
-            ),
-            format!("{command} references missing item '{}'", access.item_id),
-        ));
+    let subject = format!(
+        "{map_name}:{}:{}",
+        access.source_script, access.command_index
+    );
+    diagnostics.extend(
+        script_item_access_issues(access, &data.items)
+            .into_iter()
+            .map(|issue| script_item_access_issue_diagnostic(&subject, command, issue)),
+    );
+}
+
+fn script_item_grant_issue_diagnostic(
+    subject: &str,
+    issue: ScriptItemGrantIssue,
+) -> VerificationError {
+    match issue {
+        ScriptItemGrantIssue::InvalidItem { item_id } => VerificationError::error(
+            "invalid_script_item_grant_item",
+            subject,
+            format!("script item grant item id must be exact and nonempty, found {item_id:?}"),
+        ),
+        ScriptItemGrantIssue::UnknownItem { item_id } => VerificationError::error(
+            "unknown_script_item_grant_item",
+            subject,
+            format!("script item grant references missing item '{item_id}'"),
+        ),
+        ScriptItemGrantIssue::InvalidQuantity => VerificationError::error(
+            "invalid_script_item_grant_quantity",
+            subject,
+            "script item grant quantity must be greater than zero",
+        ),
     }
+}
+
+fn script_item_access_issue_diagnostic(
+    subject: &str,
+    command: &str,
+    issue: ScriptItemAccessIssue,
+) -> VerificationError {
+    match issue {
+        ScriptItemAccessIssue::InvalidItem { item_id } => VerificationError::error(
+            "invalid_script_item_access_item",
+            subject,
+            format!("{command} item id must be exact and nonempty, found {item_id:?}"),
+        ),
+        ScriptItemAccessIssue::UnknownItem { item_id } => VerificationError::error(
+            "unknown_script_item_access_item",
+            subject,
+            format!("{command} references missing item '{item_id}'"),
+        ),
+    }
+}
+
+fn verify_map_command_source_scripts(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    for (map_name, module) in &data.maps {
+        for source_script in module.trainer_scripts.keys() {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "trainer_script",
+                source_script,
+                None,
+                diagnostics,
+            );
+        }
+        for battle in &module.scripted_trainer_battles {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "scripted_trainer_battle",
+                &battle.source_script,
+                Some(battle.loadtrainer_command_index),
+                diagnostics,
+            );
+        }
+        for battle in &module.scripted_wild_battles {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "scripted_wild_battle",
+                &battle.source_script,
+                Some(battle.loadwildmon_command_index),
+                diagnostics,
+            );
+        }
+        for grant in &module.script_item_grants {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_item_grant",
+                &grant.source_script,
+                Some(grant.command_index),
+                diagnostics,
+            );
+        }
+        for access in &module.script_item_checks {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_item_check",
+                &access.source_script,
+                Some(access.command_index),
+                diagnostics,
+            );
+        }
+        for access in &module.script_item_takes {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_item_take",
+                &access.source_script,
+                Some(access.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_economy_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_economy",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for gift in &module.gift_pokemon_scripts {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "gift_pokemon",
+                &gift.source_script,
+                Some(gift.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_flag_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_flag",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_scene_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_scene",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_audio_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_audio",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for change in &module.script_block_changes {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_block",
+                &change.source_script,
+                Some(change.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_object_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_object",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for movement in &module.script_movements {
+            if let Some(source_script) = movement.source_script.as_deref() {
+                verify_script_source_reference(
+                    map_name,
+                    module,
+                    "script_movement",
+                    source_script,
+                    None,
+                    diagnostics,
+                );
+            }
+        }
+        for command in &module.script_map_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_map",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_text_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_text",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_variable_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_variable",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_control_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_control",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for pickup in &module.script_field_pickups {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_field_pickup",
+                &pickup.source_script,
+                Some(pickup.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_shop_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_shop",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_phone_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_phone",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+        for command in &module.script_runtime_commands {
+            verify_script_source_reference(
+                map_name,
+                module,
+                "script_runtime",
+                &command.source_script,
+                Some(command.command_index),
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn verify_script_source_reference(
+    map_name: &str,
+    module: &MapModule,
+    category: &str,
+    source_script: &str,
+    command_index: Option<usize>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if module.scripts.contains_key(source_script) {
+        return;
+    }
+    let subject = match command_index {
+        Some(command_index) => format!("{map_name}:{category}:{source_script}:{command_index}"),
+        None => format!("{map_name}:{category}:{source_script}"),
+    };
+    diagnostics.push(VerificationError::error(
+        "unknown_command_source_script",
+        subject,
+        format!("{category} references missing exact source script '{source_script}'"),
+    ));
 }
 
 fn verify_script_economy_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
@@ -2731,68 +3662,67 @@ fn verify_script_economy_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command.command.as_str())
-                || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
-            {
-                let Some(account) = command.account.as_deref() else {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_money_account",
-                        &subject,
-                        "money command is missing account id",
-                    ));
-                    continue;
-                };
-                if MoneyAccount::from_script_id(account).is_err() {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_money_account",
-                        &subject,
-                        format!("money command references unknown account '{account}'"),
-                    ));
-                }
-                if SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
-                    && constants.get("MAX_MONEY").is_none()
-                {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_money_cap",
-                        &subject,
-                        "money mutation requires MAX_MONEY in pack currency constants",
-                    ));
-                }
-            } else if SCRIPT_COIN_CHECK_COMMANDS.contains(&command.command.as_str())
-                || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
-            {
-                if command.account.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_coin_account",
-                        &subject,
-                        "coin command must not carry a money account id",
-                    ));
-                }
-                if SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
-                    && constants.get("MAX_COINS").is_none()
-                {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_coin_cap",
-                        &subject,
-                        "coin mutation requires MAX_COINS in pack currency constants",
-                    ));
-                }
-            } else if !is_known_script_economy_command(&command.command) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_economy_command",
-                    &subject,
-                    format!("unknown economy command '{}'", command.command),
-                ));
-                continue;
-            }
-            if let Err(error) = resolve_amount(&command.amount_tokens, &constants) {
-                diagnostics.push(VerificationError::error(
-                    "unresolved_script_currency_amount",
-                    &subject,
-                    format!("currency amount does not resolve from pack constants: {error:?}"),
-                ));
-            }
+            diagnostics.extend(
+                script_economy_command_issues(command, &constants)
+                    .into_iter()
+                    .map(|issue| script_economy_command_issue_diagnostic(&subject, command, issue)),
+            );
         }
+    }
+}
+
+fn script_economy_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptEconomyCommand,
+    issue: ScriptEconomyCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptEconomyCommandIssue::UnknownCommand => VerificationError::error(
+            "unknown_script_economy_command",
+            subject,
+            format!("unknown economy command '{}'", command.command),
+        ),
+        ScriptEconomyCommandIssue::MissingMoneyAccount => VerificationError::error(
+            "missing_script_money_account",
+            subject,
+            "money command is missing account id",
+        ),
+        ScriptEconomyCommandIssue::InvalidMoneyAccount => {
+            let account = optional_id_for_diagnostic(command.account.as_deref());
+            VerificationError::error(
+                "invalid_script_money_account",
+                subject,
+                format!("money command account id must be exact and nonempty, found {account}"),
+            )
+        }
+        ScriptEconomyCommandIssue::UnknownMoneyAccount => {
+            let account = optional_id_for_diagnostic(command.account.as_deref());
+            VerificationError::error(
+                "unknown_script_money_account",
+                subject,
+                format!("money command references unknown account {account}"),
+            )
+        }
+        ScriptEconomyCommandIssue::UnexpectedCoinAccount => VerificationError::error(
+            "unexpected_script_coin_account",
+            subject,
+            "coin command must not carry a money account id",
+        ),
+        ScriptEconomyCommandIssue::MissingMoneyCap => VerificationError::error(
+            "missing_script_money_cap",
+            subject,
+            "money mutation requires MAX_MONEY in pack currency constants",
+        ),
+        ScriptEconomyCommandIssue::MissingCoinCap => VerificationError::error(
+            "missing_script_coin_cap",
+            subject,
+            "coin mutation requires MAX_COINS in pack currency constants",
+        ),
+        ScriptEconomyCommandIssue::UnresolvedAmount { error } => VerificationError::error(
+            "unresolved_script_currency_amount",
+            subject,
+            format!("currency amount does not resolve from pack constants: {error:?}"),
+        ),
     }
 }
 
@@ -2815,46 +3745,48 @@ fn economy_constants(data: &GameDataSet) -> CurrencyCatalog {
 
 fn verify_gift_pokemon_scripts(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        let script_labels: BTreeSet<String> = module.scripts.keys().cloned().collect();
         for gift in &module.gift_pokemon_scripts {
             let subject = format!("{map_name}:{}:{}", gift.source_script, gift.command_index);
-            if !data.pokemon.contains_key(&gift.species_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_gift_pokemon_species",
-                    &subject,
-                    format!("gift references missing species '{}'", gift.species_id),
-                ));
-            }
-            if let Some(item_id) = gift.held_item_id.as_deref()
-                && !data.items.contains_key(item_id)
+            for issue in
+                gift_pokemon_script_issues(gift, &data.pokemon, &data.items, &script_labels)
             {
-                diagnostics.push(VerificationError::error(
-                    "unknown_gift_pokemon_item",
-                    &subject,
-                    format!("gift references missing held item '{item_id}'"),
-                ));
-            }
-            for (field, label) in [
-                ("nickname", gift.nickname_label.as_deref()),
-                ("original trainer", gift.ot_label.as_deref()),
-            ] {
-                let Some(label) = label else {
-                    continue;
-                };
-                if label.trim().is_empty() {
-                    diagnostics.push(VerificationError::error(
-                        "empty_gift_pokemon_label",
-                        &subject,
-                        format!("gift {field} label must be non-empty"),
-                    ));
-                } else if !module.scripts.contains_key(label) {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_gift_pokemon_label",
-                        &subject,
-                        format!("gift {field} label '{label}' is not loaded in map scripts"),
-                    ));
-                }
+                diagnostics.push(gift_pokemon_script_issue_diagnostic(&subject, issue));
             }
         }
+    }
+}
+
+fn gift_pokemon_script_issue_diagnostic(
+    subject: &str,
+    issue: GiftPokemonScriptIssue,
+) -> VerificationError {
+    match issue {
+        GiftPokemonScriptIssue::UnknownSpecies { species_id } => VerificationError::error(
+            "unknown_gift_pokemon_species",
+            subject,
+            format!("gift references missing species '{species_id}'"),
+        ),
+        GiftPokemonScriptIssue::UnknownHeldItem { item_id } => VerificationError::error(
+            "unknown_gift_pokemon_item",
+            subject,
+            format!("gift references missing held item '{item_id}'"),
+        ),
+        GiftPokemonScriptIssue::EmptyLabel { field } => VerificationError::error(
+            "empty_gift_pokemon_label",
+            subject,
+            format!("gift {field} label must be non-empty"),
+        ),
+        GiftPokemonScriptIssue::InvalidLabel { field, label } => VerificationError::error(
+            "invalid_gift_pokemon_label",
+            subject,
+            format!("gift {field} label '{label}' must be an exact non-empty value"),
+        ),
+        GiftPokemonScriptIssue::UnknownLabel { field, label } => VerificationError::error(
+            "unknown_gift_pokemon_label",
+            subject,
+            format!("gift {field} label '{label}' is not loaded in map scripts"),
+        ),
     }
 }
 
@@ -2865,50 +3797,56 @@ fn verify_script_flag_commands(data: &GameDataSet, diagnostics: &mut Vec<Verific
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            for issue in script_flag_command_issues(command) {
-                match issue {
-                    ScriptFlagCommandIssue::UnknownCommand => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_flag_command",
-                            &subject,
-                            format!("unknown script flag command '{}'", command.command),
-                        ));
-                    }
-                    ScriptFlagCommandIssue::EmptyFlagId => {
-                        diagnostics.push(VerificationError::error(
-                            "empty_script_flag_id",
-                            &subject,
-                            "script flag command references an empty flag id",
-                        ));
-                    }
-                }
-            }
+            diagnostics.extend(
+                script_flag_command_issues(command)
+                    .into_iter()
+                    .map(|issue| script_flag_command_issue_diagnostic(&subject, command, issue)),
+            );
         }
+    }
+}
+
+fn script_flag_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptFlagCommand,
+    issue: ScriptFlagCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptFlagCommandIssue::UnknownCommand => VerificationError::error(
+            "unknown_script_flag_command",
+            subject,
+            format!("unknown script flag command '{}'", command.command),
+        ),
+        ScriptFlagCommandIssue::EmptyFlagId => VerificationError::error(
+            "empty_script_flag_id",
+            subject,
+            "script flag command references an empty flag id",
+        ),
+        ScriptFlagCommandIssue::InvalidFlagId => VerificationError::error(
+            "invalid_script_flag_id",
+            subject,
+            format!(
+                "script flag command flag id must be exact and untrimmed, found {:?}",
+                command.flag_id
+            ),
+        ),
     }
 }
 
 fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        verify_scene_table_script_references(map_name, module, diagnostics);
         for command in &module.script_scene_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
+            diagnostics.extend(
+                script_scene_command_issues(command)
+                    .into_iter()
+                    .map(|issue| script_scene_command_issue_diagnostic(&subject, command, issue)),
+            );
             if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
-                if command.map_id.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_scene_map",
-                        &subject,
-                        "checkscene must not carry a target map id",
-                    ));
-                }
-                if command.scene_id.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_scene_id",
-                        &subject,
-                        "checkscene must not carry a scene id",
-                    ));
-                }
                 if module.scenes.scenes.is_empty() {
                     diagnostics.push(VerificationError::error(
                         "missing_script_scene_table",
@@ -2918,31 +3856,28 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 }
             } else if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
             {
-                if command.map_id.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_scene_map",
+                if command
+                    .scene_id
+                    .as_deref()
+                    .is_some_and(|scene_id| scene_id.trim() == scene_id && !scene_id.is_empty())
+                {
+                    verify_scene_token(
+                        diagnostics,
                         &subject,
-                        "setscene must not carry a target map id",
-                    ));
+                        map_name,
+                        command.scene_id.as_deref(),
+                        &module.scenes,
+                        scene_slot_count(module),
+                    );
                 }
-                verify_scene_token(
-                    diagnostics,
-                    &subject,
-                    map_name,
-                    command.scene_id.as_deref(),
-                    &module.scenes,
-                    scene_slot_count(module),
-                );
             } else if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
             {
                 let Some(map_id) = command.map_id.as_deref() else {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_scene_map",
-                        &subject,
-                        "setmapscene requires a target map id",
-                    ));
                     continue;
                 };
+                if map_id.trim().is_empty() || map_id.trim() != map_id {
+                    continue;
+                }
                 let Some((target_map_name, target_module)) = scene_table_for_map_id(data, map_id)
                 else {
                     diagnostics.push(VerificationError::error(
@@ -2952,22 +3887,93 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                     ));
                     continue;
                 };
-                verify_scene_token(
-                    diagnostics,
-                    &subject,
-                    &target_map_name,
-                    command.scene_id.as_deref(),
-                    &target_module.scenes,
-                    scene_slot_count(target_module),
-                );
-            } else if !is_known_script_scene_command(&command.command) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_scene_command",
-                    &subject,
-                    format!("unknown scene command '{}'", command.command),
-                ));
+                if command
+                    .scene_id
+                    .as_deref()
+                    .is_some_and(|scene_id| scene_id.trim() == scene_id && !scene_id.is_empty())
+                {
+                    verify_scene_token(
+                        diagnostics,
+                        &subject,
+                        &target_map_name,
+                        command.scene_id.as_deref(),
+                        &target_module.scenes,
+                        scene_slot_count(target_module),
+                    );
+                }
             }
         }
+    }
+}
+
+fn verify_scene_table_script_references(
+    map_name: &str,
+    module: &MapModule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    for scene in &module.scenes.scenes {
+        let Some(script_name) = scene.script_name.as_deref() else {
+            continue;
+        };
+        if !module.scripts.contains_key(script_name) {
+            diagnostics.push(VerificationError::error(
+                "unknown_scene_script",
+                format!("{map_name}:{}", scene.scene_id),
+                format!("scene references missing exact script '{script_name}'"),
+            ));
+        }
+    }
+}
+
+fn script_scene_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptSceneCommand,
+    issue: ScriptSceneCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptSceneCommandIssue::UnknownCommand => VerificationError::error(
+            "unknown_script_scene_command",
+            subject,
+            format!("unknown scene command '{}'", command.command),
+        ),
+        ScriptSceneCommandIssue::MissingTargetMap => VerificationError::error(
+            "missing_script_scene_map",
+            subject,
+            format!("{} requires a target map id", command.command),
+        ),
+        ScriptSceneCommandIssue::InvalidTargetMap => VerificationError::error(
+            "invalid_script_scene_map",
+            subject,
+            format!(
+                "{} target map id must be exact and nonempty, found {}",
+                command.command,
+                optional_id_for_diagnostic(command.map_id.as_deref())
+            ),
+        ),
+        ScriptSceneCommandIssue::UnexpectedTargetMap => VerificationError::error(
+            "unexpected_script_scene_map",
+            subject,
+            format!("{} must not carry a target map id", command.command),
+        ),
+        ScriptSceneCommandIssue::MissingSceneId => VerificationError::error(
+            "missing_script_scene_id",
+            subject,
+            format!("{} command is missing a scene id", command.command),
+        ),
+        ScriptSceneCommandIssue::InvalidSceneId => VerificationError::error(
+            "invalid_script_scene_id",
+            subject,
+            format!(
+                "{} scene id must be exact and nonempty, found {}",
+                command.command,
+                optional_id_for_diagnostic(command.scene_id.as_deref())
+            ),
+        ),
+        ScriptSceneCommandIssue::UnexpectedSceneId => VerificationError::error(
+            "unexpected_script_scene_id",
+            subject,
+            format!("{} must not carry a scene id", command.command),
+        ),
     }
 }
 
@@ -3002,11 +4008,11 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                         ))
                     }
                     ScriptAudioCommandIssue::UnknownMusicId => {
-                        let audio_id = command.audio_id.as_deref().unwrap_or_default();
+                        let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
                         diagnostics.push(VerificationError::error(
                             "unknown_script_music_id",
                             &subject,
-                            format!("audio command references missing music '{audio_id}'"),
+                            format!("audio command references missing music {audio_id}"),
                         ));
                     }
                     ScriptAudioCommandIssue::MissingSoundEffectId => {
@@ -3017,11 +4023,11 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                         ))
                     }
                     ScriptAudioCommandIssue::UnknownSoundEffectId => {
-                        let audio_id = command.audio_id.as_deref().unwrap_or_default();
+                        let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
                         diagnostics.push(VerificationError::error(
                             "unknown_script_sfx_id",
                             &subject,
-                            format!("playsound command references missing sfx '{audio_id}'"),
+                            format!("playsound command references missing sfx {audio_id}"),
                         ));
                     }
                     ScriptAudioCommandIssue::MissingCrySpecies => {
@@ -3032,31 +4038,38 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                         ));
                     }
                     ScriptAudioCommandIssue::UnknownCrySpecies => {
-                        let species_id = command.audio_id.as_deref().unwrap_or_default();
+                        let species_id = optional_id_for_diagnostic(command.audio_id.as_deref());
                         diagnostics.push(VerificationError::error(
                             "unknown_script_cry_species",
                             &subject,
-                            format!("cry command references missing species '{species_id}'"),
+                            format!("cry command references missing species {species_id}"),
                         ));
                     }
                     ScriptAudioCommandIssue::MissingCryMetadata => {
-                        let species_id = command.audio_id.as_deref().unwrap_or_default();
+                        let species_id = optional_id_for_diagnostic(command.audio_id.as_deref());
                         diagnostics.push(VerificationError::error(
                             "missing_script_cry_metadata",
                             &subject,
                             format!(
-                                "cry command references species '{species_id}' without cry metadata"
+                                "cry command references species {species_id} without cry metadata"
                             ),
                         ));
                     }
                     ScriptAudioCommandIssue::UnknownCryAsset => {
-                        let species_id = command.audio_id.as_deref().unwrap_or_default();
-                        let cry_id = cry_by_species.get(species_id).map_or("", String::as_str);
+                        let species_id = optional_id_for_diagnostic(command.audio_id.as_deref());
+                        let cry_id = command
+                            .audio_id
+                            .as_deref()
+                            .and_then(|species_id| cry_by_species.get(species_id))
+                            .map_or_else(
+                                || "<missing>".to_string(),
+                                |cry_id| format!("{cry_id:?}"),
+                            );
                         diagnostics.push(VerificationError::error(
                             "unknown_script_cry_audio",
                             &subject,
                             format!(
-                                "cry command references missing cry audio '{cry_id}' for species '{species_id}'"
+                                "cry command references missing cry audio {cry_id} for species {species_id}"
                             ),
                         ));
                     }
@@ -3096,48 +4109,76 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
 
 fn verify_script_block_changes(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        for change in &module.script_block_changes {
-            let subject = format!(
-                "{map_name}:{}:{}",
-                change.source_script, change.command_index
-            );
-            let metatile_x = change.x / CHANGE_BLOCK_COORD_STRIDE;
-            let metatile_y = change.y / CHANGE_BLOCK_COORD_STRIDE;
-            if metatile_x >= module.attributes.width || metatile_y >= module.attributes.height {
-                diagnostics.push(VerificationError::error(
-                    "script_block_change_out_of_bounds",
-                    &subject,
-                    format!(
-                        "changeblock targets ({}, {}) outside {} dimensions {}x{}",
-                        change.x,
-                        change.y,
-                        map_name,
-                        module.attributes.width,
-                        module.attributes.height
-                    ),
-                ));
-            }
-            let expected_blocks =
-                module.attributes.width as usize * module.attributes.height as usize;
-            if !module.blocks.is_empty() && module.blocks.len() != expected_blocks {
-                diagnostics.push(VerificationError::error(
-                    "script_block_map_size_mismatch",
-                    &subject,
-                    format!(
-                        "{} has {} blocks but attributes require {}",
-                        map_name,
-                        module.blocks.len(),
-                        expected_blocks
-                    ),
-                ));
-            }
-        }
+        diagnostics.extend(
+            script_block_change_issues(
+                &module.script_block_changes,
+                module.attributes.width,
+                module.attributes.height,
+                module.blocks.len(),
+            )
+            .into_iter()
+            .map(|issue| script_block_change_issue_diagnostic(map_name, issue)),
+        );
+    }
+}
+
+fn script_block_change_issue_diagnostic(
+    map_name: &str,
+    issue: ScriptBlockChangeIssue,
+) -> VerificationError {
+    match issue {
+        ScriptBlockChangeIssue::OutOfBounds {
+            source_script,
+            command_index,
+            x,
+            y,
+            width,
+            height,
+        } => VerificationError::error(
+            "script_block_change_out_of_bounds",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!(
+                "changeblock targets ({x}, {y}) outside {map_name} dimensions {width}x{height}"
+            ),
+        ),
+        ScriptBlockChangeIssue::MapSizeMismatch {
+            source_script,
+            command_index,
+            actual_blocks,
+            expected_blocks,
+        } => VerificationError::error(
+            "script_block_map_size_mismatch",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!(
+                "{map_name} has {actual_blocks} blocks but attributes require {expected_blocks}"
+            ),
+        ),
     }
 }
 
 fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
         for object in &module.objects {
+            if object.script != "-1"
+                && object.script != "ObjectEvent"
+                && !module.scripts.contains_key(&object.script)
+            {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "unknown_object_event_script",
+                    &subject,
+                    format!(
+                        "object event references missing exact script '{}'",
+                        object.script
+                    ),
+                ));
+            }
             if object_event_initial_facing(&object.spritemovedata).is_none() {
                 let subject = format!(
                     "{map_name}:{}",
@@ -3156,126 +4197,159 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                 ));
             }
         }
-        let object_ids: BTreeSet<&str> = module
+        let object_event_flags: BTreeMap<String, String> = module
             .objects
             .iter()
-            .filter_map(|object| object.object_identifier.as_deref())
+            .filter_map(|object| {
+                object
+                    .object_identifier
+                    .as_ref()
+                    .map(|object_id| (object_id.clone(), object.event_flag.clone()))
+            })
             .collect();
-        let movements: BTreeSet<(&str, Option<&str>)> = module
+        let hideable_event_flags: BTreeSet<String> = module
+            .objects
+            .iter()
+            .filter(|object| is_hideable_object_event_flag(&object.event_flag))
+            .map(|object| object.event_flag.clone())
+            .collect();
+        let movements: BTreeSet<(String, Option<String>)> = module
             .script_movements
             .iter()
-            .map(|movement| (movement.label.as_str(), movement.source_script.as_deref()))
+            .map(|movement| (movement.label.clone(), movement.source_script.clone()))
             .collect();
         for command in &module.script_object_commands {
-            let subject = format!(
-                "{map_name}:{}:{}",
-                command.source_script, command.command_index
+            diagnostics.extend(
+                script_object_command_issues(
+                    command,
+                    &object_event_flags,
+                    &hideable_event_flags,
+                    &movements,
+                )
+                .into_iter()
+                .map(|issue| script_object_command_issue_diagnostic(map_name, issue)),
             );
-            if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
-            } else if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command.command.as_str()) {
-                let Some(object_id) = command.object_id.as_deref() else {
-                    diagnostics.push(VerificationError::error(
-                        "script_object_missing_id",
-                        &subject,
-                        format!("{} command is missing an object id", command.command),
-                    ));
-                    continue;
-                };
-                if object_id == "LAST_TALKED" || object_id == "PLAYER" {
-                    continue;
-                }
-                let Some(object) = module
-                    .objects
-                    .iter()
-                    .find(|object| object.object_identifier.as_deref() == Some(object_id))
-                else {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_object_id",
-                        &subject,
-                        format!(
-                            "{} references missing object id '{object_id}'",
-                            command.command
-                        ),
-                    ));
-                    continue;
-                };
-                if object.event_flag != "-1" && !is_hideable_object_event_flag(&object.event_flag) {
-                    diagnostics.push(VerificationError::error(
-                        "script_object_unhideable",
-                        &subject,
-                        format!(
-                            "{} references object '{}' with unhideable event flag '{}'",
-                            command.command, object_id, object.event_flag
-                        ),
-                    ));
-                }
-            } else if SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command.command.as_str()) {
-                verify_required_object_id(diagnostics, &subject, command, &object_ids, false);
-                if command.x.is_none() || command.y.is_none() {
-                    diagnostics.push(VerificationError::error(
-                        "script_object_missing_coordinates",
-                        &subject,
-                        "moveobject command is missing x/y coordinates",
-                    ));
-                }
-            } else if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str())
-                || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str())
-            {
-                verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
-                if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str()) {
-                    verify_script_direction(diagnostics, &subject, command.direction.as_deref());
-                }
-                if SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str()) {
-                    verify_required_target_object_id(
-                        diagnostics,
-                        &subject,
-                        command,
-                        &object_ids,
-                        true,
-                    );
-                }
-            } else if SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
-                if SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
-                    verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
-                }
-                let Some(movement) = command.movement.as_deref() else {
-                    diagnostics.push(VerificationError::error(
-                        "script_object_missing_movement",
-                        &subject,
-                        format!("{} command is missing a movement label", command.command),
-                    ));
-                    continue;
-                };
-                let movement_source = script_label_parent(&command.source_script);
-                if !movements.contains(&(movement, None))
-                    && !movements.contains(&(movement, Some(movement_source)))
-                {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_movement",
-                        &subject,
-                        format!(
-                            "{} references missing movement '{movement}'",
-                            command.command
-                        ),
-                    ));
-                }
-            } else if SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command.command.as_str()) {
-                verify_required_object_id(diagnostics, &subject, command, &object_ids, true);
-                if command.emote.is_none() || command.duration.is_none() {
-                    diagnostics.push(VerificationError::error(
-                        "script_object_missing_emote",
-                        &subject,
-                        "showemote command is missing emote/duration fields",
-                    ));
-                }
-            } else if !is_known_script_object_command(&command.command) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_object_command",
-                    &subject,
-                    format!("unknown object command '{}'", command.command),
-                ));
-            }
         }
+    }
+}
+
+fn script_object_command_issue_diagnostic(
+    map_name: &str,
+    issue: ScriptObjectCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptObjectCommandIssue::MissingObjectId {
+            source_script,
+            command_index,
+            command,
+        } => VerificationError::error(
+            "script_object_missing_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} command is missing an object id"),
+        ),
+        ScriptObjectCommandIssue::UnknownObjectId {
+            source_script,
+            command_index,
+            command,
+            object_id,
+        } => VerificationError::error(
+            "unknown_script_object_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} references missing object id '{object_id}'"),
+        ),
+        ScriptObjectCommandIssue::UnhideableObject {
+            source_script,
+            command_index,
+            command,
+            object_id,
+            event_flag,
+        } => VerificationError::error(
+            "script_object_unhideable",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!(
+                "{command} references object '{object_id}' with unhideable event flag '{event_flag}'"
+            ),
+        ),
+        ScriptObjectCommandIssue::MissingCoordinates {
+            source_script,
+            command_index,
+        } => VerificationError::error(
+            "script_object_missing_coordinates",
+            format!("{map_name}:{source_script}:{command_index}"),
+            "moveobject command is missing x/y coordinates",
+        ),
+        ScriptObjectCommandIssue::MissingDirection {
+            source_script,
+            command_index,
+        } => VerificationError::error(
+            "missing_script_direction",
+            format!("{map_name}:{source_script}:{command_index}"),
+            "movement command is missing a direction",
+        ),
+        ScriptObjectCommandIssue::UnknownDirection {
+            source_script,
+            command_index,
+            direction,
+        } => VerificationError::error(
+            "unknown_script_direction",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("unknown script direction '{direction}'"),
+        ),
+        ScriptObjectCommandIssue::MissingTargetObjectId {
+            source_script,
+            command_index,
+            command,
+        } => VerificationError::error(
+            "script_object_missing_target_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} command is missing a target object id"),
+        ),
+        ScriptObjectCommandIssue::UnknownTargetObjectId {
+            source_script,
+            command_index,
+            command,
+            object_id,
+        } => VerificationError::error(
+            "unknown_script_object_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} references missing target object id '{object_id}'"),
+        ),
+        ScriptObjectCommandIssue::MissingMovement {
+            source_script,
+            command_index,
+            command,
+        } => VerificationError::error(
+            "script_object_missing_movement",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} command is missing a movement label"),
+        ),
+        ScriptObjectCommandIssue::UnknownMovement {
+            source_script,
+            command_index,
+            command,
+            movement,
+        } => VerificationError::error(
+            "unknown_script_movement",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} references missing movement '{movement}'"),
+        ),
+        ScriptObjectCommandIssue::MissingEmote {
+            source_script,
+            command_index,
+        } => VerificationError::error(
+            "script_object_missing_emote",
+            format!("{map_name}:{source_script}:{command_index}"),
+            "showemote command is missing emote/duration fields",
+        ),
+        ScriptObjectCommandIssue::UnknownCommand {
+            source_script,
+            command_index,
+            command,
+        } => VerificationError::error(
+            "unknown_script_object_command",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("unknown object command '{command}'"),
+        ),
     }
 }
 
@@ -3284,40 +4358,42 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
         for movement in &module.script_movements {
             for step in &movement.steps {
                 let subject = format!("{map_name}:{}:{}", movement.label, step.index);
-                let command = step.command.as_str();
-                match command {
-                    "step_end" => {
-                        if step.direction.is_some() {
-                            diagnostics.push(VerificationError::error(
-                                "script_movement_unexpected_direction",
-                                &subject,
-                                "step_end must not carry a direction",
-                            ));
-                        }
-                    }
-                    command
-                        if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
-                            || SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS.contains(&command) =>
-                    {
-                        if step.direction.is_some() {
-                            diagnostics.push(VerificationError::error(
-                                "script_movement_unexpected_direction",
-                                &subject,
-                                format!("{} must not carry a direction", step.command),
-                            ));
-                        }
-                    }
-                    command if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) => {
-                        verify_script_direction(diagnostics, &subject, step.direction.as_deref());
-                    }
-                    command => diagnostics.push(VerificationError::error(
-                        "unsupported_script_movement_command",
-                        &subject,
-                        format!("unsupported movement command '{command}'"),
-                    )),
-                }
+                diagnostics.extend(
+                    script_movement_step_issues(step)
+                        .into_iter()
+                        .map(|issue| script_movement_step_issue_diagnostic(&subject, step, issue)),
+                );
             }
         }
+    }
+}
+
+fn script_movement_step_issue_diagnostic(
+    subject: &str,
+    step: &ScriptMovementStep,
+    issue: ScriptMovementStepIssue,
+) -> VerificationError {
+    match issue {
+        ScriptMovementStepIssue::UnexpectedDirection => VerificationError::error(
+            "script_movement_unexpected_direction",
+            subject,
+            format!("{} must not carry a direction", step.command),
+        ),
+        ScriptMovementStepIssue::MissingDirection => VerificationError::error(
+            "missing_script_direction",
+            subject,
+            "script object command is missing a direction",
+        ),
+        ScriptMovementStepIssue::UnknownDirection { direction } => VerificationError::error(
+            "unknown_script_direction",
+            subject,
+            format!("unknown script direction '{direction}'"),
+        ),
+        ScriptMovementStepIssue::UnsupportedCommand => VerificationError::error(
+            "unsupported_script_movement_command",
+            subject,
+            format!("unsupported movement command '{}'", step.command),
+        ),
     }
 }
 
@@ -3329,109 +4405,111 @@ fn verify_script_map_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifica
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if SCRIPT_MAP_WARP_COMMANDS.contains(&command.command.as_str()) {
-                verify_script_warp_destination(
-                    diagnostics,
-                    &subject,
-                    command,
-                    &script_warp_targets,
-                );
-                if command.facing.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_warp_facing",
-                        &subject,
-                        "warp command must not carry a facing direction",
-                    ));
-                }
-                if command.map_setup.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_map_setup",
-                        &subject,
-                        "warp command must not carry a map setup",
-                    ));
-                }
-            } else if SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command.command.as_str()) {
-                verify_script_warp_destination(
-                    diagnostics,
-                    &subject,
-                    command,
-                    &script_warp_targets,
-                );
-                match command.facing.as_deref() {
-                    Some(facing) => {
-                        if parse_script_warp_facing(facing).is_err() {
-                            diagnostics.push(VerificationError::error(
-                                "unknown_script_warp_facing",
-                                &subject,
-                                format!("warpfacing references unknown direction '{facing}'"),
-                            ));
-                        }
-                    }
-                    None => diagnostics.push(VerificationError::error(
-                        "missing_script_warp_facing",
-                        &subject,
-                        "warpfacing command is missing a facing direction",
-                    )),
-                }
-                if command.map_setup.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_map_setup",
-                        &subject,
-                        "warpfacing command must not carry a map setup",
-                    ));
-                }
-            } else if SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
-                verify_no_script_warp_destination(diagnostics, &subject, command);
-                if command.facing.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_warp_facing",
-                        &subject,
-                        format!(
-                            "{} command must not carry a facing direction",
-                            command.command
-                        ),
-                    ));
-                }
-                if command.map_setup.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_map_setup",
-                        &subject,
-                        format!("{} command must not carry a map setup", command.command),
-                    ));
-                }
-            } else if SCRIPT_MAP_REANCHOR_COMMANDS.contains(&command.command.as_str()) {
-                verify_no_script_warp_destination(diagnostics, &subject, command);
-                if command.facing.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_warp_facing",
-                        &subject,
-                        "reanchormap command must not carry a facing direction",
-                    ));
-                }
-            } else if SCRIPT_MAP_NEW_LOAD_COMMANDS.contains(&command.command.as_str()) {
-                verify_no_script_warp_destination(diagnostics, &subject, command);
-                if command.facing.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_warp_facing",
-                        &subject,
-                        "newloadmap command must not carry a facing direction",
-                    ));
-                }
-                if command.map_setup.is_none() {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_map_setup",
-                        &subject,
-                        "newloadmap command is missing a map setup",
-                    ));
-                }
-            } else if !is_known_script_map_command(&command.command) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_map_command",
-                    &subject,
-                    format!("unknown script map command '{}'", command.command),
-                ));
-            }
+            diagnostics.extend(
+                script_map_command_issues(command, &script_warp_targets)
+                    .into_iter()
+                    .map(|issue| script_map_command_issue_diagnostic(&subject, command, issue)),
+            );
         }
+    }
+}
+
+fn script_map_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptMapCommand,
+    issue: ScriptMapCommandError,
+) -> VerificationError {
+    match issue {
+        ScriptMapCommandError::UnknownCommand { .. } => VerificationError::error(
+            "unknown_script_map_command",
+            subject,
+            format!("unknown script map command '{}'", command.command),
+        ),
+        ScriptMapCommandError::MissingTargetMap { .. } => VerificationError::error(
+            "missing_script_warp_map",
+            subject,
+            format!("{} command is missing a target map", command.command),
+        ),
+        ScriptMapCommandError::InvalidTargetMap { target_map, .. } => VerificationError::error(
+            "invalid_script_warp_map",
+            subject,
+            format!("{} command has invalid map '{target_map}'", command.command),
+        ),
+        ScriptMapCommandError::UnknownTargetMap { target_map, .. } => VerificationError::error(
+            "unknown_script_warp_map",
+            subject,
+            format!(
+                "{} command references missing map '{target_map}'",
+                command.command
+            ),
+        ),
+        ScriptMapCommandError::MalformedNoWarpSentinel { .. } => VerificationError::error(
+            "malformed_script_no_warp_sentinel",
+            subject,
+            "NONE is only valid for the exact warp NONE, 0, 0 sentinel",
+        ),
+        ScriptMapCommandError::MissingCoordinates { .. } => VerificationError::error(
+            "missing_script_warp_coordinates",
+            subject,
+            format!("{} command is missing x/y coordinates", command.command),
+        ),
+        ScriptMapCommandError::CoordinatesOutOfRange { .. } => VerificationError::error(
+            "script_warp_coordinates_out_of_range",
+            subject,
+            format!(
+                "{} command has coordinates outside runtime tile range",
+                command.command
+            ),
+        ),
+        ScriptMapCommandError::UnexpectedWarpDestination { .. } => VerificationError::error(
+            "unexpected_script_warp_destination",
+            subject,
+            format!(
+                "{} command must not carry target map or coordinates",
+                command.command
+            ),
+        ),
+        ScriptMapCommandError::MissingFacing { .. } => VerificationError::error(
+            "missing_script_warp_facing",
+            subject,
+            "warpfacing command is missing a facing direction",
+        ),
+        ScriptMapCommandError::UnexpectedFacing { .. } => VerificationError::error(
+            "unexpected_script_warp_facing",
+            subject,
+            format!(
+                "{} command must not carry a facing direction",
+                command.command
+            ),
+        ),
+        ScriptMapCommandError::InvalidFacing { facing } => VerificationError::error(
+            "invalid_script_warp_facing",
+            subject,
+            format!("warpfacing has invalid direction '{facing}'"),
+        ),
+        ScriptMapCommandError::UnknownFacing { facing } => VerificationError::error(
+            "unknown_script_warp_facing",
+            subject,
+            format!("warpfacing references unknown direction '{facing}'"),
+        ),
+        ScriptMapCommandError::MissingMapSetup { .. } => VerificationError::error(
+            "missing_script_map_setup",
+            subject,
+            "newloadmap command is missing a map setup",
+        ),
+        ScriptMapCommandError::InvalidMapSetup { map_setup, .. } => VerificationError::error(
+            "invalid_script_map_setup",
+            subject,
+            format!(
+                "{} command has invalid map setup '{map_setup}'",
+                command.command
+            ),
+        ),
+        ScriptMapCommandError::UnexpectedMapSetup { .. } => VerificationError::error(
+            "unexpected_script_map_setup",
+            subject,
+            format!("{} command must not carry a map setup", command.command),
+        ),
     }
 }
 
@@ -3449,415 +4527,494 @@ fn script_warp_target_constants(data: &GameDataSet) -> BTreeSet<String> {
         .collect()
 }
 
-fn verify_script_warp_destination(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    command: &ScriptMapCommand,
-    map_names: &BTreeSet<String>,
-) {
-    match command.target_map.as_deref() {
-        Some("NONE")
-            if command.command == "warp" && command.x == Some(0) && command.y == Some(0) => {}
-        Some("NONE") => diagnostics.push(VerificationError::error(
-            "malformed_script_no_warp_sentinel",
-            subject,
-            "NONE is only valid for the exact warp NONE, 0, 0 sentinel",
-        )),
-        Some(target_map) if map_names.contains(target_map) => {}
-        Some(target_map) => diagnostics.push(VerificationError::error(
-            "unknown_script_warp_map",
-            subject,
-            format!(
-                "{} command references missing map '{target_map}'",
-                command.command
-            ),
-        )),
-        None => diagnostics.push(VerificationError::error(
-            "missing_script_warp_map",
-            subject,
-            format!("{} command is missing a target map", command.command),
-        )),
-    }
-    if command.x.is_none() || command.y.is_none() {
-        diagnostics.push(VerificationError::error(
-            "missing_script_warp_coordinates",
-            subject,
-            format!("{} command is missing x/y coordinates", command.command),
-        ));
-    }
-}
-
-fn verify_no_script_warp_destination(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    command: &ScriptMapCommand,
-) {
-    if command.target_map.is_some() || command.x.is_some() || command.y.is_some() {
-        diagnostics.push(VerificationError::error(
-            "unexpected_script_warp_destination",
-            subject,
-            format!(
-                "{} command must not carry target map or coordinates",
-                command.command
-            ),
-        ));
-    }
-}
-
 fn verify_script_text_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        let text_labels: BTreeSet<&str> = module
+        let text_labels: BTreeSet<String> = module
             .scripts
             .iter()
-            .filter_map(|(label, payload)| is_text_script(payload).then_some(label.as_str()))
+            .filter_map(|(label, payload)| is_text_script(payload).then_some(label.clone()))
             .collect();
         for command in &module.script_text_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command.command.as_str()) {
-                if command.text_label.is_some() {
-                    diagnostics.push(VerificationError::error(
-                        "unexpected_script_text_label",
-                        &subject,
-                        format!("{} command must not carry a text label", command.command),
-                    ));
-                }
-            } else if SCRIPT_TEXT_LABEL_COMMANDS.contains(&command.command.as_str()) {
-                match command.text_label.as_deref() {
-                    Some(label) if text_labels.contains(label) => {}
-                    Some(label)
-                        if resolve_script_target_label(
-                            &module.scripts,
-                            &command.source_script,
-                            label,
-                        )
-                        .is_some_and(|resolved| text_labels.contains(resolved.as_str())) => {}
-                    Some(label) => diagnostics.push(VerificationError::error(
-                        "unknown_script_text_label",
-                        &subject,
-                        format!(
-                            "{} command references missing text label '{label}'",
-                            command.command
-                        ),
-                    )),
-                    None => diagnostics.push(VerificationError::error(
-                        "missing_script_text_label",
-                        &subject,
-                        format!("{} command is missing a text label", command.command),
-                    )),
-                }
-            } else if !is_known_script_text_command(&command.command) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_script_text_command",
-                    &subject,
-                    format!("unknown text command '{}'", command.command),
-                ));
-            }
+            diagnostics.extend(
+                script_text_command_issues(command, &text_labels)
+                    .into_iter()
+                    .map(|issue| script_text_command_issue_diagnostic(&subject, command, issue)),
+            );
         }
     }
 }
 
+fn script_text_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptTextCommand,
+    issue: ScriptTextCommandError,
+) -> VerificationError {
+    match issue {
+        ScriptTextCommandError::UnknownCommand { .. } => VerificationError::error(
+            "unknown_script_text_command",
+            subject,
+            format!("unknown text command '{}'", command.command),
+        ),
+        ScriptTextCommandError::MissingTextLabel { .. } => VerificationError::error(
+            "missing_script_text_label",
+            subject,
+            format!("{} command is missing a text label", command.command),
+        ),
+        ScriptTextCommandError::InvalidTextLabel { text_label, .. } => VerificationError::error(
+            "invalid_script_text_label",
+            subject,
+            format!(
+                "{} command has invalid text label '{text_label}'",
+                command.command
+            ),
+        ),
+        ScriptTextCommandError::UnknownTextLabel { .. } => {
+            let label = optional_id_for_diagnostic(command.text_label.as_deref());
+            VerificationError::error(
+                "unknown_script_text_label",
+                subject,
+                format!(
+                    "{} command references missing text label {label}",
+                    command.command
+                ),
+            )
+        }
+        ScriptTextCommandError::UnexpectedTextLabel { .. } => VerificationError::error(
+            "unexpected_script_text_label",
+            subject,
+            format!("{} command must not carry a text label", command.command),
+        ),
+    }
+}
+
 fn verify_script_text_bodies(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let expected_arg_counts = text_body_command_arg_counts();
     for (map_name, module) in &data.maps {
         for (label, body) in &module.script_text_bodies {
-            if body.label != *label {
-                diagnostics.push(VerificationError::error(
-                    "script_text_body_label_mismatch",
-                    &format!("{map_name}:{label}"),
-                    format!(
-                        "text body key '{}' does not match record label '{}'",
-                        label, body.label
-                    ),
-                ));
-            }
-            for command in &body.commands {
-                let subject = format!("{map_name}:{label}:{}", command.command_index);
-                let Some(expected) = expected_arg_counts.get(command.command.as_str()) else {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_text_body_command",
-                        &subject,
-                        format!("unknown text body command '{}'", command.command),
-                    ));
-                    continue;
-                };
-                if command.args.len() != *expected {
-                    diagnostics.push(VerificationError::error(
-                        "malformed_script_text_body_command",
-                        &subject,
-                        format!(
-                            "{} expects {} args but found {}",
-                            command.command,
-                            expected,
-                            command.args.len()
-                        ),
-                    ));
-                }
-            }
+            diagnostics.extend(
+                script_text_body_issues(label, body)
+                    .into_iter()
+                    .map(|issue| script_text_body_issue_diagnostic(map_name, label, issue)),
+            );
         }
     }
 }
 
 fn verify_script_menu_definitions(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let expected_arg_counts = menu_definition_command_arg_counts();
     for (map_name, module) in &data.maps {
         for (label, menu) in &module.script_menu_definitions {
-            if menu.label != *label {
-                diagnostics.push(VerificationError::error(
-                    "script_menu_label_mismatch",
-                    &format!("{map_name}:{label}"),
-                    format!(
-                        "menu definition key '{}' does not match record label '{}'",
-                        label, menu.label
-                    ),
-                ));
-            }
-            for command in &menu.commands {
-                let subject = format!("{map_name}:{label}:{}", command.command_index);
-                let Some(expected) = expected_arg_counts.get(command.command.as_str()) else {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_menu_command",
-                        &subject,
-                        format!("unknown menu definition command '{}'", command.command),
-                    ));
-                    continue;
-                };
-                if !expected.contains(&command.args.len()) {
-                    diagnostics.push(VerificationError::error(
-                        "malformed_script_menu_command",
-                        &subject,
-                        format!(
-                            "{} expects one of {:?} args but found {}",
-                            command.command,
-                            expected,
-                            command.args.len()
-                        ),
-                    ));
-                }
-            }
+            diagnostics.extend(
+                script_menu_definition_issues(label, menu)
+                    .into_iter()
+                    .map(|issue| script_menu_definition_issue_diagnostic(map_name, label, issue)),
+            );
         }
+    }
+}
+
+fn script_text_body_issue_diagnostic(
+    map_name: &str,
+    label: &str,
+    issue: ScriptTextBodyIssue,
+) -> VerificationError {
+    match issue {
+        ScriptTextBodyIssue::InvalidKey { key } => VerificationError::error(
+            "invalid_script_text_body_key",
+            format!("{map_name}:{key}"),
+            format!("text body key '{key}' is not an exact nonempty label"),
+        ),
+        ScriptTextBodyIssue::InvalidLabel { label } => VerificationError::error(
+            "invalid_script_text_body_label",
+            format!("{map_name}:{label}"),
+            format!("text body record label '{label}' is not an exact nonempty label"),
+        ),
+        ScriptTextBodyIssue::LabelMismatch { key, label } => VerificationError::error(
+            "script_text_body_label_mismatch",
+            format!("{map_name}:{key}"),
+            format!("text body key '{key}' does not match record label '{label}'"),
+        ),
+        ScriptTextBodyIssue::UnknownCommand {
+            command_index,
+            command,
+        } => VerificationError::error(
+            "unknown_script_text_body_command",
+            format!("{map_name}:{label}:{command_index}"),
+            format!("unknown text body command '{command}'"),
+        ),
+        ScriptTextBodyIssue::MalformedCommand {
+            command_index,
+            command,
+            expected,
+            actual,
+        } => VerificationError::error(
+            "malformed_script_text_body_command",
+            format!("{map_name}:{label}:{command_index}"),
+            format!("{command} expects {expected} args but found {actual}"),
+        ),
+    }
+}
+
+fn script_menu_definition_issue_diagnostic(
+    map_name: &str,
+    label: &str,
+    issue: ScriptMenuDefinitionIssue,
+) -> VerificationError {
+    match issue {
+        ScriptMenuDefinitionIssue::InvalidKey { key } => VerificationError::error(
+            "invalid_script_menu_key",
+            format!("{map_name}:{key}"),
+            format!("menu definition key '{key}' is not an exact nonempty label"),
+        ),
+        ScriptMenuDefinitionIssue::InvalidLabel { label } => VerificationError::error(
+            "invalid_script_menu_label",
+            format!("{map_name}:{label}"),
+            format!("menu definition label '{label}' is not an exact nonempty label"),
+        ),
+        ScriptMenuDefinitionIssue::LabelMismatch { key, label } => VerificationError::error(
+            "script_menu_label_mismatch",
+            format!("{map_name}:{key}"),
+            format!("menu definition key '{key}' does not match record label '{label}'"),
+        ),
+        ScriptMenuDefinitionIssue::UnknownCommand {
+            command_index,
+            command,
+        } => VerificationError::error(
+            "unknown_script_menu_command",
+            format!("{map_name}:{label}:{command_index}"),
+            format!("unknown menu definition command '{command}'"),
+        ),
+        ScriptMenuDefinitionIssue::MalformedCommand {
+            command_index,
+            command,
+            expected,
+            actual,
+        } => VerificationError::error(
+            "malformed_script_menu_command",
+            format!("{map_name}:{label}:{command_index}"),
+            format!("{command} expects one of {expected:?} args but found {actual}"),
+        ),
     }
 }
 
 fn verify_script_variable_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        for command in &module.script_variable_commands {
-            let subject = format!(
-                "{map_name}:{}:{}",
-                command.source_script, command.command_index
-            );
-            if let Err(error) = validate_script_variable_command(command) {
-                diagnostics.push(VerificationError::error(
-                    "invalid_script_variable_command",
-                    &subject,
-                    error.to_string(),
-                ));
-            }
-        }
+        diagnostics.extend(
+            script_variable_command_issues(&module.script_variable_commands)
+                .into_iter()
+                .map(|issue| script_variable_command_issue_diagnostic(map_name, issue)),
+        );
     }
+}
+
+fn script_variable_command_issue_diagnostic(
+    map_name: &str,
+    issue: ScriptVariableCommandIssue,
+) -> VerificationError {
+    VerificationError::error(
+        "invalid_script_variable_command",
+        format!("{map_name}:{}:{}", issue.source_script, issue.command_index),
+        issue.error.to_string(),
+    )
 }
 
 fn verify_script_control_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        let script_labels: BTreeSet<&str> = module.scripts.keys().map(String::as_str).collect();
+        let script_labels: BTreeSet<String> = module.scripts.keys().cloned().collect();
         for command in &module.script_control_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if let Err(error) = validate_script_control_command(command) {
-                diagnostics.push(VerificationError::error(
-                    "invalid_script_control_command",
-                    &subject,
-                    error.to_string(),
-                ));
-                continue;
-            }
-            if command.command != "jumpstd" {
-                let Some(target) = command.resolved_target_script.as_deref() else {
-                    continue;
-                };
-                if !script_labels.contains(target) {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_script_control_target",
-                        &subject,
-                        format!(
-                            "{} command resolves to missing script label '{target}'",
-                            command.command
-                        ),
-                    ));
-                }
-            }
+            diagnostics.extend(
+                script_control_command_issues(command, &script_labels)
+                    .into_iter()
+                    .map(|issue| script_control_command_issue_diagnostic(&subject, command, issue)),
+            );
+        }
+    }
+}
+
+fn script_control_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptControlCommand,
+    issue: ScriptControlCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptControlCommandIssue::InvalidCommand { error } => {
+            VerificationError::error("invalid_script_control_command", subject, error.to_string())
+        }
+        ScriptControlCommandIssue::InvalidTargetScript { target_script } => {
+            VerificationError::error(
+                "invalid_script_control_target",
+                subject,
+                format!(
+                    "{} command resolves to invalid script label '{target_script}'",
+                    command.command
+                ),
+            )
+        }
+        ScriptControlCommandIssue::UnknownTargetScript { target_script } => {
+            VerificationError::error(
+                "unknown_script_control_target",
+                subject,
+                format!(
+                    "{} command resolves to missing script label '{target_script}'",
+                    command.command
+                ),
+            )
         }
     }
 }
 
 fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        verify_map_event_script_references(map_name, module, diagnostics);
+        verify_hidden_item_bg_events(map_name, module, diagnostics);
         for pickup in &module.script_field_pickups {
             let subject = format!(
                 "{map_name}:{}:{}",
                 pickup.source_script, pickup.command_index
             );
-            for issue in script_field_pickup_issues(pickup, &data.items, &data.fruit_trees) {
-                match issue {
-                    ScriptFieldPickupIssue::MissingItem => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_missing_item",
-                            &subject,
-                            format!("{} pickup is missing item_id", pickup.command),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::UnknownItem => {
-                        let item_id = pickup.item_id.as_deref().unwrap_or_default();
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_field_pickup_item",
-                            &subject,
-                            format!(
-                                "{} pickup references missing item '{item_id}'",
-                                pickup.command
-                            ),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::InvalidQuantity => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_invalid_quantity",
-                            &subject,
-                            format!("{} pickup has zero quantity", pickup.command),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::MissingEvent => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_missing_event",
-                            &subject,
-                            format!("{} pickup is missing event_flag", pickup.command),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::InvalidCollectibleFlag => {
-                        let event_flag = pickup.event_flag.as_deref().unwrap_or_default();
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_uncollectible_event",
-                            &subject,
-                            format!(
-                                "{} pickup uses uncollectible event flag '{event_flag}'",
-                                pickup.command
-                            ),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::MissingFruitTree => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_missing_fruit_tree",
-                            &subject,
-                            "fruittree pickup is missing fruit_tree_id",
-                        ));
-                    }
-                    ScriptFieldPickupIssue::EmptyFruitTree => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_empty_fruit_tree",
-                            &subject,
-                            "fruittree pickup has an empty fruit_tree_id",
-                        ));
-                    }
-                    ScriptFieldPickupIssue::UnknownFruitTree => {
-                        let fruit_tree_id = pickup.fruit_tree_id.as_deref().unwrap_or_default();
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_field_fruit_tree",
-                            &subject,
-                            format!("fruittree references missing tree '{fruit_tree_id}'"),
-                        ));
-                    }
-                    ScriptFieldPickupIssue::MalformedFruitTree => {
-                        diagnostics.push(VerificationError::error(
-                            "script_field_pickup_malformed_fruit_tree",
-                            &subject,
-                            "fruittree pickup must not inline item_id or event_flag",
-                        ));
-                    }
-                    ScriptFieldPickupIssue::UnknownCommand => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_field_pickup_command",
-                            &subject,
-                            format!("unknown field pickup command '{}'", pickup.command),
-                        ));
-                    }
-                }
-            }
+            diagnostics.extend(
+                script_field_pickup_issues(pickup, &data.items, &data.fruit_trees)
+                    .into_iter()
+                    .map(|issue| script_field_pickup_issue_diagnostic(&subject, pickup, issue)),
+            );
         }
+    }
+}
+
+fn verify_map_event_script_references(
+    map_name: &str,
+    module: &MapModule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    for event in &module.events.coord_events {
+        if !module.scripts.contains_key(&event.script_name) {
+            diagnostics.push(VerificationError::error(
+                "unknown_coord_event_script",
+                format!(
+                    "{map_name}:{}:{}:{},{}",
+                    event.scene_id, event.script_name, event.x, event.y
+                ),
+                format!(
+                    "coord event references missing exact script '{}'",
+                    event.script_name
+                ),
+            ));
+        }
+    }
+    for event in &module.events.bg_events {
+        if !module.scripts.contains_key(&event.script) {
+            diagnostics.push(VerificationError::error(
+                "unknown_bg_event_script",
+                format!("{map_name}:{}:{}:{},{}", event.event_type, event.script, event.x, event.y),
+                format!(
+                    "{} background event references missing exact script '{}'",
+                    event.event_type, event.script
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_hidden_item_bg_events(
+    map_name: &str,
+    module: &MapModule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    for event in &module.events.bg_events {
+        if event.event_type != "BGEVENT_ITEM" {
+            continue;
+        }
+        let subject = format!("{map_name}:{}:{},{}", event.script, event.x, event.y);
+        let matches = module
+            .script_field_pickups
+            .iter()
+            .filter(|pickup| pickup.command == "hiddenitem" && pickup.source_script == event.script)
+            .count();
+        match matches {
+            0 => diagnostics.push(VerificationError::error(
+                "hidden_item_bg_event_missing_pickup",
+                &subject,
+                format!(
+                    "BGEVENT_ITEM script '{}' has no exact hiddenitem pickup",
+                    event.script
+                ),
+            )),
+            1 => {}
+            _ => diagnostics.push(VerificationError::error(
+                "hidden_item_bg_event_duplicate_pickup",
+                &subject,
+                format!(
+                    "BGEVENT_ITEM script '{}' resolves to {matches} hiddenitem pickups",
+                    event.script
+                ),
+            )),
+        }
+    }
+}
+
+fn script_field_pickup_issue_diagnostic(
+    subject: &str,
+    pickup: &ScriptFieldPickup,
+    issue: ScriptFieldPickupIssue,
+) -> VerificationError {
+    match issue {
+        ScriptFieldPickupIssue::MissingItem => VerificationError::error(
+            "script_field_pickup_missing_item",
+            subject,
+            format!("{} pickup is missing item_id", pickup.command),
+        ),
+        ScriptFieldPickupIssue::UnknownItem => {
+            let item_id = optional_id_for_diagnostic(pickup.item_id.as_deref());
+            VerificationError::error(
+                "unknown_script_field_pickup_item",
+                subject,
+                format!(
+                    "{} pickup references missing item {item_id}",
+                    pickup.command
+                ),
+            )
+        }
+        ScriptFieldPickupIssue::InvalidQuantity => VerificationError::error(
+            "script_field_pickup_invalid_quantity",
+            subject,
+            format!("{} pickup has zero quantity", pickup.command),
+        ),
+        ScriptFieldPickupIssue::MissingEvent => VerificationError::error(
+            "script_field_pickup_missing_event",
+            subject,
+            format!("{} pickup is missing event_flag", pickup.command),
+        ),
+        ScriptFieldPickupIssue::InvalidCollectibleFlag => {
+            let event_flag = optional_id_for_diagnostic(pickup.event_flag.as_deref());
+            VerificationError::error(
+                "script_field_pickup_uncollectible_event",
+                subject,
+                format!(
+                    "{} pickup uses uncollectible event flag {event_flag}",
+                    pickup.command
+                ),
+            )
+        }
+        ScriptFieldPickupIssue::MissingFruitTree => VerificationError::error(
+            "script_field_pickup_missing_fruit_tree",
+            subject,
+            "fruittree pickup is missing fruit_tree_id",
+        ),
+        ScriptFieldPickupIssue::EmptyFruitTree => VerificationError::error(
+            "script_field_pickup_empty_fruit_tree",
+            subject,
+            "fruittree pickup has an empty fruit_tree_id",
+        ),
+        ScriptFieldPickupIssue::InvalidFruitTree => {
+            let fruit_tree_id = optional_id_for_diagnostic(pickup.fruit_tree_id.as_deref());
+            VerificationError::error(
+                "script_field_pickup_invalid_fruit_tree",
+                subject,
+                format!("fruittree pickup has invalid fruit_tree_id {fruit_tree_id}"),
+            )
+        }
+        ScriptFieldPickupIssue::UnknownFruitTree => {
+            let fruit_tree_id = optional_id_for_diagnostic(pickup.fruit_tree_id.as_deref());
+            VerificationError::error(
+                "unknown_script_field_fruit_tree",
+                subject,
+                format!("fruittree references missing tree {fruit_tree_id}"),
+            )
+        }
+        ScriptFieldPickupIssue::MalformedFruitTree => VerificationError::error(
+            "script_field_pickup_malformed_fruit_tree",
+            subject,
+            "fruittree pickup must not inline item_id or event_flag",
+        ),
+        ScriptFieldPickupIssue::UnknownCommand => VerificationError::error(
+            "unknown_script_field_pickup_command",
+            subject,
+            format!("unknown field pickup command '{}'", pickup.command),
+        ),
     }
 }
 
 fn verify_phone_contacts(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let map_constants = map_constants(data);
-    for (contact_id, record) in &data.phone_contacts.0 {
-        let subject = format!("phone_contacts:{contact_id}");
-        if contact_id.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_phone_contact_id",
-                &subject,
-                "phone contact catalog keys must be nonempty exact ids",
-            ));
-        }
-        if &record.contact_id != contact_id {
-            diagnostics.push(VerificationError::error(
-                "phone_contact_id_mismatch",
-                &subject,
-                format!(
-                    "phone contact key '{}' does not match record contactId '{}'",
-                    contact_id, record.contact_id
-                ),
-            ));
-        }
-        if record.primary_label.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_phone_contact_primary_label",
-                &subject,
-                "phone contact primaryLabel must be nonempty",
-            ));
-        }
-        if record.lines.is_empty() || record.lines.iter().any(|line| line.trim().is_empty()) {
-            diagnostics.push(VerificationError::error(
-                "invalid_phone_contact_lines",
-                &subject,
-                "phone contact display lines must be nonempty",
-            ));
-        } else if let Some(first_line) = record.lines.first() {
-            let expected_primary = first_line.trim_end_matches(':').trim();
-            if expected_primary != record.primary_label {
-                diagnostics.push(VerificationError::error(
-                    "phone_contact_primary_label_mismatch",
-                    &subject,
-                    format!(
-                        "phone contact primaryLabel '{}' does not match first display line '{}'",
-                        record.primary_label, first_line
-                    ),
-                ));
-            }
-        }
-        if let Some(map_constant) = record.map_constant.as_deref() {
-            if map_constant.trim().is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "empty_phone_contact_map",
-                    &subject,
-                    "phone contact mapConstant must be nonempty when present",
-                ));
-            } else if !map_constants.contains_key(map_constant) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_phone_contact_map",
-                    &subject,
-                    format!("phone contact references missing map constant '{map_constant}'"),
-                ));
-            }
-        }
-    }
-    for contact_id in &data.permanent_phone_numbers {
-        if !data.phone_contacts.0.contains_key(contact_id) {
-            diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        phone_contact_catalog_issues(
+            &data.phone_contacts,
+            &data.permanent_phone_numbers,
+            &map_constants,
+        )
+        .into_iter()
+        .map(phone_contact_catalog_issue_diagnostic),
+    );
+}
+
+fn phone_contact_catalog_issue_diagnostic(issue: PhoneContactCatalogIssue) -> VerificationError {
+    match issue {
+        PhoneContactCatalogIssue::EmptyContactId { contact_id } => VerificationError::error(
+            "empty_phone_contact_id",
+            format!("phone_contacts:{contact_id}"),
+            "phone contact catalog keys must be nonempty exact ids",
+        ),
+        PhoneContactCatalogIssue::InvalidContactId { contact_id } => VerificationError::error(
+            "invalid_phone_contact_id",
+            format!("phone_contacts:{contact_id}"),
+            format!("phone contact catalog key must be exact and untrimmed, found {contact_id:?}"),
+        ),
+        PhoneContactCatalogIssue::ContactIdMismatch {
+            contact_id,
+            record_contact_id,
+        } => VerificationError::error(
+            "phone_contact_id_mismatch",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact key '{contact_id}' does not match record contactId '{record_contact_id}'"
+            ),
+        ),
+        PhoneContactCatalogIssue::EmptyPrimaryLabel { contact_id } => VerificationError::error(
+            "empty_phone_contact_primary_label",
+            format!("phone_contacts:{contact_id}"),
+            "phone contact primaryLabel must be nonempty",
+        ),
+        PhoneContactCatalogIssue::InvalidLines { contact_id } => VerificationError::error(
+            "invalid_phone_contact_lines",
+            format!("phone_contacts:{contact_id}"),
+            "phone contact display lines must be nonempty",
+        ),
+        PhoneContactCatalogIssue::PrimaryLabelMismatch {
+            contact_id,
+            primary_label,
+            first_line,
+        } => VerificationError::error(
+            "phone_contact_primary_label_mismatch",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact primaryLabel '{primary_label}' does not match first display line '{first_line}'"
+            ),
+        ),
+        PhoneContactCatalogIssue::EmptyMapConstant { contact_id } => VerificationError::error(
+            "empty_phone_contact_map",
+            format!("phone_contacts:{contact_id}"),
+            "phone contact mapConstant must be nonempty when present",
+        ),
+        PhoneContactCatalogIssue::UnknownMapConstant {
+            contact_id,
+            map_constant,
+        } => VerificationError::error(
+            "unknown_phone_contact_map",
+            format!("phone_contacts:{contact_id}"),
+            format!("phone contact references missing map constant '{map_constant}'"),
+        ),
+        PhoneContactCatalogIssue::UnknownPermanentContact { contact_id } => {
+            VerificationError::error(
                 "unknown_permanent_phone_contact",
-                contact_id,
+                &contact_id,
                 format!("permanent phone number references unknown contact '{contact_id}'"),
-            ));
+            )
         }
     }
 }
@@ -3868,256 +5025,69 @@ fn verify_required_object_sections(
     sections: &[&str],
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    if value.trim().is_empty() {
-        return;
-    }
-    let value: Value = match serde_json::from_str(value) {
-        Ok(value) => value,
-        Err(error) => {
-            diagnostics.push(VerificationError::error(
-                "invalid_runtime_bundle",
-                subject,
-                format!("runtime bundle payload is not valid JSON: {error}"),
-            ));
-            return;
-        }
-    };
-    let Some(object) = value.as_object() else {
-        diagnostics.push(VerificationError::error(
-            "invalid_runtime_bundle",
-            subject,
-            "runtime bundle payload must be an object",
-        ));
-        return;
-    };
-    for section in sections {
-        match object.get(*section).and_then(Value::as_object) {
-            Some(section_object) if !section_object.is_empty() => {}
-            _ => diagnostics.push(VerificationError::error(
-                "missing_runtime_bundle_section",
-                subject,
-                format!("runtime bundle is missing non-empty section '{section}'"),
-            )),
-        }
-    }
+    diagnostics.extend(
+        runtime_bundle_issues(value, sections)
+            .into_iter()
+            .map(|issue| runtime_bundle_issue_diagnostic(subject, issue)),
+    );
 }
 
 fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.pokemon.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_runtime_pokemon",
-            "pokemon",
-            "runtime pack must include Pokemon species data",
-        ));
-    }
-    if data.moves.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_runtime_moves",
-            "moves",
-            "runtime pack must include move data",
-        ));
-    }
-    if data.maps.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_runtime_maps",
-            "maps",
-            "runtime pack must include map modules",
-        ));
-    }
+    diagnostics.extend(
+        runtime_pack_presence_issues(runtime_pack_sections(data))
+            .into_iter()
+            .map(runtime_pack_presence_issue_diagnostic),
+    );
 
     let map_constants = map_constants(data);
-    for (key, metadata) in &data.runtime_map_metadata {
-        if key != &metadata.constant {
-            diagnostics.push(VerificationError::error(
-                "runtime_map_metadata_constant_mismatch",
-                key,
-                format!(
-                    "runtime map metadata key '{}' does not match record constant '{}'",
-                    key, metadata.constant
-                ),
-            ));
-        }
-        match map_constants.get(&metadata.constant) {
-            Some(map_name) if map_name == &metadata.name => {}
-            Some(map_name) => diagnostics.push(VerificationError::error(
-                "runtime_map_metadata_name_mismatch",
-                key,
-                format!(
-                    "runtime map metadata '{}' names '{}' but map attributes use '{}'",
-                    metadata.constant, metadata.name, map_name
-                ),
-            )),
-            None => diagnostics.push(VerificationError::error(
-                "unknown_runtime_map_metadata_constant",
-                key,
-                format!(
-                    "runtime map metadata references missing map constant '{}'",
-                    metadata.constant
-                ),
-            )),
-        }
-        if metadata.group_name.trim().is_empty() || metadata.environment.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_runtime_map_metadata",
-                key,
-                "runtime map metadata groupName and environment must be non-empty",
-            ));
-        }
-    }
+    diagnostics.extend(
+        runtime_map_metadata_issues(&data.runtime_map_metadata, &map_constants)
+            .into_iter()
+            .map(runtime_map_metadata_issue_diagnostic),
+    );
 
-    for (key, spawn) in &data.runtime_spawn_points {
-        if key.parse::<u16>().ok() != Some(spawn.identifier) {
-            diagnostics.push(VerificationError::error(
-                "runtime_spawn_point_identifier_mismatch",
-                key,
-                format!(
-                    "runtime spawn point key '{}' does not match identifier {}",
-                    key, spawn.identifier
-                ),
-            ));
-        }
-        if spawn.map_constant != "N_A" {
-            match data.runtime_map_metadata.get(&spawn.map_constant) {
-                Some(metadata) if metadata.name == spawn.map_name => {}
-                Some(metadata) => diagnostics.push(VerificationError::error(
-                    "runtime_spawn_point_map_mismatch",
-                    key,
-                    format!(
-                        "runtime spawn point targets '{}' but metadata names '{}'",
-                        spawn.map_name, metadata.name
-                    ),
-                )),
-                None => diagnostics.push(VerificationError::error(
-                    "unknown_runtime_spawn_point_map",
-                    key,
-                    format!(
-                        "runtime spawn point references missing map constant '{}'",
-                        spawn.map_constant
-                    ),
-                )),
-            }
-        }
-        if spawn.group_name.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_runtime_spawn_point",
-                key,
-                "runtime spawn point groupName must be non-empty",
-            ));
-        }
-    }
-
-    for flag in data
-        .initialize_events
-        .event_flags
+    let runtime_map_names: BTreeMap<String, String> = data
+        .runtime_map_metadata
         .iter()
-        .chain(data.initialize_events.engine_flags.iter())
-    {
-        if flag.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_initialize_event_flag",
-                flag,
-                "initialize event and engine flags must be non-empty",
-            ));
-        }
-    }
-    for (sprite, replacement) in &data.initialize_events.variable_sprites {
-        if sprite.trim().is_empty() || replacement.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_initialize_event_sprite",
-                sprite,
-                "initialize event variable sprite keys and values must be non-empty",
-            ));
-        }
-    }
+        .map(|(constant, metadata)| (constant.clone(), metadata.name.clone()))
+        .collect();
+    diagnostics.extend(
+        runtime_spawn_point_catalog_issues(&data.runtime_spawn_points, &runtime_map_names)
+            .into_iter()
+            .map(runtime_spawn_point_catalog_issue_diagnostic),
+    );
 
-    for key in data.story_event_script_constants.global.keys() {
-        if key.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_story_event_script_constant",
-                key,
-                "global story event script constant keys must be non-empty",
-            ));
-        }
-    }
-    for (map_name, constants) in &data.story_event_script_constants.maps {
-        if map_name.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_story_event_script_constant_map",
-                map_name,
-                "story event script constant map keys must be non-empty",
-            ));
-        }
-        for key in constants.keys() {
-            if key.trim().is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "invalid_story_event_script_constant",
-                    &format!("{map_name}:{key}"),
-                    "map story event script constant keys must be non-empty",
-                ));
-            }
-        }
-    }
+    diagnostics.extend(
+        initialize_events_issues(&data.initialize_events)
+            .into_iter()
+            .map(initialize_events_issue_diagnostic),
+    );
 
-    for (label, text) in &data.asm_text {
-        if label.trim().is_empty() || text.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_asm_text",
-                label,
-                "ASM text keys and values must be non-empty",
-            ));
-        }
-    }
-    if !data.move_names.is_empty() && data.move_names.len() != data.moves.len() {
-        diagnostics.push(VerificationError::error(
-            "move_names_count_mismatch",
-            "move_names",
-            format!(
-                "move_names contains {} entries but moves contains {}",
-                data.move_names.len(),
-                data.moves.len()
-            ),
-        ));
-    }
-    for (index, move_name) in data.move_names.iter().enumerate() {
-        if move_name.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_move_name",
-                &index.to_string(),
-                "move name must be non-empty",
-            ));
-        }
-    }
-    for (label, commands) in &data.battle_animations {
-        if label.trim().is_empty() || commands.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_animation",
-                label,
-                "battle animation labels and command lists must be non-empty",
-            ));
-        }
-    }
-    for (index, label) in data.battle_animation_table.iter().enumerate() {
-        if label.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_animation_table_entry",
-                &index.to_string(),
-                "battle animation table labels must be non-empty",
-            ));
-        }
-    }
-    if !data.battle_animation_table.is_empty()
-        && data.battle_animation_table.len() != data.moves.len() + 1
-    {
-        diagnostics.push(VerificationError::error(
-            "battle_animation_table_count_mismatch",
-            "battle_animation_table",
-            format!(
-                "battle animation table contains {} entries but moves plus dummy contains {}",
-                data.battle_animation_table.len(),
-                data.moves.len() + 1
-            ),
-        ));
-    }
+    diagnostics.extend(
+        story_event_script_constant_issues(&data.story_event_script_constants)
+            .into_iter()
+            .map(story_event_script_constant_issue_diagnostic),
+    );
+
+    diagnostics.extend(
+        asm_text_catalog_issues(&data.asm_text)
+            .into_iter()
+            .map(asm_text_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        move_name_catalog_issues(&data.move_names, data.moves.len())
+            .into_iter()
+            .map(move_name_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        battle_animation_catalog_issues(
+            &data.battle_animations,
+            &data.battle_animation_table,
+            data.moves.len(),
+        )
+        .into_iter()
+        .map(battle_animation_catalog_issue_diagnostic),
+    );
     verify_required_object_sections(
         "battle_anim_bundle",
         &data.battle_anim_bundle,
@@ -4136,71 +5106,22 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         &["oam_sets", "framesets", "objects"],
         diagnostics,
     );
-    for (sprite, palette) in &data.sprite_palette_defaults {
-        if sprite.trim().is_empty() || *palette < 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_sprite_palette_default",
-                sprite,
-                "sprite palette defaults require non-empty sprite ids and non-negative palettes",
-            ));
-        }
-    }
-    for (name, palettes) in &data.pokegear_town_map_palette_map {
-        if name.trim().is_empty()
-            || palettes.is_empty()
-            || palettes.iter().any(|entry| entry.trim().is_empty())
-        {
-            diagnostics.push(VerificationError::error(
-                "invalid_pokegear_palette_map",
-                name,
-                "Pokegear palette map entries must be non-empty",
-            ));
-        }
-    }
-    let landmark_constants: BTreeSet<&str> = data
-        .pokegear_landmarks
-        .landmarks
-        .iter()
-        .map(|landmark| landmark.constant.as_str())
-        .collect();
-    for landmark in &data.pokegear_landmarks.landmarks {
-        if landmark.constant.trim().is_empty()
-            || landmark.label.trim().is_empty()
-            || landmark.name.trim().is_empty()
-            || landmark.region.trim().is_empty()
-        {
-            diagnostics.push(VerificationError::error(
-                "invalid_pokegear_landmark",
-                &landmark.constant,
-                "Pokegear landmarks require non-empty constant, label, name, and region fields",
-            ));
-        }
-        if !landmark.constant.starts_with("LANDMARK_") {
-            diagnostics.push(VerificationError::error(
-                "invalid_pokegear_landmark_constant",
-                &landmark.constant,
-                "Pokegear landmark constants must use exact LANDMARK_* ids",
-            ));
-        }
-    }
-    for (map_name, landmark_constant) in &data.pokegear_landmarks.map_to_landmark {
-        if !data.maps.contains_key(map_name) {
-            diagnostics.push(VerificationError::error(
-                "unknown_pokegear_landmark_map",
-                map_name,
-                "Pokegear map-to-landmark entry references a map that is not loaded",
-            ));
-        }
-        if !landmark_constants.contains(landmark_constant.as_str()) {
-            diagnostics.push(VerificationError::error(
-                "unknown_pokegear_landmark_constant",
-                map_name,
-                format!(
-                    "Pokegear map-to-landmark entry references missing landmark constant '{landmark_constant}'"
-                ),
-            ));
-        }
-    }
+    diagnostics.extend(
+        sprite_palette_default_issues(&data.sprite_palette_defaults)
+            .into_iter()
+            .map(sprite_palette_default_issue_diagnostic),
+    );
+    diagnostics.extend(
+        pokegear_town_map_palette_issues(&data.pokegear_town_map_palette_map)
+            .into_iter()
+            .map(pokegear_town_map_palette_issue_diagnostic),
+    );
+    let map_names: BTreeSet<String> = data.maps.keys().cloned().collect();
+    diagnostics.extend(
+        pokegear_landmark_issues(&data.pokegear_landmarks, &map_names)
+            .into_iter()
+            .map(pokegear_landmark_issue_diagnostic),
+    );
     let (_, _, cry_audio) = script_audio_catalog_ids(data);
     for (species_id, cry) in &data.pokemon_cries {
         if species_id.trim().is_empty() || cry.cry.trim().is_empty() {
@@ -4238,890 +5159,1508 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         }
     }
 
-    for species_id in data
-        .flee_mons
-        .always
-        .iter()
-        .chain(data.flee_mons.often.iter())
-        .chain(data.flee_mons.sometimes.iter())
-    {
-        if !data.pokemon.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_flee_mon_species",
-                species_id,
-                format!("flee mon table references missing species '{species_id}'"),
-            ));
-        }
-    }
+    diagnostics.extend(
+        pc_string_catalog_issues(&data.pc_strings)
+            .into_iter()
+            .map(pc_string_catalog_issue_diagnostic),
+    );
 
-    for (key, value) in &data.pc_strings {
-        if key.trim().is_empty() || value.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_pc_string",
-                key,
-                "PC string keys and values must be non-empty",
-            ));
-        }
-    }
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        flee_mon_catalog_issues(&data.flee_mons, &species_ids)
+            .into_iter()
+            .map(flee_mon_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        menu_icon_catalog_issues(&data.menu_icons, &species_ids)
+            .into_iter()
+            .map(menu_icon_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        pokedex_entry_catalog_issues(&data.pokedex_entries, &species_ids)
+            .into_iter()
+            .map(pokedex_entry_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
+        frontpic_anim_catalog_issues(&data.pokemon_frontpic_anim, &species_ids)
+            .into_iter()
+            .map(frontpic_anim_catalog_issue_diagnostic),
+    );
+}
 
-    for (species_id, icon) in &data.menu_icons {
-        if species_id != "EGG" && !data.pokemon.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_menu_icon_species",
-                species_id,
-                format!("menu icon references missing species '{species_id}'"),
-            ));
-        }
-        if icon.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_menu_icon",
-                species_id,
-                "menu icon id must be non-empty",
-            ));
-        }
+fn runtime_pack_sections(data: &GameDataSet) -> RuntimePackSections {
+    RuntimePackSections {
+        has_pokemon: !data.pokemon.is_empty(),
+        has_moves: !data.moves.is_empty(),
+        has_growth_rates: !data.growth_rates.is_empty(),
+        has_learnsets: !data.learnsets.is_empty(),
+        has_evolutions: !data.evolutions.0.is_empty(),
+        has_battle_formula_tables: has_battle_formula_tables(data),
+        has_battle_rule_catalogs: has_battle_rule_catalogs(data),
+        has_economy_catalogs: has_economy_catalogs(data),
+        has_field_system_catalogs: has_field_system_catalogs(data),
+        has_items: !data.items.is_empty(),
+        has_trainers: !data.trainers.is_empty(),
+        has_audio: !data.audio.is_empty(),
+        has_pokemon_cries: !data.pokemon_cries.is_empty(),
+        has_tilesets: !data.tilesets.is_empty(),
+        has_scripts: has_runtime_script_data(data),
+        has_map_geometry: has_runtime_map_geometry(data),
+        has_map_objects: has_runtime_map_objects(data),
+        has_runtime_map_metadata: !data.runtime_map_metadata.is_empty(),
+        has_runtime_spawn_points: !data.runtime_spawn_points.is_empty(),
+        has_maps: !data.maps.is_empty(),
+        has_ui_catalogs: has_ui_catalogs(data),
+        has_display_catalogs: has_display_catalogs(data),
+        has_phone_catalogs: has_phone_catalogs(data),
+        has_special_system_catalogs: has_special_system_catalogs(data),
+        has_event_bootstrap_catalogs: has_event_bootstrap_catalogs(data),
     }
-    for species_id in data.pokemon.keys() {
-        if !data.menu_icons.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "missing_species_menu_icon",
-                species_id,
-                "Pokemon species is missing an explicit menu icon entry",
-            ));
-        }
-    }
+}
 
-    for (species_id, entry) in &data.pokedex_entries {
-        if species_id != &entry.species {
-            diagnostics.push(VerificationError::error(
-                "pokedex_entry_species_mismatch",
-                species_id,
-                format!(
-                    "pokedex entry key '{}' does not match record species '{}'",
-                    species_id, entry.species
-                ),
-            ));
-        }
-        if !data.pokemon.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_pokedex_entry_species",
-                species_id,
-                format!("pokedex entry references missing species '{species_id}'"),
-            ));
-        }
-        if entry.classification.trim().is_empty() || entry.pages.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "invalid_pokedex_entry",
-                species_id,
-                "pokedex entry classification and pages must be non-empty",
-            ));
-        }
+fn sprite_palette_default_issue_diagnostic(issue: SpritePaletteDefaultIssue) -> VerificationError {
+    match issue {
+        SpritePaletteDefaultIssue::InvalidDefault { sprite_id } => VerificationError::error(
+            "invalid_sprite_palette_default",
+            &sprite_id,
+            "sprite palette defaults require exact non-empty sprite ids and non-negative palettes",
+        ),
     }
-    for species_id in data.pokemon.keys() {
-        if !data.pokedex_entries.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "missing_species_pokedex_entry",
-                species_id,
-                "Pokemon species is missing an explicit Pokedex entry",
-            ));
-        }
-    }
+}
 
-    for (species_id, program) in &data.pokemon_frontpic_anim {
-        if !is_frontpic_animation_asset_key(species_id, data) {
-            diagnostics.push(VerificationError::error(
-                "unknown_frontpic_anim_species",
-                species_id,
-                format!("frontpic animation references missing species '{species_id}'"),
-            ));
-        }
-        if program.commands.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_frontpic_anim",
-                species_id,
-                "frontpic animation program must contain at least one command",
-            ));
-        }
-        for (index, command) in program.commands.iter().enumerate() {
-            let subject = format!("{species_id}:{index}");
-            if let Some(issue) = frontpic_anim_command_issue(command) {
-                match issue {
-                    FrontpicAnimCommandIssue::MissingFrame => {
-                        diagnostics.push(VerificationError::error(
-                            "malformed_frontpic_anim_command",
-                            &subject,
-                            "frame command requires frame and duration",
-                        ));
-                    }
-                    FrontpicAnimCommandIssue::MissingSetRepeatCount => {
-                        diagnostics.push(VerificationError::error(
-                            "malformed_frontpic_anim_command",
-                            &subject,
-                            "setrepeat command requires count",
-                        ));
-                    }
-                    FrontpicAnimCommandIssue::MissingDoRepeatTarget => {
-                        diagnostics.push(VerificationError::error(
-                            "malformed_frontpic_anim_command",
-                            &subject,
-                            "dorepeat command requires target",
-                        ));
-                    }
-                    FrontpicAnimCommandIssue::UnknownCommand => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_frontpic_anim_command",
-                            &subject,
-                            format!("unknown frontpic animation command '{}'", command.kind),
-                        ));
-                    }
-                }
-            }
-        }
+fn battle_animation_catalog_issue_diagnostic(
+    issue: BattleAnimationCatalogIssue,
+) -> VerificationError {
+    match issue {
+        BattleAnimationCatalogIssue::InvalidAnimation { label } => VerificationError::error(
+            "invalid_battle_animation",
+            &label,
+            "battle animation labels must be exact non-empty values and command lists must be non-empty",
+        ),
+        BattleAnimationCatalogIssue::InvalidTableEntry { index } => VerificationError::error(
+            "invalid_battle_animation_table_entry",
+            index.to_string(),
+            "battle animation table labels must be exact non-empty values",
+        ),
+        BattleAnimationCatalogIssue::TableCountMismatch {
+            actual_count,
+            expected_count,
+        } => VerificationError::error(
+            "battle_animation_table_count_mismatch",
+            "battle_animation_table",
+            format!(
+                "battle animation table contains {actual_count} entries but moves plus dummy contains {expected_count}"
+            ),
+        ),
     }
-    for species_id in data.pokemon.keys() {
-        if !data.pokemon_frontpic_anim.contains_key(species_id) {
-            diagnostics.push(VerificationError::error(
-                "missing_species_frontpic_anim",
-                species_id,
-                "Pokemon species is missing an explicit frontpic animation program",
-            ));
+}
+
+fn move_name_catalog_issue_diagnostic(issue: MoveNameCatalogIssue) -> VerificationError {
+    match issue {
+        MoveNameCatalogIssue::CountMismatch {
+            actual_count,
+            expected_count,
+        } => VerificationError::error(
+            "move_names_count_mismatch",
+            "move_names",
+            format!(
+                "move_names contains {actual_count} entries but moves contains {expected_count}"
+            ),
+        ),
+        MoveNameCatalogIssue::InvalidName { index } => VerificationError::error(
+            "invalid_move_name",
+            index.to_string(),
+            "move name must be an exact non-empty value",
+        ),
+    }
+}
+
+fn story_event_script_constant_issue_diagnostic(
+    issue: StoryEventScriptConstantIssue,
+) -> VerificationError {
+    match issue {
+        StoryEventScriptConstantIssue::InvalidGlobalConstant { key } => VerificationError::error(
+            "invalid_story_event_script_constant",
+            &key,
+            "global story event script constant keys must be non-empty",
+        ),
+        StoryEventScriptConstantIssue::InvalidMap { map_name } => VerificationError::error(
+            "invalid_story_event_script_constant_map",
+            &map_name,
+            "story event script constant map keys must be non-empty",
+        ),
+        StoryEventScriptConstantIssue::InvalidMapConstant { map_name, key } => {
+            let subject = format!("{map_name}:{key}");
+            VerificationError::error(
+                "invalid_story_event_script_constant",
+                subject,
+                "map story event script constant keys must be non-empty",
+            )
         }
     }
 }
 
-fn is_frontpic_animation_asset_key(species_id: &str, data: &GameDataSet) -> bool {
-    data.pokemon.contains_key(species_id)
-        || species_id == "EGG"
-        || species_id
-            .strip_prefix("UNOWN_")
-            .and_then(|suffix| {
-                suffix
-                    .as_bytes()
-                    .first()
-                    .copied()
-                    .filter(|_| suffix.len() == 1)
-            })
-            .is_some_and(|byte| byte.is_ascii_uppercase())
+fn initialize_events_issue_diagnostic(issue: InitializeEventsIssue) -> VerificationError {
+    match issue {
+        InitializeEventsIssue::InvalidFlag { flag } => VerificationError::error(
+            "invalid_initialize_event_flag",
+            &flag,
+            "initialize event and engine flags must be non-empty",
+        ),
+        InitializeEventsIssue::InvalidVariableSprite { sprite } => VerificationError::error(
+            "invalid_initialize_event_sprite",
+            &sprite,
+            "initialize event variable sprite keys and values must be non-empty",
+        ),
+    }
+}
+
+fn runtime_spawn_point_catalog_issue_diagnostic(
+    issue: RuntimeSpawnPointCatalogIssue,
+) -> VerificationError {
+    match issue {
+        RuntimeSpawnPointCatalogIssue::IdentifierMismatch { key, identifier } => {
+            VerificationError::error(
+                "runtime_spawn_point_identifier_mismatch",
+                &key,
+                format!(
+                    "runtime spawn point key '{}' does not match identifier {}",
+                    key, identifier
+                ),
+            )
+        }
+        RuntimeSpawnPointCatalogIssue::MapMismatch {
+            key,
+            map_name,
+            metadata_name,
+        } => VerificationError::error(
+            "runtime_spawn_point_map_mismatch",
+            &key,
+            format!(
+                "runtime spawn point targets '{map_name}' but metadata names '{metadata_name}'"
+            ),
+        ),
+        RuntimeSpawnPointCatalogIssue::UnknownMap { key, map_constant } => {
+            VerificationError::error(
+                "unknown_runtime_spawn_point_map",
+                &key,
+                format!("runtime spawn point references missing map constant '{map_constant}'"),
+            )
+        }
+        RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint { key } => VerificationError::error(
+            "invalid_runtime_spawn_point",
+            &key,
+            "runtime spawn point id, map constant, map name, and groupName must be exact non-empty values",
+        ),
+    }
+}
+
+fn runtime_map_metadata_issue_diagnostic(issue: RuntimeMapMetadataIssue) -> VerificationError {
+    match issue {
+        RuntimeMapMetadataIssue::ConstantMismatch {
+            key,
+            record_constant,
+        } => VerificationError::error(
+            "runtime_map_metadata_constant_mismatch",
+            &key,
+            format!(
+                "runtime map metadata key '{}' does not match record constant '{}'",
+                key, record_constant
+            ),
+        ),
+        RuntimeMapMetadataIssue::NameMismatch {
+            key,
+            constant,
+            metadata_name,
+            map_name,
+        } => VerificationError::error(
+            "runtime_map_metadata_name_mismatch",
+            &key,
+            format!(
+                "runtime map metadata '{constant}' names '{metadata_name}' but map attributes use '{map_name}'"
+            ),
+        ),
+        RuntimeMapMetadataIssue::UnknownMapConstant { key, constant } => VerificationError::error(
+            "unknown_runtime_map_metadata_constant",
+            &key,
+            format!("runtime map metadata references missing map constant '{constant}'"),
+        ),
+        RuntimeMapMetadataIssue::InvalidMetadata { key } => VerificationError::error(
+            "invalid_runtime_map_metadata",
+            &key,
+            "runtime map metadata groupName and environment must be non-empty",
+        ),
+    }
+}
+
+fn runtime_bundle_issue_diagnostic(subject: &str, issue: RuntimeBundleIssue) -> VerificationError {
+    match issue {
+        RuntimeBundleIssue::InvalidJson { error } => VerificationError::error(
+            "invalid_runtime_bundle",
+            subject,
+            format!("runtime bundle payload is not valid JSON: {error}"),
+        ),
+        RuntimeBundleIssue::NotObject => VerificationError::error(
+            "invalid_runtime_bundle",
+            subject,
+            "runtime bundle payload must be an object",
+        ),
+        RuntimeBundleIssue::MissingSection { section } => VerificationError::error(
+            "missing_runtime_bundle_section",
+            subject,
+            format!("runtime bundle is missing non-empty section '{section}'"),
+        ),
+    }
+}
+
+fn runtime_pack_presence_issue_diagnostic(issue: RuntimePackPresenceIssue) -> VerificationError {
+    match issue {
+        RuntimePackPresenceIssue::MissingPokemon => VerificationError::error(
+            "missing_runtime_pokemon",
+            "pokemon",
+            "runtime pack must include Pokemon species data",
+        ),
+        RuntimePackPresenceIssue::MissingMoves => VerificationError::error(
+            "missing_runtime_moves",
+            "moves",
+            "runtime pack must include move data",
+        ),
+        RuntimePackPresenceIssue::MissingGrowthRates => VerificationError::error(
+            "missing_runtime_growth_rates",
+            "growth_rates",
+            "runtime pack must include growth-rate data",
+        ),
+        RuntimePackPresenceIssue::MissingLearnsets => VerificationError::error(
+            "missing_runtime_learnsets",
+            "learnsets",
+            "runtime pack must include Pokemon learnset data",
+        ),
+        RuntimePackPresenceIssue::MissingEvolutions => VerificationError::error(
+            "missing_runtime_evolutions",
+            "evolutions",
+            "runtime pack must include Pokemon evolution data",
+        ),
+        RuntimePackPresenceIssue::MissingBattleFormulaTables => VerificationError::error(
+            "missing_runtime_battle_formula_tables",
+            "battle_formula_tables",
+            "runtime pack must include battle formula tables",
+        ),
+        RuntimePackPresenceIssue::MissingBattleRuleCatalogs => VerificationError::error(
+            "missing_runtime_battle_rule_catalogs",
+            "battle_rule_catalogs",
+            "runtime pack must include battle rule catalogs",
+        ),
+        RuntimePackPresenceIssue::MissingEconomyCatalogs => VerificationError::error(
+            "missing_runtime_economy_catalogs",
+            "economy_catalogs",
+            "runtime pack must include economy and shop catalogs",
+        ),
+        RuntimePackPresenceIssue::MissingFieldSystemCatalogs => VerificationError::error(
+            "missing_runtime_field_system_catalogs",
+            "field_system_catalogs",
+            "runtime pack must include field system catalogs",
+        ),
+        RuntimePackPresenceIssue::MissingItems => VerificationError::error(
+            "missing_runtime_items",
+            "items",
+            "runtime pack must include item data",
+        ),
+        RuntimePackPresenceIssue::MissingTrainers => VerificationError::error(
+            "missing_runtime_trainers",
+            "trainers",
+            "runtime pack must include trainer data",
+        ),
+        RuntimePackPresenceIssue::MissingAudio => VerificationError::error(
+            "missing_runtime_audio",
+            "audio",
+            "runtime pack must include audio asset data",
+        ),
+        RuntimePackPresenceIssue::MissingPokemonCries => VerificationError::error(
+            "missing_runtime_pokemon_cries",
+            "pokemon_cries",
+            "runtime pack must include Pokemon cry metadata",
+        ),
+        RuntimePackPresenceIssue::MissingTilesets => VerificationError::error(
+            "missing_runtime_tilesets",
+            "tilesets",
+            "runtime pack must include tileset data",
+        ),
+        RuntimePackPresenceIssue::MissingScripts => VerificationError::error(
+            "missing_runtime_scripts",
+            "scripts",
+            "runtime pack must include script data",
+        ),
+        RuntimePackPresenceIssue::MissingMapGeometry => VerificationError::error(
+            "missing_runtime_map_geometry",
+            "map_geometry",
+            "runtime pack must include explicit map geometry data",
+        ),
+        RuntimePackPresenceIssue::MissingMapObjects => VerificationError::error(
+            "missing_runtime_map_objects",
+            "map_objects",
+            "runtime pack must include explicit map object data",
+        ),
+        RuntimePackPresenceIssue::MissingRuntimeMapMetadata => VerificationError::error(
+            "missing_runtime_map_metadata",
+            "runtime_map_metadata",
+            "runtime pack must include runtime map metadata",
+        ),
+        RuntimePackPresenceIssue::MissingRuntimeSpawnPoints => VerificationError::error(
+            "missing_runtime_spawn_points",
+            "runtime_spawn_points",
+            "runtime pack must include runtime spawn points",
+        ),
+        RuntimePackPresenceIssue::MissingMaps => VerificationError::error(
+            "missing_runtime_maps",
+            "maps",
+            "runtime pack must include map modules",
+        ),
+        RuntimePackPresenceIssue::MissingUiCatalogs => VerificationError::error(
+            "missing_runtime_ui_catalogs",
+            "ui_catalogs",
+            "runtime pack must include UI catalog data",
+        ),
+        RuntimePackPresenceIssue::MissingDisplayCatalogs => VerificationError::error(
+            "missing_runtime_display_catalogs",
+            "display_catalogs",
+            "runtime pack must include display and battle animation metadata",
+        ),
+        RuntimePackPresenceIssue::MissingPhoneCatalogs => VerificationError::error(
+            "missing_runtime_phone_catalogs",
+            "phone_catalogs",
+            "runtime pack must include phone catalog data",
+        ),
+        RuntimePackPresenceIssue::MissingSpecialSystemCatalogs => VerificationError::error(
+            "missing_runtime_special_system_catalogs",
+            "special_system_catalogs",
+            "runtime pack must include special-system catalog data",
+        ),
+        RuntimePackPresenceIssue::MissingEventBootstrapCatalogs => VerificationError::error(
+            "missing_runtime_event_bootstrap_catalogs",
+            "event_bootstrap_catalogs",
+            "runtime pack must include event bootstrap catalog data",
+        ),
+    }
+}
+
+fn has_runtime_script_data(data: &GameDataSet) -> bool {
+    !data.map_scripts.is_empty()
+        || data.maps.values().any(|module| {
+            !module.scripts.is_empty()
+                || !module.trainer_scripts.is_empty()
+                || !module.scripted_trainer_battles.is_empty()
+                || !module.scripted_wild_battles.is_empty()
+                || !module.script_item_grants.is_empty()
+                || !module.script_item_checks.is_empty()
+                || !module.script_item_takes.is_empty()
+                || !module.script_economy_commands.is_empty()
+                || !module.gift_pokemon_scripts.is_empty()
+                || !module.script_flag_commands.is_empty()
+                || !module.script_scene_commands.is_empty()
+                || !module.script_audio_commands.is_empty()
+                || !module.script_block_changes.is_empty()
+                || !module.script_object_commands.is_empty()
+                || !module.script_movements.is_empty()
+                || !module.script_map_commands.is_empty()
+                || !module.script_text_commands.is_empty()
+                || !module.script_text_bodies.is_empty()
+                || !module.script_menu_definitions.is_empty()
+                || !module.script_variable_commands.is_empty()
+                || !module.script_control_commands.is_empty()
+                || !module.script_field_pickups.is_empty()
+                || !module.script_shop_commands.is_empty()
+                || !module.script_phone_commands.is_empty()
+                || !module.script_runtime_commands.is_empty()
+                || !module.map_script_section_commands.is_empty()
+                || !module.map_event_section_commands.is_empty()
+        })
+}
+
+fn has_runtime_map_geometry(data: &GameDataSet) -> bool {
+    !data.map_attributes.is_empty() && !data.map_blocks.is_empty()
+}
+
+fn has_runtime_map_objects(data: &GameDataSet) -> bool {
+    !data.npcs.is_empty()
+}
+
+fn has_battle_formula_tables(data: &GameDataSet) -> bool {
+    !data.capture_rules.ball_rules.is_empty()
+        && !data.capture_wobble_probabilities.is_empty()
+        && !data.battle_stat_multipliers.stat.is_empty()
+        && !data.battle_stat_multipliers.accuracy.is_empty()
+        && !data.move_priorities.effect_priorities.is_empty()
+        && !data.type_categories.physical.is_empty()
+        && !data.type_categories.special.is_empty()
+        && !data.type_effectiveness.matchups.is_empty()
+        && !data.type_effectiveness.foresight_matchups.is_empty()
+        && !data.weather_modifiers.type_modifiers.is_empty()
+        && !data.weather_modifiers.move_effect_modifiers.is_empty()
+}
+
+fn has_battle_rule_catalogs(data: &GameDataSet) -> bool {
+    data.battle_reward_rules != BattleRewardRules::default()
+        && data.battle_escape_rules != BattleEscapeRules::default()
+}
+
+fn has_economy_catalogs(data: &GameDataSet) -> bool {
+    !data.marts.0.is_empty() && !data.currency_constants.0.is_empty()
+}
+
+fn has_field_system_catalogs(data: &GameDataSet) -> bool {
+    data.step_event_rules != StepEventRules::default()
+        && !data.fishing.groups.is_empty()
+        && !data.fishing.rod_items.is_empty()
+        && !data.fruit_trees.0.is_empty()
+        && data.field_moves != FieldMoveCatalog::default()
+}
+
+fn has_ui_catalogs(data: &GameDataSet) -> bool {
+    !data.pc_strings.is_empty()
+        && !data.menu_icons.is_empty()
+        && !data.pokedex_entries.is_empty()
+        && !data.pokemon_frontpic_anim.is_empty()
+        && !data.move_names.is_empty()
+        && !data.asm_text.is_empty()
+}
+
+fn has_display_catalogs(data: &GameDataSet) -> bool {
+    !data.battle_animations.is_empty()
+        && !data.battle_animation_table.is_empty()
+        && !data.battle_anim_bundle.trim().is_empty()
+        && !data.sprite_anim_bundle.trim().is_empty()
+        && !data.sprite_palette_defaults.is_empty()
+        && !data.pokegear_town_map_palette_map.is_empty()
+        && !data.pokegear_landmarks.landmarks.is_empty()
+        && !data.pokegear_landmarks.map_to_landmark.is_empty()
+}
+
+fn has_phone_catalogs(data: &GameDataSet) -> bool {
+    !data.phone_contacts.0.is_empty()
+        && !data.permanent_phone_numbers.is_empty()
+        && !data.special_phone_calls.is_empty()
+        && !data.phone_scripts.is_empty()
+}
+
+fn has_special_system_catalogs(data: &GameDataSet) -> bool {
+    (!data.flee_mons.always.is_empty()
+        || !data.flee_mons.often.is_empty()
+        || !data.flee_mons.sometimes.is_empty())
+        && !data.buena_password_categories.is_empty()
+        && !data.roaming_pokemon.is_empty()
+        && !data.buena_prizes.is_empty()
+        && !data.kurt_apricorn_recipes.is_empty()
+        && data.shuckie_gift.is_some()
+        && !data.dratini_move_sets.is_empty()
+        && data.bug_contest_config.is_some()
+        && data.battle_tower_rules.is_some()
+        && !data.oak_ratings.is_empty()
+        && !data.odd_egg_definitions.is_empty()
+        && !data.magikarp_lengths.is_empty()
+        && data.happiness_data.is_some()
+}
+
+fn has_event_bootstrap_catalogs(data: &GameDataSet) -> bool {
+    data.initialize_events != InitializeEventsConfig::default()
+        && data.story_event_script_constants != StoryEventScriptConstants::default()
+}
+
+fn asm_text_catalog_issue_diagnostic(issue: AsmTextCatalogIssue) -> VerificationError {
+    match issue {
+        AsmTextCatalogIssue::InvalidText { label } => VerificationError::error(
+            "invalid_asm_text",
+            &label,
+            "ASM text keys and values must be non-empty",
+        ),
+    }
+}
+
+fn pokegear_town_map_palette_issue_diagnostic(
+    issue: PokegearTownMapPaletteIssue,
+) -> VerificationError {
+    match issue {
+        PokegearTownMapPaletteIssue::InvalidEntry { map_name } => VerificationError::error(
+            "invalid_pokegear_palette_map",
+            &map_name,
+            "Pokegear palette map entries must be exact non-empty values",
+        ),
+    }
+}
+
+fn pokegear_landmark_issue_diagnostic(issue: PokegearLandmarkIssue) -> VerificationError {
+    match issue {
+        PokegearLandmarkIssue::InvalidLandmark { constant } => VerificationError::error(
+            "invalid_pokegear_landmark",
+            &constant,
+            "Pokegear landmarks require non-empty constant, label, name, and region fields",
+        ),
+        PokegearLandmarkIssue::InvalidConstant { constant } => VerificationError::error(
+            "invalid_pokegear_landmark_constant",
+            &constant,
+            "Pokegear landmark constants must use exact LANDMARK_* ids",
+        ),
+        PokegearLandmarkIssue::InvalidMapEntry { map_name } => VerificationError::error(
+            "invalid_pokegear_landmark_map",
+            &map_name,
+            "Pokegear map-to-landmark map keys must be exact non-empty values",
+        ),
+        PokegearLandmarkIssue::InvalidLandmarkReference {
+            map_name,
+            landmark_constant,
+        } => VerificationError::error(
+            "invalid_pokegear_landmark_reference",
+            &map_name,
+            format!(
+                "Pokegear map-to-landmark entry has invalid landmark constant '{landmark_constant}'"
+            ),
+        ),
+        PokegearLandmarkIssue::UnknownMap { map_name } => VerificationError::error(
+            "unknown_pokegear_landmark_map",
+            &map_name,
+            "Pokegear map-to-landmark entry references a map that is not loaded",
+        ),
+        PokegearLandmarkIssue::UnknownLandmarkConstant {
+            map_name,
+            landmark_constant,
+        } => VerificationError::error(
+            "unknown_pokegear_landmark_constant",
+            &map_name,
+            format!(
+                "Pokegear map-to-landmark entry references missing landmark constant '{landmark_constant}'"
+            ),
+        ),
+    }
+}
+
+fn pc_string_catalog_issue_diagnostic(issue: PcStringCatalogIssue) -> VerificationError {
+    match issue {
+        PcStringCatalogIssue::InvalidString { key } => VerificationError::error(
+            "invalid_pc_string",
+            &key,
+            "PC string keys and values must be exact non-empty values",
+        ),
+    }
+}
+
+fn flee_mon_catalog_issue_diagnostic(issue: FleeMonCatalogIssue) -> VerificationError {
+    match issue {
+        FleeMonCatalogIssue::InvalidSpeciesId { species_id } => VerificationError::error(
+            "invalid_flee_mon_species",
+            &species_id,
+            "flee mon table species ids must be exact non-empty values",
+        ),
+        FleeMonCatalogIssue::UnknownSpecies { species_id } => VerificationError::error(
+            "unknown_flee_mon_species",
+            &species_id,
+            format!("flee mon table references missing species '{species_id}'"),
+        ),
+    }
+}
+
+fn menu_icon_catalog_issue_diagnostic(issue: MenuIconCatalogIssue) -> VerificationError {
+    match issue {
+        MenuIconCatalogIssue::InvalidSpeciesId { species_id } => VerificationError::error(
+            "invalid_menu_icon_species",
+            &species_id,
+            "menu icon species ids must be exact non-empty values",
+        ),
+        MenuIconCatalogIssue::UnknownSpecies { species_id } => VerificationError::error(
+            "unknown_menu_icon_species",
+            &species_id,
+            format!("menu icon references missing species '{species_id}'"),
+        ),
+        MenuIconCatalogIssue::InvalidIcon { species_id } => VerificationError::error(
+            "invalid_menu_icon",
+            &species_id,
+            "menu icon id must be exact non-empty value",
+        ),
+        MenuIconCatalogIssue::MissingSpeciesIcon { species_id } => VerificationError::error(
+            "missing_species_menu_icon",
+            &species_id,
+            "Pokemon species is missing an explicit menu icon entry",
+        ),
+    }
+}
+
+fn pokedex_entry_catalog_issue_diagnostic(issue: PokedexEntryCatalogIssue) -> VerificationError {
+    match issue {
+        PokedexEntryCatalogIssue::InvalidSpeciesId { species_id } => VerificationError::error(
+            "invalid_pokedex_entry_species",
+            &species_id,
+            "pokedex entry species ids must be exact non-empty values",
+        ),
+        PokedexEntryCatalogIssue::SpeciesMismatch {
+            species_id,
+            record_species,
+        } => VerificationError::error(
+            "pokedex_entry_species_mismatch",
+            &species_id,
+            format!(
+                "pokedex entry key '{}' does not match record species '{}'",
+                species_id, record_species
+            ),
+        ),
+        PokedexEntryCatalogIssue::UnknownSpecies { species_id } => VerificationError::error(
+            "unknown_pokedex_entry_species",
+            &species_id,
+            format!("pokedex entry references missing species '{species_id}'"),
+        ),
+        PokedexEntryCatalogIssue::InvalidEntry { species_id } => VerificationError::error(
+            "invalid_pokedex_entry",
+            &species_id,
+            "pokedex entry classification and pages must be non-empty",
+        ),
+        PokedexEntryCatalogIssue::MissingSpeciesEntry { species_id } => VerificationError::error(
+            "missing_species_pokedex_entry",
+            &species_id,
+            "Pokemon species is missing an explicit Pokedex entry",
+        ),
+    }
+}
+
+fn frontpic_anim_catalog_issue_diagnostic(issue: FrontpicAnimCatalogIssue) -> VerificationError {
+    match issue {
+        FrontpicAnimCatalogIssue::InvalidSpeciesId { species_id } => VerificationError::error(
+            "invalid_frontpic_anim_species",
+            &species_id,
+            "frontpic animation species ids must be exact non-empty values",
+        ),
+        FrontpicAnimCatalogIssue::UnknownSpecies { species_id } => VerificationError::error(
+            "unknown_frontpic_anim_species",
+            &species_id,
+            format!("frontpic animation references missing species '{species_id}'"),
+        ),
+        FrontpicAnimCatalogIssue::EmptyProgram { species_id } => VerificationError::error(
+            "empty_frontpic_anim",
+            &species_id,
+            "frontpic animation program must contain at least one command",
+        ),
+        FrontpicAnimCatalogIssue::Command {
+            species_id,
+            index,
+            command,
+            issue,
+        } => {
+            let subject = format!("{species_id}:{index}");
+            match issue {
+                FrontpicAnimCommandIssue::MissingFrame => VerificationError::error(
+                    "malformed_frontpic_anim_command",
+                    subject,
+                    "frame command requires frame and duration",
+                ),
+                FrontpicAnimCommandIssue::MissingSetRepeatCount => VerificationError::error(
+                    "malformed_frontpic_anim_command",
+                    subject,
+                    "setrepeat command requires count",
+                ),
+                FrontpicAnimCommandIssue::MissingDoRepeatTarget => VerificationError::error(
+                    "malformed_frontpic_anim_command",
+                    subject,
+                    "dorepeat command requires target",
+                ),
+                FrontpicAnimCommandIssue::UnknownCommand => VerificationError::error(
+                    "unknown_frontpic_anim_command",
+                    subject,
+                    format!("unknown frontpic animation command '{command}'"),
+                ),
+            }
+        }
+        FrontpicAnimCatalogIssue::MissingSpeciesProgram { species_id } => VerificationError::error(
+            "missing_species_frontpic_anim",
+            &species_id,
+            "Pokemon species is missing an explicit frontpic animation program",
+        ),
+    }
 }
 
 fn verify_script_shop_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        for command in &module.script_shop_commands {
-            let subject = format!(
-                "{map_name}:{}:{}",
-                command.source_script, command.command_index
-            );
-            if let Err(error) = validate_script_shop_command(&data.marts, command) {
-                match error {
-                    ShopError::UnknownMartType { mart_type } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_shop_mart_type",
-                            &subject,
-                            format!("pokemart uses unknown mart type '{mart_type}'"),
-                        ));
-                    }
-                    ShopError::InvalidZeroMart { mart_type } => {
-                        diagnostics.push(VerificationError::error(
-                            "script_shop_invalid_zero_mart",
-                            &subject,
-                            format!("pokemart type '{mart_type}' cannot use explicit mart id 0"),
-                        ));
-                    }
-                    ShopError::UnknownMart { mart_id } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_shop_mart",
-                            &subject,
-                            format!("pokemart references missing mart '{mart_id}'"),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
+        diagnostics.extend(
+            script_shop_command_issues(&data.marts, &module.script_shop_commands)
+                .into_iter()
+                .map(|issue| script_shop_command_issue_diagnostic(map_name, issue)),
+        );
+    }
+}
+
+fn script_shop_command_issue_diagnostic(
+    map_name: &str,
+    issue: ScriptShopCommandIssue,
+) -> VerificationError {
+    let subject = format!("{map_name}:{}:{}", issue.source_script, issue.command_index);
+    match issue.error {
+        ShopError::UnknownMartType { mart_type } => VerificationError::error(
+            "unknown_script_shop_mart_type",
+            subject,
+            format!("pokemart uses unknown mart type '{mart_type}'"),
+        ),
+        ShopError::InvalidMartType { mart_type } => VerificationError::error(
+            "invalid_script_shop_mart_type",
+            subject,
+            format!("pokemart mart type must be exact and nonempty, found {mart_type:?}"),
+        ),
+        ShopError::InvalidZeroMart { mart_type } => VerificationError::error(
+            "script_shop_invalid_zero_mart",
+            subject,
+            format!("pokemart type '{mart_type}' cannot use explicit mart id 0"),
+        ),
+        ShopError::InvalidMartId { mart_id } => VerificationError::error(
+            "invalid_script_shop_mart",
+            subject,
+            format!("pokemart mart id must be exact and nonempty, found {mart_id:?}"),
+        ),
+        ShopError::UnknownMart { mart_id } => VerificationError::error(
+            "unknown_script_shop_mart",
+            subject,
+            format!("pokemart references missing mart '{mart_id}'"),
+        ),
+        _ => unreachable!("script_shop_command_issues only returns verifier shop errors"),
     }
 }
 
 fn verify_script_phone_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
-        for command in &module.script_phone_commands {
-            let subject = format!(
-                "{map_name}:{}:{}",
-                command.source_script, command.command_index
-            );
-            if let Err(error) = validate_script_phone_command(command, &data.phone_contacts) {
-                match error {
-                    ScriptPhoneError::UnknownCommand { command } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_phone_command",
-                            &subject,
-                            format!("unknown phone command '{command}'"),
-                        ));
-                    }
-                    ScriptPhoneError::UnknownContact {
-                        command: phone_command,
-                        contact_id,
-                    } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_phone_contact",
-                            &subject,
-                            format!(
-                                "phone command '{phone_command}' references unknown contact '{contact_id}'"
-                            ),
-                        ));
-                    }
-                    ScriptPhoneError::EmptyContact {
-                        command: phone_command,
-                    } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_phone_contact",
-                            &subject,
-                            format!(
-                                "phone command '{phone_command}' references unknown contact '{}'",
-                                command.contact_id
-                            ),
-                        ));
-                    }
-                    ScriptPhoneError::PaddedContact {
-                        command: phone_command,
-                        contact_id,
-                    } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_phone_contact",
-                            &subject,
-                            format!(
-                                "phone command '{phone_command}' references unknown contact '{contact_id}'"
-                            ),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
+        diagnostics.extend(
+            script_phone_command_issues(&module.script_phone_commands, &data.phone_contacts)
+                .into_iter()
+                .map(|issue| script_phone_command_issue_diagnostic(map_name, issue)),
+        );
+    }
+}
+
+fn script_phone_command_issue_diagnostic(
+    map_name: &str,
+    issue: ScriptPhoneCommandIssue,
+) -> VerificationError {
+    let subject = format!("{map_name}:{}:{}", issue.source_script, issue.command_index);
+    match issue.error {
+        ScriptPhoneError::UnknownCommand { command } => VerificationError::error(
+            "unknown_script_phone_command",
+            subject,
+            format!("unknown phone command '{command}'"),
+        ),
+        ScriptPhoneError::UnknownContact {
+            command,
+            contact_id,
+        } => VerificationError::error(
+            "unknown_script_phone_contact",
+            subject,
+            format!("phone command '{command}' references unknown contact '{contact_id}'"),
+        ),
+        ScriptPhoneError::EmptyContact { command } => VerificationError::error(
+            "unknown_script_phone_contact",
+            subject,
+            format!(
+                "phone command '{command}' references unknown contact '{}'",
+                issue.contact_id
+            ),
+        ),
+        ScriptPhoneError::PaddedContact {
+            command,
+            contact_id,
+        } => VerificationError::error(
+            "invalid_script_phone_contact",
+            subject,
+            format!(
+                "phone command '{command}' contact id must be exact and untrimmed, found {contact_id:?}"
+            ),
+        ),
+        _ => unreachable!("script_phone_command_issues only returns verifier phone errors"),
     }
 }
 
 fn verify_happiness_data(data: &HappinessData, diagnostics: &mut Vec<VerificationError>) {
-    if data.changes.is_empty() {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        happiness_data_issues(data)
+            .into_iter()
+            .map(happiness_data_issue_diagnostic),
+    );
+}
+
+fn happiness_data_issue_diagnostic(issue: HappinessDataIssue) -> VerificationError {
+    match issue {
+        HappinessDataIssue::EmptyChanges => VerificationError::error(
             "empty_happiness_changes",
             "happiness_data:changes",
             "happiness data requires at least one explicit change row",
-        ));
-    }
-    let mut change_codes = BTreeSet::new();
-    let mut code_names = BTreeSet::new();
-    for entry in &data.changes {
-        let subject = format!("happiness_data:changes:{}", entry.change_code);
-        if entry.code.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_happiness_change_code",
-                &subject,
-                "happiness change entries require exact nonempty code labels",
-            ));
-        }
-        if !code_names.insert(entry.code.clone()) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_happiness_change_code",
-                &subject,
-                format!("duplicate happiness change code '{}'", entry.code),
-            ));
-        }
-        if !change_codes.insert(entry.change_code) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_happiness_change_index",
-                &subject,
-                format!("duplicate happiness change index {}", entry.change_code),
-            ));
-        }
-    }
-    if data.services.is_empty() {
-        diagnostics.push(VerificationError::error(
+        ),
+        HappinessDataIssue::EmptyChangeCode { change_code } => VerificationError::error(
+            "empty_happiness_change_code",
+            format!("happiness_data:changes:{change_code}"),
+            "happiness change entries require exact nonempty code labels",
+        ),
+        HappinessDataIssue::DuplicateChangeCode { code, change_code } => VerificationError::error(
+            "duplicate_happiness_change_code",
+            format!("happiness_data:changes:{change_code}"),
+            format!("duplicate happiness change code '{code}'"),
+        ),
+        HappinessDataIssue::DuplicateChangeIndex { change_code } => VerificationError::error(
+            "duplicate_happiness_change_index",
+            format!("happiness_data:changes:{change_code}"),
+            format!("duplicate happiness change index {change_code}"),
+        ),
+        HappinessDataIssue::EmptyServices => VerificationError::error(
             "empty_happiness_services",
             "happiness_data:services",
             "happiness data requires explicit service probability tables",
-        ));
-    }
-    let mut service_names = BTreeSet::new();
-    for service in &data.services {
-        let subject = format!("happiness_data:services:{}", service.routine);
-        if service.routine.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_happiness_service_routine",
-                &subject,
-                "happiness service routine ids must be exact nonempty labels",
-            ));
-        }
-        if !service_names.insert(service.routine.clone()) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_happiness_service",
-                &subject,
-                format!("duplicate happiness service table '{}'", service.routine),
-            ));
-        }
-        if service.outcomes.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_happiness_service_outcomes",
-                &subject,
-                "happiness service tables require at least one outcome",
-            ));
-        }
-        for outcome in &service.outcomes {
-            if !change_codes.contains(&outcome.change_code) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_happiness_service_change",
-                    &subject,
-                    format!(
-                        "happiness service outcome references missing change code {}",
-                        outcome.change_code
-                    ),
-                ));
-            }
-        }
+        ),
+        HappinessDataIssue::EmptyServiceRoutine { routine } => VerificationError::error(
+            "empty_happiness_service_routine",
+            format!("happiness_data:services:{routine}"),
+            "happiness service routine ids must be exact nonempty labels",
+        ),
+        HappinessDataIssue::DuplicateService { routine } => VerificationError::error(
+            "duplicate_happiness_service",
+            format!("happiness_data:services:{routine}"),
+            format!("duplicate happiness service table '{routine}'"),
+        ),
+        HappinessDataIssue::EmptyServiceOutcomes { routine } => VerificationError::error(
+            "empty_happiness_service_outcomes",
+            format!("happiness_data:services:{routine}"),
+            "happiness service tables require at least one outcome",
+        ),
+        HappinessDataIssue::UnknownServiceChange {
+            routine,
+            change_code,
+        } => VerificationError::error(
+            "unknown_happiness_service_change",
+            format!("happiness_data:services:{routine}"),
+            format!("happiness service outcome references missing change code {change_code}"),
+        ),
     }
 }
 
 fn verify_encounter_slot_tables(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.wild_encounters.is_empty() {
-        return;
-    }
-    verify_encounter_slot_table(
-        "grass",
-        &data.encounter_slot_tables.grass,
-        "encounter_slot_tables:grass",
-        diagnostics,
-    );
-    verify_encounter_slot_table(
-        "water",
-        &data.encounter_slot_tables.water,
-        "encounter_slot_tables:water",
-        diagnostics,
+    diagnostics.extend(
+        encounter_slot_table_issues(
+            &data.encounter_slot_tables,
+            !data.wild_encounters.is_empty(),
+        )
+        .into_iter()
+        .map(encounter_slot_table_issue_diagnostic),
     );
 }
 
-fn verify_encounter_slot_table(
-    surface: &str,
-    table: &[crystal_core::world::encounters::EncounterSlotChance],
-    subject: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if table.is_empty() {
-        diagnostics.push(VerificationError::error(
+fn encounter_slot_table_issue_diagnostic(issue: EncounterSlotTableIssue) -> VerificationError {
+    let surface = encounter_surface_label(issue.surface());
+    let subject = format!("encounter_slot_tables:{surface}");
+    match issue {
+        EncounterSlotTableIssue::MissingTable { .. } => VerificationError::error(
             "missing_encounter_slot_table",
             subject,
             format!("encounter slot table for {surface} must be declared by the modpack"),
-        ));
-        return;
-    }
-    let mut previous_threshold = 0;
-    let mut slots = BTreeSet::new();
-    for entry in table {
-        if entry.threshold == 0 || entry.threshold > 100 {
-            diagnostics.push(VerificationError::error(
-                "invalid_encounter_slot_threshold",
-                subject,
-                format!(
-                    "encounter slot table for {surface} has threshold {} outside 1..=100",
-                    entry.threshold
-                ),
-            ));
-        }
-        if entry.threshold < previous_threshold {
-            diagnostics.push(VerificationError::error(
-                "unordered_encounter_slot_threshold",
-                subject,
-                format!(
-                    "encounter slot table for {surface} has threshold {} after {}",
-                    entry.threshold, previous_threshold
-                ),
-            ));
-        }
-        previous_threshold = entry.threshold;
-        if !slots.insert(entry.slot) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_encounter_slot_index",
-                subject,
-                format!(
-                    "encounter slot table for {surface} repeats slot {}",
-                    entry.slot
-                ),
-            ));
-        }
-    }
-    if previous_threshold != 100 {
-        diagnostics.push(VerificationError::error(
+        ),
+        EncounterSlotTableIssue::InvalidThreshold { threshold, .. } => VerificationError::error(
+            "invalid_encounter_slot_threshold",
+            subject,
+            format!("encounter slot table for {surface} has threshold {threshold} outside 1..=100"),
+        ),
+        EncounterSlotTableIssue::UnorderedThreshold {
+            threshold,
+            previous,
+            ..
+        } => VerificationError::error(
+            "unordered_encounter_slot_threshold",
+            subject,
+            format!(
+                "encounter slot table for {surface} has threshold {threshold} after {previous}"
+            ),
+        ),
+        EncounterSlotTableIssue::DuplicateSlotIndex { slot, .. } => VerificationError::error(
+            "duplicate_encounter_slot_index",
+            subject,
+            format!("encounter slot table for {surface} repeats slot {slot}"),
+        ),
+        EncounterSlotTableIssue::IncompleteTable { .. } => VerificationError::error(
             "incomplete_encounter_slot_table",
             subject,
             format!("encounter slot table for {surface} must end at threshold 100"),
-        ));
+        ),
+    }
+}
+
+fn encounter_surface_label(surface: EncounterSurface) -> &'static str {
+    match surface {
+        EncounterSurface::Grass => "grass",
+        EncounterSurface::Water => "water",
+        EncounterSurface::Rock => "rock",
     }
 }
 
 fn verify_encounter_music_modifiers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.wild_encounters.is_empty() {
-        return;
-    }
     let (music, _, _) = script_audio_catalog_ids(data);
-    if data.encounter_music_modifiers.modifiers.is_empty() {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        encounter_music_modifier_issues(
+            &data.encounter_music_modifiers,
+            &music,
+            !data.wild_encounters.is_empty(),
+        )
+        .into_iter()
+        .map(encounter_music_modifier_issue_diagnostic),
+    );
+}
+
+fn encounter_music_modifier_issue_diagnostic(
+    issue: EncounterMusicModifierIssue,
+) -> VerificationError {
+    match issue {
+        EncounterMusicModifierIssue::MissingTable => VerificationError::error(
             "missing_encounter_music_modifiers",
             "encounter_music_modifiers",
             "encounter music modifiers must be declared by the modpack",
-        ));
-        return;
-    }
-    let mut seen = BTreeSet::new();
-    for modifier in &data.encounter_music_modifiers.modifiers {
-        let subject = format!("encounter_music_modifiers:{}", modifier.music_id);
-        if modifier.music_id.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "missing_encounter_music_modifier_id",
-                &subject,
-                "encounter music modifier is missing music_id",
-            ));
-        } else if !music.contains(&modifier.music_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_encounter_music_modifier_id",
-                &subject,
-                format!(
-                    "encounter music modifier references missing music audio id '{}'",
-                    modifier.music_id
-                ),
-            ));
-        }
-        if !seen.insert(modifier.music_id.as_str()) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_encounter_music_modifier_id",
-                &subject,
-                format!(
-                    "encounter music modifiers repeat music id '{}'",
-                    modifier.music_id
-                ),
-            ));
-        }
-        if modifier.denominator == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_encounter_music_modifier_ratio",
-                &subject,
-                "encounter music modifier denominator must be greater than zero",
-            ));
-        }
+        ),
+        EncounterMusicModifierIssue::MissingMusicId { music_id } => VerificationError::error(
+            "missing_encounter_music_modifier_id",
+            format!("encounter_music_modifiers:{music_id}"),
+            "encounter music modifier is missing music_id",
+        ),
+        EncounterMusicModifierIssue::UnknownMusicId { music_id } => VerificationError::error(
+            "unknown_encounter_music_modifier_id",
+            format!("encounter_music_modifiers:{music_id}"),
+            format!("encounter music modifier references missing music audio id '{music_id}'"),
+        ),
+        EncounterMusicModifierIssue::DuplicateMusicId { music_id } => VerificationError::error(
+            "duplicate_encounter_music_modifier_id",
+            format!("encounter_music_modifiers:{music_id}"),
+            format!("encounter music modifiers repeat music id '{music_id}'"),
+        ),
+        EncounterMusicModifierIssue::InvalidRatio { music_id } => VerificationError::error(
+            "invalid_encounter_music_modifier_ratio",
+            format!("encounter_music_modifiers:{music_id}"),
+            "encounter music modifier denominator must be greater than zero",
+        ),
     }
 }
 
 fn verify_battle_stat_multipliers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.moves.is_empty() {
-        return;
-    }
-    verify_battle_stat_multiplier_table(
-        "stat",
-        &data.battle_stat_multipliers.stat,
-        "battle_stat_multipliers:stat",
-        diagnostics,
-    );
-    verify_battle_stat_multiplier_table(
-        "accuracy",
-        &data.battle_stat_multipliers.accuracy,
-        "battle_stat_multipliers:accuracy",
-        diagnostics,
+    diagnostics.extend(
+        battle_stat_multiplier_table_issues(&data.battle_stat_multipliers, !data.moves.is_empty())
+            .into_iter()
+            .map(battle_stat_multiplier_table_issue_diagnostic),
     );
 }
 
-fn verify_battle_stat_multiplier_table(
-    table_name: &str,
-    table: &[crystal_core::battle::stats::BattleStatMultiplier],
-    subject: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if table.len() != 13 {
-        diagnostics.push(VerificationError::error(
+fn battle_stat_multiplier_table_issue_diagnostic(
+    issue: BattleStatMultiplierTableIssue,
+) -> VerificationError {
+    let table_name = issue.table().as_str();
+    let subject = format!("battle_stat_multipliers:{table_name}");
+    match issue {
+        BattleStatMultiplierTableIssue::InvalidLength { actual, .. } => VerificationError::error(
             "invalid_battle_stat_multiplier_table_length",
             subject,
             format!(
-                "battle stat multiplier table {table_name} must declare exactly 13 rows for stages -6..=6, found {}",
-                table.len()
+                "battle stat multiplier table {table_name} must declare exactly 13 rows for stages -6..=6, found {actual}"
             ),
-        ));
-    }
-    for (index, entry) in table.iter().enumerate() {
-        let stage = index as i8 - 6;
-        if entry.numerator <= 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_stat_multiplier_numerator",
-                subject,
-                format!(
-                    "battle stat multiplier table {table_name} stage {stage} has nonpositive numerator {}",
-                    entry.numerator
-                ),
-            ));
-        }
-        if entry.denominator <= 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_stat_multiplier_denominator",
-                subject,
-                format!(
-                    "battle stat multiplier table {table_name} stage {stage} has nonpositive denominator {}",
-                    entry.denominator
-                ),
-            ));
-        }
+        ),
+        BattleStatMultiplierTableIssue::InvalidNumerator {
+            stage, numerator, ..
+        } => VerificationError::error(
+            "invalid_battle_stat_multiplier_numerator",
+            subject,
+            format!(
+                "battle stat multiplier table {table_name} stage {stage} has nonpositive numerator {numerator}"
+            ),
+        ),
+        BattleStatMultiplierTableIssue::InvalidDenominator {
+            stage, denominator, ..
+        } => VerificationError::error(
+            "invalid_battle_stat_multiplier_denominator",
+            subject,
+            format!(
+                "battle stat multiplier table {table_name} stage {stage} has nonpositive denominator {denominator}"
+            ),
+        ),
     }
 }
 
 fn verify_weather_modifiers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.moves.is_empty() {
-        return;
-    }
-    if data.weather_modifiers.type_modifiers.is_empty() {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        weather_modifier_issues(&data.weather_modifiers, &data.moves, !data.moves.is_empty())
+            .into_iter()
+            .map(weather_modifier_issue_diagnostic),
+    );
+}
+
+fn weather_modifier_issue_diagnostic(issue: WeatherModifierIssue) -> VerificationError {
+    match issue {
+        WeatherModifierIssue::MissingTypeModifiers => VerificationError::error(
             "missing_weather_type_modifiers",
             "weather_modifiers:type_modifiers",
             "weather type modifiers must be declared when moves exist",
-        ));
-    }
-    if data.weather_modifiers.move_effect_modifiers.is_empty() {
-        diagnostics.push(VerificationError::error(
+        ),
+        WeatherModifierIssue::MissingMoveEffectModifiers => VerificationError::error(
             "missing_weather_move_effect_modifiers",
             "weather_modifiers:move_effect_modifiers",
             "weather move-effect modifiers must be declared when moves exist",
-        ));
-    }
-    for entry in &data.weather_modifiers.type_modifiers {
-        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
-            diagnostics.push(VerificationError::error(
-                "invalid_weather_modifier_weather",
-                "weather_modifiers:type_modifiers",
-                format!(
-                    "weather modifier has invalid weather id {:?}",
-                    entry.weather
-                ),
-            ));
-        }
-        verify_type_multiplier(
-            entry.multiplier,
-            "weather_modifiers:type_modifiers",
-            diagnostics,
-        );
-    }
-    for entry in &data.weather_modifiers.move_effect_modifiers {
-        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
-            diagnostics.push(VerificationError::error(
-                "invalid_weather_modifier_weather",
-                "weather_modifiers:move_effect_modifiers",
-                format!(
-                    "weather modifier has invalid weather id {:?}",
-                    entry.weather
-                ),
-            ));
-        }
-        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
-            diagnostics.push(VerificationError::error(
-                "invalid_weather_modifier_move_effect",
-                "weather_modifiers:move_effect_modifiers",
-                format!(
-                    "weather move-effect modifier has invalid move effect {:?}",
-                    entry.move_effect
-                ),
-            ));
-        }
-        verify_type_multiplier(
-            entry.multiplier,
+        ),
+        WeatherModifierIssue::InvalidWeather { table, weather } => VerificationError::error(
+            "invalid_weather_modifier_weather",
+            table.subject(),
+            format!("weather modifier has invalid weather id {weather:?}"),
+        ),
+        WeatherModifierIssue::InvalidMoveEffect { move_effect } => VerificationError::error(
+            "invalid_weather_modifier_move_effect",
             "weather_modifiers:move_effect_modifiers",
-            diagnostics,
-        );
+            format!("weather move-effect modifier has invalid move effect {move_effect:?}"),
+        ),
+        WeatherModifierIssue::UnknownMoveEffect { move_effect } => VerificationError::error(
+            "unknown_weather_modifier_move_effect",
+            "weather_modifiers:move_effect_modifiers",
+            format!("weather move-effect modifier references missing move effect '{move_effect}'"),
+        ),
+        WeatherModifierIssue::InvalidMultiplierDenominator { table } => VerificationError::error(
+            "invalid_type_multiplier_denominator",
+            table.subject(),
+            "type multiplier denominator must be nonzero",
+        ),
     }
 }
 
 fn verify_type_effectiveness(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.moves.is_empty() {
-        return;
-    }
-    if data.type_effectiveness.matchups.is_empty() {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        type_effectiveness_table_issues(
+            &data.type_effectiveness,
+            &data.type_categories,
+            !data.moves.is_empty(),
+        )
+        .into_iter()
+        .map(type_effectiveness_table_issue_diagnostic),
+    );
+}
+
+fn type_effectiveness_table_issue_diagnostic(
+    issue: TypeEffectivenessTableIssue,
+) -> VerificationError {
+    match issue {
+        TypeEffectivenessTableIssue::MissingMatchups => VerificationError::error(
             "missing_type_effectiveness_matchups",
             "type_effectiveness:matchups",
             "type effectiveness matchups must be declared when moves exist",
-        ));
-    }
-    if data.type_effectiveness.foresight_matchups.is_empty() {
-        diagnostics.push(VerificationError::error(
+        ),
+        TypeEffectivenessTableIssue::MissingForesightMatchups => VerificationError::error(
             "missing_type_effectiveness_foresight_matchups",
             "type_effectiveness:foresight_matchups",
             "Foresight type effectiveness matchups must be declared when moves exist",
-        ));
-    }
-    let declared_types: BTreeSet<&str> = data
-        .type_categories
-        .physical
-        .iter()
-        .chain(data.type_categories.special.iter())
-        .map(String::as_str)
-        .collect();
-    let mut matchup_pairs = BTreeSet::new();
-    for entry in &data.type_effectiveness.matchups {
-        verify_type_multiplier(entry.multiplier, "type_effectiveness:matchups", diagnostics);
-        if !declared_types.is_empty() {
-            if !declared_types.contains(entry.attacker.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_type_effectiveness_attacker",
-                    "type_effectiveness:matchups",
-                    format!(
-                        "type effectiveness attacker {:?} is not declared in type categories",
-                        entry.attacker
-                    ),
-                ));
-            }
-            if !declared_types.contains(entry.defender.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_type_effectiveness_defender",
-                    "type_effectiveness:matchups",
-                    format!(
-                        "type effectiveness defender {:?} is not declared in type categories",
-                        entry.defender
-                    ),
-                ));
-            }
+        ),
+        TypeEffectivenessTableIssue::InvalidMultiplierDenominator { table } => {
+            VerificationError::error(
+                "invalid_type_multiplier_denominator",
+                table.subject(),
+                "type multiplier denominator must be nonzero",
+            )
         }
-        if !matchup_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_type_effectiveness_matchup",
+        TypeEffectivenessTableIssue::UnknownAttacker { table, attacker } => {
+            let (code, prefix) = type_effectiveness_unknown_parts(table, true);
+            VerificationError::error(
+                code,
+                table.subject(),
+                format!("{prefix} attacker {attacker:?} is not declared in type categories"),
+            )
+        }
+        TypeEffectivenessTableIssue::UnknownDefender { table, defender } => {
+            let (code, prefix) = type_effectiveness_unknown_parts(table, false);
+            VerificationError::error(
+                code,
+                table.subject(),
+                format!("{prefix} defender {defender:?} is not declared in type categories"),
+            )
+        }
+        TypeEffectivenessTableIssue::DuplicateMatchup {
+            table,
+            attacker,
+            defender,
+        } => {
+            let code = match table {
+                TypeEffectivenessTableKind::Matchups => "duplicate_type_effectiveness_matchup",
+                TypeEffectivenessTableKind::ForesightMatchups => {
+                    "duplicate_foresight_type_effectiveness_matchup"
+                }
+            };
+            let prefix = type_effectiveness_message_prefix(table);
+            VerificationError::error(
+                code,
+                table.subject(),
+                format!("{prefix} matchup {attacker:?} -> {defender:?} is declared more than once"),
+            )
+        }
+        TypeEffectivenessTableIssue::MissingMatchup { attacker, defender } => {
+            VerificationError::error(
+                "missing_type_effectiveness_matchup",
                 "type_effectiveness:matchups",
                 format!(
-                    "type effectiveness matchup {:?} -> {:?} is declared more than once",
-                    entry.attacker, entry.defender
+                    "type effectiveness matchup {attacker:?} -> {defender:?} must be declared explicitly"
                 ),
-            ));
+            )
         }
     }
-    for attacker in &declared_types {
-        for defender in &declared_types {
-            if !matchup_pairs.contains(&(*attacker, *defender)) {
-                diagnostics.push(VerificationError::error(
-                    "missing_type_effectiveness_matchup",
-                    "type_effectiveness:matchups",
-                    format!(
-                        "type effectiveness matchup {:?} -> {:?} must be declared explicitly",
-                        attacker, defender
-                    ),
-                ));
-            }
+}
+
+fn type_effectiveness_unknown_parts(
+    table: TypeEffectivenessTableKind,
+    attacker: bool,
+) -> (&'static str, &'static str) {
+    match (table, attacker) {
+        (TypeEffectivenessTableKind::Matchups, true) => {
+            ("unknown_type_effectiveness_attacker", "type effectiveness")
         }
+        (TypeEffectivenessTableKind::Matchups, false) => {
+            ("unknown_type_effectiveness_defender", "type effectiveness")
+        }
+        (TypeEffectivenessTableKind::ForesightMatchups, true) => (
+            "unknown_foresight_type_effectiveness_attacker",
+            "Foresight type effectiveness",
+        ),
+        (TypeEffectivenessTableKind::ForesightMatchups, false) => (
+            "unknown_foresight_type_effectiveness_defender",
+            "Foresight type effectiveness",
+        ),
     }
-    let mut foresight_pairs = BTreeSet::new();
-    for entry in &data.type_effectiveness.foresight_matchups {
-        verify_type_multiplier(
-            entry.multiplier,
-            "type_effectiveness:foresight_matchups",
-            diagnostics,
-        );
-        if !declared_types.is_empty() {
-            if !declared_types.contains(entry.attacker.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_foresight_type_effectiveness_attacker",
-                    "type_effectiveness:foresight_matchups",
-                    format!(
-                        "Foresight type effectiveness attacker {:?} is not declared in type categories",
-                        entry.attacker
-                    ),
-                ));
-            }
-            if !declared_types.contains(entry.defender.as_str()) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_foresight_type_effectiveness_defender",
-                    "type_effectiveness:foresight_matchups",
-                    format!(
-                        "Foresight type effectiveness defender {:?} is not declared in type categories",
-                        entry.defender
-                    ),
-                ));
-            }
-        }
-        if !foresight_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_foresight_type_effectiveness_matchup",
-                "type_effectiveness:foresight_matchups",
-                format!(
-                    "Foresight type effectiveness matchup {:?} -> {:?} is declared more than once",
-                    entry.attacker, entry.defender
-                ),
-            ));
-        }
+}
+
+fn type_effectiveness_message_prefix(table: TypeEffectivenessTableKind) -> &'static str {
+    match table {
+        TypeEffectivenessTableKind::Matchups => "type effectiveness",
+        TypeEffectivenessTableKind::ForesightMatchups => "Foresight type effectiveness",
     }
 }
 
 fn verify_type_categories(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.moves.is_empty() {
-        return;
-    }
-    if data.type_categories.physical.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_physical_type_categories",
-            "type_categories:physical",
-            "physical type categories must be declared when moves exist",
-        ));
-    }
-    if data.type_categories.special.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_special_type_categories",
-            "type_categories:special",
-            "special type categories must be declared when moves exist",
-        ));
-    }
-    for type_id in &data.type_categories.physical {
-        verify_exact_type_category_token(type_id, "type_categories:physical", diagnostics);
-    }
-    for type_id in &data.type_categories.special {
-        verify_exact_type_category_token(type_id, "type_categories:special", diagnostics);
-    }
-    for type_id in &data.type_categories.physical {
-        if data
-            .type_categories
-            .special
-            .iter()
-            .any(|entry| entry == type_id)
-        {
-            diagnostics.push(VerificationError::error(
-                "overlapping_type_category",
-                "type_categories",
-                format!("type category '{type_id}' is declared as both physical and special"),
-            ));
-        }
-    }
+    diagnostics.extend(
+        type_category_issues(&data.type_categories, !data.moves.is_empty())
+            .into_iter()
+            .map(type_category_issue_diagnostic),
+    );
 }
 
 fn verify_move_priorities(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.moves.is_empty() {
-        return;
-    }
-    if data.move_priorities.base_priority < 0 {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        move_priority_table_issues(&data.move_priorities, &data.moves, !data.moves.is_empty())
+            .into_iter()
+            .map(move_priority_table_issue_diagnostic),
+    );
+}
+
+fn move_priority_table_issue_diagnostic(issue: MovePriorityTableIssue) -> VerificationError {
+    match issue {
+        MovePriorityTableIssue::InvalidBasePriority { priority } => VerificationError::error(
             "invalid_base_move_priority",
             "move_priorities:base_priority",
-            format!(
-                "base move priority must be nonnegative, found {}",
-                data.move_priorities.base_priority
-            ),
-        ));
-    }
-    if data.move_priorities.effect_priorities.is_empty() {
-        diagnostics.push(VerificationError::error(
+            format!("base move priority must be nonnegative, found {priority}"),
+        ),
+        MovePriorityTableIssue::MissingEffectPriorities => VerificationError::error(
             "missing_move_effect_priorities",
             "move_priorities:effect_priorities",
             "move effect priorities must be declared when moves exist",
-        ));
-    }
-    let mut effect_priorities = BTreeSet::new();
-    for entry in &data.move_priorities.effect_priorities {
-        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
-            diagnostics.push(VerificationError::error(
+        ),
+        MovePriorityTableIssue::InvalidMoveEffectPriorityId { move_effect } => {
+            VerificationError::error(
                 "invalid_move_effect_priority_id",
                 "move_priorities:effect_priorities",
                 format!(
-                    "move effect priority id must be exact and untrimmed, found {:?}",
-                    entry.move_effect
+                    "move effect priority id must be exact and untrimmed, found {move_effect:?}"
                 ),
-            ));
+            )
         }
-        if !effect_priorities.insert(entry.move_effect.as_str()) {
-            diagnostics.push(VerificationError::error(
+        MovePriorityTableIssue::DuplicateMoveEffectPriority { move_effect } => {
+            VerificationError::error(
                 "duplicate_move_effect_priority",
                 "move_priorities:effect_priorities",
-                format!(
-                    "move effect priority '{}' is declared more than once",
-                    entry.move_effect
-                ),
-            ));
+                format!("move effect priority '{move_effect}' is declared more than once"),
+            )
         }
-        if entry.priority < 0 {
-            diagnostics.push(VerificationError::error(
+        MovePriorityTableIssue::InvalidMoveEffectPriority { priority, .. } => {
+            VerificationError::error(
                 "invalid_move_effect_priority",
                 "move_priorities:effect_priorities",
-                format!(
-                    "move effect priority must be nonnegative, found {}",
-                    entry.priority
-                ),
-            ));
+                format!("move effect priority must be nonnegative, found {priority}"),
+            )
         }
-    }
-    for move_data in data.moves.values() {
-        if !effect_priorities.contains(move_data.effect.as_str()) {
-            diagnostics.push(VerificationError::error(
-                "missing_move_effect_priority",
-                "move_priorities:effect_priorities",
-                format!(
-                    "move '{}' effect '{}' must have an explicit priority row",
-                    move_data.name, move_data.effect
-                ),
-            ));
-        }
-    }
-    for entry in &data.move_priorities.move_priorities {
-        if entry.r#move.trim().is_empty() || entry.r#move.trim() != entry.r#move {
-            diagnostics.push(VerificationError::error(
-                "invalid_move_priority_id",
-                "move_priorities:move_priorities",
-                format!(
-                    "move priority override id must be exact and untrimmed, found {:?}",
-                    entry.r#move
-                ),
-            ));
-        }
-        if entry.priority < 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_move_priority",
-                "move_priorities:move_priorities",
-                format!(
-                    "move priority override must be nonnegative, found {}",
-                    entry.priority
-                ),
-            ));
-        }
+        MovePriorityTableIssue::MissingMoveEffectPriority {
+            move_name,
+            move_effect,
+        } => VerificationError::error(
+            "missing_move_effect_priority",
+            "move_priorities:effect_priorities",
+            format!("move '{move_name}' effect '{move_effect}' must have an explicit priority row"),
+        ),
+        MovePriorityTableIssue::InvalidMovePriorityId { move_name } => VerificationError::error(
+            "invalid_move_priority_id",
+            "move_priorities:move_priorities",
+            format!("move priority override id must be exact and untrimmed, found {move_name:?}"),
+        ),
+        MovePriorityTableIssue::UnknownMovePriority { move_name } => VerificationError::error(
+            "unknown_move_priority",
+            "move_priorities:move_priorities",
+            format!("move priority override references missing move '{move_name}'"),
+        ),
+        MovePriorityTableIssue::InvalidMovePriority { priority, .. } => VerificationError::error(
+            "invalid_move_priority",
+            "move_priorities:move_priorities",
+            format!("move priority override must be nonnegative, found {priority}"),
+        ),
     }
 }
 
-fn verify_exact_type_category_token(
-    type_id: &str,
-    subject: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if type_id.trim().is_empty() || type_id.trim() != type_id {
-        diagnostics.push(VerificationError::error(
+fn type_category_issue_diagnostic(issue: TypeCategoryIssue) -> VerificationError {
+    match issue {
+        TypeCategoryIssue::MissingPhysical => VerificationError::error(
+            "missing_physical_type_categories",
+            "type_categories:physical",
+            "physical type categories must be declared when moves exist",
+        ),
+        TypeCategoryIssue::MissingSpecial => VerificationError::error(
+            "missing_special_type_categories",
+            "type_categories:special",
+            "special type categories must be declared when moves exist",
+        ),
+        TypeCategoryIssue::InvalidToken { table, type_id } => VerificationError::error(
             "invalid_type_category_token",
-            subject,
+            table.subject(),
             format!("type category token must be exact and untrimmed, found {type_id:?}"),
-        ));
+        ),
+        TypeCategoryIssue::Overlap { type_id } => VerificationError::error(
+            "overlapping_type_category",
+            "type_categories",
+            format!("type category '{type_id}' is declared as both physical and special"),
+        ),
     }
 }
 
-fn verify_type_multiplier(
-    multiplier: crystal_core::battle::damage::TypeMultiplier,
-    subject: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if multiplier.denominator == 0 {
-        diagnostics.push(VerificationError::error(
-            "invalid_type_multiplier_denominator",
-            subject,
-            "type multiplier denominator must be nonzero",
-        ));
+fn special_routine_catalog_issue_diagnostic(
+    issue: SpecialRoutineCatalogIssue,
+) -> VerificationError {
+    match issue {
+        SpecialRoutineCatalogIssue::EmptyRoutine { .. } => VerificationError::error(
+            "empty_special_routine",
+            "special_routines",
+            "special routine ids must be nonempty exact labels",
+        ),
+        SpecialRoutineCatalogIssue::UnknownRoutine { routine } => VerificationError::error(
+            "unknown_declared_special_routine",
+            format!("special_routines:{routine}"),
+            format!("special routine '{routine}' is not implemented by the Rust runtime"),
+        ),
+    }
+}
+
+fn roaming_pokemon_definition_issue_diagnostic(
+    issue: RoamingPokemonDefinitionIssue,
+) -> VerificationError {
+    match issue {
+        RoamingPokemonDefinitionIssue::EmptySpecies { index } => VerificationError::error(
+            "empty_roaming_pokemon_species",
+            format!("roaming_pokemon:{index}"),
+            "roaming Pokemon species id must be an exact nonempty id",
+        ),
+        RoamingPokemonDefinitionIssue::UnknownSpecies { index, species } => {
+            VerificationError::error(
+                "unknown_roaming_pokemon_species",
+                format!("roaming_pokemon:{index}"),
+                format!("roaming Pokemon references missing species '{species}'"),
+            )
+        }
+        RoamingPokemonDefinitionIssue::InvalidLevel { index } => VerificationError::error(
+            "invalid_roaming_pokemon_level",
+            format!("roaming_pokemon:{index}"),
+            "roaming Pokemon level must be nonzero",
+        ),
+    }
+}
+
+fn buena_prize_definition_issue_diagnostic(issue: BuenaPrizeDefinitionIssue) -> VerificationError {
+    match issue {
+        BuenaPrizeDefinitionIssue::EmptyItem { index } => VerificationError::error(
+            "empty_buena_prize_item",
+            format!("buena_prizes:{index}"),
+            "Buena prize item id must be an exact nonempty id",
+        ),
+        BuenaPrizeDefinitionIssue::InvalidItem { index, item_id } => VerificationError::error(
+            "invalid_buena_prize_item",
+            format!("buena_prizes:{index}"),
+            format!("Buena prize item id '{item_id}' must be an exact nonempty id"),
+        ),
+        BuenaPrizeDefinitionIssue::UnknownItem { index, item_id } => VerificationError::error(
+            "unknown_buena_prize_item",
+            format!("buena_prizes:{index}"),
+            format!("Buena prize references missing item '{item_id}'"),
+        ),
+        BuenaPrizeDefinitionIssue::InvalidCost { index } => VerificationError::error(
+            "invalid_buena_prize_cost",
+            format!("buena_prizes:{index}"),
+            "Buena prize cost must be nonzero",
+        ),
+    }
+}
+
+fn buena_password_category_issue_diagnostic(
+    issue: BuenaPasswordCategoryIssue,
+) -> VerificationError {
+    match issue {
+        BuenaPasswordCategoryIssue::EmptyId { index } => VerificationError::error(
+            "empty_buena_password_category_id",
+            format!("buena_password_categories:{index}"),
+            "Buena password category id must be an exact nonempty id",
+        ),
+        BuenaPasswordCategoryIssue::InvalidId { index, id } => VerificationError::error(
+            "invalid_buena_password_category_id",
+            format!("buena_password_categories:{index}"),
+            format!("Buena password category id '{id}' must be an exact nonempty id"),
+        ),
+        BuenaPasswordCategoryIssue::UnknownCategoryType {
+            index,
+            id,
+            category_type,
+        } => VerificationError::error(
+            "unknown_buena_password_category_type",
+            format!("buena_password_categories:{index}"),
+            format!("Buena password category '{id}' has unknown type '{category_type}'"),
+        ),
+        BuenaPasswordCategoryIssue::InvalidPoints { index } => VerificationError::error(
+            "invalid_buena_password_points",
+            format!("buena_password_categories:{index}"),
+            "Buena password category points must be nonzero",
+        ),
+        BuenaPasswordCategoryIssue::EmptyOptions { index } => VerificationError::error(
+            "empty_buena_password_options",
+            format!("buena_password_categories:{index}"),
+            "Buena password category must declare at least one option",
+        ),
+        BuenaPasswordCategoryIssue::EmptyOption {
+            index,
+            option_index,
+        } => VerificationError::error(
+            "empty_buena_password_option",
+            format!("buena_password_categories:{index}:option:{option_index}"),
+            "Buena password option must be an exact nonempty id or string",
+        ),
+        BuenaPasswordCategoryIssue::InvalidOption {
+            index,
+            option_index,
+            option,
+        } => VerificationError::error(
+            "invalid_buena_password_option",
+            format!("buena_password_categories:{index}:option:{option_index}"),
+            format!("Buena password option '{option}' must be an exact nonempty id or string"),
+        ),
+        BuenaPasswordCategoryIssue::UnknownSpecies {
+            index,
+            option_index,
+            species,
+        } => VerificationError::error(
+            "unknown_buena_password_species",
+            format!("buena_password_categories:{index}:option:{option_index}"),
+            format!("Buena password option references missing species '{species}'"),
+        ),
+        BuenaPasswordCategoryIssue::UnknownItem {
+            index,
+            option_index,
+            item_id,
+        } => VerificationError::error(
+            "unknown_buena_password_item",
+            format!("buena_password_categories:{index}:option:{option_index}"),
+            format!("Buena password option references missing item '{item_id}'"),
+        ),
+        BuenaPasswordCategoryIssue::UnknownMove {
+            index,
+            option_index,
+            move_id,
+        } => VerificationError::error(
+            "unknown_buena_password_move",
+            format!("buena_password_categories:{index}:option:{option_index}"),
+            format!("Buena password option references missing move '{move_id}'"),
+        ),
+    }
+}
+
+fn kurt_apricorn_recipe_issue_diagnostic(issue: KurtApricornRecipeIssue) -> VerificationError {
+    match issue {
+        KurtApricornRecipeIssue::EmptyApricorn { index } => VerificationError::error(
+            "empty_kurt_apricorn_recipe_apricorn",
+            format!("kurt_apricorn_recipes:{index}"),
+            "Kurt apricorn recipe apricorn id must be an exact nonempty id",
+        ),
+        KurtApricornRecipeIssue::InvalidApricorn { index, apricorn } => VerificationError::error(
+            "invalid_kurt_apricorn_recipe_apricorn",
+            format!("kurt_apricorn_recipes:{index}"),
+            format!("Kurt apricorn recipe apricorn id '{apricorn}' must be an exact nonempty id"),
+        ),
+        KurtApricornRecipeIssue::UnknownApricorn { index, apricorn } => VerificationError::error(
+            "unknown_kurt_apricorn_recipe_apricorn",
+            format!("kurt_apricorn_recipes:{index}"),
+            format!("Kurt apricorn recipe references missing apricorn item '{apricorn}'"),
+        ),
+        KurtApricornRecipeIssue::EmptyBall { index } => VerificationError::error(
+            "empty_kurt_apricorn_recipe_ball",
+            format!("kurt_apricorn_recipes:{index}"),
+            "Kurt apricorn recipe ball id must be an exact nonempty id",
+        ),
+        KurtApricornRecipeIssue::InvalidBall { index, ball } => VerificationError::error(
+            "invalid_kurt_apricorn_recipe_ball",
+            format!("kurt_apricorn_recipes:{index}"),
+            format!("Kurt apricorn recipe ball id '{ball}' must be an exact nonempty id"),
+        ),
+        KurtApricornRecipeIssue::UnknownBall { index, ball } => VerificationError::error(
+            "unknown_kurt_apricorn_recipe_ball",
+            format!("kurt_apricorn_recipes:{index}"),
+            format!("Kurt apricorn recipe references missing ball item '{ball}'"),
+        ),
+    }
+}
+
+fn shuckie_gift_issue_diagnostic(issue: ShuckieGiftIssue) -> VerificationError {
+    match issue {
+        ShuckieGiftIssue::EmptySpecies => VerificationError::error(
+            "empty_shuckie_gift_species",
+            "shuckie_gift",
+            "Shuckie gift species id must be an exact nonempty id",
+        ),
+        ShuckieGiftIssue::UnknownSpecies { species } => VerificationError::error(
+            "unknown_shuckie_gift_species",
+            "shuckie_gift",
+            format!("Shuckie gift references missing species '{species}'"),
+        ),
+        ShuckieGiftIssue::InvalidLevel => VerificationError::error(
+            "invalid_shuckie_gift_level",
+            "shuckie_gift",
+            "Shuckie gift level must be nonzero",
+        ),
+        ShuckieGiftIssue::EmptyHeldItem => VerificationError::error(
+            "empty_shuckie_gift_item",
+            "shuckie_gift",
+            "Shuckie gift held item id must be an exact nonempty id",
+        ),
+        ShuckieGiftIssue::UnknownHeldItem { held_item } => VerificationError::error(
+            "unknown_shuckie_gift_item",
+            "shuckie_gift",
+            format!("Shuckie gift references missing held item '{held_item}'"),
+        ),
+        ShuckieGiftIssue::EmptyName => VerificationError::error(
+            "empty_shuckie_gift_name",
+            "shuckie_gift",
+            "Shuckie gift nickname and original trainer name must be nonempty",
+        ),
+        ShuckieGiftIssue::EmptyEngineFlag => VerificationError::error(
+            "empty_shuckie_gift_engine_flag",
+            "shuckie_gift",
+            "Shuckie gift engine flag must be an exact nonempty id",
+        ),
+        ShuckieGiftIssue::UnknownEngineFlag { engine_flag } => VerificationError::error(
+            "unknown_shuckie_gift_engine_flag",
+            "shuckie_gift",
+            format!("Shuckie gift references missing engine flag '{engine_flag}'"),
+        ),
     }
 }
 
 fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let (music, _, _) = script_audio_catalog_ids(data);
+    diagnostics.extend(
+        special_routine_catalog_issues(&data.special_routines)
+            .into_iter()
+            .map(special_routine_catalog_issue_diagnostic),
+    );
     for routine in &data.special_routines {
-        if routine.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_special_routine",
-                "special_routines",
-                "special routine ids must be nonempty exact labels",
-            ));
-        }
-        if !is_known_special_routine(routine) {
-            diagnostics.push(VerificationError::error(
-                "unknown_declared_special_routine",
-                &format!("special_routines:{routine}"),
-                format!("special routine '{routine}' is not implemented by the Rust runtime"),
-            ));
-        }
         if routine == "FadeOutMusic" && !music.contains("MUSIC_NONE") {
             diagnostics.push(VerificationError::error(
                 "missing_special_routine_music_id",
@@ -5238,540 +6777,311 @@ fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
     if let Some(happiness_data) = &data.happiness_data {
         verify_happiness_data(happiness_data, diagnostics);
     }
-    for (index, definition) in data.roaming_pokemon.iter().enumerate() {
-        let subject = format!("roaming_pokemon:{index}");
-        if definition.species.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_roaming_pokemon_species",
-                &subject,
-                "roaming Pokemon species id must be an exact nonempty id",
-            ));
-        } else if !data.pokemon.contains_key(&definition.species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_roaming_pokemon_species",
-                &subject,
-                format!(
-                    "roaming Pokemon references missing species '{}'",
-                    definition.species
-                ),
-            ));
-        }
-        if definition.level == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_roaming_pokemon_level",
-                &subject,
-                "roaming Pokemon level must be nonzero",
-            ));
-        }
-    }
-    for (index, prize) in data.buena_prizes.iter().enumerate() {
-        let subject = format!("buena_prizes:{index}");
-        if prize.item_id.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_buena_prize_item",
-                &subject,
-                "Buena prize item id must be an exact nonempty id",
-            ));
-        } else if !data.items.contains_key(&prize.item_id) {
-            diagnostics.push(VerificationError::error(
-                "unknown_buena_prize_item",
-                &subject,
-                format!("Buena prize references missing item '{}'", prize.item_id),
-            ));
-        }
-        if prize.cost == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_buena_prize_cost",
-                &subject,
-                "Buena prize cost must be nonzero",
-            ));
-        }
-    }
-    for (index, category) in data.buena_password_categories.iter().enumerate() {
-        let subject = format!("buena_password_categories:{index}");
-        if category.id.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_buena_password_category_id",
-                &subject,
-                "Buena password category id must be an exact nonempty id",
-            ));
-        }
-        if !is_known_buena_password_category_type(&category.category_type) {
-            diagnostics.push(VerificationError::error(
-                "unknown_buena_password_category_type",
-                &subject,
-                format!(
-                    "Buena password category '{}' has unknown type '{}'",
-                    category.id, category.category_type
-                ),
-            ));
-        }
-        if category.points == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_buena_password_points",
-                &subject,
-                "Buena password category points must be nonzero",
-            ));
-        }
-        if category.options.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_buena_password_options",
-                &subject,
-                "Buena password category must declare at least one option",
-            ));
-        }
-        for (option_index, option) in category.options.iter().enumerate() {
-            let option_subject = format!("{subject}:option:{option_index}");
-            if option.trim().is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "empty_buena_password_option",
-                    &option_subject,
-                    "Buena password option must be an exact nonempty id or string",
-                ));
-                continue;
-            }
-            match category.category_type.as_str() {
-                BUENA_PASSWORD_CATEGORY_MON if !data.pokemon.contains_key(option) => {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_buena_password_species",
-                        &option_subject,
-                        format!("Buena password option references missing species '{option}'"),
-                    ));
-                }
-                BUENA_PASSWORD_CATEGORY_ITEM if !data.items.contains_key(option) => {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_buena_password_item",
-                        &option_subject,
-                        format!("Buena password option references missing item '{option}'"),
-                    ));
-                }
-                BUENA_PASSWORD_CATEGORY_MOVE if !data.moves.contains_key(option) => {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_buena_password_move",
-                        &option_subject,
-                        format!("Buena password option references missing move '{option}'"),
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    for (index, recipe) in data.kurt_apricorn_recipes.iter().enumerate() {
-        let subject = format!("kurt_apricorn_recipes:{index}");
-        if recipe.apricorn.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_kurt_apricorn_recipe_apricorn",
-                &subject,
-                "Kurt apricorn recipe apricorn id must be an exact nonempty id",
-            ));
-        } else if !data.items.contains_key(&recipe.apricorn) {
-            diagnostics.push(VerificationError::error(
-                "unknown_kurt_apricorn_recipe_apricorn",
-                &subject,
-                format!(
-                    "Kurt apricorn recipe references missing apricorn item '{}'",
-                    recipe.apricorn
-                ),
-            ));
-        }
-        if recipe.ball.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_kurt_apricorn_recipe_ball",
-                &subject,
-                "Kurt apricorn recipe ball id must be an exact nonempty id",
-            ));
-        } else if !data.items.contains_key(&recipe.ball) {
-            diagnostics.push(VerificationError::error(
-                "unknown_kurt_apricorn_recipe_ball",
-                &subject,
-                format!(
-                    "Kurt apricorn recipe references missing ball item '{}'",
-                    recipe.ball
-                ),
-            ));
-        }
-    }
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        roaming_pokemon_definition_issues(&data.roaming_pokemon, &species_ids)
+            .into_iter()
+            .map(roaming_pokemon_definition_issue_diagnostic),
+    );
+    let item_ids: BTreeSet<String> = data.items.keys().cloned().collect();
+    diagnostics.extend(
+        buena_prize_definition_issues(&data.buena_prizes, &item_ids)
+            .into_iter()
+            .map(buena_prize_definition_issue_diagnostic),
+    );
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    diagnostics.extend(
+        buena_password_category_issues(
+            &data.buena_password_categories,
+            &species_ids,
+            &item_ids,
+            &move_ids,
+        )
+        .into_iter()
+        .map(buena_password_category_issue_diagnostic),
+    );
+    diagnostics.extend(
+        kurt_apricorn_recipe_issues(&data.kurt_apricorn_recipes, &item_ids)
+            .into_iter()
+            .map(kurt_apricorn_recipe_issue_diagnostic),
+    );
     if let Some(gift) = data.shuckie_gift.as_ref() {
-        if gift.species.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_shuckie_gift_species",
-                "shuckie_gift",
-                "Shuckie gift species id must be an exact nonempty id",
-            ));
-        } else if !data.pokemon.contains_key(&gift.species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_shuckie_gift_species",
-                "shuckie_gift",
-                format!("Shuckie gift references missing species '{}'", gift.species),
-            ));
-        }
-        if gift.level == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_shuckie_gift_level",
-                "shuckie_gift",
-                "Shuckie gift level must be nonzero",
-            ));
-        }
-        if gift.held_item.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_shuckie_gift_item",
-                "shuckie_gift",
-                "Shuckie gift held item id must be an exact nonempty id",
-            ));
-        } else if !data.items.contains_key(&gift.held_item) {
-            diagnostics.push(VerificationError::error(
-                "unknown_shuckie_gift_item",
-                "shuckie_gift",
-                format!(
-                    "Shuckie gift references missing held item '{}'",
-                    gift.held_item
-                ),
-            ));
-        }
-        if gift.nickname.trim().is_empty() || gift.original_trainer_name.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_shuckie_gift_name",
-                "shuckie_gift",
-                "Shuckie gift nickname and original trainer name must be nonempty",
-            ));
-        }
         let engine_flags = script_engine_flag_ids(data);
-        if gift.got_today_engine_flag.trim().is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_shuckie_gift_engine_flag",
-                "shuckie_gift",
-                "Shuckie gift engine flag must be an exact nonempty id",
-            ));
-        } else if !engine_flags.contains(&gift.got_today_engine_flag) {
-            diagnostics.push(VerificationError::error(
-                "unknown_shuckie_gift_engine_flag",
-                "shuckie_gift",
-                format!(
-                    "Shuckie gift references missing engine flag '{}'",
-                    gift.got_today_engine_flag
-                ),
-            ));
+        diagnostics.extend(
+            shuckie_gift_issues(gift, &species_ids, &item_ids, &engine_flags)
+                .into_iter()
+                .map(shuckie_gift_issue_diagnostic),
+        );
+    }
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    diagnostics.extend(
+        dratini_move_set_issues(&data.dratini_move_sets, &move_ids)
+            .into_iter()
+            .map(dratini_move_set_issue_diagnostic),
+    );
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        odd_egg_definition_issues(&data.odd_egg_definitions, &species_ids, &move_ids)
+            .into_iter()
+            .map(odd_egg_definition_issue_diagnostic),
+    );
+    if let Some(config) = data.bug_contest_config.as_ref() {
+        let event_flags = script_event_flag_ids(data);
+        diagnostics.extend(
+            bug_contest_config_issues(config, &event_flags)
+                .into_iter()
+                .map(bug_contest_config_issue_diagnostic),
+        );
+    }
+    if let Some(rules) = data.battle_tower_rules.as_ref() {
+        let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+        diagnostics.extend(
+            battle_tower_rules_issues(rules, &species_ids)
+                .into_iter()
+                .map(battle_tower_rules_issue_diagnostic),
+        );
+    }
+    if !data.oak_ratings.is_empty() {
+        diagnostics.extend(
+            oak_rating_table_issues(&data.oak_ratings, data.pokemon.len())
+                .into_iter()
+                .map(oak_rating_table_issue_diagnostic),
+        );
+    }
+    diagnostics.extend(
+        magikarp_length_table_issues(&data.magikarp_lengths)
+            .into_iter()
+            .map(magikarp_length_table_issue_diagnostic),
+    );
+}
+
+fn oak_rating_table_issue_diagnostic(issue: OakRatingTableIssue) -> VerificationError {
+    match issue {
+        OakRatingTableIssue::InvalidFanfare { index, .. } => VerificationError::error(
+            "invalid_oak_rating_fanfare",
+            format!("oak_ratings:{index}"),
+            "Oak rating fanfare must be an exact nonempty id",
+        ),
+        OakRatingTableIssue::InvalidTextLabel { index, .. } => VerificationError::error(
+            "invalid_oak_rating_text_label",
+            format!("oak_ratings:{index}"),
+            "Oak rating textLabel must be an exact nonempty id",
+        ),
+        OakRatingTableIssue::InvalidOrder { index, .. } => VerificationError::error(
+            "invalid_oak_rating_order",
+            format!("oak_ratings:{index}"),
+            "Oak rating caughtCountLimit values must be strictly increasing",
+        ),
+        OakRatingTableIssue::IncompleteCoverage {
+            pokemon_count,
+            last_caught_count_limit,
+        } => VerificationError::error(
+            "incomplete_oak_rating_coverage",
+            "oak_ratings",
+            format!(
+                "Oak rating table only covers {last_caught_count_limit} caught Pokemon, but {pokemon_count} Pokemon are loaded"
+            ),
+        ),
+    }
+}
+
+fn battle_tower_rules_issue_diagnostic(issue: BattleTowerRulesIssue) -> VerificationError {
+    match issue {
+        BattleTowerRulesIssue::MissingRequiredPartyCount => VerificationError::error(
+            "invalid_battle_tower_required_party_count",
+            "battle_tower_rules:required_party_count",
+            "Battle Tower requiredPartyCount must be nonzero",
+        ),
+        BattleTowerRulesIssue::MissingChallengeStreakLength => VerificationError::error(
+            "invalid_battle_tower_challenge_streak_length",
+            "battle_tower_rules:challengeStreakLength",
+            "Battle Tower challengeStreakLength must be nonzero",
+        ),
+        BattleTowerRulesIssue::MissingLevelGroupSize => VerificationError::error(
+            "invalid_battle_tower_level_group_size",
+            "battle_tower_rules:levelGroupSize",
+            "Battle Tower levelGroupSize must be nonzero",
+        ),
+        BattleTowerRulesIssue::InvalidLevelGroupRange => VerificationError::error(
+            "invalid_battle_tower_level_group_range",
+            "battle_tower_rules:levelGroupRange",
+            "Battle Tower level group range must be nonzero and ordered",
+        ),
+        BattleTowerRulesIssue::InvalidFailureText { field, .. } => VerificationError::error(
+            "invalid_battle_tower_failure_text",
+            field.subject(),
+            "Battle Tower failure text ids must be exact nonempty ids",
+        ),
+        BattleTowerRulesIssue::InvalidBannedSpecies { index, .. } => VerificationError::error(
+            "invalid_battle_tower_banned_species",
+            format!("battle_tower_rules:banned_species:{index}"),
+            "Battle Tower bannedSpecies entries must be exact nonempty species ids",
+        ),
+        BattleTowerRulesIssue::DuplicateBannedSpecies { index, species_id } => {
+            VerificationError::error(
+                "duplicate_battle_tower_banned_species",
+                format!("battle_tower_rules:banned_species:{index}"),
+                format!("Battle Tower bannedSpecies repeats '{species_id}'"),
+            )
+        }
+        BattleTowerRulesIssue::UnknownBannedSpecies { index, species_id } => {
+            VerificationError::error(
+                "unknown_battle_tower_banned_species",
+                format!("battle_tower_rules:banned_species:{index}"),
+                format!("Battle Tower bannedSpecies references missing species '{species_id}'"),
+            )
         }
     }
-    for (index, move_set) in data.dratini_move_sets.iter().enumerate() {
-        let subject = format!("dratini_move_sets:{index}");
-        if move_set.moves.is_empty() {
-            diagnostics.push(VerificationError::error(
-                "empty_dratini_move_set",
-                &subject,
-                "Dratini move set must contain at least one move",
-            ));
-        }
-        for (move_index, move_id) in move_set.moves.iter().enumerate() {
-            let move_subject = format!("{subject}:move:{move_index}");
-            if move_id.trim().is_empty() {
-                diagnostics.push(VerificationError::error(
-                    "empty_dratini_move",
-                    &move_subject,
-                    "Dratini move id must be an exact nonempty id",
-                ));
-            } else if !data.moves.contains_key(move_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_dratini_move",
-                    &move_subject,
-                    format!("Dratini move set references missing move '{move_id}'"),
-                ));
-            }
-        }
-    }
-    if !data.odd_egg_definitions.is_empty() {
-        let total_probability = data
-            .odd_egg_definitions
-            .iter()
-            .map(|definition| u32::from(definition.probability))
-            .sum::<u32>();
-        if total_probability != 100 {
-            diagnostics.push(VerificationError::error(
+}
+
+fn odd_egg_definition_issue_diagnostic(issue: OddEggDefinitionIssue) -> VerificationError {
+    match issue {
+        OddEggDefinitionIssue::InvalidProbabilityTotal { total_probability } => {
+            VerificationError::error(
                 "invalid_odd_egg_probability_total",
                 "odd_egg_definitions",
                 format!("Odd Egg probabilities must sum to 100, found {total_probability}"),
-            ));
+            )
         }
-    }
-    for (index, definition) in data.odd_egg_definitions.iter().enumerate() {
-        let subject = format!("odd_egg_definitions:{index}");
-        if definition.species.trim().is_empty() || definition.species.trim() != definition.species {
-            diagnostics.push(VerificationError::error(
-                "invalid_odd_egg_species",
-                &subject,
-                "Odd Egg species must be an exact nonempty species id",
-            ));
-        } else if !data.pokemon.contains_key(&definition.species) {
-            diagnostics.push(VerificationError::error(
-                "unknown_odd_egg_species",
-                &subject,
-                format!(
-                    "Odd Egg references missing species '{}'",
-                    definition.species
-                ),
-            ));
-        }
-        if definition.moves.is_empty() || definition.moves.len() > 4 {
-            diagnostics.push(VerificationError::error(
-                "invalid_odd_egg_move_count",
-                &subject,
-                "Odd Egg move list must contain 1..=4 exact move ids",
-            ));
-        }
-        for (move_index, move_id) in definition.moves.iter().enumerate() {
-            let move_subject = format!("{subject}:move:{move_index}");
-            if move_id.trim().is_empty() || move_id.trim() != move_id {
-                diagnostics.push(VerificationError::error(
-                    "invalid_odd_egg_move",
-                    &move_subject,
-                    "Odd Egg move id must be an exact nonempty id",
-                ));
-            } else if !data.moves.contains_key(move_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_odd_egg_move",
-                    &move_subject,
-                    format!("Odd Egg references missing move '{move_id}'"),
-                ));
-            }
-        }
-        if definition.probability == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_odd_egg_probability",
-                &subject,
-                "Odd Egg probability must be positive",
-            ));
-        }
-        if definition.level == 0 || definition.level > 100 {
-            diagnostics.push(VerificationError::error(
-                "invalid_odd_egg_level",
-                &subject,
-                format!("Odd Egg level must be 1..=100, found {}", definition.level),
-            ));
-        }
-        if definition.nickname.trim().is_empty()
-            || definition.nickname.trim() != definition.nickname
-        {
-            diagnostics.push(VerificationError::error(
-                "invalid_odd_egg_nickname",
-                &subject,
-                "Odd Egg nickname must be exact nonempty pack data",
-            ));
-        }
-        if definition.original_trainer_name.trim().is_empty()
-            || definition.original_trainer_name.trim() != definition.original_trainer_name
-        {
-            diagnostics.push(VerificationError::error(
+        OddEggDefinitionIssue::InvalidSpecies { index, .. } => VerificationError::error(
+            "invalid_odd_egg_species",
+            format!("odd_egg_definitions:{index}"),
+            "Odd Egg species must be an exact nonempty species id",
+        ),
+        OddEggDefinitionIssue::UnknownSpecies { index, species_id } => VerificationError::error(
+            "unknown_odd_egg_species",
+            format!("odd_egg_definitions:{index}"),
+            format!("Odd Egg references missing species '{species_id}'"),
+        ),
+        OddEggDefinitionIssue::InvalidMoveCount { index, .. } => VerificationError::error(
+            "invalid_odd_egg_move_count",
+            format!("odd_egg_definitions:{index}"),
+            "Odd Egg move list must contain 1..=4 exact move ids",
+        ),
+        OddEggDefinitionIssue::InvalidMove {
+            index, move_index, ..
+        } => VerificationError::error(
+            "invalid_odd_egg_move",
+            format!("odd_egg_definitions:{index}:move:{move_index}"),
+            "Odd Egg move id must be an exact nonempty id",
+        ),
+        OddEggDefinitionIssue::UnknownMove {
+            index,
+            move_index,
+            move_id,
+        } => VerificationError::error(
+            "unknown_odd_egg_move",
+            format!("odd_egg_definitions:{index}:move:{move_index}"),
+            format!("Odd Egg references missing move '{move_id}'"),
+        ),
+        OddEggDefinitionIssue::InvalidProbability { index } => VerificationError::error(
+            "invalid_odd_egg_probability",
+            format!("odd_egg_definitions:{index}"),
+            "Odd Egg probability must be positive",
+        ),
+        OddEggDefinitionIssue::InvalidLevel { index, level } => VerificationError::error(
+            "invalid_odd_egg_level",
+            format!("odd_egg_definitions:{index}"),
+            format!("Odd Egg level must be 1..=100, found {level}"),
+        ),
+        OddEggDefinitionIssue::InvalidNickname { index, .. } => VerificationError::error(
+            "invalid_odd_egg_nickname",
+            format!("odd_egg_definitions:{index}"),
+            "Odd Egg nickname must be exact nonempty pack data",
+        ),
+        OddEggDefinitionIssue::InvalidOriginalTrainerName { index, .. } => {
+            VerificationError::error(
                 "invalid_odd_egg_original_trainer_name",
-                &subject,
+                format!("odd_egg_definitions:{index}"),
                 "Odd Egg original trainer name must be exact nonempty pack data",
-            ));
+            )
         }
     }
-    if let Some(config) = data.bug_contest_config.as_ref() {
-        if config.park_balls == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_bug_contest_park_balls",
-                "bug_contest_config",
-                "Bug-Catching Contest park_balls must be positive",
-            ));
-        }
-        if config.timer_seconds > 59 {
-            diagnostics.push(VerificationError::error(
-                "invalid_bug_contest_timer_seconds",
-                "bug_contest_config",
-                format!(
-                    "Bug-Catching Contest timer_seconds must be 0..=59, found {}",
-                    config.timer_seconds
-                ),
-            ));
-        }
-        if config.selected_contestant_count == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_bug_contest_selected_count",
-                "bug_contest_config",
-                "Bug-Catching Contest selected_contestant_count must be positive",
-            ));
-        }
-        if config.contestant_flags.len() < config.selected_contestant_count {
-            diagnostics.push(VerificationError::error(
-                "invalid_bug_contest_selected_count",
-                "bug_contest_config",
-                format!(
-                    "Bug-Catching Contest selected_contestant_count {} exceeds {} contestant flags",
-                    config.selected_contestant_count,
-                    config.contestant_flags.len()
-                ),
-            ));
-        }
-        let event_flags = script_event_flag_ids(data);
-        let mut seen = BTreeSet::new();
-        for (index, flag) in config.contestant_flags.iter().enumerate() {
-            let subject = format!("bug_contest_config:contestant_flags:{index}");
-            if flag.trim().is_empty() || flag.trim() != flag {
-                diagnostics.push(VerificationError::error(
-                    "empty_bug_contest_contestant_flag",
-                    &subject,
-                    "Bug-Catching Contest contestant flag must be an exact nonempty id",
-                ));
-                continue;
-            }
-            if !seen.insert(flag) {
-                diagnostics.push(VerificationError::error(
-                    "duplicate_bug_contest_contestant_flag",
-                    &subject,
-                    format!("Bug-Catching Contest contestant flag '{flag}' is duplicated"),
-                ));
-            }
-            if !event_flags.contains(flag) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_bug_contest_contestant_flag",
-                    &subject,
-                    format!("Bug-Catching Contest contestant flag '{flag}' is not loaded"),
-                ));
-            }
-        }
+}
+
+fn dratini_move_set_issue_diagnostic(issue: DratiniMoveSetIssue) -> VerificationError {
+    match issue {
+        DratiniMoveSetIssue::EmptyMoveSet { index } => VerificationError::error(
+            "empty_dratini_move_set",
+            format!("dratini_move_sets:{index}"),
+            "Dratini move set must contain at least one move",
+        ),
+        DratiniMoveSetIssue::InvalidMove {
+            index, move_index, ..
+        } => VerificationError::error(
+            "empty_dratini_move",
+            format!("dratini_move_sets:{index}:move:{move_index}"),
+            "Dratini move id must be an exact nonempty id",
+        ),
+        DratiniMoveSetIssue::UnknownMove {
+            index,
+            move_index,
+            move_id,
+        } => VerificationError::error(
+            "unknown_dratini_move",
+            format!("dratini_move_sets:{index}:move:{move_index}"),
+            format!("Dratini move set references missing move '{move_id}'"),
+        ),
     }
-    if let Some(rules) = data.battle_tower_rules.as_ref() {
-        if rules.required_party_count == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_tower_required_party_count",
-                "battle_tower_rules:required_party_count",
-                "Battle Tower requiredPartyCount must be nonzero",
-            ));
-        }
-        if rules.challenge_streak_length == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_tower_challenge_streak_length",
-                "battle_tower_rules:challengeStreakLength",
-                "Battle Tower challengeStreakLength must be nonzero",
-            ));
-        }
-        if rules.level_group_size == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_tower_level_group_size",
-                "battle_tower_rules:levelGroupSize",
-                "Battle Tower levelGroupSize must be nonzero",
-            ));
-        }
-        if rules.minimum_level_group == 0 || rules.maximum_level_group < rules.minimum_level_group {
-            diagnostics.push(VerificationError::error(
-                "invalid_battle_tower_level_group_range",
-                "battle_tower_rules:levelGroupRange",
-                "Battle Tower level group range must be nonzero and ordered",
-            ));
-        }
-        for (field, value) in [
-            (
-                "partyCountFailureText",
-                rules.party_count_failure_text.as_str(),
+}
+
+fn bug_contest_config_issue_diagnostic(issue: BugContestConfigIssue) -> VerificationError {
+    match issue {
+        BugContestConfigIssue::MissingParkBalls => VerificationError::error(
+            "invalid_bug_contest_park_balls",
+            "bug_contest_config",
+            "Bug-Catching Contest park_balls must be positive",
+        ),
+        BugContestConfigIssue::InvalidTimerSeconds { timer_seconds } => VerificationError::error(
+            "invalid_bug_contest_timer_seconds",
+            "bug_contest_config",
+            format!("Bug-Catching Contest timer_seconds must be 0..=59, found {timer_seconds}"),
+        ),
+        BugContestConfigIssue::MissingSelectedContestantCount => VerificationError::error(
+            "invalid_bug_contest_selected_count",
+            "bug_contest_config",
+            "Bug-Catching Contest selected_contestant_count must be positive",
+        ),
+        BugContestConfigIssue::SelectedContestantCountExceedsFlags {
+            selected_contestant_count,
+            contestant_flag_count,
+        } => VerificationError::error(
+            "invalid_bug_contest_selected_count",
+            "bug_contest_config",
+            format!(
+                "Bug-Catching Contest selected_contestant_count {selected_contestant_count} exceeds {contestant_flag_count} contestant flags"
             ),
-            (
-                "duplicateSpeciesFailureText",
-                rules.duplicate_species_failure_text.as_str(),
-            ),
-            (
-                "duplicateHeldItemFailureText",
-                rules.duplicate_held_item_failure_text.as_str(),
-            ),
-            ("eggFailureText", rules.egg_failure_text.as_str()),
-        ] {
-            if value.trim().is_empty() || value.trim() != value {
-                diagnostics.push(VerificationError::error(
-                    "invalid_battle_tower_failure_text",
-                    format!("battle_tower_rules:{field}"),
-                    "Battle Tower failure text ids must be exact nonempty ids",
-                ));
-            }
-        }
-        let mut seen = BTreeSet::new();
-        for (index, species_id) in rules.banned_species.iter().enumerate() {
-            let subject = format!("battle_tower_rules:banned_species:{index}");
-            if species_id.trim().is_empty() || species_id.trim() != species_id {
-                diagnostics.push(VerificationError::error(
-                    "invalid_battle_tower_banned_species",
-                    &subject,
-                    "Battle Tower bannedSpecies entries must be exact nonempty species ids",
-                ));
-                continue;
-            }
-            if !seen.insert(species_id) {
-                diagnostics.push(VerificationError::error(
-                    "duplicate_battle_tower_banned_species",
-                    &subject,
-                    format!("Battle Tower bannedSpecies repeats '{species_id}'"),
-                ));
-            }
-            if !data.pokemon.contains_key(species_id) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_battle_tower_banned_species",
-                    &subject,
-                    format!("Battle Tower bannedSpecies references missing species '{species_id}'"),
-                ));
-            }
-        }
+        ),
+        BugContestConfigIssue::InvalidContestantFlag { index, .. } => VerificationError::error(
+            "empty_bug_contest_contestant_flag",
+            format!("bug_contest_config:contestant_flags:{index}"),
+            "Bug-Catching Contest contestant flag must be an exact nonempty id",
+        ),
+        BugContestConfigIssue::DuplicateContestantFlag { index, flag } => VerificationError::error(
+            "duplicate_bug_contest_contestant_flag",
+            format!("bug_contest_config:contestant_flags:{index}"),
+            format!("Bug-Catching Contest contestant flag '{flag}' is duplicated"),
+        ),
+        BugContestConfigIssue::UnknownContestantFlag { index, flag } => VerificationError::error(
+            "unknown_bug_contest_contestant_flag",
+            format!("bug_contest_config:contestant_flags:{index}"),
+            format!("Bug-Catching Contest contestant flag '{flag}' is not loaded"),
+        ),
     }
-    if !data.oak_ratings.is_empty() {
-        let mut previous_limit = None;
-        for (index, entry) in data.oak_ratings.iter().enumerate() {
-            let subject = format!("oak_ratings:{index}");
-            if entry.fanfare.trim().is_empty() || entry.fanfare.trim() != entry.fanfare {
-                diagnostics.push(VerificationError::error(
-                    "invalid_oak_rating_fanfare",
-                    &subject,
-                    "Oak rating fanfare must be an exact nonempty id",
-                ));
-            }
-            if entry.text_label.trim().is_empty() || entry.text_label.trim() != entry.text_label {
-                diagnostics.push(VerificationError::error(
-                    "invalid_oak_rating_text_label",
-                    &subject,
-                    "Oak rating textLabel must be an exact nonempty id",
-                ));
-            }
-            if previous_limit.is_some_and(|limit| entry.caught_count_limit <= limit) {
-                diagnostics.push(VerificationError::error(
-                    "invalid_oak_rating_order",
-                    &subject,
-                    "Oak rating caughtCountLimit values must be strictly increasing",
-                ));
-            }
-            previous_limit = Some(entry.caught_count_limit);
-        }
-        if let Some(last) = data.oak_ratings.last() {
-            let pokemon_count = data.pokemon.len();
-            if pokemon_count > 0 && last.caught_count_limit < pokemon_count {
-                diagnostics.push(VerificationError::error(
-                    "incomplete_oak_rating_coverage",
-                    "oak_ratings",
-                    format!(
-                        "Oak rating table only covers {} caught Pokemon, but {} Pokemon are loaded",
-                        last.caught_count_limit, pokemon_count
-                    ),
-                ));
-            }
-        }
-    }
-    let mut previous_magikarp_threshold = None;
-    for (index, entry) in data.magikarp_lengths.iter().enumerate() {
-        let subject = format!("magikarp_lengths:{index}");
-        if entry.divisor == 0 {
-            diagnostics.push(VerificationError::error(
-                "invalid_magikarp_length_divisor",
-                &subject,
-                format!(
-                    "Magikarp length threshold {} has zero divisor",
-                    entry.threshold
-                ),
-            ));
-        }
-        if previous_magikarp_threshold.is_some_and(|previous| entry.threshold <= previous) {
-            diagnostics.push(VerificationError::error(
-                "invalid_magikarp_length_threshold_order",
-                &subject,
-                "Magikarp length thresholds must be strictly increasing",
-            ));
-        }
-        previous_magikarp_threshold = Some(entry.threshold);
+}
+
+fn magikarp_length_table_issue_diagnostic(issue: MagikarpLengthTableIssue) -> VerificationError {
+    match issue {
+        MagikarpLengthTableIssue::InvalidDivisor { index, threshold } => VerificationError::error(
+            "invalid_magikarp_length_divisor",
+            format!("magikarp_lengths:{index}"),
+            format!("Magikarp length threshold {threshold} has zero divisor"),
+        ),
+        MagikarpLengthTableIssue::InvalidThresholdOrder { index, .. } => VerificationError::error(
+            "invalid_magikarp_length_threshold_order",
+            format!("magikarp_lengths:{index}"),
+            "Magikarp length thresholds must be strictly increasing",
+        ),
     }
 }
 
@@ -5811,302 +7121,250 @@ fn script_engine_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
 
 fn verify_script_runtime_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            special_routines: data.special_routines.clone(),
+            trainer_classes: data
+                .trainers
+                .trainers
+                .iter()
+                .map(|(trainer_id, trainer)| (trainer_id.clone(), trainer.trainer_class.clone()))
+                .collect(),
+            items: data.items.keys().cloned().collect(),
+            pokemon: data.pokemon.keys().cloned().collect(),
+            phone_contacts: data.phone_contacts.0.keys().cloned().collect(),
+            special_phone_calls: data.special_phone_calls.clone(),
+            npc_trades: data.npc_trades.clone(),
+            script_labels: module.scripts.keys().cloned().collect(),
+        };
         for command in &module.script_runtime_commands {
             let subject = format!(
                 "{map_name}:{}:{}",
                 command.source_script, command.command_index
             );
-            if let Err(error) = validate_script_runtime_command(command) {
-                match error {
-                    ScriptRuntimeCommandError::UnknownCommand { command } => {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_runtime_command",
-                            &subject,
-                            format!("unknown runtime command '{command}'"),
-                        ));
-                    }
-                    ScriptRuntimeCommandError::WrongArgCount {
-                        command,
-                        expected,
-                        actual,
-                    } => {
-                        diagnostics.push(VerificationError::error(
-                            "malformed_script_runtime_command",
-                            &subject,
-                            format!("{command} expects {expected} args but found {actual}"),
-                        ));
-                    }
-                    ScriptRuntimeCommandError::EmptyArg { command }
-                    | ScriptRuntimeCommandError::PaddedArg { command, .. } => {
-                        diagnostics.push(VerificationError::error(
-                            "malformed_script_runtime_command",
-                            &subject,
-                            format!("{command} requires exact nonempty args"),
-                        ));
-                    }
-                    _ => {}
-                }
-                continue;
-            };
-            match command.command.as_str() {
-                "special" => {
-                    let special_id = &command.args[0];
-                    if !data.special_routines.contains(special_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_special_routine",
-                            &subject,
-                            format!("special references unknown routine '{special_id}'"),
-                        ));
-                    }
-                }
-                "gettrainername" => {
-                    let trainer_class = &command.args[1];
-                    let trainer_id = &command.args[2];
-                    match data.trainers.get(trainer_id) {
-                        Some(trainer) if trainer.trainer_class == *trainer_class => {}
-                        Some(trainer) => diagnostics.push(VerificationError::error(
-                            "script_trainer_name_class_mismatch",
-                            &subject,
-                            format!(
-                                "gettrainername expected trainer '{}' to have class '{}' but pack declares '{}'",
-                                trainer_id, trainer_class, trainer.trainer_class
-                            ),
-                        )),
-                        None => diagnostics.push(VerificationError::error(
-                            "unknown_script_trainer_name",
-                            &subject,
-                            format!("gettrainername references unknown trainer '{trainer_id}'"),
-                        )),
-                    }
-                }
-                "getitemname" => {
-                    let item_id = &command.args[1];
-                    if item_id != "USE_SCRIPT_VAR"
-                        && item_id != "ITEM_FROM_MEM"
-                        && !data.items.contains_key(item_id)
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_item_name",
-                            &subject,
-                            format!("getitemname references unknown item '{item_id}'"),
-                        ));
-                    }
-                }
-                "getmonname" => {
-                    let species_id = &command.args[1];
-                    if species_id != "USE_SCRIPT_VAR" && !data.pokemon.contains_key(species_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_mon_name",
-                            &subject,
-                            format!("getmonname references unknown species '{species_id}'"),
-                        ));
-                    }
-                }
-                "addcellnum" => {
-                    let contact_id = &command.args[0];
-                    if !data.phone_contacts.0.contains_key(contact_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_addcellnum_contact",
-                            &subject,
-                            format!("addcellnum references unknown contact '{contact_id}'"),
-                        ));
-                    }
-                }
-                "specialphonecall" => {
-                    let call_id = &command.args[0];
-                    if !data.special_phone_calls.contains(call_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_special_phone_call",
-                            &subject,
-                            format!("specialphonecall references unknown call '{call_id}'"),
-                        ));
-                    }
-                }
-                "checkpoke" | "pokepic" => {
-                    let species_id = &command.args[0];
-                    if !data.pokemon.contains_key(species_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_species_runtime_command",
-                            &subject,
-                            format!(
-                                "{} references unknown species '{}'",
-                                command.command, species_id
-                            ),
-                        ));
-                    }
-                }
-                "trade" => {
-                    let trade_id = &command.args[0];
-                    if !data.npc_trades.contains(trade_id) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_npc_trade",
-                            &subject,
-                            format!("trade references unknown NPC trade '{trade_id}'"),
-                        ));
-                    }
-                }
-                "cmdqueue" | "writecmdqueue" | "elevator" | "callasm" | "dba" | "dw"
-                | "checkpokemail" | "givepokemail" => {
-                    let target_label = match command.command.as_str() {
-                        "cmdqueue" => &command.args[1],
-                        _ => &command.args[0],
-                    };
-                    if target_label != "BANK(@)"
-                        && resolve_script_target_label(
-                            &module.scripts,
-                            &command.source_script,
-                            target_label,
-                        )
-                        .is_none()
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_runtime_target",
-                            &subject,
-                            format!(
-                                "{} references unknown target '{}'",
-                                command.command, target_label
-                            ),
-                        ));
-                    }
-                }
-                "stonetable" => {
-                    let target_label = &command.args[2];
-                    if resolve_script_target_label(
-                        &module.scripts,
-                        &command.source_script,
-                        target_label,
-                    )
-                    .is_none()
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_runtime_target",
-                            &subject,
-                            format!("stonetable references unknown target '{target_label}'"),
-                        ));
-                    }
-                }
-                "conditional_event" => {
-                    let target_label = &command.args[1];
-                    if resolve_script_target_label(
-                        &module.scripts,
-                        &command.source_script,
-                        target_label,
-                    )
-                    .is_none()
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_script_runtime_target",
-                            &subject,
-                            format!("conditional_event references unknown target '{target_label}'"),
-                        ));
-                    }
-                }
-                _ => {}
-            }
+            diagnostics.extend(
+                script_runtime_command_issues(command, &catalog)
+                    .into_iter()
+                    .map(|issue| script_runtime_command_issue_diagnostic(&subject, command, issue)),
+            );
         }
     }
 }
 
+fn script_runtime_command_issue_diagnostic(
+    subject: &str,
+    command: &ScriptRuntimeCommand,
+    issue: ScriptRuntimeCommandIssue,
+) -> VerificationError {
+    match issue {
+        ScriptRuntimeCommandIssue::InvalidCommand { error } => {
+            script_runtime_invalid_command_diagnostic(subject, error)
+        }
+        ScriptRuntimeCommandIssue::UnknownSpecialRoutine { special_id } => {
+            VerificationError::error(
+                "unknown_script_special_routine",
+                subject,
+                format!("special references unknown routine '{special_id}'"),
+            )
+        }
+        ScriptRuntimeCommandIssue::UnknownTrainer { trainer_id } => VerificationError::error(
+            "unknown_script_trainer_name",
+            subject,
+            format!("gettrainername references unknown trainer '{trainer_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::TrainerClassMismatch {
+            trainer_id,
+            expected_class,
+            actual_class,
+        } => VerificationError::error(
+            "script_trainer_name_class_mismatch",
+            subject,
+            format!(
+                "gettrainername expected trainer '{}' to have class '{}' but pack declares '{}'",
+                trainer_id, expected_class, actual_class
+            ),
+        ),
+        ScriptRuntimeCommandIssue::UnknownItem { item_id } => VerificationError::error(
+            "unknown_script_item_name",
+            subject,
+            format!("getitemname references unknown item '{item_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::UnknownSpecies { species_id } => {
+            let code = if command.command == "getmonname" {
+                "unknown_script_mon_name"
+            } else {
+                "unknown_script_species_runtime_command"
+            };
+            let message = if command.command == "getmonname" {
+                format!("getmonname references unknown species '{species_id}'")
+            } else {
+                format!(
+                    "{} references unknown species '{}'",
+                    command.command, species_id
+                )
+            };
+            VerificationError::error(code, subject, message)
+        }
+        ScriptRuntimeCommandIssue::UnknownPhoneContact { contact_id } => VerificationError::error(
+            "unknown_script_addcellnum_contact",
+            subject,
+            format!("addcellnum references unknown contact '{contact_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall { call_id } => VerificationError::error(
+            "unknown_script_special_phone_call",
+            subject,
+            format!("specialphonecall references unknown call '{call_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::UnknownNpcTrade { trade_id } => VerificationError::error(
+            "unknown_script_npc_trade",
+            subject,
+            format!("trade references unknown NPC trade '{trade_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::UnknownTarget { target_label } => VerificationError::error(
+            "unknown_script_runtime_target",
+            subject,
+            format!(
+                "{} references unknown target '{}'",
+                command.command, target_label
+            ),
+        ),
+    }
+}
+
+fn script_runtime_invalid_command_diagnostic(
+    subject: &str,
+    error: ScriptRuntimeCommandError,
+) -> VerificationError {
+    match error {
+        ScriptRuntimeCommandError::UnknownCommand { command } => VerificationError::error(
+            "unknown_script_runtime_command",
+            subject,
+            format!("unknown runtime command '{command}'"),
+        ),
+        ScriptRuntimeCommandError::WrongArgCount {
+            command,
+            expected,
+            actual,
+        } => VerificationError::error(
+            "malformed_script_runtime_command",
+            subject,
+            format!("{command} expects {expected} args but found {actual}"),
+        ),
+        ScriptRuntimeCommandError::EmptyArg { command }
+        | ScriptRuntimeCommandError::PaddedArg { command, .. } => VerificationError::error(
+            "malformed_script_runtime_command",
+            subject,
+            format!("{command} requires exact nonempty args"),
+        ),
+        error => VerificationError::error(
+            "malformed_script_runtime_command",
+            subject,
+            error.to_string(),
+        ),
+    }
+}
+
 fn verify_map_section_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let script_counts = map_script_section_command_arg_counts();
-    let event_counts = map_event_section_command_arg_counts();
     for (map_name, module) in &data.maps {
+        let script_labels: BTreeSet<String> = module.scripts.keys().cloned().collect();
         for command in &module.map_script_section_commands {
             let subject = format!("{map_name}:map_scripts:{}", command.command_index);
-            let Some(expected) = script_counts.get(command.command.as_str()) else {
-                diagnostics.push(VerificationError::error(
-                    "unknown_map_script_section_command",
-                    &subject,
-                    format!("unknown map script section command '{}'", command.command),
-                ));
-                continue;
-            };
-            if !expected.contains(&command.args.len()) {
-                diagnostics.push(VerificationError::error(
-                    "malformed_map_script_section_command",
-                    &subject,
-                    format!(
-                        "{} expects one of {:?} args but found {}",
-                        command.command,
-                        expected,
-                        command.args.len()
-                    ),
-                ));
-                continue;
-            }
-            match command.command.as_str() {
-                "scene_script" => {
-                    let script = &command.args[0];
-                    if !module.scripts.contains_key(script) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_map_scene_script",
-                            &subject,
-                            format!("scene_script references unknown script '{script}'"),
-                        ));
-                    }
-                }
-                "callback" => {
-                    let script = &command.args[1];
-                    if !module.scripts.contains_key(script) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_map_callback_script",
-                            &subject,
-                            format!("callback references unknown script '{script}'"),
-                        ));
-                    }
-                }
-                _ => {}
-            }
+            diagnostics.extend(
+                map_script_section_command_issues(command, &script_labels)
+                    .into_iter()
+                    .map(|issue| {
+                        map_script_section_command_issue_diagnostic(&subject, command, issue)
+                    }),
+            );
         }
         for command in &module.map_event_section_commands {
             let subject = format!("{map_name}:map_events:{}", command.command_index);
-            let Some(expected) = event_counts.get(command.command.as_str()) else {
-                diagnostics.push(VerificationError::error(
-                    "unknown_map_event_section_command",
-                    &subject,
-                    format!("unknown map event section command '{}'", command.command),
-                ));
-                continue;
-            };
-            if !expected.contains(&command.args.len()) {
-                diagnostics.push(VerificationError::error(
-                    "malformed_map_event_section_command",
-                    &subject,
-                    format!(
-                        "{} expects one of {:?} args but found {}",
-                        command.command,
-                        expected,
-                        command.args.len()
-                    ),
-                ));
-                continue;
-            }
-            match command.command.as_str() {
-                "coord_event" | "bg_event" => {
-                    let script = &command.args[3];
-                    if !module.scripts.contains_key(script) {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_map_event_script",
-                            &subject,
-                            format!("{} references unknown script '{script}'", command.command),
-                        ));
-                    }
-                }
-                "object_event" => {
-                    let script = &command.args[11];
-                    if script != "-1"
-                        && script != "ObjectEvent"
-                        && !module.scripts.contains_key(script)
-                    {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_map_object_event_script",
-                            &subject,
-                            format!("object_event references unknown script '{script}'"),
-                        ));
-                    }
-                }
-                _ => {}
-            }
+            diagnostics.extend(
+                map_event_section_command_issues(command, &script_labels)
+                    .into_iter()
+                    .map(|issue| {
+                        map_event_section_command_issue_diagnostic(&subject, command, issue)
+                    }),
+            );
+        }
+    }
+}
+
+fn map_script_section_command_issue_diagnostic(
+    subject: &str,
+    command: &MapScriptSectionCommand,
+    issue: MapScriptSectionCommandIssue,
+) -> VerificationError {
+    match issue {
+        MapScriptSectionCommandIssue::UnknownCommand => VerificationError::error(
+            "unknown_map_script_section_command",
+            subject,
+            format!("unknown map script section command '{}'", command.command),
+        ),
+        MapScriptSectionCommandIssue::WrongArgCount { expected, actual } => {
+            VerificationError::error(
+                "malformed_map_script_section_command",
+                subject,
+                format!(
+                    "{} expects one of {:?} args but found {}",
+                    command.command, expected, actual
+                ),
+            )
+        }
+        MapScriptSectionCommandIssue::InvalidArg { arg } => VerificationError::error(
+            "malformed_map_script_section_command",
+            subject,
+            format!("{} has invalid exact operand '{arg}'", command.command),
+        ),
+        MapScriptSectionCommandIssue::UnknownSceneScript { script } => VerificationError::error(
+            "unknown_map_scene_script",
+            subject,
+            format!("scene_script references unknown script '{script}'"),
+        ),
+        MapScriptSectionCommandIssue::UnknownCallbackScript { script } => VerificationError::error(
+            "unknown_map_callback_script",
+            subject,
+            format!("callback references unknown script '{script}'"),
+        ),
+    }
+}
+
+fn map_event_section_command_issue_diagnostic(
+    subject: &str,
+    command: &MapEventSectionCommand,
+    issue: MapEventSectionCommandIssue,
+) -> VerificationError {
+    match issue {
+        MapEventSectionCommandIssue::UnknownCommand => VerificationError::error(
+            "unknown_map_event_section_command",
+            subject,
+            format!("unknown map event section command '{}'", command.command),
+        ),
+        MapEventSectionCommandIssue::WrongArgCount { expected, actual } => {
+            VerificationError::error(
+                "malformed_map_event_section_command",
+                subject,
+                format!(
+                    "{} expects one of {:?} args but found {}",
+                    command.command, expected, actual
+                ),
+            )
+        }
+        MapEventSectionCommandIssue::InvalidArg { arg } => VerificationError::error(
+            "malformed_map_event_section_command",
+            subject,
+            format!("{} has invalid exact operand '{arg}'", command.command),
+        ),
+        MapEventSectionCommandIssue::UnknownEventScript { script } => VerificationError::error(
+            "unknown_map_event_script",
+            subject,
+            format!("{} references unknown script '{script}'", command.command),
+        ),
+        MapEventSectionCommandIssue::UnknownObjectEventScript { script } => {
+            VerificationError::error(
+                "unknown_map_object_event_script",
+                subject,
+                format!("object_event references unknown script '{script}'"),
+            )
         }
     }
 }
@@ -6137,94 +7395,6 @@ fn is_text_script(payload: &Value) -> bool {
             )
         )
     })
-}
-
-fn verify_script_direction(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    direction: Option<&str>,
-) {
-    let Some(direction) = direction else {
-        diagnostics.push(VerificationError::error(
-            "missing_script_direction",
-            subject,
-            "movement command is missing a direction",
-        ));
-        return;
-    };
-    if let Err(error) = parse_script_direction(direction) {
-        diagnostics.push(VerificationError::error(
-            "unknown_script_direction",
-            subject,
-            error.to_string(),
-        ));
-    }
-}
-
-fn verify_required_object_id(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    command: &ScriptObjectCommand,
-    object_ids: &BTreeSet<&str>,
-    allow_player: bool,
-) {
-    let Some(object_id) = command.object_id.as_deref() else {
-        diagnostics.push(VerificationError::error(
-            "script_object_missing_id",
-            subject,
-            format!("{} command is missing an object id", command.command),
-        ));
-        return;
-    };
-    if allow_player && object_id == "PLAYER" {
-        return;
-    }
-    if object_id == "LAST_TALKED" {
-        return;
-    }
-    if !object_ids.contains(object_id) {
-        diagnostics.push(VerificationError::error(
-            "unknown_script_object_id",
-            subject,
-            format!(
-                "{} references missing object id '{object_id}'",
-                command.command
-            ),
-        ));
-    }
-}
-
-fn verify_required_target_object_id(
-    diagnostics: &mut Vec<VerificationError>,
-    subject: &str,
-    command: &ScriptObjectCommand,
-    object_ids: &BTreeSet<&str>,
-    allow_player: bool,
-) {
-    let Some(object_id) = command.target_object_id.as_deref() else {
-        diagnostics.push(VerificationError::error(
-            "script_object_missing_target_id",
-            subject,
-            format!("{} command is missing a target object id", command.command),
-        ));
-        return;
-    };
-    if allow_player && object_id == "PLAYER" {
-        return;
-    }
-    if object_id == "LAST_TALKED" {
-        return;
-    }
-    if !object_ids.contains(object_id) {
-        diagnostics.push(VerificationError::error(
-            "unknown_script_object_id",
-            subject,
-            format!(
-                "{} references missing target object id '{object_id}'",
-                command.command
-            ),
-        ));
-    }
 }
 
 fn script_audio_catalog_ids(
@@ -6303,118 +7473,101 @@ fn verify_scene_token(
 }
 
 fn verify_battle_reward_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.battle_reward_rules == BattleRewardRules::default() {
-        return;
-    }
-    if data.battle_reward_rules.max_level == 0 {
-        diagnostics.push(VerificationError::error(
-            "invalid_battle_reward_rule",
-            "battle_reward_rules:max_level",
-            "battle reward rules maxLevel must be nonzero",
-        ));
-    }
-    if data.battle_reward_rules.wild_exp_divisor <= 0 {
-        diagnostics.push(VerificationError::error(
-            "invalid_battle_reward_rule",
-            "battle_reward_rules:wild_exp_divisor",
-            "battle reward rules wildExpDivisor must be positive",
-        ));
-    }
-    if data.battle_reward_rules.trainer_exp_numerator <= 0 {
-        diagnostics.push(VerificationError::error(
-            "invalid_battle_reward_rule",
-            "battle_reward_rules:trainer_exp_numerator",
-            "battle reward rules trainerExpNumerator must be positive",
-        ));
-    }
-    if data.battle_reward_rules.trainer_exp_denominator <= 0 {
-        diagnostics.push(VerificationError::error(
-            "invalid_battle_reward_rule",
-            "battle_reward_rules:trainer_exp_denominator",
-            "battle reward rules trainerExpDenominator must be positive",
-        ));
-    }
+    diagnostics.extend(
+        battle_reward_rules_issues(&data.battle_reward_rules)
+            .into_iter()
+            .map(battle_reward_rules_issue_diagnostic),
+    );
+}
+
+fn battle_reward_rules_issue_diagnostic(issue: BattleRewardRulesIssue) -> VerificationError {
+    let message = match issue {
+        BattleRewardRulesIssue::MissingMaxLevel => "battle reward rules maxLevel must be nonzero",
+        BattleRewardRulesIssue::InvalidWildExpDivisor { .. } => {
+            "battle reward rules wildExpDivisor must be positive"
+        }
+        BattleRewardRulesIssue::InvalidTrainerExpNumerator { .. } => {
+            "battle reward rules trainerExpNumerator must be positive"
+        }
+        BattleRewardRulesIssue::InvalidTrainerExpDenominator { .. } => {
+            "battle reward rules trainerExpDenominator must be positive"
+        }
+    };
+    VerificationError::error(
+        "invalid_battle_reward_rule",
+        issue.field().subject(),
+        message,
+    )
 }
 
 fn verify_battle_escape_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.pokemon.is_empty() {
-        return;
-    }
-    if data.battle_escape_rules == BattleEscapeRules::default() {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        battle_escape_rules_issues(&data.battle_escape_rules, !data.pokemon.is_empty())
+            .into_iter()
+            .map(battle_escape_rules_issue_diagnostic),
+    );
+}
+
+fn battle_escape_rules_issue_diagnostic(issue: BattleEscapeRulesIssue) -> VerificationError {
+    match issue {
+        BattleEscapeRulesIssue::Missing => VerificationError::error(
             "missing_battle_escape_rules",
             "battle_escape_rules",
             "battle escape rules must be declared when Pokemon exist",
-        ));
-        return;
-    }
-    if data.battle_escape_rules.player_speed_multiplier == 0 {
-        diagnostics.push(VerificationError::error(
+        ),
+        BattleEscapeRulesIssue::MissingPlayerSpeedMultiplier => VerificationError::error(
             "invalid_battle_escape_rule",
             "battle_escape_rules:player_speed_multiplier",
             "battle escape player speed multiplier must be nonzero",
-        ));
-    }
-    if data.battle_escape_rules.enemy_speed_divisor == 0 {
-        diagnostics.push(VerificationError::error(
+        ),
+        BattleEscapeRulesIssue::MissingEnemySpeedDivisor => VerificationError::error(
             "invalid_battle_escape_rule",
             "battle_escape_rules:enemy_speed_divisor",
             "battle escape enemy speed divisor must be nonzero",
-        ));
-    }
-    if data.battle_escape_rules.rng_roll_values == 0
-        || data.battle_escape_rules.rng_roll_values > u16::from(u8::MAX) + 1
-    {
-        diagnostics.push(VerificationError::error(
+        ),
+        BattleEscapeRulesIssue::InvalidRngRollValues { .. } => VerificationError::error(
             "invalid_battle_escape_rule",
             "battle_escape_rules:rng_roll_values",
             "battle escape rng roll values must be in 1..=256",
-        ));
+        ),
     }
 }
 
 fn verify_step_event_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.step_event_rules == StepEventRules::default() {
-        return;
-    }
-    if data.step_event_rules.poison_step_interval == 0 {
-        diagnostics.push(VerificationError::error(
+    diagnostics.extend(
+        step_event_rules_issues(&data.step_event_rules)
+            .into_iter()
+            .map(step_event_rules_issue_diagnostic),
+    );
+}
+
+fn step_event_rules_issue_diagnostic(issue: StepEventRulesIssue) -> VerificationError {
+    match issue {
+        StepEventRulesIssue::MissingPoisonStepInterval => VerificationError::error(
             "invalid_step_event_rule",
             "step_event_rules:poison_step_interval",
             "step event rules poisonStepInterval must be nonzero",
-        ));
-    }
-    if data.step_event_rules.poison_status.trim().is_empty()
-        || data.step_event_rules.poison_status.trim() != data.step_event_rules.poison_status
-    {
-        diagnostics.push(VerificationError::error(
+        ),
+        StepEventRulesIssue::InvalidPoisonStatus { .. } => VerificationError::error(
             "invalid_step_event_rule",
             "step_event_rules:poison_status",
             "step event rules poisonStatus must be an exact nonempty status id",
-        ));
-    }
-    if data.step_event_rules.egg_nickname.trim().is_empty()
-        || data.step_event_rules.egg_nickname.trim() != data.step_event_rules.egg_nickname
-    {
-        diagnostics.push(VerificationError::error(
+        ),
+        StepEventRulesIssue::InvalidEggNickname { .. } => VerificationError::error(
             "invalid_step_event_rule",
             "step_event_rules:egg_nickname",
             "step event rules eggNickname must be an exact nonempty nickname token",
-        ));
-    }
-    if data.step_event_rules.happiness_step_counter_target
-        > data.step_event_rules.happiness_step_counter_mask
-    {
-        diagnostics.push(VerificationError::error(
+        ),
+        StepEventRulesIssue::HappinessTargetOutsideMask { .. } => VerificationError::error(
             "invalid_step_event_rule",
             "step_event_rules:happiness_step_counter_target",
             "step event rules happinessStepCounterTarget must fit inside happinessStepCounterMask",
-        ));
+        ),
     }
 }
 
 fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let referenced_groups: Vec<(&String, &str)> = data
+    let referenced_groups: Vec<(String, String)> = data
         .map_attributes
         .iter()
         .chain(
@@ -6427,481 +7580,314 @@ fn verify_fishing(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) 
                 .fishing_group
                 .as_deref()
                 .filter(|group| *group != crystal_core::world::fishing::FISHGROUP_NONE)
-                .map(|group| (map_name, group))
+                .map(|group| (map_name.clone(), group.to_string()))
         })
         .collect();
-    if data.fishing.groups.is_empty() {
-        for (map_name, group) in referenced_groups {
-            diagnostics.push(VerificationError::error(
-                "missing_fishing_catalog",
-                map_name,
-                format!("map references fishing group '{group}' but no fishing catalog is loaded"),
-            ));
-        }
-        return;
-    }
-    if data.fishing.rod_items.is_empty() {
-        diagnostics.push(VerificationError::error(
+    let item_ids: BTreeSet<String> = data.items.keys().cloned().collect();
+    let species_ids: BTreeSet<String> = data.pokemon.keys().cloned().collect();
+    diagnostics.extend(
+        fishing_catalog_issues(&data.fishing, &referenced_groups, &item_ids, &species_ids)
+            .into_iter()
+            .map(fishing_catalog_issue_diagnostic),
+    );
+}
+
+fn fishing_catalog_issue_diagnostic(issue: FishingCatalogIssue) -> VerificationError {
+    match issue {
+        FishingCatalogIssue::MissingCatalog { map_name, group } => VerificationError::error(
+            "missing_fishing_catalog",
+            map_name,
+            format!("map references fishing group '{group}' but no fishing catalog is loaded"),
+        ),
+        FishingCatalogIssue::MissingRodItems => VerificationError::error(
             "missing_fishing_rod_items",
             "fishing",
             "fishing catalog must declare exact item id to rod rules",
-        ));
-    }
-    let item_ids: BTreeSet<&str> = data.items.keys().map(String::as_str).collect();
-    let mut rod_item_ids = BTreeSet::new();
-    for rule in &data.fishing.rod_items {
-        let subject = format!("fishing:rod_items:{}", rule.item_id);
-        if !rod_item_ids.insert(rule.item_id.as_str()) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_fishing_rod_item_id",
-                &subject,
-                format!("fishing rod item rules repeat item id '{}'", rule.item_id),
-            ));
+        ),
+        FishingCatalogIssue::InvalidRodItemId { item_id } => VerificationError::error(
+            "invalid_fishing_rod_item_id",
+            format!("fishing:rod_items:{item_id}"),
+            "fishing rod item rule item id must be an exact nonempty item id",
+        ),
+        FishingCatalogIssue::DuplicateRodItemId { item_id } => VerificationError::error(
+            "duplicate_fishing_rod_item_id",
+            format!("fishing:rod_items:{item_id}"),
+            format!("fishing rod item rules repeat item id '{item_id}'"),
+        ),
+        FishingCatalogIssue::UnknownRodItemRod { item_id, rod } => VerificationError::error(
+            "unknown_fishing_rod_item_rod",
+            format!("fishing:rod_items:{item_id}"),
+            format!("fishing rod item rule references unknown rod '{rod}'"),
+        ),
+        FishingCatalogIssue::UnknownRodItemId { item_id } => VerificationError::error(
+            "unknown_fishing_rod_item_id",
+            format!("fishing:rod_items:{item_id}"),
+            format!("fishing rod item rule references missing item id '{item_id}'"),
+        ),
+        FishingCatalogIssue::InvalidMapFishingGroup { map_name, group } => {
+            VerificationError::error(
+                "invalid_map_fishing_group",
+                map_name,
+                format!("map fishing group '{group}' must be an exact nonempty fish group id"),
+            )
         }
-        if !is_known_fishing_rod(&rule.rod) {
-            diagnostics.push(VerificationError::error(
-                "unknown_fishing_rod_item_rod",
-                &subject,
-                format!(
-                    "fishing rod item rule references unknown rod '{}'",
-                    rule.rod
-                ),
-            ));
-        }
-        if !item_ids.contains(rule.item_id.as_str()) {
-            diagnostics.push(VerificationError::error(
-                "unknown_fishing_rod_item_id",
-                &subject,
-                format!(
-                    "fishing rod item rule references missing item id '{}'",
-                    rule.item_id
-                ),
-            ));
-        }
-    }
-    for (map_name, group) in referenced_groups {
-        if !data.fishing.groups.contains_key(group) {
-            diagnostics.push(VerificationError::error(
+        FishingCatalogIssue::UnknownMapFishingGroup { map_name, group } => {
+            VerificationError::error(
                 "unknown_map_fishing_group",
                 map_name,
                 format!("map references missing fishing group '{group}'"),
-            ));
+            )
         }
-    }
-    for (group_id, group) in &data.fishing.groups {
-        for (rod, table) in &group.rod_tables {
-            if !is_known_fishing_rod(rod) {
-                diagnostics.push(VerificationError::error(
-                    "unknown_fishing_rod",
-                    group_id,
-                    format!("fishing group references unknown rod '{rod}'"),
-                ));
-            }
-            for slot in &table.slots {
-                if let Some(species) = slot.species.as_deref()
-                    && !data.pokemon.contains_key(species)
-                {
-                    diagnostics.push(VerificationError::error(
-                        "unknown_fishing_species",
-                        group_id,
-                        format!("fishing slot references missing species '{species}'"),
-                    ));
-                }
-                if let Some(time_group) = slot.time_group {
-                    let Some(entry) = data.fishing.time_groups.get(time_group) else {
-                        diagnostics.push(VerificationError::error(
-                            "unknown_fishing_time_group",
-                            group_id,
-                            format!("fishing slot references missing time group {time_group}"),
-                        ));
-                        continue;
-                    };
-                    for species in [&entry.day_species, &entry.night_species] {
-                        if !data.pokemon.contains_key(species) {
-                            diagnostics.push(VerificationError::error(
-                                "unknown_fishing_species",
-                                group_id,
-                                format!(
-                                    "fishing time group references missing species '{species}'"
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
+        FishingCatalogIssue::InvalidFishingGroupId { group_id } => VerificationError::error(
+            "invalid_fishing_group_id",
+            group_id,
+            "fishing group id must be exact and nonempty",
+        ),
+        FishingCatalogIssue::UnknownFishingRod { group_id, rod } => VerificationError::error(
+            "unknown_fishing_rod",
+            group_id,
+            format!("fishing group references unknown rod '{rod}'"),
+        ),
+        FishingCatalogIssue::EmptyFishingRodTable { group_id, rod } => VerificationError::error(
+            "empty_fishing_rod_table",
+            group_id,
+            format!("fishing group rod '{rod}' must declare slots"),
+        ),
+        FishingCatalogIssue::InvalidFishingSlotThreshold {
+            group_id,
+            rod,
+            slot_index,
+            threshold,
+        } => VerificationError::error(
+            "invalid_fishing_slot_threshold",
+            group_id,
+            format!("fishing {rod} slot {slot_index} has invalid threshold {threshold}"),
+        ),
+        FishingCatalogIssue::UnorderedFishingSlotThreshold {
+            group_id,
+            rod,
+            slot_index,
+            threshold,
+            previous,
+        } => VerificationError::error(
+            "unordered_fishing_slot_threshold",
+            group_id,
+            format!(
+                "fishing {rod} slot {slot_index} threshold {threshold} is below previous {previous}"
+            ),
+        ),
+        FishingCatalogIssue::IncompleteFishingRodTable {
+            group_id,
+            rod,
+            last_threshold,
+        } => VerificationError::error(
+            "incomplete_fishing_rod_table",
+            group_id,
+            format!("fishing {rod} table must end at threshold 255, found {last_threshold}"),
+        ),
+        FishingCatalogIssue::InvalidFishingSlotLevel {
+            group_id,
+            rod,
+            slot_index,
+            level,
+        } => VerificationError::error(
+            "invalid_fishing_slot_level",
+            group_id,
+            format!("fishing {rod} slot {slot_index} has invalid direct species level {level}"),
+        ),
+        FishingCatalogIssue::MissingFishingSlotSpecies {
+            group_id,
+            rod,
+            slot_index,
+        } => VerificationError::error(
+            "missing_fishing_slot_species",
+            group_id,
+            format!("fishing {rod} slot {slot_index} must declare species or time group"),
+        ),
+        FishingCatalogIssue::InvalidFishingSpecies { group_id, species } => {
+            VerificationError::error(
+                "invalid_fishing_species",
+                group_id,
+                format!("fishing slot species '{species}' must be an exact nonempty species id"),
+            )
         }
-    }
-    let mut seen_swarm_rules = BTreeSet::new();
-    for (index, rule) in data.fishing.swarm_rules.iter().enumerate() {
-        let subject = format!("fishing:swarm_rules:{index}");
-        if rule.daily_flag_bit >= u8::BITS as u8 {
-            diagnostics.push(VerificationError::error(
-                "invalid_fishing_swarm_flag_bit",
-                &subject,
+        FishingCatalogIssue::UnknownFishingSpecies { group_id, species } => {
+            VerificationError::error(
+                "unknown_fishing_species",
+                group_id,
+                format!("fishing slot references missing species '{species}'"),
+            )
+        }
+        FishingCatalogIssue::UnknownFishingTimeGroup {
+            group_id,
+            time_group,
+        } => VerificationError::error(
+            "unknown_fishing_time_group",
+            group_id,
+            format!("fishing slot references missing time group {time_group}"),
+        ),
+        FishingCatalogIssue::InvalidFishingTimeGroupSpecies { index, species } => {
+            VerificationError::error(
+                "invalid_fishing_time_group_species",
+                format!("fishing:time_groups:{index}"),
                 format!(
-                    "fishing swarm rule dailyFlagBit must be 0..=7, found {}",
-                    rule.daily_flag_bit
+                    "fishing time group species '{species}' must be an exact nonempty species id"
                 ),
-            ));
+            )
         }
-        if rule.base_group.trim().is_empty() || rule.base_group.trim() != rule.base_group {
-            diagnostics.push(VerificationError::error(
-                "invalid_fishing_swarm_base_group",
-                &subject,
-                "fishing swarm baseGroup must be an exact nonempty fish group id",
-            ));
-        } else if !data.fishing.groups.contains_key(&rule.base_group) {
-            diagnostics.push(VerificationError::error(
+        FishingCatalogIssue::UnknownFishingTimeGroupSpecies { index, species } => {
+            VerificationError::error(
+                "unknown_fishing_time_group_species",
+                format!("fishing:time_groups:{index}"),
+                format!("fishing time group references missing species '{species}'"),
+            )
+        }
+        FishingCatalogIssue::InvalidSwarmFlagBit {
+            index,
+            daily_flag_bit,
+        } => VerificationError::error(
+            "invalid_fishing_swarm_flag_bit",
+            format!("fishing:swarm_rules:{index}"),
+            format!("fishing swarm rule dailyFlagBit must be 0..=7, found {daily_flag_bit}"),
+        ),
+        FishingCatalogIssue::InvalidSwarmBaseGroup { index } => VerificationError::error(
+            "invalid_fishing_swarm_base_group",
+            format!("fishing:swarm_rules:{index}"),
+            "fishing swarm baseGroup must be an exact nonempty fish group id",
+        ),
+        FishingCatalogIssue::UnknownSwarmBaseGroup { index, base_group } => {
+            VerificationError::error(
                 "unknown_fishing_swarm_base_group",
-                &subject,
-                format!(
-                    "fishing swarm rule references missing base group '{}'",
-                    rule.base_group
-                ),
-            ));
+                format!("fishing:swarm_rules:{index}"),
+                format!("fishing swarm rule references missing base group '{base_group}'"),
+            )
         }
-        if rule.swarm_group.trim().is_empty() || rule.swarm_group.trim() != rule.swarm_group {
-            diagnostics.push(VerificationError::error(
-                "invalid_fishing_swarm_group",
-                &subject,
-                "fishing swarm swarmGroup must be an exact nonempty fish group id",
-            ));
-        } else if !data.fishing.groups.contains_key(&rule.swarm_group) {
-            diagnostics.push(VerificationError::error(
-                "unknown_fishing_swarm_group",
-                &subject,
-                format!(
-                    "fishing swarm rule references missing swarm group '{}'",
-                    rule.swarm_group
-                ),
-            ));
-        }
-        if !seen_swarm_rules.insert((rule.daily_flag_bit, rule.swarm, rule.base_group.as_str())) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_fishing_swarm_rule",
-                &subject,
-                "fishing swarm rules must not repeat the same dailyFlagBit, swarm, and baseGroup",
-            ));
-        }
+        FishingCatalogIssue::InvalidSwarmGroup { index } => VerificationError::error(
+            "invalid_fishing_swarm_group",
+            format!("fishing:swarm_rules:{index}"),
+            "fishing swarm swarmGroup must be an exact nonempty fish group id",
+        ),
+        FishingCatalogIssue::UnknownSwarmGroup { index, swarm_group } => VerificationError::error(
+            "unknown_fishing_swarm_group",
+            format!("fishing:swarm_rules:{index}"),
+            format!("fishing swarm rule references missing swarm group '{swarm_group}'"),
+        ),
+        FishingCatalogIssue::DuplicateSwarmRule { index } => VerificationError::error(
+            "duplicate_fishing_swarm_rule",
+            format!("fishing:swarm_rules:{index}"),
+            "fishing swarm rules must not repeat the same dailyFlagBit, swarm, and baseGroup",
+        ),
     }
 }
 
 fn verify_field_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.field_moves == FieldMoveCatalog::default() {
-        return;
-    }
-    verify_field_move_block_rule(data, "field_moves:cut", &data.field_moves.cut, diagnostics);
-    verify_field_move_block_rule(
-        data,
-        "field_moves:whirlpool",
-        &data.field_moves.whirlpool,
-        diagnostics,
-    );
-    verify_field_move_flag_rule(
-        data,
-        "field_moves:strength",
-        &data.field_moves.strength,
-        diagnostics,
-    );
-    verify_field_move_flag_rule(
-        data,
-        "field_moves:flash",
-        &data.field_moves.flash,
-        diagnostics,
-    );
-    verify_field_move_travel_rule(
-        data,
-        "field_moves:surf",
-        &data.field_moves.surf,
-        diagnostics,
-    );
-    verify_field_move_travel_rule(
-        data,
-        "field_moves:waterfall",
-        &data.field_moves.waterfall,
-        diagnostics,
-    );
-    verify_field_move_rule(data, "field_moves:fly", &data.field_moves.fly, diagnostics);
-    verify_field_move_move_rule(data, "field_moves:dig", &data.field_moves.dig, diagnostics);
-    verify_field_move_move_rule(
-        data,
-        "field_moves:teleport",
-        &data.field_moves.teleport,
-        diagnostics,
-    );
-    verify_field_escape_item_rule(data, diagnostics);
-    verify_field_repel_item_rule(data, diagnostics);
-    verify_field_item_rule(
-        data,
-        "field_moves:bicycle",
-        &data.field_moves.bicycle,
-        diagnostics,
-    );
-    verify_field_item_rule(
-        data,
-        "field_moves:itemfinder",
-        &data.field_moves.itemfinder,
-        diagnostics,
-    );
-    verify_field_item_rule(
-        data,
-        "field_moves:squirtbottle",
-        &data.field_moves.squirtbottle,
-        diagnostics,
-    );
-    verify_field_item_rule(
-        data,
-        "field_moves:coin_case",
-        &data.field_moves.coin_case,
-        diagnostics,
-    );
-    verify_field_item_rule(
-        data,
-        "field_moves:blue_card",
-        &data.field_moves.blue_card,
-        diagnostics,
-    );
-    verify_field_item_rule(
-        data,
-        "field_moves:town_map",
-        &data.field_moves.town_map,
-        diagnostics,
+    let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    diagnostics.extend(
+        field_move_catalog_issues(&data.field_moves, &move_ids, &data.items)
+            .into_iter()
+            .map(field_move_catalog_issue_diagnostic),
     );
 }
 
-fn verify_field_move_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldMoveRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
-    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
-}
-
-fn verify_field_move_move_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldMoveMoveRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
-}
-
-fn verify_field_escape_item_rule(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let rule = &data.field_moves.escape_rope;
-    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
-        diagnostics.push(VerificationError::error(
-            "invalid_field_escape_item_id",
-            "field_moves:escape_rope",
-            "field escape item id must be exact and nonempty",
-        ));
-    }
-    if rule.escape_rope_mode.trim().is_empty()
-        || rule.escape_rope_mode.trim() != rule.escape_rope_mode
-    {
-        diagnostics.push(VerificationError::error(
-            "invalid_field_escape_item_mode",
-            "field_moves:escape_rope",
-            "field escape item mode must be exact and nonempty",
-        ));
-    }
-    if data.items.is_empty() || rule.item_id.is_empty() || rule.escape_rope_mode.is_empty() {
-        return;
-    }
-    match data.items.get(&rule.item_id) {
-        Some(item) if item.escape_rope_mode.as_deref() == Some(rule.escape_rope_mode.as_str()) => {}
-        _ => {
-            diagnostics.push(VerificationError::error(
-                "unknown_field_escape_item_rule",
-                "field_moves:escape_rope",
-                format!(
-                    "field escape item rule references item '{}' with mode '{}' not implemented by the item payload",
-                    rule.item_id, rule.escape_rope_mode
-                ),
-            ));
-        }
-    }
-}
-
-fn verify_field_repel_item_rule(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    if data.items.is_empty() {
-        return;
-    }
-    if !data.items.values().any(|item| item.repel_steps.is_some()) {
-        diagnostics.push(VerificationError::error(
-            "missing_field_repel_item_payload",
-            "field_moves:repel",
-            "field repel behavior requires at least one item with repel_steps",
-        ));
-    }
-}
-
-fn verify_field_item_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldItemRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
-        diagnostics.push(VerificationError::error(
-            "invalid_field_item_id",
-            subject,
-            "field item id must be exact and nonempty",
-        ));
-        return;
-    }
-    if !data.items.contains_key(&rule.item_id) {
-        diagnostics.push(VerificationError::error(
-            "unknown_field_item_id",
-            subject,
-            format!("field item rule references unknown item '{}'", rule.item_id),
-        ));
-    }
-}
-
-fn verify_field_move_id(
-    data: &GameDataSet,
-    subject: &str,
-    move_id: &str,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if move_id.trim().is_empty() || move_id.trim() != move_id {
-        diagnostics.push(VerificationError::error(
+fn field_move_catalog_issue_diagnostic(issue: FieldMoveCatalogIssue) -> VerificationError {
+    match issue {
+        FieldMoveCatalogIssue::InvalidMoveId { subject } => VerificationError::error(
             "invalid_field_move_id",
             subject,
             "field move id must be an exact nonempty move id",
-        ));
-    } else if !data.moves.contains_key(move_id) {
-        diagnostics.push(VerificationError::error(
+        ),
+        FieldMoveCatalogIssue::UnknownMoveId { subject, move_id } => VerificationError::error(
             "unknown_field_move_id",
             subject,
             format!("field move references missing move '{move_id}'"),
-        ));
-    }
-}
-
-fn verify_field_move_badge(
-    subject: &str,
-    move_id: &str,
-    badge: &crystal_core::systems::field_moves::FieldMoveBadgeRequirement,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    if badge.region != "johto" {
-        diagnostics.push(VerificationError::error(
+        ),
+        FieldMoveCatalogIssue::InvalidBadgeRegion {
+            subject,
+            move_id,
+            region,
+        } => VerificationError::error(
             "invalid_field_move_badge_region",
             subject,
-            format!(
-                "field move '{move_id}' badge region must be exact 'johto', found '{}'",
-                badge.region
-            ),
-        ));
-    }
-    if badge.index >= 8 {
-        diagnostics.push(VerificationError::error(
+            format!("field move '{move_id}' badge region must be exact 'johto', found '{region}'"),
+        ),
+        FieldMoveCatalogIssue::InvalidBadgeIndex {
+            subject,
+            move_id,
+            index,
+        } => VerificationError::error(
             "invalid_field_move_badge_index",
             subject,
-            format!(
-                "field move '{move_id}' Johto badge index must be 0..=7, found {}",
-                badge.index
-            ),
-        ));
-    }
-}
-
-fn verify_field_move_block_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldMoveBlockRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
-    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
-    if rule.target_collisions.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_field_move_target_collisions",
+            format!("field move '{move_id}' Johto badge index must be 0..=7, found {index}"),
+        ),
+        FieldMoveCatalogIssue::MissingTargetCollisions { subject, move_id } => {
+            VerificationError::error(
+                "missing_field_move_target_collisions",
+                subject,
+                format!("field move '{move_id}' requires exact target collisions"),
+            )
+        }
+        FieldMoveCatalogIssue::MissingReplacements { subject, move_id } => {
+            VerificationError::error(
+                "missing_field_move_replacements",
+                subject,
+                format!("field move '{move_id}' requires exact replacement rows"),
+            )
+        }
+        FieldMoveCatalogIssue::InvalidReplacementTileset { subject } => VerificationError::error(
+            "invalid_field_move_replacement_tileset",
             subject,
-            format!(
-                "field move '{}' requires exact target collisions",
-                rule.move_id
-            ),
-        ));
-    }
-    if rule.replacements.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_field_move_replacements",
+            "field move replacement tileset must be exact and nonempty",
+        ),
+        FieldMoveCatalogIssue::InvalidReplacementVariant { subject } => VerificationError::error(
+            "invalid_field_move_replacement_variant",
             subject,
-            format!(
-                "field move '{}' requires exact replacement rows",
-                rule.move_id
-            ),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for (index, replacement) in rule.replacements.iter().enumerate() {
-        let replacement_subject = format!("{subject}:replacement:{index}");
-        if replacement.tileset.trim().is_empty()
-            || replacement.tileset.trim() != replacement.tileset
-        {
-            diagnostics.push(VerificationError::error(
-                "invalid_field_move_replacement_tileset",
-                &replacement_subject,
-                "field move replacement tileset must be exact and nonempty",
-            ));
-        }
-        if replacement.variant.trim().is_empty()
-            || replacement.variant.trim() != replacement.variant
-        {
-            diagnostics.push(VerificationError::error(
-                "invalid_field_move_replacement_variant",
-                &replacement_subject,
-                "field move replacement variant must be exact and nonempty",
-            ));
-        }
-        if !seen.insert((replacement.tileset.as_str(), replacement.block_id)) {
-            diagnostics.push(VerificationError::error(
-                "duplicate_field_move_replacement",
-                &replacement_subject,
-                "field move replacements must not repeat the same tileset and block id",
-            ));
-        }
-    }
-}
-
-fn verify_field_move_flag_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldMoveFlagRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
-    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
-    if rule.engine_flag.trim().is_empty() || rule.engine_flag.trim() != rule.engine_flag {
-        diagnostics.push(VerificationError::error(
+            "field move replacement variant must be exact and nonempty",
+        ),
+        FieldMoveCatalogIssue::DuplicateReplacement { subject } => VerificationError::error(
+            "duplicate_field_move_replacement",
+            subject,
+            "field move replacements must not repeat the same tileset and block id",
+        ),
+        FieldMoveCatalogIssue::InvalidEngineFlag { subject, move_id } => VerificationError::error(
             "invalid_field_move_engine_flag",
             subject,
+            format!("field move '{move_id}' requires an exact engine flag"),
+        ),
+        FieldMoveCatalogIssue::InvalidEscapeItemId => VerificationError::error(
+            "invalid_field_escape_item_id",
+            "field_moves:escape_rope",
+            "field escape item id must be exact and nonempty",
+        ),
+        FieldMoveCatalogIssue::InvalidEscapeItemMode => VerificationError::error(
+            "invalid_field_escape_item_mode",
+            "field_moves:escape_rope",
+            "field escape item mode must be exact and nonempty",
+        ),
+        FieldMoveCatalogIssue::UnknownEscapeItemRule {
+            item_id,
+            escape_rope_mode,
+        } => VerificationError::error(
+            "unknown_field_escape_item_rule",
+            "field_moves:escape_rope",
             format!(
-                "field move '{}' requires an exact engine flag",
-                rule.move_id
+                "field escape item rule references item '{item_id}' with mode '{escape_rope_mode}' not implemented by the item payload"
             ),
-        ));
-    }
-}
-
-fn verify_field_move_travel_rule(
-    data: &GameDataSet,
-    subject: &str,
-    rule: &FieldMoveTravelRule,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    verify_field_move_id(data, subject, &rule.move_id, diagnostics);
-    verify_field_move_badge(subject, &rule.move_id, &rule.badge, diagnostics);
-    if subject.ends_with(":waterfall") && rule.target_collisions.is_empty() {
-        diagnostics.push(VerificationError::error(
-            "missing_field_move_target_collisions",
+        ),
+        FieldMoveCatalogIssue::MissingRepelItemPayload => VerificationError::error(
+            "missing_field_repel_item_payload",
+            "field_moves:repel",
+            "field repel behavior requires at least one item with repel_steps",
+        ),
+        FieldMoveCatalogIssue::InvalidFieldItemId { subject } => VerificationError::error(
+            "invalid_field_item_id",
             subject,
-            "waterfall requires exact target collisions",
-        ));
+            "field item id must be exact and nonempty",
+        ),
+        FieldMoveCatalogIssue::UnknownFieldItemId { subject, item_id } => VerificationError::error(
+            "unknown_field_item_id",
+            subject,
+            format!("field item rule references unknown item '{item_id}'"),
+        ),
     }
 }
 
@@ -8012,37 +8998,6 @@ fn reachable_maps(
         .collect()
 }
 
-fn encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
-    let mut species = BTreeSet::new();
-    for table in [data.grass.as_ref(), data.water.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        for encounter in table
-            .morning
-            .iter()
-            .chain(table.day.iter())
-            .chain(table.night.iter())
-        {
-            species.insert(encounter.species.clone());
-        }
-    }
-    species
-}
-
-fn field_encounter_species(data: &FieldEncounterData) -> BTreeSet<String> {
-    let mut species = BTreeSet::new();
-    for table in [data.headbutt.as_ref(), data.rock_smash.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        for encounter in table.common.iter().chain(table.rare.iter()) {
-            species.insert(encounter.species.clone());
-        }
-    }
-    species
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataSet {
@@ -8125,24 +9080,14 @@ pub struct GameDataSet {
 }
 
 impl GameDataSet {
-    pub fn load_base_json(asset_root: &AssetRoot) -> Result<Self> {
+    pub(crate) fn load_base_json(asset_root: &AssetRoot) -> Result<Self> {
         let index = asset_root.load_content_pack_index()?;
         let mut data = Self::default();
         data.apply_content_pack_index(asset_root, &index)?;
         Ok(data)
     }
 
-    pub fn with_content_packs(mut self, asset_root: &AssetRoot) -> Result<Self> {
-        self.apply_content_packs(asset_root)?;
-        Ok(self)
-    }
-
-    pub fn apply_content_packs(&mut self, asset_root: &AssetRoot) -> Result<()> {
-        let index = asset_root.load_content_pack_index()?;
-        self.apply_content_pack_index(asset_root, &index)
-    }
-
-    pub fn apply_content_pack_index(
+    pub(crate) fn apply_content_pack_index(
         &mut self,
         asset_root: &AssetRoot,
         index: &ContentPackIndex,
@@ -8153,15 +9098,15 @@ impl GameDataSet {
                     resolve_content_pack_data_path(asset_root, &pack.id, compiled_path)?;
                 let compiled: CompiledContentPack = read_json_file(&compiled_path)
                     .with_context(|| format!("load compiled content pack {}", pack.id))?;
-                if compiled.pack_id != pack.id {
+                if compiled.pack_id() != pack.id {
                     anyhow::bail!(
                         "compiled content pack {} declared packId {}",
                         pack.id,
-                        compiled.pack_id
+                        compiled.pack_id()
                     );
                 }
                 for category in CONTENT_PACK_CATEGORIES {
-                    for payload in compiled.categories.entries(*category) {
+                    for payload in compiled.categories().entries(*category) {
                         self.apply_content_pack_payload(*category, payload.clone())
                             .with_context(|| {
                                 format!(
@@ -8229,6 +9174,7 @@ impl GameDataSet {
             }
             ContentPackCategory::Moves => {
                 for move_data in parse_one_or_many::<Move>(payload)? {
+                    validate_manifest_move(&move_data)?;
                     self.moves.insert(move_data.name.clone(), move_data);
                 }
             }
@@ -8241,6 +9187,7 @@ impl GameDataSet {
             }
             ContentPackCategory::Items => {
                 for item in parse_one_or_many::<Item>(payload)? {
+                    validate_manifest_item(&item)?;
                     self.items.insert(item_key(&item)?, item);
                 }
             }
@@ -8526,11 +9473,12 @@ impl GameDataSet {
         Ok(())
     }
 
-    pub fn apply_modpack(&mut self, manifest: &ModpackManifest) -> Result<()> {
+    pub(crate) fn apply_modpack(&mut self, manifest: &ModpackManifest) -> Result<()> {
         for species in &manifest.payload.pokemon {
             self.pokemon.insert(species.id.clone(), species.clone());
         }
         for move_data in &manifest.payload.moves {
+            validate_manifest_move(move_data)?;
             self.moves.insert(move_data.name.clone(), move_data.clone());
         }
         merge_evolution_table(&mut self.evolutions, &manifest.payload.evolutions);
@@ -8544,8 +9492,10 @@ impl GameDataSet {
         for map in &manifest.payload.maps {
             self.maps.insert(map.id.clone(), map.clone());
         }
+        let move_ids: BTreeSet<String> = self.moves.keys().cloned().collect();
         for item in &manifest.payload.items {
             validate_manifest_item(item)?;
+            validate_manifest_item_references(item, &move_ids)?;
             self.items.insert(item_key(item)?, item.clone());
         }
         for wild_encounter_data in &manifest.payload.wild_encounters {
@@ -8727,11 +9677,6 @@ impl GameDataSet {
             .extend(manifest.payload.tilesets.iter().cloned());
         merge_playability_rules(&mut self.playability, &manifest.payload.playability);
         Ok(())
-    }
-
-    pub fn with_modpack(mut self, manifest: &ModpackManifest) -> Result<Self> {
-        self.apply_modpack(manifest)?;
-        Ok(self)
     }
 
     pub fn create_pokemon(&self, species_id: &str, level: u8, dvs: Dv) -> Result<Pokemon> {
@@ -9079,7 +10024,7 @@ where
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
-pub fn write_compiled_game_pack(path: impl AsRef<Path>, pack: &CompiledGamePack) -> Result<()> {
+fn write_compiled_game_pack(path: impl AsRef<Path>, pack: &CompiledGamePack) -> Result<()> {
     let path = path.as_ref();
     validate_compiled_game_pack_path(path)?;
     if pack.format_version != COMPILED_GAME_PACK_FORMAT_VERSION {
@@ -9106,11 +10051,21 @@ pub fn write_compiled_game_pack(path: impl AsRef<Path>, pack: &CompiledGamePack)
         .with_context(|| format!("write compiled game pack {}", path.display()))
 }
 
-pub fn read_compiled_game_pack(path: impl AsRef<Path>) -> Result<CompiledGamePack> {
-    Ok(read_loaded_compiled_game_pack(path)?.pack)
+#[cfg(any(test, feature = "test-fixtures"))]
+pub fn write_compiled_game_pack_for_tests(
+    path: impl AsRef<Path>,
+    pack: &CompiledGamePack,
+) -> Result<()> {
+    write_compiled_game_pack(path, pack)
 }
 
-pub fn read_loaded_compiled_game_pack(path: impl AsRef<Path>) -> Result<LoadedCompiledGamePack> {
+#[cfg(test)]
+fn read_compiled_game_pack(path: impl AsRef<Path>) -> Result<CompiledGamePack> {
+    let (_, _, pack) = read_loaded_compiled_game_pack(path)?.into_parts();
+    Ok(pack)
+}
+
+fn read_loaded_compiled_game_pack(path: impl AsRef<Path>) -> Result<LoadedCompiledGamePack> {
     let path = path.as_ref();
     validate_compiled_game_pack_path(path)?;
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
@@ -9120,6 +10075,74 @@ pub fn read_loaded_compiled_game_pack(path: impl AsRef<Path>) -> Result<LoadedCo
         bytes,
         pack,
     })
+}
+
+pub fn read_verified_compiled_game_pack(path: impl AsRef<Path>) -> Result<CompiledGamePack> {
+    let (_, _, pack) = read_loaded_verified_compiled_game_pack(path)?.into_parts();
+    Ok(pack)
+}
+
+pub fn read_loaded_verified_compiled_game_pack(
+    path: impl AsRef<Path>,
+) -> Result<LoadedCompiledGamePack> {
+    let loaded = read_loaded_compiled_game_pack(path)?;
+    verify_compiled_game_pack_for_runtime(loaded.pack())?;
+    Ok(loaded)
+}
+
+pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<()> {
+    validate_compiled_report_manifest_identity(&pack.report)?;
+
+    let mut diagnostics = pack
+        .report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == VerificationSeverity::Error)
+        .cloned()
+        .collect::<Vec<_>>();
+    diagnostics.extend(
+        runtime_pack_presence_issues(runtime_pack_sections(&pack.data))
+            .into_iter()
+            .map(runtime_pack_presence_issue_diagnostic),
+    );
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+
+    let summary = diagnostics
+        .into_iter()
+        .take(8)
+        .map(|diagnostic| {
+            format!(
+                "{:?} {} [{}]: {}",
+                diagnostic.severity, diagnostic.subject, diagnostic.code, diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::bail!("compiled game pack is not verified for runtime: {summary}")
+}
+
+fn validate_compiled_report_manifest_identity(report: &ModpackCompileReport) -> Result<()> {
+    if report.manifests.is_empty() {
+        anyhow::bail!("compiled game pack report must include at least one manifest id");
+    }
+    let mut seen = BTreeSet::new();
+    for manifest_id in &report.manifests {
+        if !is_exact_manifest_id_token(manifest_id) {
+            anyhow::bail!(
+                "compiled game pack report manifest id '{}' must be exact, non-empty, and must not contain '+'",
+                manifest_id
+            );
+        }
+        if !seen.insert(manifest_id) {
+            anyhow::bail!(
+                "compiled game pack report includes duplicate manifest id '{}'",
+                manifest_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePack> {
@@ -10122,24 +11145,20 @@ fn parse_script_flag_commands(
             let Some(command_name) = entry.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            match command_name {
-                "setevent" | "clearevent" | "checkevent" | "setflag" | "clearflag"
-                | "checkflag" => {
-                    let args = script_command_args(map_name, script_name, command_name, entry)?;
-                    if args.len() != 1 {
-                        anyhow::bail!(
-                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                            args.len()
-                        );
-                    }
-                    commands.push(ScriptFlagCommand {
-                        command: command_name.to_string(),
-                        flag_id: args[0].to_string(),
-                        source_script: script_name.clone(),
-                        command_index: index,
-                    });
+            if is_known_script_flag_command(command_name) {
+                let args = script_command_args(map_name, script_name, command_name, entry)?;
+                if args.len() != 1 {
+                    anyhow::bail!(
+                        "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                        args.len()
+                    );
                 }
-                _ => {}
+                commands.push(ScriptFlagCommand {
+                    command: command_name.to_string(),
+                    flag_id: args[0].to_string(),
+                    source_script: script_name.clone(),
+                    command_index: index,
+                });
             }
         }
     }
@@ -10646,7 +11665,7 @@ fn parse_script_text_commands(
                 continue;
             };
             match command_name {
-                "opentext" | "closetext" | "promptbutton" | "waitbutton" | "yesorno" => {
+                command if SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if !args.is_empty() {
                         anyhow::bail!(
@@ -10661,7 +11680,7 @@ fn parse_script_text_commands(
                         command_index: index,
                     });
                 }
-                "writetext" | "jumptext" | "jumptextfaceplayer" => {
+                command if SCRIPT_TEXT_LABEL_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
@@ -10671,7 +11690,7 @@ fn parse_script_text_commands(
                     }
                     commands.push(ScriptTextCommand {
                         command: command_name.to_string(),
-                        text_label: Some(args[0].to_string()),
+                        text_label: Some(resolve_local_script_label(script_name, args[0])),
                         source_script: script_name.clone(),
                         command_index: index,
                     });
@@ -10681,6 +11700,14 @@ fn parse_script_text_commands(
         }
     }
     Ok(commands)
+}
+
+fn resolve_local_script_label(source_script: &str, label: &str) -> String {
+    if label.starts_with('.') {
+        format!("{label}@{}", script_label_parent(source_script))
+    } else {
+        label.to_string()
+    }
 }
 
 fn parse_script_text_bodies(
@@ -11561,19 +12588,234 @@ fn push_flattened(target: &mut Vec<Value>, payload: Value) {
 }
 
 fn item_key(item: &Item) -> Result<String> {
-    if item.script_name.trim().is_empty() {
+    let issues = item_payload_issues(item);
+    if issues.contains(&ItemPayloadIssue::MissingScriptName) {
         anyhow::bail!("item '{}' is missing explicit script_name", item.name);
+    } else if let Some(ItemPayloadIssue::InvalidScriptName { script_name }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidScriptName { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid script_name '{}'",
+            item.name,
+            script_name
+        );
     } else {
         Ok(item.script_name.clone())
     }
 }
 
+fn validate_manifest_move(move_data: &Move) -> Result<()> {
+    let issues = move_payload_issues(move_data);
+    if issues.contains(&MovePayloadIssue::MissingName) {
+        anyhow::bail!("move payload must declare explicit name");
+    }
+    if let Some(MovePayloadIssue::InvalidName { name }) = issues
+        .iter()
+        .find(|issue| matches!(issue, MovePayloadIssue::InvalidName { .. }))
+    {
+        anyhow::bail!("move '{}' has invalid name '{}'", move_data.name, name);
+    }
+    if issues.contains(&MovePayloadIssue::MissingType) {
+        anyhow::bail!("move '{}' must declare explicit type", move_data.name);
+    }
+    if let Some(MovePayloadIssue::InvalidType { move_type }) = issues
+        .iter()
+        .find(|issue| matches!(issue, MovePayloadIssue::InvalidType { .. }))
+    {
+        anyhow::bail!("move '{}' has invalid type '{}'", move_data.name, move_type);
+    }
+    if issues.contains(&MovePayloadIssue::MissingEffect) {
+        anyhow::bail!("move '{}' must declare explicit effect", move_data.name);
+    }
+    if let Some(MovePayloadIssue::InvalidEffect { effect }) = issues
+        .iter()
+        .find(|issue| matches!(issue, MovePayloadIssue::InvalidEffect { .. }))
+    {
+        anyhow::bail!("move '{}' has invalid effect '{}'", move_data.name, effect);
+    }
+    Ok(())
+}
+
 fn validate_manifest_item(item: &Item) -> Result<()> {
-    if item.pocket == ITEM_POCKET_TM_HM && item.tmhm_index.is_none() {
+    let issues = item_payload_issues(item);
+    if issues.contains(&ItemPayloadIssue::MissingName) {
+        anyhow::bail!("item '{}' must declare explicit name", item.script_name);
+    }
+    if let Some(ItemPayloadIssue::InvalidName { name }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidName { .. }))
+    {
+        anyhow::bail!("item '{}' has invalid name '{}'", item.script_name, name);
+    }
+    if issues.contains(&ItemPayloadIssue::MissingDescription) {
+        anyhow::bail!(
+            "item '{}' must declare explicit description",
+            item.script_name
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidDescription { description }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidDescription { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid description '{}'",
+            item.script_name,
+            description
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingPocket) {
+        anyhow::bail!("item '{}' must declare explicit pocket", item.script_name);
+    }
+    if let Some(ItemPayloadIssue::InvalidPocket { pocket }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidPocket { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid pocket '{}'",
+            item.script_name,
+            pocket
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingEffect) {
+        anyhow::bail!("item '{}' must declare explicit effect", item.script_name);
+    }
+    if let Some(ItemPayloadIssue::InvalidEffect { effect }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidEffect { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid effect '{}'",
+            item.script_name,
+            effect
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingHeldEffect) {
+        anyhow::bail!(
+            "item '{}' must declare explicit held_effect",
+            item.script_name
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidHeldEffect { held_effect }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidHeldEffect { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid held_effect '{}'",
+            item.script_name,
+            held_effect
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidProperty { property }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidProperty { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid property '{}'",
+            item.script_name,
+            property
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingFieldMenu) {
+        anyhow::bail!(
+            "item '{}' must declare explicit field_menu",
+            item.script_name
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidFieldMenu { menu }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidFieldMenu { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid field_menu '{}'",
+            item.script_name,
+            menu
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingBattleMenu) {
+        anyhow::bail!(
+            "item '{}' must declare explicit battle_menu",
+            item.script_name
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidBattleMenu { menu }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidBattleMenu { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid battle_menu '{}'",
+            item.script_name,
+            menu
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingTmhmIndex) {
         anyhow::bail!(
             "TM/HM item '{}' must declare explicit tmhm_index",
             item.script_name
         );
+    }
+    if let Some(ItemPayloadIssue::InvalidTmhmIndex { index }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidTmhmIndex { .. }))
+    {
+        anyhow::bail!(
+            "TM/HM item '{}' must declare positive tmhm_index, found {}",
+            item.script_name,
+            index
+        );
+    }
+    if issues.contains(&ItemPayloadIssue::MissingTmhmMove) {
+        anyhow::bail!(
+            "TM/HM item '{}' must declare explicit tmhm_move",
+            item.script_name
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidTmhmMove { move_id }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidTmhmMove { .. }))
+    {
+        anyhow::bail!(
+            "TM/HM item '{}' must declare exact tmhm_move, found '{}'",
+            item.script_name,
+            move_id
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidFieldUsableMenu { menu, usable }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidFieldUsableMenu { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' field_usable {} contradicts field_menu '{}'",
+            item.script_name,
+            usable,
+            menu
+        );
+    }
+    if let Some(ItemPayloadIssue::InvalidBattleUsableMenu { menu, usable }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidBattleUsableMenu { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' battle_usable {} contradicts battle_menu '{}'",
+            item.script_name,
+            usable,
+            menu
+        );
+    }
+    Ok(())
+}
+
+fn validate_manifest_item_references(item: &Item, move_ids: &BTreeSet<String>) -> Result<()> {
+    for issue in item_reference_issues(item, move_ids) {
+        match issue {
+            ItemReferenceIssue::UnknownTmhmMove { move_id } => {
+                anyhow::bail!(
+                    "TM/HM item '{}' references missing move '{}'",
+                    item.script_name,
+                    move_id
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -11710,50 +12952,53 @@ mod tests {
     use super::*;
     use crystal_core::map::MapConnection;
     use crystal_core::models::{
-        BaseStats, Item, ability, egg_group, growth_rate, item_pocket, pokemon_type,
+        ability, egg_group, growth_rate, item_pocket, pokemon_type, BaseStats, Item,
     };
     use crystal_core::random::Random;
     use crystal_core::state::GameState;
     use crystal_core::systems::economy::{
-        AmountComparison, MoneyAccount, check_coins, check_money, take_money,
+        check_coins, check_money, take_money, AmountComparison, MoneyAccount,
     };
     use crystal_core::systems::field_items::{
-        FieldItemPickup, FieldItemPickupOutcome, FieldItemSource, pickup_field_item,
-        pickup_script_field_item,
+        pickup_field_item, pickup_script_field_item, FieldItemPickup, FieldItemPickupOutcome,
+        FieldItemSource,
     };
-    use crystal_core::systems::gift_pokemon::{GiftPokemonRequest, give_gift_pokemon};
+    use crystal_core::systems::gift_pokemon::{give_gift_pokemon, GiftPokemonRequest};
     use crystal_core::systems::phone::PhoneContactRecord;
     use crystal_core::systems::script_blocks::apply_script_block_change;
     use crystal_core::systems::script_flags::{apply_script_flag_mutation, check_script_flag};
     use crystal_core::systems::script_items::{
-        ScriptItemGrantOutcome, check_script_item, grant_script_item, take_script_item,
+        check_script_item, grant_script_item, take_script_item, ScriptItemGrantOutcome,
     };
     use crystal_core::systems::script_objects::{
         apply_script_movement, apply_script_object_mutation,
     };
     use crystal_core::systems::script_scenes::apply_script_scene_command;
     use crystal_core::systems::scripted_battles::{
-        ScriptedBattleEffects, apply_scripted_battle_effects_to_session,
+        apply_scripted_battle_effects_to_session, ScriptedBattleEffects,
+    };
+    use crystal_core::systems::special_routines::{
+        BUENA_PASSWORD_CATEGORY_ITEM, BUENA_PASSWORD_CATEGORY_MON, BUENA_PASSWORD_CATEGORY_MOVE,
     };
     use crystal_core::world::collision::{
-        MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile, permissions,
-        sample_collision,
+        can_enter_tile, permissions, sample_collision, MetatileCollision, PlayerTraversalState,
+        TilesetCollision,
     };
     use crystal_core::world::encounters::EncounterMusicModifier;
     use crystal_core::world::encounters::{
-        EncounterSurface, FieldEncounterData, FieldEncounterEntry, FieldEncounterTable, TimeOfDay,
-        WildEncounter, WildEncounterTable, table_for_surface,
+        table_for_surface, EncounterSurface, FieldEncounterData, FieldEncounterEntry,
+        FieldEncounterTable, TimeOfDay, WildEncounter, WildEncounterTable,
     };
     use crystal_core::world::map::{Direction, TilePosition};
     use crystal_core::world::movement::{StepOptions, StepOutcome};
     use crystal_core::world::session::{
-        EncounterCheckOptions, OverworldSession, warp_tile_position,
+        warp_tile_position, EncounterCheckOptions, OverworldSession,
     };
 
     fn test_item(id: &str) -> Item {
         Item {
             name: id.to_string(),
-            description: String::new(),
+            description: "A test item.".to_string(),
             effect: "NONE".to_string(),
             status_heals: Vec::new(),
             revive_hp_percent: None,
@@ -11787,6 +13032,21 @@ mod tests {
             consumable: false,
             tmhm_index: None,
             tmhm_move: None,
+        }
+    }
+
+    fn test_phone_contact(contact_id: &str) -> PhoneContactRecord {
+        PhoneContactRecord {
+            contact_id: contact_id.to_string(),
+            trainer_class: Some("TRAINER_NONE".to_string()),
+            trainer_label: Some(format!("PHONECONTACT_{contact_id}")),
+            lines: vec![format!("{contact_id}:")],
+            primary_label: contact_id.to_string(),
+            map_constant: None,
+            callee_time_mask: 7,
+            callee_script: None,
+            caller_time_mask: 0,
+            caller_script: None,
         }
     }
 
@@ -11854,7 +13114,7 @@ mod tests {
             }],
             move_effect_modifiers: vec![crystal_core::battle::damage::WeatherMoveEffectModifier {
                 weather: "WEATHER_RAIN".to_string(),
-                move_effect: "EFFECT_SOLARBEAM".to_string(),
+                move_effect: "SOLARBEAM".to_string(),
                 multiplier: crystal_core::battle::damage::TypeMultiplier {
                     numerator: 1,
                     denominator: 2,
@@ -11970,6 +13230,9 @@ mod tests {
             id: "CRY_CHIKORITA".to_string(),
             path: "content-packs/core-modular/cries/CRY_CHIKORITA.mid".to_string(),
             kind: ModpackAudioKind::Cry,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         });
     }
 
@@ -12050,6 +13313,9 @@ mod tests {
             id: "SFX_TACKLE".to_string(),
             path: "content-packs/test/sfx/SFX_TACKLE.mid".to_string(),
             kind: ModpackAudioKind::SoundEffect,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         });
 
         let report = verify_game_data(
@@ -12061,6 +13327,91 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_trainer_encounter_music"
                 && diagnostic.subject == "YOUNGSTER_JOEY"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_scripted_battle_requests_without_runtime_fallbacks() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        add_test_trainer(&mut data, "MUSIC_YOUNGSTER_ENCOUNTER");
+        data.audio.push(ModpackAudioAsset {
+            id: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            path: "content-packs/test/music/MUSIC_YOUNGSTER_ENCOUNTER.mid".to_string(),
+            kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
+        });
+        let known_species_id = data
+            .pokemon
+            .keys()
+            .next()
+            .expect("runtime species")
+            .clone();
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.trainer_scripts.insert(
+            "TrainerScript".to_string(),
+            TrainerBattleRequest::new("youngster", "YOUNGSTER_JOEY", "EVENT_BEAT_JOEY"),
+        );
+        module.scripted_trainer_battles = vec![ScriptedTrainerBattle {
+            source_script: "LoadTrainerScript".to_string(),
+            loadtrainer_command_index: 3,
+            startbattle_command_index: 4,
+            request: TrainerBattleRequest::new("YOUNGSTER", "youngster_joey", ""),
+            reload_map_after_battle: false,
+            post_battle_event_flags: Vec::new(),
+            post_battle_script_flags: Vec::new(),
+        }];
+        module.scripted_wild_battles = vec![
+            ScriptedWildBattle {
+                source_script: "WildCaseScript".to_string(),
+                loadwildmon_command_index: 5,
+                startbattle_command_index: 6,
+                request: StaticWildBattleRequest::new(known_species_id.to_lowercase(), 10),
+                reload_map_after_battle: false,
+                pre_battle_event_flags: Vec::new(),
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+                disappear_object_ids: Vec::new(),
+            },
+            ScriptedWildBattle {
+                source_script: "WildZeroScript".to_string(),
+                loadwildmon_command_index: 7,
+                startbattle_command_index: 8,
+                request: StaticWildBattleRequest::new(known_species_id, 0),
+                reload_map_after_battle: false,
+                pre_battle_event_flags: Vec::new(),
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+                disappear_object_ids: Vec::new(),
+            },
+        ];
+        data.maps.insert("Start".to_string(), module);
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "scripted_trainer_class_mismatch"
+                && diagnostic.subject == "Start:TrainerScript"
+                && diagnostic.message.contains("youngster")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_scripted_trainer"
+                && diagnostic.subject == "Start:LoadTrainerScript:3"
+                && diagnostic.message.contains("youngster_joey")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_scripted_wild_species"
+                && diagnostic.subject == "Start:WildCaseScript:5"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_scripted_wild_level"
+                && diagnostic.subject == "Start:WildZeroScript:7"
         }));
     }
 
@@ -12118,11 +13469,17 @@ mod tests {
         item.effect = "REPEL".to_string();
         data.items.insert("REPEL".to_string(), item);
         data.field_moves.repel = crystal_core::systems::field_moves::FieldRepelItemRule {};
+        data.field_moves.bicycle = FieldItemRule {
+            item_id: "REPEL".to_string(),
+        };
 
-        let mut diagnostics = Vec::new();
-        verify_field_repel_item_rule(&data, &mut diagnostics);
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
 
-        assert!(diagnostics.iter().any(|diagnostic| {
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "missing_field_repel_item_payload"
                 && diagnostic.subject == "field_moves:repel"
         }));
@@ -12226,6 +13583,9 @@ mod tests {
             id: "MUSIC_POKEMON_MARCH".to_string(),
             path: "content-packs/test/music/MUSIC_POKEMON_MARCH.mid".to_string(),
             kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         });
         data.encounter_music_modifiers = EncounterMusicModifiers {
             modifiers: vec![
@@ -12752,7 +14112,7 @@ mod tests {
             moves: 1,
             ..ModpackCompileReport::default()
         };
-        let pack = CompiledGamePack::new(data, report);
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report);
 
         write_compiled_game_pack(&path, &pack).expect("write compiled pack");
         let loaded = read_compiled_game_pack(&path).expect("read compiled pack");
@@ -12760,12 +14120,119 @@ mod tests {
             read_loaded_compiled_game_pack(&path).expect("read loaded compiled pack");
 
         assert_eq!(loaded, pack);
-        assert_eq!(loaded_artifact.pack, pack);
+        assert_eq!(loaded_artifact.pack(), &pack);
         assert_eq!(
-            loaded_artifact.bytes,
-            std::fs::read(&path).expect("read raw pack")
+            loaded_artifact.bytes(),
+            std::fs::read(&path).expect("read raw pack").as_slice()
         );
-        assert!(loaded.data.pokemon.contains_key("NEW_MON"));
+        assert!(loaded.data().pokemon.contains_key("NEW_MON"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_missing_runtime_sections() {
+        let path = temp_test_path("missing-runtime.crystalpack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+
+        write_compiled_game_pack(&path, &pack).expect("write compiled pack");
+        let raw = read_compiled_game_pack(&path).expect("raw read still decodes pack");
+        let error = read_verified_compiled_game_pack(&path)
+            .expect_err("verified read must reject missing runtime data")
+            .to_string();
+
+        assert_eq!(raw, pack);
+        assert!(error.contains("compiled game pack is not verified for runtime"));
+        assert!(error.contains("missing_runtime_pokemon"), "{error}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_missing_manifest_identity() {
+        let path = temp_test_path("missing-identity.crystalpack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport::default(),
+        );
+
+        write_compiled_game_pack(&path, &pack).expect("write compiled pack");
+        let error = read_verified_compiled_game_pack(&path)
+            .expect_err("verified read must reject packs without manifest identity")
+            .to_string();
+
+        assert!(
+            error.contains("must include at least one manifest id"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("missing_runtime_pokemon"),
+            "manifest identity must be rejected before runtime section checks: {error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_malformed_manifest_identity() {
+        for (manifest_ids, expected) in [
+            (
+                vec![" base-game".to_string()],
+                "must be exact, non-empty, and must not contain '+'",
+            ),
+            (
+                vec!["base+game".to_string()],
+                "must be exact, non-empty, and must not contain '+'",
+            ),
+            (
+                vec!["base-game".to_string(), "base-game".to_string()],
+                "duplicate manifest id 'base-game'",
+            ),
+        ] {
+            let pack = CompiledGamePack::new_unchecked_for_tests(
+                GameDataSet::default(),
+                ModpackCompileReport {
+                    manifests: manifest_ids,
+                    ..ModpackCompileReport::default()
+                },
+            );
+            let error = verify_compiled_game_pack_for_runtime(&pack)
+                .expect_err("verified runtime packs must reject malformed manifest identity")
+                .to_string();
+
+            assert!(error.contains(expected), "{error}");
+            assert!(
+                !error.contains("missing_runtime_pokemon"),
+                "manifest identity must be rejected before runtime section checks: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_stored_error_diagnostics() {
+        let path = temp_test_path("error-report.crystalpack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                diagnostics: vec![VerificationError::error(
+                    "bad_pack",
+                    "test",
+                    "test diagnostic",
+                )],
+                ..ModpackCompileReport::default()
+            },
+        );
+
+        write_compiled_game_pack(&path, &pack).expect("write compiled pack");
+        let error = read_loaded_verified_compiled_game_pack(&path)
+            .expect_err("verified loaded read must reject error reports")
+            .to_string();
+
+        assert!(error.contains("bad_pack"), "{error}");
         let _ = std::fs::remove_file(path);
     }
 
@@ -12785,13 +14252,115 @@ mod tests {
 
         assert!(codes.contains("missing_runtime_pokemon"));
         assert!(codes.contains("missing_runtime_moves"));
+        assert!(codes.contains("missing_runtime_growth_rates"));
+        assert!(codes.contains("missing_runtime_learnsets"));
+        assert!(codes.contains("missing_runtime_evolutions"));
+        assert!(codes.contains("missing_runtime_battle_formula_tables"));
+        assert!(codes.contains("missing_runtime_battle_rule_catalogs"));
+        assert!(codes.contains("missing_runtime_economy_catalogs"));
+        assert!(codes.contains("missing_runtime_field_system_catalogs"));
+        assert!(codes.contains("missing_runtime_items"));
+        assert!(codes.contains("missing_runtime_trainers"));
+        assert!(codes.contains("missing_runtime_audio"));
+        assert!(codes.contains("missing_runtime_pokemon_cries"));
+        assert!(codes.contains("missing_runtime_tilesets"));
+        assert!(codes.contains("missing_runtime_scripts"));
+        assert!(codes.contains("missing_runtime_map_geometry"));
+        assert!(codes.contains("missing_runtime_map_objects"));
+        assert!(codes.contains("missing_runtime_map_metadata"));
+        assert!(codes.contains("missing_runtime_spawn_points"));
         assert!(codes.contains("missing_runtime_maps"));
+        assert!(codes.contains("missing_runtime_ui_catalogs"));
+        assert!(codes.contains("missing_runtime_display_catalogs"));
+        assert!(codes.contains("missing_runtime_phone_catalogs"));
+        assert!(codes.contains("missing_runtime_special_system_catalogs"));
+        assert!(codes.contains("missing_runtime_event_bootstrap_catalogs"));
+    }
+
+    #[test]
+    fn runtime_pack_geometry_requires_declared_aggregate_catalogs() {
+        let data = GameDataSet {
+            maps: [(
+                "Route29".to_string(),
+                test_map_module("Route29", "ROUTE_29", None),
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        let codes: BTreeSet<&str> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+
+        assert!(codes.contains("missing_runtime_map_geometry"));
+        assert!(codes.contains("missing_runtime_map_objects"));
+        assert!(!codes.contains("missing_runtime_maps"));
+    }
+
+    #[test]
+    fn runtime_pack_objects_require_declared_npc_catalog() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.objects = vec![test_object("ROUTE29_YOUNGSTER", "EVENT_ROUTE29_YOUNGSTER", 4, 5)];
+        let data = GameDataSet {
+            maps: [("Route29".to_string(), module)].into_iter().collect(),
+            map_attributes: [(
+                "Route29".to_string(),
+                MapAttributes {
+                    tileset_name: "johto".to_string(),
+                    border_block: 0,
+                    width: 1,
+                    height: 1,
+                    connections: Vec::new(),
+                    time_of_day: None,
+                    phone_service: 0,
+                    phone_flag: false,
+                    environment: Some("route".to_string()),
+                    location: Some("johto".to_string()),
+                    music: None,
+                    palette: None,
+                    fishing_group: None,
+                    map_constant: Some("ROUTE_29".to_string()),
+                    map_group_constant: None,
+                    blocks_label: Some("Route29_Blocks".to_string()),
+                    map_scripts_label: None,
+                    map_events_label: None,
+                    connection_flags: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            map_blocks: [("Route29_Blocks".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        let codes: BTreeSet<&str> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+
+        assert!(!codes.contains("missing_runtime_map_geometry"));
+        assert!(codes.contains("missing_runtime_map_objects"));
+        assert!(!codes.contains("missing_runtime_maps"));
     }
 
     #[test]
     fn runtime_compiled_game_pack_rejects_json_extension() {
         let path = temp_test_path("runtime.json");
-        let pack = CompiledGamePack::new(GameDataSet::default(), ModpackCompileReport::default());
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), ModpackCompileReport::default());
 
         let error = write_compiled_game_pack(&path, &pack)
             .expect_err("runtime compiled packs must not be JSON files")
@@ -12817,7 +14386,7 @@ mod tests {
         let data_root = root.join("apps/web/assets/data");
         std::fs::create_dir_all(data_root.join("content-packs")).expect("create data root");
 
-        let pack = CompiledGamePack::new(GameDataSet::default(), ModpackCompileReport::default());
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), ModpackCompileReport::default());
         write_compiled_game_pack(data_root.join("content-packs/core.crystalpack"), &pack)
             .expect("write compiled pack");
         let asset_root = AssetRoot::new(&root);
@@ -12825,7 +14394,7 @@ mod tests {
         let loaded = asset_root
             .load_loaded_compiled_game_pack("content-packs/core.crystalpack")
             .expect("load relative compiled pack");
-        assert!(loaded.bytes.starts_with(COMPILED_GAME_PACK_MAGIC));
+        assert!(loaded.bytes().starts_with(COMPILED_GAME_PACK_MAGIC));
 
         let legacy = asset_root
             .load_compiled_game_pack("assets/data/content-packs/core.crystalpack")
@@ -12901,11 +14470,9 @@ mod tests {
 
         let json_error = ModpackAudioAsset::from_content_pack_path("mods/new/audio.json")
             .expect_err("ambiguous audio JSON is not accepted");
-        assert!(
-            json_error
-                .to_string()
-                .contains("must live under music, sfx, or cries")
-        );
+        assert!(json_error
+            .to_string()
+            .contains("must live under music, sfx, or cries"));
 
         let root_level_error = ModpackAudioAsset::from_content_pack_path("MUSIC_ROUTE_29.mid")
             .expect_err("root-level audio is not accepted");
@@ -12942,7 +14509,7 @@ mod tests {
         let asm_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.asm")
                 .expect_err("music ASM is not accepted");
-        assert!(asm_error.to_string().contains("must use a .mid file"));
+        assert!(asm_error.to_string().contains("unsupported extension 'asm'"));
 
         let extensionless_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29")
@@ -12950,19 +14517,19 @@ mod tests {
         assert!(
             extensionless_error
                 .to_string()
-                .contains("path must have a file extension"),
+                .contains("must have a file extension"),
             "{extensionless_error}"
         );
 
         let mp3_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.mp3")
                 .expect_err("MP3 music is not accepted");
-        assert!(mp3_error.to_string().contains("must use a .mid file"));
+        assert!(mp3_error.to_string().contains("unsupported extension 'mp3'"));
 
         let midi_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.midi")
                 .expect_err(".midi music is not accepted");
-        assert!(midi_error.to_string().contains("must use a .mid file"));
+        assert!(midi_error.to_string().contains("unsupported extension 'midi'"));
 
         let uppercase_mid_error =
             ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.MID")
@@ -12970,13 +14537,51 @@ mod tests {
         assert!(
             uppercase_mid_error
                 .to_string()
-                .contains("must use a .mid file"),
+                .contains("unsupported extension 'MID'"),
             "{uppercase_mid_error}"
         );
 
         let cry = ModpackAudioAsset::cry("CRY_NIDORAN_M", "mods/new/cries/CRY_NIDORAN_M.mid")
             .expect("valid MIDI cry asset");
         assert_eq!(cry.kind, ModpackAudioKind::Cry);
+        assert_eq!(cry.source, ModpackAudioSource::Midi);
+        assert_eq!(cry.sample_rate_hz, None);
+        assert_eq!(cry.channels, None);
+
+        let pcm_cry =
+            ModpackAudioAsset::cry_pcm("CRY_NIDORAN_M", "mods/new/cries/CRY_NIDORAN_M.pcm", 22050, 1)
+                .expect("valid PCM cry asset");
+        assert_eq!(pcm_cry.kind, ModpackAudioKind::Cry);
+        assert_eq!(pcm_cry.source, ModpackAudioSource::Pcm);
+        assert_eq!(pcm_cry.sample_rate_hz, Some(22050));
+        assert_eq!(pcm_cry.channels, Some(1));
+
+        let shorthand_pcm_error =
+            ModpackAudioAsset::from_content_pack_path("mods/new/cries/CRY_NIDORAN_M.pcm")
+                .expect_err("shorthand PCM path lacks required sample metadata");
+        assert!(
+            shorthand_pcm_error
+                .to_string()
+                .contains("must declare sample_rate_hz"),
+            "{shorthand_pcm_error}"
+        );
+
+        let midi_with_pcm_metadata = ModpackAudioAsset {
+            id: "MUSIC_ROUTE_29".to_string(),
+            path: "mods/new/music/MUSIC_ROUTE_29.mid".to_string(),
+            kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: Some(44100),
+            channels: None,
+        }
+        .validate()
+        .expect_err("MIDI assets must not carry PCM metadata");
+        assert!(
+            midi_with_pcm_metadata
+                .to_string()
+                .contains("must not declare PCM sample metadata"),
+            "{midi_with_pcm_metadata}"
+        );
 
         let singular_cry_dir =
             ModpackAudioAsset::from_content_pack_path("mods/new/cry/CRY_NIDORAN_M.mid")
@@ -12991,6 +14596,17 @@ mod tests {
             ModpackAudioAsset::cry("CRY_NIDORAN_M", "mods/new/cries/CRY_NIDORAN_M.mp3")
                 .expect_err("MP3 cries are not accepted");
         assert!(cry_mp3_error.to_string().contains("must use a .mid file"));
+
+        let missing_source = serde_json::from_str::<ModpackAudioAsset>(
+            r#"{"id":"MUSIC_ROUTE_29","path":"mods/new/music/MUSIC_ROUTE_29.mid","kind":"music","sample_rate_hz":null,"channels":null}"#,
+        )
+        .expect_err("audio assets must declare an exact source");
+        assert!(
+            missing_source
+                .to_string()
+                .contains("missing field `source`"),
+            "{missing_source}"
+        );
     }
 
     #[test]
@@ -13395,55 +15011,104 @@ mod tests {
     fn verifier_rejects_runtime_pack_species_case_and_malformed_frontpic_commands() {
         let data = GameDataSet {
             pokemon: [(species().id.clone(), species())].into_iter().collect(),
-            runtime_spawn_points: [(
-                "1".to_string(),
-                RuntimeSpawnPoint {
-                    identifier: 0,
-                    map_constant: "MISSING_MAP".to_string(),
-                    map_name: "MissingMap".to_string(),
-                    group_id: 1,
-                    map_id: 1,
-                    tile_x: 0,
-                    tile_y: 0,
-                    group_name: String::new(),
-                    metatile_x: 0,
-                    metatile_y: 0,
-                    subtile_x: 0,
-                    subtile_y: 0,
-                },
-            )]
+            runtime_spawn_points: [
+                (
+                    "1".to_string(),
+                    RuntimeSpawnPoint {
+                        identifier: 0,
+                        map_constant: "MISSING_MAP".to_string(),
+                        map_name: "MissingMap".to_string(),
+                        group_id: 1,
+                        map_id: 1,
+                        tile_x: 0,
+                        tile_y: 0,
+                        group_name: String::new(),
+                        metatile_x: 0,
+                        metatile_y: 0,
+                        subtile_x: 0,
+                        subtile_y: 0,
+                    },
+                ),
+                (
+                    " 2".to_string(),
+                    RuntimeSpawnPoint {
+                        identifier: 2,
+                        map_constant: " ROUTE_29".to_string(),
+                        map_name: " Route29".to_string(),
+                        group_id: 1,
+                        map_id: 1,
+                        tile_x: 0,
+                        tile_y: 0,
+                        group_name: "GROUP_ROUTE_29".to_string(),
+                        metatile_x: 0,
+                        metatile_y: 0,
+                        subtile_x: 0,
+                        subtile_y: 0,
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             flee_mons: FleeMonTables {
-                always: vec!["new_mon".to_string()],
+                always: vec!["new_mon".to_string(), " NEW_MON".to_string()],
                 ..FleeMonTables::default()
             },
-            menu_icons: [("New_Mon".to_string(), "ICON_NEW_MON".to_string())]
+            pc_strings: [("PCString_ChooseaPKMN".to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            pokedex_entries: [(
-                "NEW_MON".to_string(),
-                RuntimePokedexEntry {
-                    species: "new_mon".to_string(),
-                    classification: String::new(),
-                    height_digits: 1,
-                    weight_digits: 1,
-                    pages: Vec::new(),
-                },
-            )]
+            menu_icons: [
+                ("New_Mon".to_string(), "ICON_NEW_MON".to_string()),
+                (" NEW_MON".to_string(), "ICON_NEW_MON".to_string()),
+                ("NEW_MON".to_string(), " ICON_NEW_MON".to_string()),
+            ]
             .into_iter()
             .collect(),
-            pokemon_frontpic_anim: [(
-                "NEW_MON".to_string(),
-                FrontpicAnimProgram {
-                    commands: vec![FrontpicAnimCommand {
-                        kind: "frame".to_string(),
-                        frame: Some(0),
-                        duration: None,
-                        ..FrontpicAnimCommand::default()
-                    }],
-                },
-            )]
+            pokedex_entries: [
+                (
+                    "NEW_MON".to_string(),
+                    RuntimePokedexEntry {
+                        species: "new_mon".to_string(),
+                        classification: String::new(),
+                        height_digits: 1,
+                        weight_digits: 1,
+                        pages: Vec::new(),
+                    },
+                ),
+                (
+                    " NEW_MON".to_string(),
+                    RuntimePokedexEntry {
+                        species: " NEW_MON".to_string(),
+                        classification: "Spark".to_string(),
+                        height_digits: 1,
+                        weight_digits: 1,
+                        pages: vec![" A small test Pokemon.".to_string()],
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            pokemon_frontpic_anim: [
+                (
+                    "NEW_MON".to_string(),
+                    FrontpicAnimProgram {
+                        commands: vec![FrontpicAnimCommand {
+                            kind: "frame".to_string(),
+                            frame: Some(0),
+                            duration: None,
+                            ..FrontpicAnimCommand::default()
+                        }],
+                    },
+                ),
+                (
+                    " NEW_MON".to_string(),
+                    FrontpicAnimProgram {
+                        commands: vec![FrontpicAnimCommand {
+                            kind: "endanim".to_string(),
+                            ..FrontpicAnimCommand::default()
+                        }],
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             initialize_events: InitializeEventsConfig {
@@ -13471,13 +15136,236 @@ mod tests {
         assert!(codes.contains("runtime_spawn_point_identifier_mismatch"));
         assert!(codes.contains("unknown_runtime_spawn_point_map"));
         assert!(codes.contains("invalid_runtime_spawn_point"));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_runtime_spawn_point_map" && diagnostic.subject == " 2"
+        }));
         assert!(codes.contains("invalid_initialize_event_flag"));
         assert!(codes.contains("invalid_story_event_script_constant"));
         assert!(codes.contains("unknown_flee_mon_species"));
+        assert!(codes.contains("invalid_flee_mon_species"));
+        assert!(codes.contains("invalid_pc_string"));
         assert!(codes.contains("unknown_menu_icon_species"));
+        assert!(codes.contains("invalid_menu_icon_species"));
+        assert!(codes.contains("invalid_menu_icon"));
+        assert!(codes.contains("invalid_pokedex_entry_species"));
         assert!(codes.contains("pokedex_entry_species_mismatch"));
         assert!(codes.contains("invalid_pokedex_entry"));
+        assert!(codes.contains("invalid_frontpic_anim_species"));
         assert!(codes.contains("malformed_frontpic_anim_command"));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokedex_entry_species" && diagnostic.subject == " NEW_MON"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_frontpic_anim_species" && diagnostic.subject == " NEW_MON"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_story_event_script_constants_without_coercion() {
+        let data = GameDataSet {
+            story_event_script_constants: StoryEventScriptConstants {
+                global: [("TRUE".to_string(), 1)].into_iter().collect(),
+                maps: [
+                    (
+                        "".to_string(),
+                        [("EVENT_ONE".to_string(), 1)].into_iter().collect(),
+                    ),
+                    (
+                        "ROUTE_29".to_string(),
+                        [("".to_string(), 2)].into_iter().collect(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_story_event_script_constant_map"
+                && diagnostic.subject.is_empty()
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_story_event_script_constant"
+                && diagnostic.subject == "ROUTE_29:"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_initialize_event_sprites_without_coercion() {
+        let data = GameDataSet {
+            initialize_events: InitializeEventsConfig {
+                event_flags: vec!["EVENT_GOT_STARTER".to_string()],
+                engine_flags: vec!["ENGINE_POKEGEAR".to_string()],
+                variable_sprites: [("SPRITE_ELM".to_string(), String::new())]
+                    .into_iter()
+                    .collect(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_initialize_event_sprite"
+                && diagnostic.subject == "SPRITE_ELM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_runtime_spawn_point_map_name_mismatches() {
+        let data = GameDataSet {
+            runtime_map_metadata: [(
+                "ROUTE_29".to_string(),
+                RuntimeMapMetadata {
+                    constant: "ROUTE_29".to_string(),
+                    name: "Route29".to_string(),
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: 10,
+                    height: 9,
+                    environment: "TOWN".to_string(),
+                    phone_service: 1,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            runtime_spawn_points: [(
+                "2".to_string(),
+                RuntimeSpawnPoint {
+                    identifier: 2,
+                    map_constant: "ROUTE_29".to_string(),
+                    map_name: "WrongMap".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    tile_x: 0,
+                    tile_y: 0,
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    metatile_x: 0,
+                    metatile_y: 0,
+                    subtile_x: 0,
+                    subtile_y: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "runtime_spawn_point_map_mismatch" && diagnostic.subject == "2"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_runtime_map_metadata_without_coercion() {
+        let data = GameDataSet {
+            maps: [
+                (
+                    "Route29".to_string(),
+                    test_map_module("Route29", "ROUTE_29", None),
+                ),
+                (
+                    "NewBarkTown".to_string(),
+                    test_map_module("NewBarkTown", "NEW_BARK_TOWN", None),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            runtime_map_metadata: [
+                (
+                    "NEW_BARK_TOWN".to_string(),
+                    RuntimeMapMetadata {
+                        constant: "NEW_BARK_TOWN".to_string(),
+                        name: "WrongName".to_string(),
+                        group_name: "GROUP_NEW_BARK".to_string(),
+                        group_id: 1,
+                        map_id: 1,
+                        width: 10,
+                        height: 9,
+                        environment: "TOWN".to_string(),
+                        phone_service: 1,
+                    },
+                ),
+                (
+                    "ROUTE_29".to_string(),
+                    RuntimeMapMetadata {
+                        constant: "ROUTE_29_ALIAS".to_string(),
+                        name: "Route29".to_string(),
+                        group_name: String::new(),
+                        group_id: 1,
+                        map_id: 2,
+                        width: 10,
+                        height: 9,
+                        environment: "ROUTE".to_string(),
+                        phone_service: 1,
+                    },
+                ),
+                (
+                    " ROUTE_30".to_string(),
+                    RuntimeMapMetadata {
+                        constant: " ROUTE_30".to_string(),
+                        name: " Route30".to_string(),
+                        group_name: "GROUP_ROUTE_30".to_string(),
+                        group_id: 1,
+                        map_id: 3,
+                        width: 10,
+                        height: 9,
+                        environment: "ROUTE".to_string(),
+                        phone_service: 1,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "runtime_map_metadata_name_mismatch"
+                && diagnostic.subject == "NEW_BARK_TOWN"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "runtime_map_metadata_constant_mismatch"
+                && diagnostic.subject == "ROUTE_29"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_runtime_map_metadata_constant"
+                && diagnostic.subject == "ROUTE_29"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_runtime_map_metadata" && diagnostic.subject == "ROUTE_29"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_runtime_map_metadata" && diagnostic.subject == " ROUTE_30"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_runtime_map_metadata_constant"
+                && diagnostic.subject == " ROUTE_30"
+        }));
     }
 
     #[test]
@@ -13510,6 +15398,213 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_invalid_battle_animation_metadata_without_coercion() {
+        let data = GameDataSet {
+            moves: [("TACKLE".to_string(), test_move("TACKLE"))]
+                .into_iter()
+                .collect(),
+            battle_animations: [
+                (
+                    " BattleAnim_Padded".to_string(),
+                    vec!["anim_wait 1".to_string()],
+                ),
+                ("BattleAnim_Tackle".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+            battle_animation_table: vec![
+                "BattleAnim_Dummy".to_string(),
+                String::new(),
+                "BattleAnim_Tackle ".to_string(),
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_animation"
+                && diagnostic.subject == " BattleAnim_Padded"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_animation"
+                && diagnostic.subject == "BattleAnim_Tackle"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_animation_table_entry" && diagnostic.subject == "1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_battle_animation_table_entry" && diagnostic.subject == "2"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "battle_animation_table_count_mismatch"
+                && diagnostic.subject == "battle_animation_table"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_runtime_bundles_without_coercion() {
+        let data = GameDataSet {
+            battle_anim_bundle: "[".to_string(),
+            sprite_anim_bundle: r#"{"oam_sets":{}}"#.to_string(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_runtime_bundle"
+                && diagnostic.subject == "battle_anim_bundle"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_runtime_bundle_section"
+                && diagnostic.subject == "sprite_anim_bundle"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_move_name_metadata_without_coercion() {
+        let data = GameDataSet {
+            moves: [("POUND".to_string(), test_move("POUND"))]
+                .into_iter()
+                .collect(),
+            move_names: vec![
+                "POUND".to_string(),
+                String::new(),
+                "KARATE CHOP ".to_string(),
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "move_names_count_mismatch" && diagnostic.subject == "move_names"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_move_name" && diagnostic.subject == "1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_move_name" && diagnostic.subject == "2"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_move_payload_ids_without_effect_enum_restriction() {
+        let mut move_data = test_move("AETHER_PULSE");
+        move_data.name = " AETHER_PULSE".to_string();
+        move_data.move_type = pokemon_type("AETHER ");
+        move_data.effect = " MODDED_EFFECT".to_string();
+        let data = GameDataSet {
+            moves: [("AETHER_PULSE".to_string(), move_data)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for expected in [
+            "invalid_move_name",
+            "invalid_move_type",
+            "invalid_move_effect",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == expected && diagnostic.subject == "AETHER_PULSE"
+                }),
+                "missing diagnostic {expected}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_asm_text_without_coercion() {
+        let data = GameDataSet {
+            asm_text: [("GreetingText".to_string(), String::new())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_asm_text" && diagnostic.subject == "GreetingText"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_display_metadata_without_coercion() {
+        let data = GameDataSet {
+            sprite_palette_defaults: [
+                (" SPRITE_CHRIS".to_string(), 0),
+                ("SPRITE_CHRIS".to_string(), -1),
+            ]
+            .into_iter()
+            .collect(),
+            pokegear_town_map_palette_map: [
+                (" NEW_BARK_TOWN".to_string(), vec!["PAL_GREEN".to_string()]),
+                (
+                    "NEW_BARK_TOWN".to_string(),
+                    vec!["PAL_GREEN".to_string(), String::new()],
+                ),
+                ("ROUTE_29".to_string(), vec![" PAL_GREEN".to_string()]),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_sprite_palette_default"
+                && diagnostic.subject == "SPRITE_CHRIS"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_sprite_palette_default"
+                && diagnostic.subject == " SPRITE_CHRIS"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_palette_map"
+                && diagnostic.subject == "NEW_BARK_TOWN"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_palette_map"
+                && diagnostic.subject == " NEW_BARK_TOWN"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_palette_map" && diagnostic.subject == "ROUTE_29"
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_pokegear_landmarks_for_unknown_maps_or_constants() {
         let data = GameDataSet {
             maps: [(
@@ -13531,8 +15626,8 @@ mod tests {
                     },
                     PokegearLandmark {
                         id: 2,
-                        constant: "route_30".to_string(),
-                        label: String::new(),
+                        constant: " route_30".to_string(),
+                        label: " ROUTE_30".to_string(),
                         name: "Route 30".to_string(),
                         x: 4,
                         y: 5,
@@ -13542,6 +15637,8 @@ mod tests {
                 map_to_landmark: [
                     ("Route29".to_string(), "LANDMARK_ROUTE_30".to_string()),
                     ("MissingRoute".to_string(), "LANDMARK_ROUTE_29".to_string()),
+                    (" Route29".to_string(), "LANDMARK_ROUTE_29".to_string()),
+                    ("Route30".to_string(), " LANDMARK_ROUTE_29".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -13556,11 +15653,15 @@ mod tests {
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_pokegear_landmark" && diagnostic.subject == "route_30"
+            diagnostic.code == "invalid_pokegear_landmark" && diagnostic.subject == " route_30"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_pokegear_landmark_constant"
-                && diagnostic.subject == "route_30"
+            diagnostic.code == "invalid_pokegear_landmark_map" && diagnostic.subject == " Route29"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_landmark_reference"
+                && diagnostic.subject == "Route30"
+                && diagnostic.message.contains(" LANDMARK_ROUTE_29")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_pokegear_landmark_constant"
@@ -13570,6 +15671,13 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_pokegear_landmark_map"
                 && diagnostic.subject == "MissingRoute"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokegear_landmark_map" && diagnostic.subject == " Route29"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokegear_landmark_constant"
+                && diagnostic.subject == "Route30"
         }));
     }
 
@@ -13584,6 +15692,7 @@ mod tests {
         let data = GameDataSet {
             pokemon: [(species().id.clone(), species())].into_iter().collect(),
             pokemon_frontpic_anim: [
+                (" UNOWN_A".to_string(), valid_program.clone()),
                 ("EGG".to_string(), valid_program.clone()),
                 ("UNOWN_A".to_string(), valid_program.clone()),
                 ("unown_a".to_string(), valid_program.clone()),
@@ -13606,11 +15715,18 @@ mod tests {
             .filter(|diagnostic| diagnostic.code == "unknown_frontpic_anim_species")
             .map(|diagnostic| diagnostic.subject.as_str())
             .collect();
+        let malformed_frontpic_subjects: BTreeSet<&str> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "invalid_frontpic_anim_species")
+            .map(|diagnostic| diagnostic.subject.as_str())
+            .collect();
 
         assert_eq!(
             invalid_frontpic_subjects,
             BTreeSet::from(["UNOWN_1", "UNOWN_AA", "unown_a"])
         );
+        assert_eq!(malformed_frontpic_subjects, BTreeSet::from([" UNOWN_A"]));
     }
 
     #[test]
@@ -13645,6 +15761,24 @@ mod tests {
             .to_string();
 
         assert!(error.contains("parse single payload entry"), "{error}");
+    }
+
+    #[test]
+    fn move_content_payloads_reject_malformed_ids_without_effect_enum_restriction() {
+        let mut move_data = test_move("AETHER_PULSE");
+        move_data.effect = " MODDED_EFFECT".to_string();
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_content_pack_payload(ContentPackCategory::Moves, serde_json::json!([move_data]))
+            .expect_err("move category payload rejects malformed ids")
+            .to_string();
+
+        assert!(
+            error.contains("move 'AETHER_PULSE' has invalid effect ' MODDED_EFFECT'"),
+            "{error}"
+        );
+        assert!(data.moves.is_empty());
     }
 
     #[test]
@@ -13736,12 +15870,11 @@ mod tests {
             }),
         )
         .expect("single exported evolution entry is canonical");
-        assert!(
-            data.evolutions
-                .entries_for("NEW_MON")
-                .expect("NEW_MON evolutions")
-                .is_empty()
-        );
+        assert!(data
+            .evolutions
+            .entries_for("NEW_MON")
+            .expect("NEW_MON evolutions")
+            .is_empty());
 
         let mut data = GameDataSet::default();
         let error = data
@@ -14586,6 +16719,38 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_move_priority_overrides_for_missing_moves() {
+        let mut data = GameDataSet {
+            moves: [("TACKLE".to_string(), test_move("TACKLE"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        data.move_priorities = MovePriorityTable {
+            base_priority: 1,
+            effect_priorities: vec![crystal_core::battle::turn::MoveEffectPriority {
+                move_effect: "NORMAL_HIT".to_string(),
+                priority: 1,
+            }],
+            move_priorities: vec![crystal_core::battle::turn::MovePriorityOverride {
+                r#move: "EXTREME_SPEED".to_string(),
+                priority: 2,
+            }],
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_move_priority"
+                && diagnostic.subject == "move_priorities:move_priorities"
+        }));
+    }
+
+    #[test]
     fn content_pack_payloads_merge_weather_modifiers_as_exact_pack_data() {
         let mut data = GameDataSet::default();
 
@@ -14607,7 +16772,7 @@ mod tests {
                 "move_effect_modifiers": [
                     {
                         "weather": "WEATHER_RAIN",
-                        "move_effect": "EFFECT_SOLARBEAM",
+                        "move_effect": "SOLARBEAM",
                         "multiplier": { "numerator": 1, "denominator": 2 }
                     }
                 ]
@@ -14639,7 +16804,7 @@ mod tests {
                 move_effect_modifiers: vec![
                     crystal_core::battle::damage::WeatherMoveEffectModifier {
                         weather: "WEATHER_RAIN".to_string(),
-                        move_effect: "EFFECT_SOLARBEAM".to_string(),
+                        move_effect: "SOLARBEAM".to_string(),
                         multiplier: crystal_core::battle::damage::TypeMultiplier {
                             numerator: 1,
                             denominator: 2,
@@ -14648,6 +16813,39 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn verifier_rejects_weather_move_effect_modifiers_for_missing_move_effects() {
+        let mut data = GameDataSet {
+            moves: [("TACKLE".to_string(), test_move("TACKLE"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        data.weather_modifiers = WeatherModifiers {
+            type_modifiers: vec![crystal_core::battle::damage::WeatherTypeModifier {
+                weather: "WEATHER_RAIN".to_string(),
+                move_type: pokemon_type("WATER"),
+                multiplier: crystal_core::battle::damage::TypeMultiplier::one(),
+            }],
+            move_effect_modifiers: vec![crystal_core::battle::damage::WeatherMoveEffectModifier {
+                weather: "WEATHER_RAIN".to_string(),
+                move_effect: "SOLARBEAM".to_string(),
+                multiplier: crystal_core::battle::damage::TypeMultiplier::one(),
+            }],
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_weather_modifier_move_effect"
+                && diagnostic.subject == "weather_modifiers:move_effect_modifiers"
+        }));
     }
 
     #[test]
@@ -14721,11 +16919,10 @@ mod tests {
                 .map(|metadata| metadata.name.as_str()),
             Some("Route29")
         );
-        assert!(
-            data.initialize_events
-                .event_flags
-                .contains(&"EVENT_RIVAL_CHERRYGROVE_CITY".to_string())
-        );
+        assert!(data
+            .initialize_events
+            .event_flags
+            .contains(&"EVENT_RIVAL_CHERRYGROVE_CITY".to_string()));
         assert_eq!(
             data.story_event_script_constants.global.get("TRUE"),
             Some(&1)
@@ -14749,11 +16946,10 @@ mod tests {
         assert!(battle_anim_bundle.get("objects").is_some());
         assert!(sprite_anim_bundle.get("oam_sets").is_some());
         assert_eq!(data.sprite_palette_defaults.get("SPRITE_CHRIS"), Some(&0));
-        assert!(
-            data.pokegear_town_map_palette_map
-                .get("town_map")
-                .is_some_and(|entries| !entries.is_empty())
-        );
+        assert!(data
+            .pokegear_town_map_palette_map
+            .get("town_map")
+            .is_some_and(|entries| !entries.is_empty()));
         assert_eq!(
             data.pokemon_cries.get("CHIKORITA").map(|cry| (
                 cry.cry.as_str(),
@@ -14797,16 +16993,14 @@ mod tests {
             .expect("compile base core pack");
 
         assert!(
-            !compiled.report.has_errors(),
+            !compiled.report().has_errors(),
             "{:?}",
-            compiled.report.diagnostics
+            compiled.report().diagnostics
         );
-        assert!(
-            compiled
-                .report
-                .solvable_events
-                .contains(&"EVENT_HALL_OF_FAME".to_string())
-        );
+        assert!(compiled
+            .report()
+            .solvable_events
+            .contains(&"EVENT_HALL_OF_FAME".to_string()));
     }
 
     #[test]
@@ -14976,10 +17170,16 @@ mod tests {
                 WildEncounterData {
                     map_name: "Start".to_string(),
                     grass: Some(WildEncounterTable {
-                        morning: vec![WildEncounter {
-                            level: 3,
-                            species: "MISSING_MON".to_string(),
-                        }],
+                        morning: vec![
+                            WildEncounter {
+                                level: 3,
+                                species: "MISSING_MON".to_string(),
+                            },
+                            WildEncounter {
+                                level: 3,
+                                species: " MISSING_MON".to_string(),
+                            },
+                        ],
                         ..WildEncounterTable::default()
                     }),
                     ..WildEncounterData::default()
@@ -15001,6 +17201,10 @@ mod tests {
             diagnostic.code == "unknown_encounter_species"
                 && diagnostic.message.contains("MISSING_MON")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_encounter_species"
+                && diagnostic.message.contains(" MISSING_MON")
+        }));
     }
 
     #[test]
@@ -15012,32 +17216,45 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            wild_encounters: [(
-                "Start".to_string(),
-                WildEncounterData {
-                    map_name: "Start".to_string(),
-                    grass_rates: Some(
-                        [("DAY".to_string(), 20), ("night".to_string(), 10)]
+            wild_encounters: [
+                (
+                    "Start".to_string(),
+                    WildEncounterData {
+                        map_name: "Start".to_string(),
+                        grass_rates: Some(
+                            [
+                                (" DAY".to_string(), 5),
+                                ("DAY".to_string(), 20),
+                                ("night".to_string(), 10),
+                            ]
                             .into_iter()
                             .collect(),
-                    ),
-                    water_rate: Some(15),
-                    grass: Some(WildEncounterTable {
-                        morning: vec![WildEncounter {
-                            level: 3,
-                            species: "NEW_MON".to_string(),
-                        }],
-                        ..WildEncounterTable::default()
-                    }),
-                    water: Some(WildEncounterTable {
-                        morning: vec![WildEncounter {
-                            level: 10,
-                            species: "NEW_MON".to_string(),
-                        }],
-                        ..WildEncounterTable::default()
-                    }),
-                },
-            )]
+                        ),
+                        water_rate: Some(15),
+                        grass: Some(WildEncounterTable {
+                            morning: vec![WildEncounter {
+                                level: 3,
+                                species: "NEW_MON".to_string(),
+                            }],
+                            ..WildEncounterTable::default()
+                        }),
+                        water: Some(WildEncounterTable {
+                            morning: vec![WildEncounter {
+                                level: 10,
+                                species: "NEW_MON".to_string(),
+                            }],
+                            ..WildEncounterTable::default()
+                        }),
+                    },
+                ),
+                (
+                    " Start".to_string(),
+                    WildEncounterData {
+                        map_name: " Start".to_string(),
+                        ..WildEncounterData::default()
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             ..GameDataSet::default()
@@ -15051,6 +17268,8 @@ mod tests {
 
         assert!(report.has_errors());
         for code in [
+            "invalid_encounter_map",
+            "invalid_grass_encounter_rate_time",
             "unknown_grass_encounter_rate_time",
             "missing_grass_encounter_rate",
             "empty_grass_encounter_slots",
@@ -15148,18 +17367,14 @@ mod tests {
         );
 
         assert!(report.has_errors());
-        assert!(
-            report
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.code == "missing_grass_encounter_table" })
-        );
-        assert!(
-            report
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.code == "missing_water_encounter_table" })
-        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "missing_grass_encounter_table" }));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "missing_water_encounter_table" }));
     }
 
     #[test]
@@ -15172,28 +17387,38 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            field_encounters: [(
-                "Start".to_string(),
-                FieldEncounterData {
-                    map_name: "Start".to_string(),
-                    headbutt: Some(FieldEncounterTable {
-                        common: vec![FieldEncounterEntry {
-                            weight: 90,
-                            species: "NEW_MON".to_string(),
-                            level: 3,
-                        }],
-                        rare: Vec::new(),
-                    }),
-                    rock_smash: Some(FieldEncounterTable {
-                        common: vec![FieldEncounterEntry {
-                            weight: 0,
-                            species: "NEW_MON".to_string(),
-                            level: 8,
-                        }],
-                        rare: Vec::new(),
-                    }),
-                },
-            )]
+            field_encounters: [
+                (
+                    "Start".to_string(),
+                    FieldEncounterData {
+                        map_name: "Start".to_string(),
+                        headbutt: Some(FieldEncounterTable {
+                            common: vec![FieldEncounterEntry {
+                                weight: 90,
+                                species: "NEW_MON".to_string(),
+                                level: 3,
+                            }],
+                            rare: Vec::new(),
+                        }),
+                        rock_smash: Some(FieldEncounterTable {
+                            common: vec![FieldEncounterEntry {
+                                weight: 0,
+                                species: " NEW_MON".to_string(),
+                                level: 8,
+                            }],
+                            rare: Vec::new(),
+                        }),
+                    },
+                ),
+                (
+                    " Start".to_string(),
+                    FieldEncounterData {
+                        map_name: " Start".to_string(),
+                        headbutt: None,
+                        rock_smash: None,
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             ..GameDataSet::default()
@@ -15207,6 +17432,8 @@ mod tests {
 
         assert!(report.has_errors());
         for code in [
+            "invalid_field_encounter_map",
+            "invalid_field_encounter_species",
             "invalid_field_encounter_weight_total",
             "empty_field_encounter_bucket",
             "zero_weight_field_encounter",
@@ -15225,13 +17452,11 @@ mod tests {
     #[test]
     fn verifier_rejects_missing_midi_asset_files() {
         let data = GameDataSet {
-            audio: vec![
-                ModpackAudioAsset::music(
-                    "MUSIC_MISSING_THEME",
-                    "content-packs/test/music/MUSIC_MISSING_THEME.mid",
-                )
-                .expect("valid MIDI asset shape"),
-            ],
+            audio: vec![ModpackAudioAsset::music(
+                "MUSIC_MISSING_THEME",
+                "content-packs/test/music/MUSIC_MISSING_THEME.mid",
+            )
+            .expect("valid MIDI asset shape")],
             ..GameDataSet::default()
         };
 
@@ -15253,10 +17478,11 @@ mod tests {
         std::fs::create_dir_all(midi_path.parent().expect("midi parent")).expect("create midi dir");
         std::fs::write(&midi_path, b"not midi").expect("write invalid midi");
         let data = GameDataSet {
-            audio: vec![
-                ModpackAudioAsset::music("MUSIC_BAD", "content-packs/test/music/MUSIC_BAD.mid")
-                    .expect("valid MIDI asset shape"),
-            ],
+            audio: vec![ModpackAudioAsset::music(
+                "MUSIC_BAD",
+                "content-packs/test/music/MUSIC_BAD.mid",
+            )
+            .expect("valid MIDI asset shape")],
             ..GameDataSet::default()
         };
 
@@ -15264,6 +17490,31 @@ mod tests {
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_midi_file" && diagnostic.subject == "MUSIC_BAD"
+        }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verifier_rejects_empty_pcm_asset_bytes() {
+        let root = temp_test_path("invalid-pcm-root");
+        let pcm_path = root.join("apps/web/assets/data/content-packs/test/cries/CRY_EMPTY.pcm");
+        std::fs::create_dir_all(pcm_path.parent().expect("pcm parent")).expect("create pcm dir");
+        std::fs::write(&pcm_path, &[] as &[u8]).expect("write empty pcm");
+        let data = GameDataSet {
+            audio: vec![ModpackAudioAsset::cry_pcm(
+                "CRY_EMPTY",
+                "content-packs/test/cries/CRY_EMPTY.pcm",
+                22050,
+                1,
+            )
+            .expect("valid PCM asset shape")],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(&AssetRoot::new(&root), &data, &PlayabilityRules::default());
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pcm_file" && diagnostic.subject == "CRY_EMPTY"
         }));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -15293,6 +17544,199 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_heavy_ball_species" && diagnostic.subject == "MISSING_HEAVY"
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_capture_ball_rules_without_coercion() {
+        let mut ball = test_item("BAD_BALL");
+        ball.pocket = item_pocket("BALL");
+        let data = GameDataSet {
+            items: [("BAD_BALL".to_string(), ball)].into_iter().collect(),
+            capture_rules: CaptureRules {
+                fast_ball_species: BTreeSet::new(),
+                heavy_ball_modifiers: BTreeMap::new(),
+                ball_rules: [(
+                    " BAD_BALL".to_string(),
+                    crystal_core::battle::capture::CaptureBallRule {
+                        multiplier_numerator: 1,
+                        multiplier_denominator: 0,
+                        battle_type: " BATTLETYPE_FISH".to_string(),
+                        skip_hp_calc: false,
+                        use_heavy_ball_weight_modifier: false,
+                        use_level_ball_multiplier: false,
+                        require_same_species: false,
+                        require_same_gender: false,
+                        require_fast_species: false,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                guaranteed_capture_balls: BTreeSet::new(),
+                status_bonus: BTreeMap::new(),
+            },
+            capture_wobble_probabilities: vec![CaptureWobbleProbability {
+                catch_rate: 255,
+                chance: 255,
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for code in [
+            "invalid_capture_ball_id",
+            "invalid_capture_ball_battle_type",
+            "invalid_capture_ball_multiplier",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == code
+                        && diagnostic.subject == "capture_rules:ball_rules: BAD_BALL"
+                }),
+                "missing {code}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_capture_rules_for_missing_ball_items() {
+        let mut ball = test_item("POKE_BALL");
+        ball.pocket = item_pocket("BALL");
+        let rule = crystal_core::battle::capture::CaptureBallRule {
+            multiplier_numerator: 1,
+            multiplier_denominator: 1,
+            battle_type: String::new(),
+            skip_hp_calc: false,
+            use_heavy_ball_weight_modifier: false,
+            use_level_ball_multiplier: false,
+            require_same_species: false,
+            require_same_gender: false,
+            require_fast_species: false,
+        };
+        let data = GameDataSet {
+            items: [("POKE_BALL".to_string(), ball)].into_iter().collect(),
+            capture_rules: CaptureRules {
+                fast_ball_species: BTreeSet::new(),
+                heavy_ball_modifiers: BTreeMap::new(),
+                ball_rules: [
+                    ("POKE_BALL".to_string(), rule.clone()),
+                    ("MOD_BALL".to_string(), rule),
+                ]
+                .into_iter()
+                .collect(),
+                guaranteed_capture_balls: BTreeSet::from([
+                    " MASTER_BALL".to_string(),
+                    "MOD_BALL".to_string(),
+                ]),
+                status_bonus: BTreeMap::new(),
+            },
+            capture_wobble_probabilities: vec![CaptureWobbleProbability {
+                catch_rate: 255,
+                chance: 255,
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for expected in [
+            (
+                "unknown_capture_ball_rule_item",
+                "capture_rules:ball_rules:MOD_BALL",
+            ),
+            (
+                "invalid_guaranteed_capture_ball",
+                "capture_rules:guaranteed_capture_balls",
+            ),
+            (
+                "unknown_guaranteed_capture_ball",
+                "capture_rules:guaranteed_capture_balls",
+            ),
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == expected.0 && diagnostic.subject == expected.1
+                }),
+                "missing {:?}: {:?}",
+                expected,
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_capture_wobble_probabilities_without_coercion() {
+        let mut ball = test_item("POKE_BALL");
+        ball.pocket = item_pocket("BALL");
+        let data = GameDataSet {
+            items: [("POKE_BALL".to_string(), ball)].into_iter().collect(),
+            capture_rules: CaptureRules {
+                fast_ball_species: BTreeSet::new(),
+                heavy_ball_modifiers: BTreeMap::new(),
+                ball_rules: [(
+                    "POKE_BALL".to_string(),
+                    crystal_core::battle::capture::CaptureBallRule {
+                        multiplier_numerator: 1,
+                        multiplier_denominator: 1,
+                        battle_type: String::new(),
+                        skip_hp_calc: false,
+                        use_heavy_ball_weight_modifier: false,
+                        use_level_ball_multiplier: false,
+                        require_same_species: false,
+                        require_same_gender: false,
+                        require_fast_species: false,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                guaranteed_capture_balls: BTreeSet::new(),
+                status_bonus: BTreeMap::new(),
+            },
+            capture_wobble_probabilities: vec![
+                CaptureWobbleProbability {
+                    catch_rate: 0,
+                    chance: 0,
+                },
+                CaptureWobbleProbability {
+                    catch_rate: 10,
+                    chance: 20,
+                },
+                CaptureWobbleProbability {
+                    catch_rate: 9,
+                    chance: 30,
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for code in [
+            "invalid_capture_wobble_catch_rate",
+            "unordered_capture_wobble_probability",
+            "incomplete_capture_wobble_probabilities",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == code && diagnostic.subject == "capture_wobble_probabilities"
+                }),
+                "missing {code}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -15351,10 +17795,14 @@ mod tests {
     fn verifier_accepts_modpack_item_menu_ids_as_definitive_data() {
         let mut mod_menu = test_item("MOD_MENU_ITEM");
         mod_menu.field_menu = "ITEMMENU_MODDED".to_string();
+        mod_menu.field_usable = true;
         mod_menu.battle_menu = "ITEMMENU_NOUSE".to_string();
+        mod_menu.battle_usable = false;
         let mut exact_menu = test_item("EXACT_MENU_ITEM");
         exact_menu.field_menu = "ITEMMENU_CURRENT".to_string();
+        exact_menu.field_usable = true;
         exact_menu.battle_menu = "ITEMMENU_PARTY".to_string();
+        exact_menu.battle_usable = true;
         let data = GameDataSet {
             items: [
                 ("MOD_MENU_ITEM".to_string(), mod_menu),
@@ -15375,6 +17823,410 @@ mod tests {
             diagnostic.code == "unknown_item_menu"
                 && (diagnostic.subject == "MOD_MENU_ITEM"
                     || diagnostic.subject == "EXACT_MENU_ITEM")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_menu_usability_contradictions() {
+        let mut bad_field = test_item("BAD_FIELD_MENU");
+        bad_field.field_menu = "ITEMMENU_NOUSE".to_string();
+        bad_field.field_usable = true;
+        let mut bad_battle = test_item("BAD_BATTLE_MENU");
+        bad_battle.battle_menu = "ITEMMENU_PARTY".to_string();
+        bad_battle.battle_usable = false;
+        let data = GameDataSet {
+            items: [
+                ("BAD_FIELD_MENU".to_string(), bad_field),
+                ("BAD_BATTLE_MENU".to_string(), bad_battle),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_field_usable_menu"
+                && diagnostic.subject == "BAD_FIELD_MENU"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_battle_usable_menu"
+                && diagnostic.subject == "BAD_BATTLE_MENU"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_script_name_whitespace_without_coercion() {
+        let mut item = test_item("MOD_ITEM");
+        item.script_name = " MOD_ITEM".to_string();
+        let data = GameDataSet {
+            items: [("MOD_ITEM".to_string(), item)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_script_name" && diagnostic.subject == "MOD_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_display_name_whitespace_without_inference() {
+        let mut bad = test_item("BAD_NAME_ITEM");
+        bad.name = " Flash Step Charm".to_string();
+        let mut exact = test_item("EXACT_NAME_ITEM");
+        exact.name = "Flash Step Charm".to_string();
+        let data = GameDataSet {
+            items: [
+                ("BAD_NAME_ITEM".to_string(), bad),
+                ("EXACT_NAME_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_name" && diagnostic.subject == "BAD_NAME_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_name" && diagnostic.subject == "EXACT_NAME_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_description_whitespace_without_inference() {
+        let mut bad = test_item("BAD_DESCRIPTION_ITEM");
+        bad.description = " A charm with exact text.".to_string();
+        let mut exact = test_item("EXACT_DESCRIPTION_ITEM");
+        exact.description = "A charm with exact text.".to_string();
+        let data = GameDataSet {
+            items: [
+                ("BAD_DESCRIPTION_ITEM".to_string(), bad),
+                ("EXACT_DESCRIPTION_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_description"
+                && diagnostic.subject == "BAD_DESCRIPTION_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_description"
+                && diagnostic.subject == "EXACT_DESCRIPTION_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_pocket_whitespace_without_enum_restriction() {
+        let mut bad = test_item("BAD_POCKET_ITEM");
+        bad.pocket = " BATTLE_PASS".to_string();
+        let mut exact = test_item("EXACT_POCKET_ITEM");
+        exact.pocket = "BATTLE_PASS".to_string();
+        let data = GameDataSet {
+            items: [
+                ("BAD_POCKET_ITEM".to_string(), bad),
+                ("EXACT_POCKET_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_pocket" && diagnostic.subject == "BAD_POCKET_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_pocket" && diagnostic.subject == "EXACT_POCKET_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_effect_whitespace_without_enum_restriction() {
+        let mut bad = test_item("BAD_EFFECT_ITEM");
+        bad.effect = " MODDED_FLASH_STEP".to_string();
+        let mut exact = test_item("EXACT_EFFECT_ITEM");
+        exact.effect = "MODDED_FLASH_STEP".to_string();
+        let data = GameDataSet {
+            items: [
+                ("BAD_EFFECT_ITEM".to_string(), bad),
+                ("EXACT_EFFECT_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_effect" && diagnostic.subject == "BAD_EFFECT_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_effect" && diagnostic.subject == "EXACT_EFFECT_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_held_effect_whitespace_without_enum_restriction() {
+        let mut bad = test_item("BAD_HELD_EFFECT_ITEM");
+        bad.held_effect = " HELD_MODDED".to_string();
+        let mut exact = test_item("EXACT_HELD_EFFECT_ITEM");
+        exact.held_effect = "HELD_MODDED".to_string();
+        let data = GameDataSet {
+            items: [
+                ("BAD_HELD_EFFECT_ITEM".to_string(), bad),
+                ("EXACT_HELD_EFFECT_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_held_effect"
+                && diagnostic.subject == "BAD_HELD_EFFECT_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_held_effect"
+                && diagnostic.subject == "EXACT_HELD_EFFECT_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_property_whitespace_without_requiring_property() {
+        let mut bad = test_item("BAD_PROPERTY_ITEM");
+        bad.property = " CANT_SELECT".to_string();
+        let mut exact = test_item("EXACT_PROPERTY_ITEM");
+        exact.property = "CANT_SELECT".to_string();
+        let mut empty = test_item("EMPTY_PROPERTY_ITEM");
+        empty.property = String::new();
+        let data = GameDataSet {
+            items: [
+                ("BAD_PROPERTY_ITEM".to_string(), bad),
+                ("EXACT_PROPERTY_ITEM".to_string(), exact),
+                ("EMPTY_PROPERTY_ITEM".to_string(), empty),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_property" && diagnostic.subject == "BAD_PROPERTY_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_property"
+                && (diagnostic.subject == "EXACT_PROPERTY_ITEM"
+                    || diagnostic.subject == "EMPTY_PROPERTY_ITEM")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_item_menu_whitespace_without_enum_restriction() {
+        let mut bad = test_item("BAD_MENU_ITEM");
+        bad.field_menu = " ITEMMENU_MODDED".to_string();
+        bad.battle_menu = String::new();
+        let mut exact = test_item("EXACT_MENU_ITEM");
+        exact.field_menu = "ITEMMENU_MODDED".to_string();
+        exact.field_usable = true;
+        exact.battle_menu = "ITEMMENU_MODDED_BATTLE".to_string();
+        exact.battle_usable = true;
+        let data = GameDataSet {
+            items: [
+                ("BAD_MENU_ITEM".to_string(), bad),
+                ("EXACT_MENU_ITEM".to_string(), exact),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_field_menu" && diagnostic.subject == "BAD_MENU_ITEM"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_battle_menu" && diagnostic.subject == "BAD_MENU_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            (diagnostic.code == "invalid_item_field_menu"
+                || diagnostic.code == "missing_item_battle_menu")
+                && diagnostic.subject == "EXACT_MENU_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_tmhm_items_without_explicit_index_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = None;
+        let data = GameDataSet {
+            items: [("TM_MUD_SLAP".to_string(), tm)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_tmhm_index" && diagnostic.subject == "TM_MUD_SLAP"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_tmhm_move" && diagnostic.subject == "TM_MUD_SLAP"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_tmhm_items_with_zero_index_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(0);
+        tm.tmhm_move = Some("MUD_SLAP".to_string());
+        let data = GameDataSet {
+            items: [("TM_MUD_SLAP".to_string(), tm)].into_iter().collect(),
+            moves: [("MUD_SLAP".to_string(), test_move("MUD_SLAP"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_tmhm_index" && diagnostic.subject == "TM_MUD_SLAP"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_tmhm_items_with_whitespace_move_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some(" MUD_SLAP".to_string());
+        let data = GameDataSet {
+            items: [("TM_MUD_SLAP".to_string(), tm)].into_iter().collect(),
+            moves: [("MUD_SLAP".to_string(), test_move("MUD_SLAP"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_tmhm_move" && diagnostic.subject == "TM_MUD_SLAP"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_tmhm_items_with_unknown_move_without_coercion() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some("mud_slap".to_string());
+        let data = GameDataSet {
+            items: [("TM_MUD_SLAP".to_string(), tm)].into_iter().collect(),
+            moves: [("MUD_SLAP".to_string(), test_move("MUD_SLAP"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_item_tmhm_move" && diagnostic.subject == "TM_MUD_SLAP"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_items_without_explicit_script_name_data() {
+        let mut item = test_item("FLASH_STEP_CHARM");
+        item.script_name = String::new();
+        let data = GameDataSet {
+            items: [("FLASH_STEP_CHARM".to_string(), item)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_script_name"
+                && diagnostic.subject == "FLASH_STEP_CHARM"
         }));
     }
 
@@ -15431,12 +18283,10 @@ mod tests {
             );
         }
         for subject in ["POKE_DOLL", "REPEL", "ESCAPE_ROPE"] {
-            assert!(
-                !report
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.subject == subject)
-            );
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.subject == subject));
         }
     }
 
@@ -15447,6 +18297,7 @@ mod tests {
         bad_restore_hp.parameter = -2;
         let mut bad_status_heal = test_item("BAD_STATUS_HEAL");
         bad_status_heal.effect = "STATUS_HEAL".to_string();
+        bad_status_heal.status_heals = vec![String::new(), " POISON".to_string()];
         let mut bad_revive = test_item("BAD_REVIVE");
         bad_revive.effect = "MOD_REVIVE".to_string();
         bad_revive.revive_hp_percent = Some(0);
@@ -15474,7 +18325,14 @@ mod tests {
         bad_x_item.battle_stat_boost_stages = Some(7);
         let mut bad_guard_spec = test_item("BAD_GUARD_SPEC");
         bad_guard_spec.effect = "MOD_GUARD".to_string();
-        bad_guard_spec.battle_stat_drop_guard = Some(false);
+        bad_guard_spec.battle_stat_drop_guard = Some(true);
+        let mut bad_guard_spec_turns = test_item("BAD_GUARD_SPEC_TURNS");
+        bad_guard_spec_turns.effect = "MOD_GUARD".to_string();
+        bad_guard_spec_turns.battle_stat_drop_guard = Some(true);
+        bad_guard_spec_turns.battle_stat_drop_guard_turns = Some(0);
+        let mut bad_guard_spec_flag = test_item("BAD_GUARD_SPEC_FLAG");
+        bad_guard_spec_flag.effect = "MOD_GUARD".to_string();
+        bad_guard_spec_flag.battle_stat_drop_guard_turns = Some(5);
         let mut bad_dire_hit = test_item("BAD_DIRE_HIT");
         bad_dire_hit.effect = "MOD_FOCUS".to_string();
         bad_dire_hit.battle_focus_energy = Some(false);
@@ -15516,6 +18374,7 @@ mod tests {
         let mut exact_guard_spec = test_item("EXACT_GUARD_SPEC");
         exact_guard_spec.effect = "MOD_GUARD".to_string();
         exact_guard_spec.battle_stat_drop_guard = Some(true);
+        exact_guard_spec.battle_stat_drop_guard_turns = Some(5);
         let mut exact_dire_hit = test_item("EXACT_DIRE_HIT");
         exact_dire_hit.effect = "MOD_FOCUS".to_string();
         exact_dire_hit.battle_focus_energy = Some(true);
@@ -15535,6 +18394,8 @@ mod tests {
                 ("BAD_RARE_CANDY".to_string(), bad_rare_candy),
                 ("BAD_X_ITEM".to_string(), bad_x_item),
                 ("BAD_GUARD_SPEC".to_string(), bad_guard_spec),
+                ("BAD_GUARD_SPEC_TURNS".to_string(), bad_guard_spec_turns),
+                ("BAD_GUARD_SPEC_FLAG".to_string(), bad_guard_spec_flag),
                 ("BAD_DIRE_HIT".to_string(), bad_dire_hit),
                 ("BAD_BITTER_BERRY".to_string(), bad_bitter_berry),
                 ("EXACT_RESTORE_HP".to_string(), exact_restore_hp),
@@ -15563,6 +18424,7 @@ mod tests {
 
         for (code, subject) in [
             ("invalid_item_heal_amount", "BAD_RESTORE_HP"),
+            ("invalid_item_status_heal", "BAD_STATUS_HEAL"),
             ("invalid_item_revive_hp_percent", "BAD_REVIVE"),
             ("invalid_item_party_revive_hp_percent", "BAD_SACRED_ASH"),
             ("invalid_item_pp_restore_scope", "BAD_RESTORE_PP"),
@@ -15574,7 +18436,15 @@ mod tests {
             ("invalid_item_rare_candy_level_gain", "BAD_RARE_CANDY"),
             ("invalid_item_battle_stat_boost_stat", "BAD_X_ITEM"),
             ("invalid_item_battle_stat_boost_stages", "BAD_X_ITEM"),
-            ("invalid_item_battle_stat_drop_guard", "BAD_GUARD_SPEC"),
+            (
+                "missing_item_battle_stat_drop_guard_turns",
+                "BAD_GUARD_SPEC",
+            ),
+            (
+                "invalid_item_battle_stat_drop_guard_turns",
+                "BAD_GUARD_SPEC_TURNS",
+            ),
+            ("missing_item_battle_stat_drop_guard", "BAD_GUARD_SPEC_FLAG"),
             ("invalid_item_battle_focus_energy", "BAD_DIRE_HIT"),
             ("invalid_item_confusion_heal", "BAD_BITTER_BERRY"),
         ] {
@@ -15633,15 +18503,33 @@ mod tests {
             evolutions: EvolutionTable(
                 [
                     (
+                        " new_mon".to_string(),
+                        vec![EvolutionEntry::level("NEW_FORM", 20)],
+                    ),
+                    (
                         "new_mon".to_string(),
                         vec![EvolutionEntry::level("NEW_FORM", 20)],
                     ),
                     (
                         "NEW_MON".to_string(),
                         vec![
+                            EvolutionEntry::item(" NEW_FORM", " THUNDERSTONE"),
                             EvolutionEntry::item("new_form", "thunderstone"),
+                            EvolutionEntry::happiness("NEW_FORM", " MORNINGISH"),
                             EvolutionEntry::happiness("NEW_FORM", "MORNINGISH"),
+                            EvolutionEntry::trade("NEW_FORM", Some(" THUNDERSTONE")),
+                            EvolutionEntry::trade("NEW_FORM", Some("thunderstone")),
+                            EvolutionEntry::stat("NEW_FORM", 20, " ATTACKIER"),
                             EvolutionEntry::stat("NEW_FORM", 20, "ATTACKIER"),
+                            EvolutionEntry {
+                                method: " MOON_PHASE".to_string(),
+                                species: "NEW_FORM".to_string(),
+                                level: None,
+                                item: None,
+                                held_item: None,
+                                happiness: None,
+                                stat_ratio: None,
+                            },
                             EvolutionEntry {
                                 method: "MOON_PHASE".to_string(),
                                 species: "NEW_FORM".to_string(),
@@ -15667,11 +18555,19 @@ mod tests {
         );
 
         for expected in [
+            "invalid_evolution_source_species",
             "unknown_evolution_source_species",
+            "invalid_evolution_target_species",
             "unknown_evolution_target_species",
+            "invalid_evolution_item",
             "unknown_evolution_item",
+            "invalid_evolution_happiness_window",
             "unknown_evolution_happiness_window",
+            "invalid_trade_evolution_item",
+            "unknown_trade_evolution_item",
+            "invalid_evolution_stat_ratio",
             "unknown_evolution_stat_ratio",
+            "invalid_evolution_method",
             "unknown_evolution_method",
         ] {
             assert!(
@@ -15743,7 +18639,7 @@ mod tests {
     fn verifier_rejects_unknown_species_held_items_without_case_coercion() {
         let mut known_species = species();
         known_species.tmhm_learnset.clear();
-        known_species.item1 = Some("potion".to_string());
+        known_species.item1 = Some(" POTION".to_string());
         known_species.item2 = Some("RARE_CANDY".to_string());
         let species_id = known_species.id.clone();
         let data = GameDataSet {
@@ -15766,14 +18662,153 @@ mod tests {
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_species_held_item"
+            diagnostic.code == "invalid_species_held_item"
                 && diagnostic.subject == species_id
-                && diagnostic.message.contains("potion")
+                && diagnostic.message.contains(" POTION")
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_species_held_item"
                 && diagnostic.message.contains("RARE_CANDY")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_learnset_ids_without_coercion() {
+        let mut known_species = species();
+        known_species.tmhm_learnset = vec![" HEADBUTT".to_string(), "headbutt".to_string()];
+        let species_id = known_species.id.clone();
+        let data = GameDataSet {
+            pokemon: [(species_id.clone(), known_species)].into_iter().collect(),
+            learnsets: [
+                (
+                    species_id.clone(),
+                    vec![
+                        LearnsetEntry(1, "TACKLE ".to_string()),
+                        LearnsetEntry(1, "tackle".to_string()),
+                    ],
+                ),
+                (
+                    " CHIKORITA".to_string(),
+                    vec![LearnsetEntry(1, "TACKLE".to_string())],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            evolutions: EvolutionTable([(species_id.clone(), Vec::new())].into_iter().collect()),
+            moves: [
+                ("TACKLE".to_string(), test_move("TACKLE")),
+                ("HEADBUTT".to_string(), test_move("HEADBUTT")),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("invalid_tmhm_move", species_id.as_str()),
+            ("unknown_tmhm_move", species_id.as_str()),
+            ("invalid_level_move", species_id.as_str()),
+            ("unknown_level_move", species_id.as_str()),
+            ("invalid_learnset_species", " CHIKORITA"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_trainer_catalog_without_coercion() {
+        let data = GameDataSet {
+            pokemon: [("RATTATA".to_string(), species())].into_iter().collect(),
+            items: [
+                ("BERRY".to_string(), test_item("BERRY")),
+                ("POTION".to_string(), test_item("POTION")),
+            ]
+            .into_iter()
+            .collect(),
+            moves: [("TACKLE".to_string(), test_move("TACKLE"))]
+                .into_iter()
+                .collect(),
+            trainers: TrainerCatalog {
+                trainers: [(
+                    "YOUNGSTER_JOEY".to_string(),
+                    Trainer {
+                        trainer_id: " YOUNGSTER_JOEY".to_string(),
+                        trainer_class: "YOUNGSTER ".to_string(),
+                        party: vec![
+                            crystal_core::models::TrainerPartyPokemon {
+                                species: " RATTATA".to_string(),
+                                level: 6,
+                                item: Some(" BERRY".to_string()),
+                                moves: vec![crystal_core::models::LearnedMove {
+                                    name: " TACKLE".to_string(),
+                                    current_pp: 35,
+                                    pp_ups: 0,
+                                }],
+                                dvs: Dv::default(),
+                            },
+                            crystal_core::models::TrainerPartyPokemon {
+                                species: "rattata".to_string(),
+                                level: 6,
+                                item: Some("berry".to_string()),
+                                moves: vec![crystal_core::models::LearnedMove {
+                                    name: "tackle".to_string(),
+                                    current_pp: 35,
+                                    pp_ups: 0,
+                                }],
+                                dvs: Dv::default(),
+                            },
+                        ],
+                        items: vec![Some(" POTION".to_string()), Some("potion".to_string())],
+                        ..Trainer::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("trainer_catalog_key_mismatch", "YOUNGSTER_JOEY"),
+            ("invalid_trainer_id", " YOUNGSTER_JOEY"),
+            ("invalid_trainer_class", " YOUNGSTER_JOEY"),
+            ("invalid_trainer_party_species", " YOUNGSTER_JOEY:party:0"),
+            ("invalid_trainer_party_item", " YOUNGSTER_JOEY:party:0"),
+            ("invalid_trainer_party_move", " YOUNGSTER_JOEY:party:0"),
+            ("unknown_trainer_party_species", " YOUNGSTER_JOEY:party:1"),
+            ("unknown_trainer_party_item", " YOUNGSTER_JOEY:party:1"),
+            ("unknown_trainer_party_move", " YOUNGSTER_JOEY:party:1"),
+            ("invalid_trainer_battle_item", " YOUNGSTER_JOEY:item:0"),
+            ("unknown_trainer_battle_item", " YOUNGSTER_JOEY:item:1"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -15783,9 +18818,12 @@ mod tests {
                 .into_iter()
                 .collect(),
             marts: MartCatalog(
-                [("MartNew".to_string(), vec!["potion".to_string()])]
-                    .into_iter()
-                    .collect(),
+                [
+                    (" MartNew".to_string(), vec!["POTION".to_string()]),
+                    ("MartNew".to_string(), vec!["potion".to_string()]),
+                ]
+                .into_iter()
+                .collect(),
             ),
             ..GameDataSet::default()
         };
@@ -15800,6 +18838,9 @@ mod tests {
             diagnostic.code == "unknown_mart_item"
                 && diagnostic.subject == "MartNew"
                 && diagnostic.message.contains("potion")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_mart_id" && diagnostic.subject == " MartNew"
         }));
     }
 
@@ -15824,6 +18865,18 @@ mod tests {
                 mart_id: "MART_CHERRYGROVE".to_string(),
                 source_script: "LowerTypeScript".to_string(),
                 command_index: 3,
+            },
+            ScriptShopCommand {
+                mart_type: " MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_CHERRYGROVE".to_string(),
+                source_script: "PaddedTypeScript".to_string(),
+                command_index: 4,
+            },
+            ScriptShopCommand {
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: " MART_CHERRYGROVE".to_string(),
+                source_script: "PaddedMartScript".to_string(),
+                command_index: 5,
             },
         ];
         let data = GameDataSet {
@@ -15859,18 +18912,103 @@ mod tests {
                 && diagnostic.subject == "Start:LowerTypeScript:3"
                 && diagnostic.message.contains("marttype_standard")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_shop_mart_type"
+                && diagnostic.subject == "Start:PaddedTypeScript:4"
+                && diagnostic.message.contains(" MARTTYPE_STANDARD")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_shop_mart"
+                && diagnostic.subject == "Start:PaddedMartScript:5"
+                && diagnostic.message.contains(" MART_CHERRYGROVE")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_script_phone_commands_without_coercion() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_phone_commands = vec![
+            ScriptPhoneCommand {
+                command: "CheckCellNum".to_string(),
+                contact_id: "PHONE_MOM".to_string(),
+                source_script: "PhoneScript".to_string(),
+                command_index: 1,
+            },
+            ScriptPhoneCommand {
+                command: "checkcellnum".to_string(),
+                contact_id: "phone_mom".to_string(),
+                source_script: "LowerContactScript".to_string(),
+                command_index: 2,
+            },
+            ScriptPhoneCommand {
+                command: "askforphonenumber".to_string(),
+                contact_id: String::new(),
+                source_script: "EmptyContactScript".to_string(),
+                command_index: 3,
+            },
+            ScriptPhoneCommand {
+                command: "askforphonenumber".to_string(),
+                contact_id: " PHONE_MOM".to_string(),
+                source_script: "PaddedContactScript".to_string(),
+                command_index: 4,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            phone_contacts: PhoneContactCatalog(
+                [("PHONE_MOM".to_string(), test_phone_contact("PHONE_MOM"))]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_phone_command"
+                && diagnostic.subject == "Start:PhoneScript:1"
+                && diagnostic.message.contains("CheckCellNum")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_phone_contact"
+                && diagnostic.subject == "Start:LowerContactScript:2"
+                && diagnostic.message.contains("phone_mom")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_phone_contact"
+                && diagnostic.subject == "Start:EmptyContactScript:3"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_phone_contact"
+                && diagnostic.subject == "Start:PaddedContactScript:4"
+                && diagnostic.message.contains(" PHONE_MOM")
+        }));
     }
 
     #[test]
     fn verifier_rejects_unknown_script_item_grants_without_case_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.script_item_grants = vec![ScriptItemGrant {
-            item_id: "potion".to_string(),
-            quantity: 1,
-            source_script: "GiftScript".to_string(),
-            command_index: 4,
-            verbose: true,
-        }];
+        module.script_item_grants = vec![
+            ScriptItemGrant {
+                item_id: "potion".to_string(),
+                quantity: 1,
+                source_script: "GiftScript".to_string(),
+                command_index: 4,
+                verbose: true,
+            },
+            ScriptItemGrant {
+                item_id: " POTION".to_string(),
+                quantity: 1,
+                source_script: "PaddedGiftScript".to_string(),
+                command_index: 5,
+                verbose: true,
+            },
+        ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             items: [("POTION".to_string(), test_item("POTION"))]
@@ -15890,6 +19028,11 @@ mod tests {
                 && diagnostic.subject == "Start:GiftScript:4"
                 && diagnostic.message.contains("potion")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_item_grant_item"
+                && diagnostic.subject == "Start:PaddedGiftScript:5"
+                && diagnostic.message.contains(" POTION")
+        }));
     }
 
     #[test]
@@ -15900,11 +19043,18 @@ mod tests {
             source_script: "GateScript".to_string(),
             command_index: 3,
         }];
-        module.script_item_takes = vec![ScriptItemAccess {
-            item_id: "lost_item".to_string(),
-            source_script: "CopycatScript".to_string(),
-            command_index: 8,
-        }];
+        module.script_item_takes = vec![
+            ScriptItemAccess {
+                item_id: "lost_item".to_string(),
+                source_script: "CopycatScript".to_string(),
+                command_index: 8,
+            },
+            ScriptItemAccess {
+                item_id: " LOST_ITEM".to_string(),
+                source_script: "PaddedCopycatScript".to_string(),
+                command_index: 9,
+            },
+        ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             items: [
@@ -15931,6 +19081,11 @@ mod tests {
             diagnostic.code == "unknown_script_item_access_item"
                 && diagnostic.subject == "Start:CopycatScript:8"
                 && diagnostic.message.contains("lost_item")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_item_access_item"
+                && diagnostic.subject == "Start:PaddedCopycatScript:9"
+                && diagnostic.message.contains(" LOST_ITEM")
         }));
     }
 
@@ -15966,6 +19121,15 @@ mod tests {
                 command_index: 0,
             },
             ScriptFieldPickup {
+                command: "fruittree".to_string(),
+                item_id: None,
+                quantity: 1,
+                event_flag: None,
+                fruit_tree_id: Some(" FRUITTREE_ROUTE_29".to_string()),
+                source_script: "BadFruitTree".to_string(),
+                command_index: 0,
+            },
+            ScriptFieldPickup {
                 command: "ITEMBALL".to_string(),
                 item_id: Some("POTION".to_string()),
                 quantity: 1,
@@ -15994,6 +19158,7 @@ mod tests {
             "script_field_pickup_invalid_quantity",
             "script_field_pickup_uncollectible_event",
             "script_field_pickup_empty_fruit_tree",
+            "script_field_pickup_invalid_fruit_tree",
             "unknown_script_field_fruit_tree",
             "unknown_script_field_pickup_command",
         ] {
@@ -16009,12 +19174,215 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_hidden_item_bg_events_without_exact_pickup() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.events.bg_events = vec![
+            BackgroundEvent {
+                x: 4,
+                y: 4,
+                event_type: "BGEVENT_ITEM".to_string(),
+                script: "MissingHiddenPotion".to_string(),
+            },
+            BackgroundEvent {
+                x: 5,
+                y: 4,
+                event_type: "BGEVENT_ITEM".to_string(),
+                script: "DuplicateHiddenPotion".to_string(),
+            },
+        ];
+        module.script_field_pickups = vec![
+            ScriptFieldPickup {
+                command: "hiddenitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_DUPLICATE_HIDDEN_POTION".to_string()),
+                fruit_tree_id: None,
+                source_script: "DuplicateHiddenPotion".to_string(),
+                command_index: 0,
+            },
+            ScriptFieldPickup {
+                command: "hiddenitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_DUPLICATE_HIDDEN_POTION_2".to_string()),
+                fruit_tree_id: None,
+                source_script: "DuplicateHiddenPotion".to_string(),
+                command_index: 1,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "hidden_item_bg_event_missing_pickup"
+                && diagnostic.subject == "Start:MissingHiddenPotion:4,4"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "hidden_item_bg_event_duplicate_pickup"
+                && diagnostic.subject == "Start:DuplicateHiddenPotion:5,4"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_map_events_that_reference_missing_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "KnownSignScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.events.coord_events = vec![CoordEvent {
+            x: 2,
+            y: 3,
+            scene_id: "SCENE_START".to_string(),
+            script_name: "knownsignscript".to_string(),
+        }];
+        module.events.bg_events = vec![
+            BackgroundEvent {
+                x: 4,
+                y: 5,
+                event_type: "BGEVENT_READ".to_string(),
+                script: "KnownSignScript".to_string(),
+            },
+            BackgroundEvent {
+                x: 6,
+                y: 7,
+                event_type: "BGEVENT_READ".to_string(),
+                script: "MissingSignScript".to_string(),
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_coord_event_script"
+                && diagnostic.subject == "Start:SCENE_START:knownsignscript:2,3"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_bg_event_script"
+                && diagnostic.subject == "Start:BGEVENT_READ:MissingSignScript:6,7"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_bg_event_script"
+                && diagnostic.subject == "Start:BGEVENT_READ:KnownSignScript:4,5"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_command_records_with_missing_source_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "KnownScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.script_movements = vec![
+            ScriptMovement {
+                label: "KnownMovement".to_string(),
+                source_script: Some("KnownScript".to_string()),
+                steps: Vec::new(),
+            },
+            ScriptMovement {
+                label: "MissingMovement".to_string(),
+                source_script: Some("MissingMovementScript".to_string()),
+                steps: Vec::new(),
+            },
+            ScriptMovement {
+                label: "SharedMovement".to_string(),
+                source_script: None,
+                steps: Vec::new(),
+            },
+        ];
+        module.script_field_pickups = vec![
+            ScriptFieldPickup {
+                command: "hiddenitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_HIDDEN_POTION".to_string()),
+                fruit_tree_id: None,
+                source_script: "KnownScript".to_string(),
+                command_index: 2,
+            },
+            ScriptFieldPickup {
+                command: "hiddenitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_HIDDEN_POTION".to_string()),
+                fruit_tree_id: None,
+                source_script: "MissingPickupScript".to_string(),
+                command_index: 3,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_command_source_script"
+                && diagnostic.subject == "Start:script_movement:MissingMovementScript"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_command_source_script"
+                && diagnostic.subject == "Start:script_field_pickup:MissingPickupScript:3"
+        }));
+        for accepted in [
+            "Start:script_movement:KnownScript",
+            "Start:script_movement:SharedMovement",
+            "Start:script_field_pickup:KnownScript:2",
+        ] {
+            assert!(
+                !report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "unknown_command_source_script"
+                        && diagnostic.subject == accepted
+                }),
+                "accepted source reference was rejected: {accepted}"
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_fruit_tree_catalog_items_without_case_coercion() {
         let data = GameDataSet {
             fruit_trees: FruitTreeCatalog(
-                [("FRUITTREE_ROUTE_29".to_string(), "berry".to_string())]
-                    .into_iter()
-                    .collect(),
+                [
+                    (" FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string()),
+                    ("FRUITTREE_ROUTE_29".to_string(), "berry".to_string()),
+                ]
+                .into_iter()
+                .collect(),
             ),
             items: [("BERRY".to_string(), test_item("BERRY"))]
                 .into_iter()
@@ -16032,6 +19400,10 @@ mod tests {
             diagnostic.code == "unknown_fruit_tree_item"
                 && diagnostic.subject == "fruit_trees:FRUITTREE_ROUTE_29"
                 && diagnostic.message.contains("berry")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_fruit_tree_id"
+                && diagnostic.subject == "fruit_trees: FRUITTREE_ROUTE_29"
         }));
     }
 
@@ -16072,13 +19444,22 @@ mod tests {
     #[test]
     fn verifier_rejects_unresolved_script_economy_constants_without_case_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.script_economy_commands = vec![ScriptEconomyCommand {
-            command: "checkmoney".to_string(),
-            account: Some("YOUR_MONEY".to_string()),
-            amount_tokens: vec!["route43gate_toll".to_string()],
-            source_script: "TollScript".to_string(),
-            command_index: 2,
-        }];
+        module.script_economy_commands = vec![
+            ScriptEconomyCommand {
+                command: "checkmoney".to_string(),
+                account: Some("YOUR_MONEY".to_string()),
+                amount_tokens: vec!["route43gate_toll".to_string()],
+                source_script: "TollScript".to_string(),
+                command_index: 2,
+            },
+            ScriptEconomyCommand {
+                command: "checkmoney".to_string(),
+                account: Some(" YOUR_MONEY".to_string()),
+                amount_tokens: vec!["ROUTE43GATE_TOLL".to_string()],
+                source_script: "PaddedAccountScript".to_string(),
+                command_index: 3,
+            },
+        ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             currency_constants: CurrencyCatalog(
@@ -16099,6 +19480,11 @@ mod tests {
             diagnostic.code == "unresolved_script_currency_amount"
                 && diagnostic.subject == "Start:TollScript:2"
                 && diagnostic.message.contains("route43gate_toll")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_money_account"
+                && diagnostic.subject == "Start:PaddedAccountScript:3"
+                && diagnostic.message.contains(" YOUR_MONEY")
         }));
     }
 
@@ -16169,7 +19555,7 @@ mod tests {
             level: 5,
             held_item_id: Some("berry".to_string()),
             nickname_label: Some("giftstartername".to_string()),
-            ot_label: Some(String::new()),
+            ot_label: Some(" GiftOtText".to_string()),
             source_script: "StarterScript".to_string(),
             command_index: 2,
             egg: false,
@@ -16208,8 +19594,9 @@ mod tests {
                 && diagnostic.message.contains("giftstartername")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "empty_gift_pokemon_label"
+            diagnostic.code == "invalid_gift_pokemon_label"
                 && diagnostic.subject == "Start:StarterScript:2"
+                && diagnostic.message.contains(" GiftOtText")
         }));
     }
 
@@ -16228,6 +19615,12 @@ mod tests {
                 flag_id: String::new(),
                 source_script: "RouteScript".to_string(),
                 command_index: 5,
+            },
+            ScriptFlagCommand {
+                command: "setevent".to_string(),
+                flag_id: " EVENT_ROUTE_29_POTION".to_string(),
+                source_script: "RouteScript".to_string(),
+                command_index: 6,
             },
         ];
         let data = GameDataSet {
@@ -16248,6 +19641,106 @@ mod tests {
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "empty_script_flag_id" && diagnostic.subject == "Start:RouteScript:5"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_flag_id"
+                && diagnostic.subject == "Start:RouteScript:6"
+                && diagnostic.message.contains(" EVENT_ROUTE_29_POTION")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_script_scene_commands_without_normalization() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_scene_commands = vec![
+            ScriptSceneCommand {
+                command: "setscene".to_string(),
+                map_id: Some("START_MAP".to_string()),
+                scene_id: None,
+                source_script: "SceneScript".to_string(),
+                command_index: 1,
+            },
+            ScriptSceneCommand {
+                command: "setmapscene".to_string(),
+                map_id: None,
+                scene_id: None,
+                source_script: "SceneScript".to_string(),
+                command_index: 2,
+            },
+            ScriptSceneCommand {
+                command: "checkscene".to_string(),
+                map_id: None,
+                scene_id: Some("SCENE_START_OPEN".to_string()),
+                source_script: "SceneScript".to_string(),
+                command_index: 3,
+            },
+            ScriptSceneCommand {
+                command: "resetscene".to_string(),
+                map_id: None,
+                scene_id: None,
+                source_script: "SceneScript".to_string(),
+                command_index: 4,
+            },
+            ScriptSceneCommand {
+                command: "setmapscene".to_string(),
+                map_id: Some(" START_MAP".to_string()),
+                scene_id: Some("SCENE_START_OPEN".to_string()),
+                source_script: "SceneScript".to_string(),
+                command_index: 5,
+            },
+            ScriptSceneCommand {
+                command: "setscene".to_string(),
+                map_id: None,
+                scene_id: Some(" SCENE_START_OPEN".to_string()),
+                source_script: "SceneScript".to_string(),
+                command_index: 6,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unexpected_script_scene_map"
+                && diagnostic.subject == "Start:SceneScript:1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_script_scene_id"
+                && diagnostic.subject == "Start:SceneScript:1"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_script_scene_map"
+                && diagnostic.subject == "Start:SceneScript:2"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_script_scene_id"
+                && diagnostic.subject == "Start:SceneScript:2"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unexpected_script_scene_id"
+                && diagnostic.subject == "Start:SceneScript:3"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_scene_command"
+                && diagnostic.subject == "Start:SceneScript:4"
+                && diagnostic.message.contains("resetscene")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_scene_map"
+                && diagnostic.subject == "Start:SceneScript:5"
+                && diagnostic.message.contains(" START_MAP")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_scene_id"
+                && diagnostic.subject == "Start:SceneScript:6"
+                && diagnostic.message.contains(" SCENE_START_OPEN")
         }));
     }
 
@@ -16320,12 +19813,140 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_script_map_commands_without_normalization() {
+        let mut start = test_map_module("Start", "START_MAP", None);
+        start.script_map_commands = vec![
+            ScriptMapCommand {
+                command: "warp".to_string(),
+                target_map: None,
+                x: Some(1),
+                y: None,
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 1,
+            },
+            ScriptMapCommand {
+                command: "warpfacing".to_string(),
+                target_map: Some("START_MAP".to_string()),
+                x: Some(1),
+                y: Some(2),
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 2,
+            },
+            ScriptMapCommand {
+                command: "warpcheck".to_string(),
+                target_map: Some("START_MAP".to_string()),
+                x: Some(1),
+                y: Some(2),
+                facing: Some("DOWN".to_string()),
+                map_setup: Some("MAPSETUP_WARP".to_string()),
+                source_script: "MapScript".to_string(),
+                command_index: 3,
+            },
+            ScriptMapCommand {
+                command: "newloadmap".to_string(),
+                target_map: Some("START_MAP".to_string()),
+                x: None,
+                y: None,
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 4,
+            },
+            ScriptMapCommand {
+                command: "loadmap".to_string(),
+                target_map: None,
+                x: None,
+                y: None,
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 5,
+            },
+            ScriptMapCommand {
+                command: "warp".to_string(),
+                target_map: Some(" START_MAP".to_string()),
+                x: Some(1),
+                y: Some(2),
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 6,
+            },
+            ScriptMapCommand {
+                command: "warpfacing".to_string(),
+                target_map: Some("START_MAP".to_string()),
+                x: Some(1),
+                y: Some(2),
+                facing: Some(" DOWN".to_string()),
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 7,
+            },
+            ScriptMapCommand {
+                command: "reanchormap".to_string(),
+                target_map: None,
+                x: None,
+                y: None,
+                facing: None,
+                map_setup: Some(" MAPSETUP_WARP".to_string()),
+                source_script: "MapScript".to_string(),
+                command_index: 8,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), start)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("missing_script_warp_map", "Start:MapScript:1"),
+            ("missing_script_warp_coordinates", "Start:MapScript:1"),
+            ("missing_script_warp_facing", "Start:MapScript:2"),
+            ("unexpected_script_warp_destination", "Start:MapScript:3"),
+            ("unexpected_script_warp_facing", "Start:MapScript:3"),
+            ("unexpected_script_map_setup", "Start:MapScript:3"),
+            ("unexpected_script_warp_destination", "Start:MapScript:4"),
+            ("missing_script_map_setup", "Start:MapScript:4"),
+            ("unknown_script_map_command", "Start:MapScript:5"),
+            ("invalid_script_warp_map", "Start:MapScript:6"),
+            ("invalid_script_warp_facing", "Start:MapScript:7"),
+            ("invalid_script_map_setup", "Start:MapScript:8"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| { diagnostic.code == code && diagnostic.subject == subject }),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_script_text_labels_without_normalization() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.scripts.insert(
             "GreetingText".to_string(),
             serde_json::json!([
                 {"command": "text", "args": "\"Hello.\""},
+                {"command": "done", "args": []}
+            ]),
+        );
+        module.scripts.insert(
+            ".LocalText@GreetingScript".to_string(),
+            serde_json::json!([
+                {"command": "text", "args": "\"Local.\""},
                 {"command": "done", "args": []}
             ]),
         );
@@ -16347,6 +19968,18 @@ mod tests {
                 text_label: None,
                 source_script: "GreetingScript".to_string(),
                 command_index: 4,
+            },
+            ScriptTextCommand {
+                command: "writetext".to_string(),
+                text_label: Some(".MissingLocal".to_string()),
+                source_script: "GreetingScript".to_string(),
+                command_index: 5,
+            },
+            ScriptTextCommand {
+                command: "writetext".to_string(),
+                text_label: Some(" GreetingText".to_string()),
+                source_script: "GreetingScript".to_string(),
+                command_index: 6,
             },
         ];
         let data = GameDataSet {
@@ -16372,6 +20005,16 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "missing_script_text_label"
                 && diagnostic.subject == "Start:GreetingScript:4"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_text_label"
+                && diagnostic.subject == "Start:GreetingScript:5"
+                && diagnostic.message.contains(".MissingLocal")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_text_label"
+                && diagnostic.subject == "Start:GreetingScript:6"
+                && diagnostic.message.contains(" GreetingText")
         }));
     }
 
@@ -16400,6 +20043,20 @@ mod tests {
                 source_script: "VarScript".to_string(),
                 command_index: 3,
             },
+            ScriptVariableCommand {
+                command: "readmem".to_string(),
+                target: Some(" wVanceFightCount".to_string()),
+                value_tokens: Vec::new(),
+                source_script: "VarScript".to_string(),
+                command_index: 4,
+            },
+            ScriptVariableCommand {
+                command: "setval".to_string(),
+                target: None,
+                value_tokens: vec![" TRUE".to_string()],
+                source_script: "VarScript".to_string(),
+                command_index: 5,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -16412,7 +20069,7 @@ mod tests {
             &PlayabilityRules::default(),
         );
 
-        for index in [1, 2, 3] {
+        for index in [1, 2, 3, 4, 5] {
             let subject = format!("Start:VarScript:{index}");
             assert!(
                 report.diagnostics.iter().any(|diagnostic| {
@@ -16460,6 +20117,46 @@ mod tests {
                 source_script: "MainScript".to_string(),
                 command_index: 2,
             },
+            ScriptControlCommand {
+                command: "ifequal".to_string(),
+                compare_value: Some(" TRUE".to_string()),
+                target_label: Some(".Done".to_string()),
+                resolved_target_script: Some(".Done@MainScript".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 3,
+            },
+            ScriptControlCommand {
+                command: "iftrue".to_string(),
+                compare_value: None,
+                target_label: Some(" .Done".to_string()),
+                resolved_target_script: Some(".Done@MainScript".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 4,
+            },
+            ScriptControlCommand {
+                command: "iftrue".to_string(),
+                compare_value: None,
+                target_label: Some(".Done".to_string()),
+                resolved_target_script: Some(" .Done@MainScript".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 5,
+            },
+            ScriptControlCommand {
+                command: String::new(),
+                compare_value: None,
+                target_label: Some(".Done".to_string()),
+                resolved_target_script: Some(".Done@MainScript".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 6,
+            },
+            ScriptControlCommand {
+                command: " iftrue".to_string(),
+                compare_value: None,
+                target_label: Some(".Done".to_string()),
+                resolved_target_script: Some(".Done@MainScript".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 7,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -16485,6 +20182,17 @@ mod tests {
             diagnostic.code == "invalid_script_control_command"
                 && diagnostic.subject == "Start:MainScript:2"
         }));
+        for index in [3, 4, 5, 6, 7] {
+            let subject = format!("Start:MainScript:{index}");
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "invalid_script_control_command"
+                        && diagnostic.subject == subject
+                }),
+                "missing invalid control diagnostic for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -16572,6 +20280,67 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_scene_table_entries_that_reference_missing_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "KnownSceneScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.scenes = MapSceneTable {
+            scenes: vec![
+                MapScene {
+                    scene_id: "SCENE_START_KNOWN".to_string(),
+                    script_name: Some("KnownSceneScript".to_string()),
+                },
+                MapScene {
+                    scene_id: "SCENE_START_CASE_CHANGED".to_string(),
+                    script_name: Some("knownscenescript".to_string()),
+                },
+                MapScene {
+                    scene_id: "SCENE_START_MISSING".to_string(),
+                    script_name: Some("MissingSceneScript".to_string()),
+                },
+                MapScene {
+                    scene_id: "SCENE_START_CONST_ONLY".to_string(),
+                    script_name: None,
+                },
+            ],
+        };
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_scene_script"
+                && diagnostic.subject == "Start:SCENE_START_CASE_CHANGED"
+                && diagnostic.message.contains("knownscenescript")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_scene_script"
+                && diagnostic.subject == "Start:SCENE_START_MISSING"
+                && diagnostic.message.contains("MissingSceneScript")
+        }));
+        for accepted in ["Start:SCENE_START_KNOWN", "Start:SCENE_START_CONST_ONLY"] {
+            assert!(
+                !report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "unknown_scene_script" && diagnostic.subject == accepted
+                }),
+                "accepted scene script was rejected: {accepted}"
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_script_audio_ids_without_normalization() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_audio_commands = vec![
@@ -16627,11 +20396,17 @@ mod tests {
                     id: "MUSIC_ROUTE_29".to_string(),
                     path: "content-packs/test/music/MUSIC_ROUTE_29.mid".to_string(),
                     kind: ModpackAudioKind::Music,
+                    source: ModpackAudioSource::Midi,
+                    sample_rate_hz: None,
+                    channels: None,
                 },
                 ModpackAudioAsset {
                     id: "CRY_HO_OH".to_string(),
                     path: "content-packs/test/cries/CRY_HO_OH.mid".to_string(),
                     kind: ModpackAudioKind::Cry,
+                    source: ModpackAudioSource::Midi,
+                    sample_rate_hz: None,
+                    channels: None,
                 },
             ],
             ..GameDataSet::default()
@@ -16708,6 +20483,9 @@ mod tests {
                 id: "CRY_HO_OH".to_string(),
                 path: "content-packs/test/cries/CRY_HO_OH.mid".to_string(),
                 kind: ModpackAudioKind::Cry,
+                source: ModpackAudioSource::Midi,
+                sample_rate_hz: None,
+                channels: None,
             }],
             ..GameDataSet::default()
         };
@@ -16744,6 +20522,9 @@ mod tests {
                 id: "MUSIC_CUSTOM_ROUTE29".to_string(),
                 path: "content-packs/test/music/MUSIC_CUSTOM_ROUTE29.mid".to_string(),
                 kind: ModpackAudioKind::Music,
+                source: ModpackAudioSource::Midi,
+                sample_rate_hz: None,
+                channels: None,
             }],
             ..GameDataSet::default()
         };
@@ -16781,6 +20562,9 @@ mod tests {
                 id: "SFX_TACKLE".to_string(),
                 path: "content-packs/test/sfx/SFX_TACKLE.mid".to_string(),
                 kind: ModpackAudioKind::SoundEffect,
+                source: ModpackAudioSource::Midi,
+                sample_rate_hz: None,
+                channels: None,
             }],
             ..GameDataSet::default()
         };
@@ -16858,9 +20642,51 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_roaming_pokemon_without_coercion() {
+        let data = GameDataSet {
+            pokemon: [("RAIKOU".to_string(), species())].into_iter().collect(),
+            roaming_pokemon: vec![
+                RoamingPokemonDefinition {
+                    species: String::new(),
+                    level: 0,
+                    map_group: 1,
+                    map_number: 1,
+                },
+                RoamingPokemonDefinition {
+                    species: "raikou".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 2,
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "empty_roaming_pokemon_species"
+                && diagnostic.subject == "roaming_pokemon:0"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_roaming_pokemon_level"
+                && diagnostic.subject == "roaming_pokemon:0"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_roaming_pokemon_species"
+                && diagnostic.subject == "roaming_pokemon:1"
+                && diagnostic.message.contains("raikou")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_declared_special_routine_unknown_to_rust_runtime() {
         let data = GameDataSet {
-            special_routines: BTreeSet::from(["ModpackOnlyRoutine".to_string()]),
+            special_routines: BTreeSet::from(["ModpackOnlyRoutine".to_string(), String::new()]),
             ..GameDataSet::default()
         };
 
@@ -16876,6 +20702,9 @@ mod tests {
                 && diagnostic
                     .message
                     .contains("is not implemented by the Rust runtime")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "empty_special_routine" && diagnostic.subject == "special_routines"
         }));
     }
 
@@ -16900,6 +20729,53 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_buena_prizes_without_coercion() {
+        let data = GameDataSet {
+            items: [("ULTRA_BALL".to_string(), test_item("ULTRA_BALL"))]
+                .into_iter()
+                .collect(),
+            buena_prizes: vec![
+                BuenaPrizeDefinition {
+                    item_id: String::new(),
+                    cost: 0,
+                },
+                BuenaPrizeDefinition {
+                    item_id: " ULTRA_BALL".to_string(),
+                    cost: 2,
+                },
+                BuenaPrizeDefinition {
+                    item_id: "ultra_ball".to_string(),
+                    cost: 2,
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "empty_buena_prize_item" && diagnostic.subject == "buena_prizes:0"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_buena_prize_cost" && diagnostic.subject == "buena_prizes:0"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_buena_prize_item"
+                && diagnostic.subject == "buena_prizes:1"
+                && diagnostic.message.contains(" ULTRA_BALL")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_buena_prize_item"
+                && diagnostic.subject == "buena_prizes:2"
+                && diagnostic.message.contains("ultra_ball")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_buenas_password_without_buena_password_category_pack_data() {
         let data = GameDataSet {
             special_routines: BTreeSet::from(["BuenasPassword".to_string()]),
@@ -16917,6 +20793,112 @@ mod tests {
                 && diagnostic.subject == "special_routines:BuenasPassword"
                 && diagnostic.message.contains("Buena password")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_buena_password_categories_without_coercion() {
+        let data = GameDataSet {
+            pokemon: [("PIKACHU".to_string(), species())].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            moves: [("THUNDERBOLT".to_string(), test_move("THUNDERBOLT"))]
+                .into_iter()
+                .collect(),
+            buena_password_categories: vec![
+                BuenaPasswordCategoryDefinition {
+                    id: String::new(),
+                    category_type: "buena_mon".to_string(),
+                    points: 0,
+                    options: Vec::new(),
+                },
+                BuenaPasswordCategoryDefinition {
+                    id: " MON".to_string(),
+                    category_type: BUENA_PASSWORD_CATEGORY_MON.to_string(),
+                    points: 1,
+                    options: vec![String::new(), "PIKACHU ".to_string(), "pikachu".to_string()],
+                },
+                BuenaPasswordCategoryDefinition {
+                    id: "ITEM".to_string(),
+                    category_type: BUENA_PASSWORD_CATEGORY_ITEM.to_string(),
+                    points: 1,
+                    options: vec![" POTION".to_string(), "potion".to_string()],
+                },
+                BuenaPasswordCategoryDefinition {
+                    id: "MOVE".to_string(),
+                    category_type: BUENA_PASSWORD_CATEGORY_MOVE.to_string(),
+                    points: 1,
+                    options: vec!["THUNDERBOLT ".to_string(), "thunderbolt".to_string()],
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            (
+                "empty_buena_password_category_id",
+                "buena_password_categories:0",
+            ),
+            (
+                "unknown_buena_password_category_type",
+                "buena_password_categories:0",
+            ),
+            (
+                "invalid_buena_password_points",
+                "buena_password_categories:0",
+            ),
+            (
+                "empty_buena_password_options",
+                "buena_password_categories:0",
+            ),
+            (
+                "invalid_buena_password_category_id",
+                "buena_password_categories:1",
+            ),
+            (
+                "empty_buena_password_option",
+                "buena_password_categories:1:option:0",
+            ),
+            (
+                "invalid_buena_password_option",
+                "buena_password_categories:1:option:1",
+            ),
+            (
+                "unknown_buena_password_species",
+                "buena_password_categories:1:option:2",
+            ),
+            (
+                "invalid_buena_password_option",
+                "buena_password_categories:2:option:0",
+            ),
+            (
+                "unknown_buena_password_item",
+                "buena_password_categories:2:option:1",
+            ),
+            (
+                "invalid_buena_password_option",
+                "buena_password_categories:3:option:0",
+            ),
+            (
+                "unknown_buena_password_move",
+                "buena_password_categories:3:option:1",
+            ),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -16940,6 +20922,72 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_kurt_apricorn_recipes_without_coercion() {
+        let data = GameDataSet {
+            items: [
+                ("BLU_APRICORN".to_string(), test_item("BLU_APRICORN")),
+                ("LURE_BALL".to_string(), test_item("LURE_BALL")),
+            ]
+            .into_iter()
+            .collect(),
+            kurt_apricorn_recipes: vec![
+                KurtApricornRecipe {
+                    apricorn: String::new(),
+                    ball: String::new(),
+                },
+                KurtApricornRecipe {
+                    apricorn: " BLU_APRICORN".to_string(),
+                    ball: "LURE_BALL ".to_string(),
+                },
+                KurtApricornRecipe {
+                    apricorn: "blu_apricorn".to_string(),
+                    ball: "lure_ball".to_string(),
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            (
+                "empty_kurt_apricorn_recipe_apricorn",
+                "kurt_apricorn_recipes:0",
+            ),
+            ("empty_kurt_apricorn_recipe_ball", "kurt_apricorn_recipes:0"),
+            (
+                "invalid_kurt_apricorn_recipe_apricorn",
+                "kurt_apricorn_recipes:1",
+            ),
+            (
+                "invalid_kurt_apricorn_recipe_ball",
+                "kurt_apricorn_recipes:1",
+            ),
+            (
+                "unknown_kurt_apricorn_recipe_apricorn",
+                "kurt_apricorn_recipes:2",
+            ),
+            (
+                "unknown_kurt_apricorn_recipe_ball",
+                "kurt_apricorn_recipes:2",
+            ),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_shuckie_routines_without_shuckie_gift_pack_data() {
         let data = GameDataSet {
             special_routines: BTreeSet::from([
@@ -16960,6 +21008,97 @@ mod tests {
                 && diagnostic.subject == "special_routines:Shuckie"
                 && diagnostic.message.contains("Shuckie gift")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_shuckie_gift_without_coercion() {
+        let data = GameDataSet {
+            pokemon: [("SHUCKLE".to_string(), species())].into_iter().collect(),
+            items: [("BERRY".to_string(), test_item("BERRY"))]
+                .into_iter()
+                .collect(),
+            initialize_events: InitializeEventsConfig {
+                engine_flags: vec!["ENGINE_GOT_SHUCKIE_TODAY".to_string()],
+                ..InitializeEventsConfig::default()
+            },
+            shuckie_gift: Some(ShuckieGiftDefinition {
+                species: String::new(),
+                level: 0,
+                held_item: String::new(),
+                nickname: String::new(),
+                original_trainer_name: String::new(),
+                original_trainer_id: 518,
+                got_today_engine_flag: String::new(),
+            }),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for code in [
+            "empty_shuckie_gift_species",
+            "invalid_shuckie_gift_level",
+            "empty_shuckie_gift_item",
+            "empty_shuckie_gift_name",
+            "empty_shuckie_gift_engine_flag",
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code
+                        && diagnostic.subject == "shuckie_gift"),
+                "missing {code}: {:?}",
+                report.diagnostics
+            );
+        }
+
+        let data = GameDataSet {
+            pokemon: [("SHUCKLE".to_string(), species())].into_iter().collect(),
+            items: [("BERRY".to_string(), test_item("BERRY"))]
+                .into_iter()
+                .collect(),
+            initialize_events: InitializeEventsConfig {
+                engine_flags: vec!["ENGINE_GOT_SHUCKIE_TODAY".to_string()],
+                ..InitializeEventsConfig::default()
+            },
+            shuckie_gift: Some(ShuckieGiftDefinition {
+                species: "shuckle".to_string(),
+                level: 15,
+                held_item: "berry".to_string(),
+                nickname: "SHUCKIE".to_string(),
+                original_trainer_name: "MANIA".to_string(),
+                original_trainer_id: 518,
+                got_today_engine_flag: "engine_got_shuckie_today".to_string(),
+            }),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for code in [
+            "unknown_shuckie_gift_species",
+            "unknown_shuckie_gift_item",
+            "unknown_shuckie_gift_engine_flag",
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code
+                        && diagnostic.subject == "shuckie_gift"),
+                "missing {code}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -17277,12 +21416,82 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_script_runtime_commands_without_coercion() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_runtime_commands = vec![
+            ScriptRuntimeCommand {
+                command: "Special".to_string(),
+                args: vec!["FadeOutMusic".to_string()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 0,
+            },
+            ScriptRuntimeCommand {
+                command: String::new(),
+                args: vec!["FadeOutMusic".to_string()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 4,
+            },
+            ScriptRuntimeCommand {
+                command: " special".to_string(),
+                args: vec!["FadeOutMusic".to_string()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 5,
+            },
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: Vec::new(),
+                source_script: "RuntimeScript".to_string(),
+                command_index: 1,
+            },
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: vec![String::new()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 2,
+            },
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: vec![" FadeOutMusic".to_string()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 3,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            special_routines: BTreeSet::from(["FadeOutMusic".to_string()]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_runtime_command"
+                && diagnostic.subject == "Start:RuntimeScript:0"
+                && diagnostic.message.contains("Special")
+        }));
+        for index in [1, 2, 3, 4, 5] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "malformed_script_runtime_command"
+                        && diagnostic.subject == format!("Start:RuntimeScript:{index}")
+                }),
+                "missing malformed runtime command diagnostic for index {index}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_malformed_text_bodies_without_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_text_bodies.insert(
             "GreetingText".to_string(),
             ScriptTextBody {
-                label: "greetingtext".to_string(),
+                label: " greetingtext".to_string(),
                 commands: vec![
                     ScriptTextBodyCommand {
                         command: "Text".to_string(),
@@ -17314,6 +21523,10 @@ mod tests {
                 && diagnostic.subject == "Start:GreetingText"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_text_body_label"
+                && diagnostic.subject == "Start: greetingtext"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_text_body_command"
                 && diagnostic.subject == "Start:GreetingText:0"
                 && diagnostic.message.contains("Text")
@@ -17322,6 +21535,59 @@ mod tests {
             diagnostic.code == "malformed_script_text_body_command"
                 && diagnostic.subject == "Start:GreetingText:1"
                 && diagnostic.message.contains("done expects 0 args")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_menu_definitions_without_coercion() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_menu_definitions.insert(
+            "ChoiceMenu".to_string(),
+            ScriptMenuDefinition {
+                label: " choicemenu".to_string(),
+                commands: vec![
+                    ScriptMenuCommand {
+                        command: "verticalmenu".to_string(),
+                        args: Vec::new(),
+                        command_index: 0,
+                    },
+                    ScriptMenuCommand {
+                        command: "db".to_string(),
+                        args: vec!["one".to_string(), "two".to_string()],
+                        command_index: 1,
+                    },
+                ],
+            },
+        );
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.has_errors());
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_menu_label_mismatch"
+                && diagnostic.subject == "Start:ChoiceMenu"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_menu_label"
+                && diagnostic.subject == "Start: choicemenu"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_menu_command"
+                && diagnostic.subject == "Start:ChoiceMenu:0"
+                && diagnostic.message.contains("verticalmenu")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "malformed_script_menu_command"
+                && diagnostic.subject == "Start:ChoiceMenu:1"
+                && diagnostic.message.contains("db expects one of")
         }));
     }
 
@@ -17342,6 +21608,11 @@ mod tests {
                     "MissingCallback".to_string(),
                 ],
                 command_index: 2,
+            },
+            MapScriptSectionCommand {
+                command: "scene_script".to_string(),
+                args: vec![" KnownScript".to_string()],
+                command_index: 6,
             },
         ];
         module.map_event_section_commands = vec![
@@ -17379,6 +21650,16 @@ mod tests {
                 ],
                 command_index: 5,
             },
+            MapEventSectionCommand {
+                command: "bg_event".to_string(),
+                args: vec![
+                    "1".to_string(),
+                    "2".to_string(),
+                    "BGEVENT_READ".to_string(),
+                    " KnownScript".to_string(),
+                ],
+                command_index: 6,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -17404,6 +21685,17 @@ mod tests {
                     .iter()
                     .any(|diagnostic| diagnostic.code == expected),
                 "missing diagnostic {expected}: {:?}",
+                report.diagnostics
+            );
+        }
+        for subject in ["Start:map_scripts:6", "Start:map_events:6"] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code.starts_with("malformed_map_")
+                        && diagnostic.subject == subject
+                        && diagnostic.message.contains(" KnownScript")
+                }),
+                "missing malformed exact operand for {subject}: {:?}",
                 report.diagnostics
             );
         }
@@ -17535,6 +21827,10 @@ mod tests {
                 ),
                 ("PHONE_LINES".to_string(), empty_lines),
                 ("PHONE_MISMATCH".to_string(), mismatch),
+                (
+                    " PHONE_PADDED".to_string(),
+                    phone_contact(" PHONE_PADDED", None),
+                ),
             ])),
             ..GameDataSet::default()
         };
@@ -17561,6 +21857,10 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "phone_contact_primary_label_mismatch"
                 && diagnostic.subject == "phone_contacts:PHONE_MISMATCH"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_phone_contact_id"
+                && diagnostic.subject == "phone_contacts: PHONE_PADDED"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             (diagnostic.code == "unknown_phone_contact_map"
@@ -17663,6 +21963,131 @@ mod tests {
                 && diagnostic.subject == "Start:FollowScript:11"
                 && diagnostic.message.contains("start_player")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_object_events_that_reference_missing_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        let mut exact_object = test_object("START_EXACT", "EVENT_START_EXACT", 1, 1);
+        exact_object.script = "ObjectScript".to_string();
+        let mut lowercase_object = test_object("START_LOWERCASE", "EVENT_START_LOWERCASE", 2, 1);
+        lowercase_object.script = "objectscript".to_string();
+        let mut missing_object = test_object("START_MISSING", "EVENT_START_MISSING", 3, 1);
+        missing_object.script = "MissingObjectScript".to_string();
+        let mut sentinel_object = test_object("START_SENTINEL", "-1", 4, 1);
+        sentinel_object.script = "-1".to_string();
+        let mut asm_handler_object = test_object("START_OBJECT_EVENT", "-1", 5, 1);
+        asm_handler_object.script = "ObjectEvent".to_string();
+        module.objects = vec![
+            exact_object,
+            lowercase_object,
+            missing_object,
+            sentinel_object,
+            asm_handler_object,
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_object_event_script"
+                && diagnostic.subject == "Start:START_LOWERCASE"
+                && diagnostic.message.contains("objectscript")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_object_event_script"
+                && diagnostic.subject == "Start:START_MISSING"
+                && diagnostic.message.contains("MissingObjectScript")
+        }));
+        for accepted in [
+            "Start:START_EXACT",
+            "Start:START_SENTINEL",
+            "Start:START_OBJECT_EVENT",
+        ] {
+            assert!(
+                !report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "unknown_object_event_script"
+                        && diagnostic.subject == accepted
+                }),
+                "accepted object script was rejected: {accepted}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_script_movement_steps_without_coercion() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_movements = vec![ScriptMovement {
+            label: "BadMovement".to_string(),
+            source_script: Some("MovementScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("north".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "spin_forever".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 3,
+                },
+            ],
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, index) in [
+            ("missing_script_direction", 0),
+            ("unknown_script_direction", 1),
+            ("script_movement_unexpected_direction", 2),
+            ("unsupported_script_movement_command", 3),
+        ] {
+            let subject = format!("Start:BadMovement:{index}");
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -17794,10 +22219,193 @@ mod tests {
     }
 
     #[test]
+    fn modpack_tmhm_items_reject_zero_index_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(0);
+        tm.tmhm_move = Some("MUD_SLAP".to_string());
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![tm],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("zero tmhm index rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TM/HM item 'TM_MUD_SLAP' must declare positive tmhm_index, found 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_tmhm_items_reject_whitespace_move_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some(" MUD_SLAP".to_string());
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![tm],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("whitespace tmhm move rejected");
+
+        assert!(
+            error.to_string().contains(
+                "TM/HM item 'TM_MUD_SLAP' must declare exact tmhm_move, found ' MUD_SLAP'"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_items_reject_menu_usability_contradictions() {
+        let mut item = test_item("MOD_MENU_ITEM");
+        item.field_menu = "ITEMMENU_NOUSE".to_string();
+        item.field_usable = true;
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("field menu usability contradiction rejected");
+
+        assert!(
+            error.to_string().contains(
+                "item 'MOD_MENU_ITEM' field_usable true contradicts field_menu 'ITEMMENU_NOUSE'"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_tmhm_items_require_explicit_move_data() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![tm],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("missing tmhm move rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TM/HM item 'TM_MUD_SLAP' must declare explicit tmhm_move"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_tmhm_items_require_exact_move_references() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some("mud_slap".to_string());
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                moves: vec![test_move("MUD_SLAP")],
+                items: vec![tm],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("unknown tmhm move rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TM/HM item 'TM_MUD_SLAP' references missing move 'mud_slap'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_moves_reject_malformed_ids_without_effect_enum_restriction() {
+        let mut move_data = test_move("AETHER_PULSE");
+        move_data.move_type = pokemon_type(" AETHER");
+        move_data.effect = "MODDED_EFFECT".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                moves: vec![move_data],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("malformed move type rejected")
+            .to_string();
+
+        assert!(
+            error.contains("move 'AETHER_PULSE' has invalid type ' AETHER'"),
+            "{error}"
+        );
+        assert!(data.moves.is_empty());
+    }
+
+    #[test]
+    fn modpack_tmhm_items_accept_exact_move_references() {
+        let mut tm = test_item("TM_MUD_SLAP");
+        tm.pocket = item_pocket("TM_HM");
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some("MUD_SLAP".to_string());
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                moves: vec![test_move("MUD_SLAP")],
+                items: vec![tm],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        data.apply_modpack(&manifest)
+            .expect("exact tmhm move accepted");
+
+        assert!(data.items.contains_key("TM_MUD_SLAP"));
+    }
+
+    #[test]
     fn modpack_symbolic_tm_grants_validate_against_exact_item_data() {
         let mut tm = test_item("TM_MUD_SLAP");
         tm.pocket = item_pocket("TM_HM");
         tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some("MUD_SLAP".to_string());
         let mut module = test_map_module("VioletGym", "VIOLET_GYM", None);
         module.script_item_grants = vec![ScriptItemGrant {
             item_id: "TM_MUD_SLAP".to_string(),
@@ -17900,64 +22508,137 @@ mod tests {
             pokemon: [("MAGIKARP".to_string(), known_species)]
                 .into_iter()
                 .collect(),
-            map_attributes: [(
-                "Lake".to_string(),
-                MapAttributes {
-                    tileset_name: "johto".to_string(),
-                    border_block: 0,
-                    width: 1,
-                    height: 1,
-                    connections: Vec::new(),
-                    time_of_day: None,
-                    phone_service: 0,
-                    phone_flag: false,
-                    environment: None,
-                    location: None,
-                    music: None,
-                    palette: None,
-                    fishing_group: Some("fishgroup_lake".to_string()),
-                    map_constant: Some("LAKE".to_string()),
-                    map_group_constant: None,
-                    blocks_label: None,
-                    map_scripts_label: None,
-                    map_events_label: None,
-                    connection_flags: None,
-                },
-            )]
+            map_attributes: [
+                (
+                    "Lake".to_string(),
+                    MapAttributes {
+                        tileset_name: "johto".to_string(),
+                        border_block: 0,
+                        width: 1,
+                        height: 1,
+                        connections: Vec::new(),
+                        time_of_day: None,
+                        phone_service: 0,
+                        phone_flag: false,
+                        environment: None,
+                        location: None,
+                        music: None,
+                        palette: None,
+                        fishing_group: Some("fishgroup_lake".to_string()),
+                        map_constant: Some("LAKE".to_string()),
+                        map_group_constant: None,
+                        blocks_label: None,
+                        map_scripts_label: None,
+                        map_events_label: None,
+                        connection_flags: None,
+                    },
+                ),
+                (
+                    "BadLake".to_string(),
+                    MapAttributes {
+                        tileset_name: "johto".to_string(),
+                        border_block: 0,
+                        width: 1,
+                        height: 1,
+                        connections: Vec::new(),
+                        time_of_day: None,
+                        phone_service: 0,
+                        phone_flag: false,
+                        environment: None,
+                        location: None,
+                        music: None,
+                        palette: None,
+                        fishing_group: Some(" fishgroup_lake".to_string()),
+                        map_constant: Some("BAD_LAKE".to_string()),
+                        map_group_constant: None,
+                        blocks_label: None,
+                        map_scripts_label: None,
+                        map_events_label: None,
+                        connection_flags: None,
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             fishing: FishingCatalog {
-                groups: [(
-                    "FISHGROUP_LAKE".to_string(),
-                    crystal_core::world::fishing::FishingGroup {
-                        bite_threshold: 128,
-                        rod_tables: [(
-                            "good_rod".to_string(),
-                            crystal_core::world::fishing::RodTable {
-                                slots: vec![
-                                    crystal_core::world::fishing::FishingSlot {
-                                        threshold: 255,
-                                        species: Some("magikarp".to_string()),
-                                        level: 10,
-                                        time_group: None,
-                                    },
-                                    crystal_core::world::fishing::FishingSlot {
-                                        threshold: 255,
-                                        species: None,
-                                        level: 0,
-                                        time_group: Some(0),
-                                    },
-                                ],
-                            },
-                        )]
-                        .into_iter()
-                        .collect(),
-                    },
-                )]
+                groups: [
+                    (
+                        "FISHGROUP_LAKE".to_string(),
+                        crystal_core::world::fishing::FishingGroup {
+                            bite_threshold: 128,
+                            rod_tables: [(
+                                "good_rod".to_string(),
+                                crystal_core::world::fishing::RodTable {
+                                    slots: vec![
+                                        crystal_core::world::fishing::FishingSlot {
+                                            threshold: 255,
+                                            species: Some(" magikarp".to_string()),
+                                            level: 10,
+                                            time_group: None,
+                                        },
+                                        crystal_core::world::fishing::FishingSlot {
+                                            threshold: 255,
+                                            species: None,
+                                            level: 0,
+                                            time_group: Some(0),
+                                        },
+                                    ],
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                        },
+                    ),
+                    (
+                        " FISHGROUP_BAD".to_string(),
+                        crystal_core::world::fishing::FishingGroup {
+                            bite_threshold: 128,
+                            rod_tables: [(
+                                crystal_core::world::fishing::ROD_OLD.to_string(),
+                                crystal_core::world::fishing::RodTable { slots: Vec::new() },
+                            )]
+                            .into_iter()
+                            .collect(),
+                        },
+                    ),
+                    (
+                        "FISHGROUP_TABLE_BAD".to_string(),
+                        crystal_core::world::fishing::FishingGroup {
+                            bite_threshold: 128,
+                            rod_tables: [(
+                                crystal_core::world::fishing::ROD_OLD.to_string(),
+                                crystal_core::world::fishing::RodTable {
+                                    slots: vec![
+                                        crystal_core::world::fishing::FishingSlot {
+                                            threshold: 0,
+                                            species: Some("MAGIKARP".to_string()),
+                                            level: 5,
+                                            time_group: None,
+                                        },
+                                        crystal_core::world::fishing::FishingSlot {
+                                            threshold: 10,
+                                            species: Some("MAGIKARP".to_string()),
+                                            level: 0,
+                                            time_group: None,
+                                        },
+                                        crystal_core::world::fishing::FishingSlot {
+                                            threshold: 5,
+                                            species: None,
+                                            level: 0,
+                                            time_group: None,
+                                        },
+                                    ],
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                        },
+                    ),
+                ]
                 .into_iter()
                 .collect(),
                 time_groups: vec![crystal_core::world::fishing::TimeFishEntry {
-                    day_species: "MAGIKARP".to_string(),
+                    day_species: " MAGIKARP".to_string(),
                     day_level: 10,
                     night_species: "staryu".to_string(),
                     night_level: 10,
@@ -17977,6 +22658,10 @@ mod tests {
                         item_id: "GOOD_ROD".to_string(),
                         rod: crystal_core::world::fishing::ROD_GOOD.to_string(),
                     },
+                    crystal_core::world::fishing::FishingRodItemRule {
+                        item_id: " GOOD_ROD".to_string(),
+                        rod: crystal_core::world::fishing::ROD_GOOD.to_string(),
+                    },
                 ],
             },
             ..GameDataSet::default()
@@ -17989,9 +22674,21 @@ mod tests {
         );
 
         for expected in [
+            "invalid_fishing_rod_item_id",
             "unknown_map_fishing_group",
+            "invalid_map_fishing_group",
+            "invalid_fishing_group_id",
             "unknown_fishing_rod",
+            "empty_fishing_rod_table",
+            "invalid_fishing_slot_threshold",
+            "invalid_fishing_slot_level",
+            "unordered_fishing_slot_threshold",
+            "missing_fishing_slot_species",
+            "incomplete_fishing_rod_table",
+            "invalid_fishing_species",
             "unknown_fishing_species",
+            "invalid_fishing_time_group_species",
+            "unknown_fishing_time_group_species",
             "invalid_fishing_swarm_flag_bit",
             "unknown_fishing_swarm_base_group",
             "unknown_fishing_swarm_group",
@@ -18617,11 +23314,83 @@ mod tests {
             .compile_modpacks(&[manifest], ModpackCompileOptions::default())
             .expect_err("missing dependency should fail compilation");
 
-        assert!(
-            error
-                .to_string()
-                .contains("depends on missing modpack 'missing-base'")
-        );
+        assert!(error
+            .to_string()
+            .contains("depends on missing modpack 'missing-base'"));
+    }
+
+    #[test]
+    fn compiler_rejects_malformed_manifest_metadata_without_coercion() {
+        let cases = [
+            (
+                "id",
+                ModpackManifest {
+                    metadata: ModpackMetadata {
+                        id: " dependent".to_string(),
+                        name: "Dependent".to_string(),
+                        version: "1.0.0".to_string(),
+                        author: None,
+                        description: None,
+                    },
+                    ..ModpackManifest::default()
+                },
+                "metadata.id must be an exact non-empty value",
+            ),
+            (
+                "name",
+                ModpackManifest {
+                    metadata: ModpackMetadata {
+                        id: "dependent".to_string(),
+                        name: " Dependent".to_string(),
+                        version: "1.0.0".to_string(),
+                        author: None,
+                        description: None,
+                    },
+                    ..ModpackManifest::default()
+                },
+                "metadata.name must be an exact non-empty value",
+            ),
+            (
+                "version",
+                ModpackManifest {
+                    metadata: ModpackMetadata {
+                        id: "dependent".to_string(),
+                        name: "Dependent".to_string(),
+                        version: " 1.0.0".to_string(),
+                        author: None,
+                        description: None,
+                    },
+                    ..ModpackManifest::default()
+                },
+                "metadata.version must be an exact non-empty value",
+            ),
+            (
+                "dependency",
+                ModpackManifest {
+                    metadata: ModpackMetadata {
+                        id: "dependent".to_string(),
+                        name: "Dependent".to_string(),
+                        version: "1.0.0".to_string(),
+                        author: None,
+                        description: None,
+                    },
+                    dependencies: vec![" missing-base".to_string()],
+                    ..ModpackManifest::default()
+                },
+                "dependency ' missing-base' must be an exact non-empty value",
+            ),
+        ];
+
+        for (field, manifest, expected) in cases {
+            let error = AssetRoot::new(repository_root_for_tests())
+                .compile_modpacks(&[manifest], ModpackCompileOptions::default())
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error for {field}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -18722,12 +23491,10 @@ mod tests {
         assert_eq!(module.events.bg_events.len(), 2);
         assert_eq!(module.events.bg_events[0].event_type, "BGEVENT_READ");
         assert_eq!(module.events.bg_events[0].script, "Route29Sign1");
-        assert!(
-            module
-                .map_event_section_commands
-                .iter()
-                .any(|command| command.command == "def_warp_events" && command.command_index == 1)
-        );
+        assert!(module
+            .map_event_section_commands
+            .iter()
+            .any(|command| command.command == "def_warp_events" && command.command_index == 1));
         assert!(module.map_event_section_commands.iter().any(|command| {
             command.command == "warp_event"
                 && command.args == vec!["27", "1", "ROUTE_29_ROUTE_46_GATE", "3"]
@@ -19042,15 +23809,12 @@ mod tests {
             .iter()
             .find(|battle| battle.source_script == "VermilionSnorlax")
             .expect("Snorlax battle");
-        assert!(
-            session
-                .objects
-                .iter()
-                .find(|object| object.object_identifier.as_deref()
-                    == Some("VERMILIONCITY_BIG_SNORLAX"))
-                .map(|object| session.is_object_visible(object))
-                .unwrap_or(false)
-        );
+        assert!(session
+            .objects
+            .iter()
+            .find(|object| object.object_identifier.as_deref() == Some("VERMILIONCITY_BIG_SNORLAX"))
+            .map(|object| session.is_object_visible(object))
+            .unwrap_or(false));
 
         let mut state = GameState::default();
         let effects = ScriptedBattleEffects {
@@ -19613,11 +24377,10 @@ mod tests {
             .find(|command| command.audio_id.as_deref() == Some("SFX_GET_BADGE"))
             .expect("Mahogany badge sound");
         assert_eq!(badge.command, "playsound");
-        assert!(
-            gym.script_audio_commands
-                .iter()
-                .any(|command| command.command == "waitsfx" && command.audio_id.is_none())
-        );
+        assert!(gym
+            .script_audio_commands
+            .iter()
+            .any(|command| command.command == "waitsfx" && command.audio_id.is_none()));
 
         let lugia = data
             .map_module("WhirlIslandLugiaChamber")
@@ -19774,12 +24537,10 @@ mod tests {
         assert_eq!(clair.commands[0].args, vec!["\"I am sorry.\""]);
         assert_eq!(clair.commands[1].command, "para");
         assert_eq!(clair.commands[1].args, vec!["\"CLAIR, our GYM\""]);
-        assert!(
-            clair
-                .commands
-                .iter()
-                .any(|command| command.command == "done" && command.args.is_empty())
-        );
+        assert!(clair
+            .commands
+            .iter()
+            .any(|command| command.command == "done" && command.args.is_empty()));
 
         let vending = data
             .map_module("CeladonDeptStore6F")
@@ -20378,35 +25139,29 @@ mod tests {
         let blackthorn_gym = data
             .map_module("BlackthornGym2F")
             .expect("assemble Blackthorn Gym 2F");
-        assert!(
-            blackthorn_gym
-                .script_runtime_commands
-                .iter()
-                .any(|command| {
-                    command.command == "writecmdqueue"
-                        && command.args == vec![".CommandQueue"]
-                        && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
-                })
-        );
-        assert!(
-            blackthorn_gym
-                .script_runtime_commands
-                .iter()
-                .any(|command| {
-                    command.command == "cmdqueue"
-                        && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
-                        && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
-                })
-        );
-        assert!(
-            blackthorn_gym
-                .script_runtime_commands
-                .iter()
-                .any(|command| {
-                    command.command == "stonetable"
-                        && command.args == vec!["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
-                })
-        );
+        assert!(blackthorn_gym
+            .script_runtime_commands
+            .iter()
+            .any(|command| {
+                command.command == "writecmdqueue"
+                    && command.args == vec![".CommandQueue"]
+                    && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
+            }));
+        assert!(blackthorn_gym
+            .script_runtime_commands
+            .iter()
+            .any(|command| {
+                command.command == "cmdqueue"
+                    && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
+                    && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
+            }));
+        assert!(blackthorn_gym
+            .script_runtime_commands
+            .iter()
+            .any(|command| {
+                command.command == "stonetable"
+                    && command.args == vec!["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
+            }));
 
         let elevator = data
             .map_module("CeladonDeptStoreElevator")
@@ -21157,11 +25912,9 @@ mod tests {
             .resolve_warp_transition(&trigger)
             .expect_err("missing target map constant");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unknown target map constant 'MISSING_TARGET_MAP'")
-        );
+        assert!(error
+            .to_string()
+            .contains("unknown target map constant 'MISSING_TARGET_MAP'"));
     }
 
     #[test]
@@ -21249,11 +26002,9 @@ mod tests {
             .resolve_connection_transition(&trigger)
             .expect_err("missing connection target");
 
-        assert!(
-            error
-                .to_string()
-                .contains("connection target 'MissingTarget' missing attributes")
-        );
+        assert!(error
+            .to_string()
+            .contains("connection target 'MissingTarget' missing attributes"));
     }
 
     #[test]
@@ -21326,11 +26077,9 @@ mod tests {
             .resolve_connection_transition(&trigger)
             .expect_err("out-of-bounds destination must be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("connection destination tile (1, 99) is outside target map")
-        );
+        assert!(error
+            .to_string()
+            .contains("connection destination tile (1, 99) is outside target map"));
     }
 
     #[test]
@@ -21452,9 +26201,9 @@ mod tests {
             parameter: 0,
             property: String::new(),
             pocket: item_pocket("ITEM"),
-            field_menu: String::new(),
+            field_menu: "ITEMMENU_PARTY".to_string(),
             field_usable: true,
-            battle_menu: String::new(),
+            battle_menu: "ITEMMENU_PARTY".to_string(),
             battle_usable: true,
             script_name: String::new(),
             consumable: false,
@@ -21474,11 +26223,186 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("missing item ids must not be derived from display names");
 
-        assert!(
-            error
-                .to_string()
-                .contains("item 'Flash Step Charm' is missing explicit script_name")
-        );
+        assert!(error
+            .to_string()
+            .contains("item 'Flash Step Charm' is missing explicit script_name"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_script_name_without_coercion() {
+        let mut item = test_item("MOD_ITEM");
+        item.name = "Flash Step Charm".to_string();
+        item.script_name = " MOD_ITEM".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item id must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'Flash Step Charm' has invalid script_name ' MOD_ITEM'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_display_name_without_inference() {
+        let mut item = test_item("MOD_ITEM");
+        item.name = " Flash Step Charm".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item display name must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid name ' Flash Step Charm'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_description_without_inference() {
+        let mut item = test_item("MOD_ITEM");
+        item.description = " A charm with exact text.".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item description must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid description ' A charm with exact text.'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_pocket_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM");
+        item.pocket = " BATTLE_PASS".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item pocket must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid pocket ' BATTLE_PASS'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_effect_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM");
+        item.effect = " MODDED_FLASH_STEP".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item effect must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid effect ' MODDED_FLASH_STEP'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_held_effect_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM");
+        item.held_effect = " HELD_MODDED".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item held effect must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid held_effect ' HELD_MODDED'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_property_without_requiring_property() {
+        let mut item = test_item("MOD_ITEM");
+        item.property = " CANT_SELECT".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item property must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid property ' CANT_SELECT'"));
+    }
+
+    #[test]
+    fn modpack_items_reject_invalid_menu_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM");
+        item.field_menu = " ITEMMENU_MODDED".to_string();
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![item],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("invalid item menu must not be trimmed");
+
+        assert!(error
+            .to_string()
+            .contains("item 'MOD_ITEM' has invalid field_menu ' ITEMMENU_MODDED'"));
     }
 
     fn explicit_empty_manifest_json() -> Value {
@@ -21689,11 +26613,8 @@ mod tests {
         let canonical = asset_root
             .resolve_data_path("content-packs/core-modular/music/MUSIC_ROUTE_29.mid")
             .expect("canonical runtime data path");
-        assert!(
-            canonical.ends_with(
-                "apps/web/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid"
-            )
-        );
+        assert!(canonical
+            .ends_with("apps/web/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid"));
     }
 
     #[test]

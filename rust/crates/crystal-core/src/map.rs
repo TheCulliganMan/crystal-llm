@@ -125,6 +125,134 @@ pub fn map_event_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapScriptSectionCommandIssue {
+    UnknownCommand,
+    WrongArgCount {
+        expected: BTreeSet<usize>,
+        actual: usize,
+    },
+    InvalidArg {
+        arg: String,
+    },
+    UnknownSceneScript {
+        script: String,
+    },
+    UnknownCallbackScript {
+        script: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapEventSectionCommandIssue {
+    UnknownCommand,
+    WrongArgCount {
+        expected: BTreeSet<usize>,
+        actual: usize,
+    },
+    InvalidArg {
+        arg: String,
+    },
+    UnknownEventScript {
+        script: String,
+    },
+    UnknownObjectEventScript {
+        script: String,
+    },
+}
+
+pub fn map_script_section_command_issues(
+    command: &MapScriptSectionCommand,
+    script_labels: &BTreeSet<String>,
+) -> Vec<MapScriptSectionCommandIssue> {
+    let counts = map_script_section_command_arg_counts();
+    let Some(expected) = counts.get(command.command.as_str()) else {
+        return vec![MapScriptSectionCommandIssue::UnknownCommand];
+    };
+    if !expected.contains(&command.args.len()) {
+        return vec![MapScriptSectionCommandIssue::WrongArgCount {
+            expected: expected.clone(),
+            actual: command.args.len(),
+        }];
+    }
+    if let Some(arg) = invalid_section_arg(&command.args) {
+        return vec![MapScriptSectionCommandIssue::InvalidArg { arg }];
+    }
+    match command.command.as_str() {
+        "scene_script" => {
+            let script = &command.args[0];
+            if script_labels.contains(script) {
+                Vec::new()
+            } else {
+                vec![MapScriptSectionCommandIssue::UnknownSceneScript {
+                    script: script.clone(),
+                }]
+            }
+        }
+        "callback" => {
+            let script = &command.args[1];
+            if script_labels.contains(script) {
+                Vec::new()
+            } else {
+                vec![MapScriptSectionCommandIssue::UnknownCallbackScript {
+                    script: script.clone(),
+                }]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub fn map_event_section_command_issues(
+    command: &MapEventSectionCommand,
+    script_labels: &BTreeSet<String>,
+) -> Vec<MapEventSectionCommandIssue> {
+    let counts = map_event_section_command_arg_counts();
+    let Some(expected) = counts.get(command.command.as_str()) else {
+        return vec![MapEventSectionCommandIssue::UnknownCommand];
+    };
+    if !expected.contains(&command.args.len()) {
+        return vec![MapEventSectionCommandIssue::WrongArgCount {
+            expected: expected.clone(),
+            actual: command.args.len(),
+        }];
+    }
+    if let Some(arg) = invalid_section_arg(&command.args) {
+        return vec![MapEventSectionCommandIssue::InvalidArg { arg }];
+    }
+    match command.command.as_str() {
+        "coord_event" | "bg_event" => {
+            let script = &command.args[3];
+            if script_labels.contains(script) {
+                Vec::new()
+            } else {
+                vec![MapEventSectionCommandIssue::UnknownEventScript {
+                    script: script.clone(),
+                }]
+            }
+        }
+        "object_event" => {
+            let script = &command.args[11];
+            if script == "-1" || script == "ObjectEvent" || script_labels.contains(script) {
+                Vec::new()
+            } else {
+                vec![MapEventSectionCommandIssue::UnknownObjectEventScript {
+                    script: script.clone(),
+                }]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn invalid_section_arg(args: &[String]) -> Option<String> {
+    args.iter()
+        .find(|arg| arg.is_empty() || arg.trim() != **arg)
+        .cloned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectEvent {
     pub sprite: String,
@@ -204,6 +332,185 @@ mod tests {
                 ("def_object_events", BTreeSet::from([0])),
                 ("object_event", BTreeSet::from([13])),
             ])
+        );
+    }
+
+    #[test]
+    fn map_script_section_issues_validate_exact_shapes_and_targets() {
+        let labels = BTreeSet::from(["KnownScript".to_string(), "KnownCallback".to_string()]);
+
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
+                    command: "Scene_Script".to_string(),
+                    args: vec!["KnownScript".to_string()],
+                    command_index: 0,
+                },
+                &labels,
+            ),
+            vec![MapScriptSectionCommandIssue::UnknownCommand]
+        );
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
+                    command: "scene_script".to_string(),
+                    args: Vec::new(),
+                    command_index: 1,
+                },
+                &labels,
+            ),
+            vec![MapScriptSectionCommandIssue::WrongArgCount {
+                expected: BTreeSet::from([1, 2]),
+                actual: 0,
+            }]
+        );
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
+                    command: "scene_script".to_string(),
+                    args: vec!["knownscript".to_string()],
+                    command_index: 2,
+                },
+                &labels,
+            ),
+            vec![MapScriptSectionCommandIssue::UnknownSceneScript {
+                script: "knownscript".to_string()
+            }]
+        );
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
+                    command: "scene_script".to_string(),
+                    args: vec![" KnownScript".to_string()],
+                    command_index: 4,
+                },
+                &labels,
+            ),
+            vec![MapScriptSectionCommandIssue::InvalidArg {
+                arg: " KnownScript".to_string()
+            }]
+        );
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
+                    command: "callback".to_string(),
+                    args: vec![
+                        "MAPCALLBACK_OBJECTS".to_string(),
+                        "KnownCallback".to_string()
+                    ],
+                    command_index: 3,
+                },
+                &labels,
+            ),
+            Vec::<MapScriptSectionCommandIssue>::new()
+        );
+    }
+
+    #[test]
+    fn map_event_section_issues_validate_exact_shapes_and_targets() {
+        let labels = BTreeSet::from(["KnownSign".to_string(), "KnownObject".to_string()]);
+
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "bg_event".to_string(),
+                    args: vec!["1".to_string(), "2".to_string()],
+                    command_index: 0,
+                },
+                &labels,
+            ),
+            vec![MapEventSectionCommandIssue::WrongArgCount {
+                expected: BTreeSet::from([4]),
+                actual: 2,
+            }]
+        );
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "bg_event".to_string(),
+                    args: vec![
+                        "1".to_string(),
+                        "2".to_string(),
+                        "BGEVENT_READ".to_string(),
+                        "knownsign".to_string(),
+                    ],
+                    command_index: 1,
+                },
+                &labels,
+            ),
+            vec![MapEventSectionCommandIssue::UnknownEventScript {
+                script: "knownsign".to_string()
+            }]
+        );
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "bg_event".to_string(),
+                    args: vec![
+                        "1".to_string(),
+                        "2".to_string(),
+                        "BGEVENT_READ".to_string(),
+                        " KnownSign".to_string(),
+                    ],
+                    command_index: 4,
+                },
+                &labels,
+            ),
+            vec![MapEventSectionCommandIssue::InvalidArg {
+                arg: " KnownSign".to_string()
+            }]
+        );
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "object_event".to_string(),
+                    args: vec![
+                        "0".to_string(),
+                        "0".to_string(),
+                        "SPRITE_MON".to_string(),
+                        "SPRITEMOVEDATA_STANDING_DOWN".to_string(),
+                        "0".to_string(),
+                        "0".to_string(),
+                        "-1".to_string(),
+                        "-1".to_string(),
+                        "PAL_NPC_RED".to_string(),
+                        "OBJECTTYPE_SCRIPT".to_string(),
+                        "0".to_string(),
+                        "MissingObjectScript".to_string(),
+                        "-1".to_string(),
+                    ],
+                    command_index: 2,
+                },
+                &labels,
+            ),
+            vec![MapEventSectionCommandIssue::UnknownObjectEventScript {
+                script: "MissingObjectScript".to_string()
+            }]
+        );
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "object_event".to_string(),
+                    args: vec![
+                        "0".to_string(),
+                        "0".to_string(),
+                        "SPRITE_MON".to_string(),
+                        "SPRITEMOVEDATA_STANDING_DOWN".to_string(),
+                        "0".to_string(),
+                        "0".to_string(),
+                        "-1".to_string(),
+                        "-1".to_string(),
+                        "PAL_NPC_RED".to_string(),
+                        "OBJECTTYPE_SCRIPT".to_string(),
+                        "0".to_string(),
+                        "ObjectEvent".to_string(),
+                        "-1".to_string(),
+                    ],
+                    command_index: 3,
+                },
+                &labels,
+            ),
+            Vec::<MapEventSectionCommandIssue>::new()
         );
     }
 

@@ -2169,7 +2169,7 @@ export const exportWeatherModifiers = (): WeatherModifiers => {
     if (section === "type") {
       typeModifiers.push({ weather, move_type: target, multiplier });
     } else {
-      moveEffectModifiers.push({ weather, move_effect: target, multiplier });
+      moveEffectModifiers.push({ weather, move_effect: moveEffectSchemaId(target), multiplier });
     }
   }
   if (!typeModifiers.length || !moveEffectModifiers.length) {

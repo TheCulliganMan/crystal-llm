@@ -50,6 +50,11 @@ impl AudioPointerTable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioProgramSource {
     Midi(Vec<u8>),
+    Pcm {
+        sample_rate_hz: u32,
+        channels: u16,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,8 +572,10 @@ mod tests {
             .expect("build program");
         assert!(program.cache_key.contains("MUSIC_ROUTE_29.mid"));
         assert!(!program.cache_key.contains(".mp3"));
-        let AudioProgramSource::Midi(bytes) = program.source;
-        assert!(bytes.starts_with(b"MThd"));
+        match program.source {
+            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
+            AudioProgramSource::Pcm { .. } => panic!("music fixture must load as MIDI"),
+        }
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -580,8 +587,10 @@ mod tests {
             .build_program(AudioKind::SoundEffect, "SFX_TACKLE")
             .expect("build sfx");
         assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
-        let AudioProgramSource::Midi(bytes) = sfx.source;
-        assert!(bytes.starts_with(b"MThd"));
+        match sfx.source {
+            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
+            AudioProgramSource::Pcm { .. } => panic!("sfx fixture must load as MIDI"),
+        }
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -594,8 +603,10 @@ mod tests {
             .expect("build cry");
         assert!(cry.cache_key.contains("CRY_NIDORAN_M.mid"));
         assert!(!cry.cache_key.contains(".mp3"));
-        let AudioProgramSource::Midi(bytes) = cry.source;
-        assert!(bytes.starts_with(b"MThd"));
+        match cry.source {
+            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
+            AudioProgramSource::Pcm { .. } => panic!("cry fixture must load as MIDI"),
+        }
         let _ = std::fs::remove_dir_all(temp);
     }
 

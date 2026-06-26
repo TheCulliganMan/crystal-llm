@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use crystal_assets::AssetRoot;
 use crystal_assets::modpack::{
-    COMPILED_GAME_PACK_EXTENSION, ModpackCompileOptions, ModpackCompiler,
+    COMPILED_GAME_PACK_EXTENSION, ModpackCompileOptions, ModpackCompiler, ModpackManifest,
+    ModpackMetadata,
 };
 
 fn main() -> Result<()> {
@@ -23,10 +24,20 @@ fn main() -> Result<()> {
 
     let asset_root = AssetRoot::new(PathBuf::from(&repository_root));
     let compiler = ModpackCompiler::new(&asset_root);
-    let mut compiled = compiler
-        .compile(&[], ModpackCompileOptions::default())
+    let core_manifest = ModpackManifest {
+        metadata: ModpackMetadata {
+            id: "core-modular".to_string(),
+            name: "Pokemon Crystal".to_string(),
+            version: "1.0.0".to_string(),
+            author: None,
+            description: None,
+        },
+        priority: -100,
+        ..ModpackManifest::default()
+    };
+    let compiled = compiler
+        .compile(&[core_manifest], ModpackCompileOptions::default())
         .context("compile core modpack from exported content pack")?;
-    compiled.report.manifests = vec!["core-modular".to_string()];
     compiled
         .write_game_pack(
             asset_root

@@ -3,9 +3,10 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crystal_core::multiplayer::{
-    BattleActionFrame, BattleRngState, LinkByteFrame, LinkClockSyncFrame, LinkHello, LinkMessage,
-    MultiplayerInteractionRequest, MultiplayerInteractionResponse, OverworldPresence, PlayerId,
-    PlayerInputFrame, StateChecksumFrame, TradeConfirmation, TradeOffer,
+    validate_link_hello, BattleActionFrame, BattleRngState, LinkByteFrame, LinkClockSyncFrame,
+    LinkHandshakeError, LinkHello, LinkMessage, LinkSessionIdentity, MultiplayerInteractionRequest,
+    MultiplayerInteractionResponse, OverworldPresence, PlayerId, PlayerInputFrame, StateChecksumFrame,
+    TradeConfirmation, TradeOffer,
 };
 use thiserror::Error;
 
@@ -20,6 +21,12 @@ pub enum TransportError {
     NotConnected,
     #[error("message exceeds transport frame size")]
     MessageTooLarge,
+    #[error("link frame max size {max_frame_bytes} is smaller than the required header")]
+    FrameLimitTooSmall { max_frame_bytes: usize },
+    #[error(
+        "link frame max size {max_frame_bytes} exceeds the binary frame payload length field"
+    )]
+    FrameLimitTooLarge { max_frame_bytes: usize },
     #[error("link frame is shorter than the required header")]
     FrameTooShort,
     #[error("link frame magic is invalid")]
@@ -32,6 +39,12 @@ pub enum TransportError {
     InvalidPayload { message: String },
     #[error("link frame message violates protocol invariants: {message}")]
     InvalidMessage { message: String },
+    #[error("link frame requires an exact session identity")]
+    MissingSessionBinding,
+    #[error("link frame session violates protocol invariants: {message}")]
+    InvalidSession { message: String },
+    #[error("link frame session does not match codec session: {message}")]
+    SessionMismatch { message: String },
 }
 
 pub trait LinkTransport {
@@ -59,7 +72,7 @@ impl MemoryLinkTransport {
         let b_to_a = Rc::new(RefCell::new(VecDeque::new()));
         (
             Self {
-                codec,
+                codec: codec.clone(),
                 inbound: Rc::clone(&b_to_a),
                 outbound: Rc::clone(&a_to_b),
                 connected: true,
@@ -81,6 +94,7 @@ impl MemoryLinkTransport {
         self.inbound.borrow().len()
     }
 
+    #[cfg(test)]
     pub fn push_inbound_frame_for_tests(&mut self, frame: Vec<u8>) {
         self.inbound.borrow_mut().push_back(frame);
     }
@@ -123,6 +137,13 @@ enum WireLinkMessage {
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
     Disconnect { player_id: PlayerId, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLinkFrame {
+    session: LinkSessionIdentity,
+    message: WireLinkMessage,
 }
 
 impl From<&LinkMessage> for WireLinkMessage {
@@ -176,20 +197,41 @@ impl From<WireLinkMessage> for LinkMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkFrameCodec {
     max_frame_bytes: usize,
+    session: Option<LinkSessionIdentity>,
 }
 
 impl Default for LinkFrameCodec {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_FRAME_BYTES)
+        Self::new(DEFAULT_MAX_FRAME_BYTES).expect("default frame limit fits link header")
     }
 }
 
 impl LinkFrameCodec {
-    pub const fn new(max_frame_bytes: usize) -> Self {
-        Self { max_frame_bytes }
+    pub fn new(max_frame_bytes: usize) -> Result<Self, TransportError> {
+        validate_frame_limit(max_frame_bytes)?;
+        Ok(Self {
+            max_frame_bytes,
+            session: None,
+        })
+    }
+
+    pub fn for_session(
+        max_frame_bytes: usize,
+        session: LinkSessionIdentity,
+    ) -> Result<Self, TransportError> {
+        validate_frame_limit(max_frame_bytes)?;
+        session
+            .validate()
+            .map_err(|error| TransportError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            max_frame_bytes,
+            session: Some(session),
+        })
     }
 
     pub const fn max_frame_bytes(&self) -> usize {
@@ -197,12 +239,20 @@ impl LinkFrameCodec {
     }
 
     pub fn encode(&self, message: &LinkMessage) -> Result<Vec<u8>, TransportError> {
+        let session = message_session(message, self.session.as_ref())?;
         validate_link_message(message)?;
-        let wire_message = WireLinkMessage::from(message);
-        let payload = bincode::serde::encode_to_vec(&wire_message, bincode::config::standard())
+        validate_frame_session(&session, message)?;
+        let wire_frame = WireLinkFrame {
+            session,
+            message: WireLinkMessage::from(message),
+        };
+        let payload = bincode::serde::encode_to_vec(&wire_frame, link_frame_binary_config())
             .map_err(|error| TransportError::InvalidPayload {
                 message: error.to_string(),
             })?;
+        if payload.len() > u32::MAX as usize {
+            return Err(TransportError::MessageTooLarge);
+        }
         let frame_len = HEADER_LEN + payload.len();
         if frame_len > self.max_frame_bytes {
             return Err(TransportError::MessageTooLarge);
@@ -247,8 +297,8 @@ impl LinkFrameCodec {
             return Err(TransportError::LengthMismatch { declared, actual });
         }
 
-        let (message, bytes_read): (WireLinkMessage, usize) =
-            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], bincode::config::standard())
+        let (wire_frame, bytes_read): (WireLinkFrame, usize) =
+            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], link_frame_binary_config())
                 .map_err(|error| TransportError::InvalidPayload {
                     message: error.to_string(),
                 })?;
@@ -258,28 +308,123 @@ impl LinkFrameCodec {
                 actual: bytes_read,
             });
         }
-        let message = message.into();
+        wire_frame
+            .session
+            .validate()
+            .map_err(|error| TransportError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        if let Some(expected_session) = &self.session {
+            compare_sessions(expected_session, &wire_frame.session)
+                .map_err(session_mismatch_error)?;
+        }
+        let message = wire_frame.message.into();
+        if self.session.is_none() && !matches!(message, LinkMessage::Hello(_)) {
+            return Err(TransportError::MissingSessionBinding);
+        }
+        validate_frame_session(&wire_frame.session, &message)?;
         validate_link_message(&message)?;
         Ok(message)
     }
 }
 
-fn validate_link_message(message: &LinkMessage) -> Result<(), TransportError> {
-    match message {
-        LinkMessage::Hello(hello) => {
-            hello
-                .validate()
-                .map_err(|error| TransportError::InvalidMessage {
-                    message: error.to_string(),
-                })
-        }
-        LinkMessage::BattleAction(action) if action.state_hash.as_deref() == Some("") => {
-            Err(TransportError::InvalidMessage {
-                message: "battle action state hash must be non-empty".to_string(),
-            })
-        }
-        _ => Ok(()),
+fn validate_frame_limit(max_frame_bytes: usize) -> Result<(), TransportError> {
+    if max_frame_bytes < HEADER_LEN {
+        return Err(TransportError::FrameLimitTooSmall { max_frame_bytes });
     }
+    if max_frame_bytes - HEADER_LEN > u32::MAX as usize {
+        return Err(TransportError::FrameLimitTooLarge { max_frame_bytes });
+    }
+    Ok(())
+}
+
+fn link_frame_binary_config() -> impl bincode::config::Config {
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
+}
+
+fn message_session(
+    message: &LinkMessage,
+    codec_session: Option<&LinkSessionIdentity>,
+) -> Result<LinkSessionIdentity, TransportError> {
+    if let Some(session) = codec_session {
+        session
+            .validate()
+            .map_err(|error| TransportError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        return Ok(session.clone());
+    }
+    match message {
+        LinkMessage::Hello(hello) => Ok(hello.session().clone()),
+        _ => Err(TransportError::MissingSessionBinding),
+    }
+}
+
+fn compare_sessions(
+    expected: &LinkSessionIdentity,
+    actual: &LinkSessionIdentity,
+) -> Result<(), LinkHandshakeError> {
+    expected.validate()?;
+    actual.validate()?;
+    if actual.session_id() != expected.session_id() {
+        return Err(LinkHandshakeError::SessionMismatch {
+            expected: expected.session_id().to_string(),
+            actual: actual.session_id().to_string(),
+        });
+    }
+    if actual.modpack().id() != expected.modpack().id() {
+        return Err(LinkHandshakeError::ModpackIdMismatch {
+            expected: expected.modpack().id().to_string(),
+            actual: actual.modpack().id().to_string(),
+        });
+    }
+    if actual.modpack().hash() != expected.modpack().hash() {
+        return Err(LinkHandshakeError::ModpackHashMismatch {
+            expected: expected.modpack().hash().to_string(),
+            actual: actual.modpack().hash().to_string(),
+        });
+    }
+    if actual.protocol_version() != expected.protocol_version() {
+        return Err(LinkHandshakeError::ProtocolVersionMismatch {
+            expected: expected.protocol_version(),
+            actual: actual.protocol_version(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_frame_session(
+    session: &LinkSessionIdentity,
+    message: &LinkMessage,
+) -> Result<(), TransportError> {
+    if let LinkMessage::Hello(hello) = message {
+        validate_link_hello(session, hello).map_err(session_mismatch_error)?;
+    }
+    Ok(())
+}
+
+fn session_mismatch_error(error: LinkHandshakeError) -> TransportError {
+    match error {
+        LinkHandshakeError::SessionMismatch { .. }
+        | LinkHandshakeError::ModpackIdMismatch { .. }
+        | LinkHandshakeError::ModpackHashMismatch { .. }
+        | LinkHandshakeError::ProtocolVersionMismatch { .. } => TransportError::SessionMismatch {
+            message: error.to_string(),
+        },
+        _ => TransportError::InvalidMessage {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn validate_link_message(message: &LinkMessage) -> Result<(), TransportError> {
+    message
+        .validate()
+        .map_err(|error| TransportError::InvalidMessage {
+            message: error.to_string(),
+        })
 }
 
 #[cfg(test)]
@@ -288,9 +433,9 @@ mod tests {
     use crystal_core::battle::turn::BattleAction;
     use crystal_core::models::{BaseStats, Dv, Pokemon, PokemonSpecies};
     use crystal_core::multiplayer::{
-        BattleActionFrame, LINK_PREAMBLE_RESPONSE, LinkByteFrame, LinkClockSyncFrame, LinkHello,
-        LinkSessionIdentity, PlayerIdentity, PlayerInputFrame, StateChecksumFrame,
-        TradeConfirmation, TradeOffer,
+        BattleActionFrame, LinkByteFrame, LinkClockSyncFrame, LinkHello, LinkSessionIdentity,
+        MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame, StateChecksumFrame,
+        TradeConfirmation, TradeOffer, LINK_PREAMBLE_RESPONSE,
     };
     use crystal_core::save::SaveModpackIdentity;
     use crystal_core::timing::Frame;
@@ -299,14 +444,20 @@ mod tests {
         SaveModpackIdentity::new("core-modular", "1234abcd").expect("modpack identity")
     }
 
+    fn session() -> LinkSessionIdentity {
+        LinkSessionIdentity::new("session-1", modpack()).expect("session")
+    }
+
+    fn player(id: PlayerId, display_name: &str) -> PlayerIdentity {
+        PlayerIdentity::new(id, display_name).expect("player")
+    }
+
+    fn session_codec() -> LinkFrameCodec {
+        LinkFrameCodec::for_session(DEFAULT_MAX_FRAME_BYTES, session()).expect("session codec")
+    }
+
     fn hello_message() -> LinkMessage {
-        LinkMessage::Hello(LinkHello {
-            session: LinkSessionIdentity::new("session-1", modpack()).expect("session"),
-            player: PlayerIdentity {
-                id: 7,
-                display_name: "P7".to_string(),
-            },
-        })
+        LinkMessage::Hello(LinkHello::from_session(session(), player(7, "P7")).expect("hello"))
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
@@ -320,7 +471,14 @@ mod tests {
     }
 
     fn frame_from_wire_message(message: WireLinkMessage) -> Vec<u8> {
-        let payload = bincode::serde::encode_to_vec(&message, bincode::config::standard())
+        frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message,
+        })
+    }
+
+    fn frame_from_wire_frame(frame: WireLinkFrame) -> Vec<u8> {
+        let payload = bincode::serde::encode_to_vec(&frame, link_frame_binary_config())
             .expect("encode wire payload");
         let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
         frame.extend_from_slice(LINK_FRAME_MAGIC);
@@ -343,8 +501,10 @@ mod tests {
 
     #[test]
     fn binary_link_frame_round_trips_input_message() {
-        let codec = LinkFrameCodec::default();
-        let message = LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000));
+        let codec = session_codec();
+        let message = LinkMessage::Input(
+            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+        );
         let frame = codec.encode(&message).expect("encode");
 
         assert_eq!(codec.decode(&frame).expect("decode"), message);
@@ -352,7 +512,7 @@ mod tests {
 
     #[test]
     fn binary_link_frame_round_trips_player_bound_state_hash_message() {
-        let codec = LinkFrameCodec::default();
+        let codec = session_codec();
         let message = LinkMessage::StateHash(StateChecksumFrame::new(2, Frame(144), 0xaabbccdd));
         let frame = codec.encode(&message).expect("encode");
 
@@ -361,7 +521,7 @@ mod tests {
 
     #[test]
     fn binary_link_frame_round_trips_battle_action_message() {
-        let codec = LinkFrameCodec::default();
+        let codec = session_codec();
         let message = LinkMessage::BattleAction(
             BattleActionFrame::with_state_hash(
                 2,
@@ -380,18 +540,22 @@ mod tests {
 
     #[test]
     fn binary_link_frame_round_trips_trade_messages() {
-        let codec = LinkFrameCodec::default();
-        let offer = LinkMessage::TradeOffer(TradeOffer {
-            trade_id: "trade-1".to_string(),
-            player_id: 1,
-            party_slot: 0,
-            pokemon: pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
-        });
+        let codec = session_codec();
+        let offer = LinkMessage::TradeOffer(
+            TradeOffer::new(
+                "trade-1",
+                1,
+                0,
+                pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
+            )
+            .expect("offer"),
+        );
         let offer_frame = codec.encode(&offer).expect("encode offer");
         assert_eq!(codec.decode(&offer_frame).expect("decode offer"), offer);
 
-        let confirmation =
-            LinkMessage::TradeConfirmation(TradeConfirmation::new("trade-1", 1, true));
+        let confirmation = LinkMessage::TradeConfirmation(
+            TradeConfirmation::new("trade-1", 1, true).expect("confirmation"),
+        );
         let confirmation_frame = codec.encode(&confirmation).expect("encode confirmation");
         assert_eq!(
             codec
@@ -403,23 +567,50 @@ mod tests {
 
     #[test]
     fn binary_link_frame_round_trips_link_cable_messages() {
-        let codec = LinkFrameCodec::default();
-        let byte = LinkMessage::LinkByte(LinkByteFrame {
-            player_id: 2,
-            byte: LINK_PREAMBLE_RESPONSE,
-            clock: 7,
-        });
+        let codec = session_codec();
+        let byte = LinkMessage::LinkByte(
+            LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("byte frame"),
+        );
         let byte_frame = codec.encode(&byte).expect("encode byte");
         assert_eq!(codec.decode(&byte_frame).expect("decode byte"), byte);
 
-        let sync = LinkMessage::LinkClockSync(LinkClockSyncFrame {
-            player_id: 1,
-            t0: 100,
-            t1: 101,
-            t2: 102,
-        });
+        let sync = LinkMessage::LinkClockSync(
+            LinkClockSyncFrame::new(1, 100, 101, 102).expect("sync frame"),
+        );
         let sync_frame = codec.encode(&sync).expect("encode sync");
         assert_eq!(codec.decode(&sync_frame).expect("decode sync"), sync);
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_zero_clock_link_byte_frames() {
+        let codec = session_codec();
+        let frame = frame_from_wire_message(WireLinkMessage::LinkByte(
+            LinkByteFrame::new_unchecked_for_tests(2, LINK_PREAMBLE_RESPONSE, 0),
+        ));
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::InvalidMessage {
+                message: "link cable clock 0 must be nonzero".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_impossible_clock_sync_ordering() {
+        let codec = session_codec();
+        let frame = frame_from_wire_message(WireLinkMessage::LinkClockSync(
+            LinkClockSyncFrame::new_unchecked_for_tests(1, 12, 11, 13),
+        ));
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::InvalidMessage {
+                message:
+                    "link cable clock sync requires t0 <= t1 <= t2 but got t0=12, t1=11, t2=13"
+                        .to_string(),
+            })
+        );
     }
 
     #[test]
@@ -449,45 +640,54 @@ mod tests {
     #[test]
     fn binary_link_codec_rejects_messages_that_bypass_protocol_constructors() {
         let codec = LinkFrameCodec::default();
-        let invalid_hello = LinkMessage::Hello(LinkHello {
-            session: LinkSessionIdentity {
-                protocol_version: LINK_FRAME_VERSION,
-                session_id: String::new(),
-                modpack: modpack(),
-            },
-            player: PlayerIdentity {
-                id: 7,
-                display_name: "P7".to_string(),
-            },
-        });
+        let invalid_hello = LinkMessage::Hello(
+            serde_json::from_value(serde_json::json!({
+                "session": {
+                    "protocol_version": LINK_FRAME_VERSION,
+                    "session_id": "",
+                    "modpack": modpack(),
+                },
+                "player": {
+                    "id": 7,
+                    "display_name": "P7",
+                },
+            }))
+            .expect("deserialize invalid hello"),
+        );
         assert!(matches!(
             codec.encode(&invalid_hello),
             Err(TransportError::InvalidMessage { .. })
         ));
 
-        let invalid_wire_frame = frame_from_wire_message(WireLinkMessage::Hello(LinkHello {
-            session: LinkSessionIdentity {
-                protocol_version: LINK_FRAME_VERSION,
-                session_id: String::new(),
-                modpack: modpack(),
-            },
-            player: PlayerIdentity {
-                id: 7,
-                display_name: "P7".to_string(),
-            },
-        }));
+        let invalid_wire_frame = frame_from_wire_message(WireLinkMessage::Hello(
+            serde_json::from_value(serde_json::json!({
+                "session": {
+                    "protocol_version": LINK_FRAME_VERSION,
+                    "session_id": "",
+                    "modpack": modpack(),
+                },
+                "player": {
+                    "id": 7,
+                    "display_name": "P7",
+                },
+            }))
+            .expect("deserialize invalid wire hello"),
+        ));
         assert!(matches!(
             codec.decode(&invalid_wire_frame),
             Err(TransportError::InvalidMessage { .. })
         ));
 
-        let empty_player_frame = frame_from_wire_message(WireLinkMessage::Hello(LinkHello {
-            session: LinkSessionIdentity::new("session-1", modpack()).expect("session"),
-            player: PlayerIdentity {
-                id: 7,
-                display_name: String::new(),
-            },
-        }));
+        let empty_player_frame = frame_from_wire_message(WireLinkMessage::Hello(
+            serde_json::from_value(serde_json::json!({
+                "session": session(),
+                "player": {
+                    "id": 7,
+                    "display_name": "",
+                },
+            }))
+            .expect("deserialize empty-player hello"),
+        ));
         assert_eq!(
             codec.decode(&empty_player_frame),
             Err(TransportError::InvalidMessage {
@@ -495,18 +695,173 @@ mod tests {
             })
         );
 
-        let empty_hash = LinkMessage::BattleAction(BattleActionFrame {
-            player_id: 2,
-            turn: 12,
-            action: BattleAction::Run,
-            state_hash: Some(String::new()),
-        });
+        let empty_hash = LinkMessage::BattleAction(BattleActionFrame::new_unchecked_for_tests(
+            2,
+            12,
+            BattleAction::Run,
+            Some(String::new()),
+        ));
+        assert_eq!(
+            codec.encode(&empty_hash),
+            Err(TransportError::MissingSessionBinding)
+        );
+
+        let codec = session_codec();
         assert_eq!(
             codec.encode(&empty_hash),
             Err(TransportError::InvalidMessage {
-                message: "battle action state hash must be non-empty".to_string()
+                message: "battle sync state hash must be non-empty".to_string()
             })
         );
+
+        let padded_hash_frame = frame_from_wire_message(WireLinkMessage::BattleAction(
+            BattleActionFrame::new_unchecked_for_tests(
+                2,
+                12,
+                BattleAction::Run,
+                Some(" 2222".to_string()),
+            ),
+        ));
+        assert_eq!(
+            codec.decode(&padded_hash_frame),
+            Err(TransportError::InvalidMessage {
+                message: "battle sync state hash  2222 must be exact and untrimmed".to_string()
+            })
+        );
+
+        let empty_trade_frame =
+            frame_from_wire_message(WireLinkMessage::TradeConfirmation(
+                TradeConfirmation::new_unchecked_for_tests("", 1, true),
+            ));
+        assert_eq!(
+            codec.decode(&empty_trade_frame),
+            Err(TransportError::InvalidMessage {
+                message: "trade id is required".to_string()
+            })
+        );
+
+        let invalid_offer_frame = frame_from_wire_message(WireLinkMessage::TradeOffer(
+            TradeOffer::new_unchecked_for_tests(
+                "trade-1",
+                1,
+                crystal_core::models::PARTY_SIZE,
+                pokemon("PIKACHU", None),
+            ),
+        ));
+        assert_eq!(
+            codec.decode(&invalid_offer_frame),
+            Err(TransportError::InvalidMessage {
+                message: format!(
+                    "party slot {} is outside the party",
+                    crystal_core::models::PARTY_SIZE
+                ),
+            })
+        );
+
+        let empty_interaction_frame =
+            frame_from_wire_message(WireLinkMessage::InteractionRequest(
+                MultiplayerInteractionRequest::new_unchecked_for_tests(
+                    "",
+                    "user-a",
+                    "Player A",
+                    "user-b",
+                    MultiplayerInteractionKind::Trade,
+                    123,
+                ),
+            ));
+        assert_eq!(
+            codec.decode(&empty_interaction_frame),
+            Err(TransportError::InvalidMessage {
+                message: "interaction request id must be non-empty".to_string()
+            })
+        );
+
+        let padded_disconnect_frame = frame_from_wire_message(WireLinkMessage::Disconnect {
+            player_id: 1,
+            reason: " done".to_string(),
+        });
+        assert_eq!(
+            codec.decode(&padded_disconnect_frame),
+            Err(TransportError::InvalidMessage {
+                message: "disconnect reason must be exact and untrimmed".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_requires_session_binding_for_gameplay_frames() {
+        let codec = LinkFrameCodec::default();
+        let input = PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input");
+
+        assert_eq!(
+            codec.encode(&LinkMessage::Input(input.clone())),
+            Err(TransportError::MissingSessionBinding)
+        );
+
+        let frame = frame_from_wire_message(WireLinkMessage::Input(input));
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::MissingSessionBinding)
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_session_bound_hello_mismatch_on_encode() {
+        let codec = session_codec();
+        let mut hello = hello_message();
+        if let LinkMessage::Hello(hello) = &mut hello {
+            *hello = LinkHello::from_session(
+                LinkSessionIdentity::new(
+                    "session-1",
+                    SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+                )
+                .expect("other session"),
+                player(7, "P7"),
+            )
+            .expect("other hello");
+        }
+
+        assert!(matches!(
+            codec.encode(&hello),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_conflicting_input_direction_masks() {
+        let codec = session_codec();
+        let frame = frame_from_wire_message(WireLinkMessage::Input(
+            PlayerInputFrame::new_unchecked_for_tests(2, 144, 0b0000_0011),
+        ));
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::InvalidMessage {
+                message: "lockstep input mask 0b00000011 has conflicting direction buttons"
+                    .to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_cross_session_frames() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new(
+            "session-1",
+            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+        )
+        .expect("other session");
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: other_session,
+            message: WireLinkMessage::Input(
+                PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            ),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
     }
 
     #[test]
@@ -541,7 +896,23 @@ mod tests {
 
     #[test]
     fn binary_link_codec_enforces_max_frame_size() {
-        let codec = LinkFrameCodec::new(HEADER_LEN);
+        assert_eq!(
+            LinkFrameCodec::new(HEADER_LEN - 1),
+            Err(TransportError::FrameLimitTooSmall {
+                max_frame_bytes: HEADER_LEN - 1,
+            })
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let too_large = HEADER_LEN + u32::MAX as usize + 1;
+            assert_eq!(
+                LinkFrameCodec::new(too_large),
+                Err(TransportError::FrameLimitTooLarge {
+                    max_frame_bytes: too_large,
+                })
+            );
+        }
+        let codec = LinkFrameCodec::new(HEADER_LEN).expect("codec");
         assert_eq!(
             codec.encode(&hello_message()),
             Err(TransportError::MessageTooLarge)
@@ -556,9 +927,11 @@ mod tests {
 
     #[test]
     fn memory_transport_delivers_binary_framed_messages_bidirectionally() {
-        let (mut host, mut peer) = MemoryLinkTransport::pair();
+        let (mut host, mut peer) = MemoryLinkTransport::pair_with_codec(session_codec());
         let hello = hello_message();
-        let input = LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000));
+        let input = LinkMessage::Input(
+            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+        );
 
         host.send(hello.clone()).expect("host send");
         peer.send(input.clone()).expect("peer send");
@@ -571,7 +944,8 @@ mod tests {
 
     #[test]
     fn memory_transport_uses_codec_limits_and_rejects_corrupt_frames() {
-        let (mut host, _) = MemoryLinkTransport::pair_with_codec(LinkFrameCodec::new(HEADER_LEN));
+        let (mut host, _) =
+            MemoryLinkTransport::pair_with_codec(LinkFrameCodec::new(HEADER_LEN).expect("codec"));
 
         assert_eq!(
             host.send(hello_message()),

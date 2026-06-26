@@ -115,6 +115,19 @@ pub enum EconomyError {
     UnexpectedMoneyAccount { command: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptEconomyCommandIssue {
+    UnknownCommand,
+    MissingMoneyAccount,
+    InvalidMoneyAccount,
+    UnknownMoneyAccount,
+    UnexpectedCoinAccount,
+    MissingMoneyCap,
+    MissingCoinCap,
+    UnresolvedAmount { error: EconomyError },
+}
+
 pub const SCRIPT_MONEY_CHECK_COMMANDS: &[&str] = &["checkmoney"];
 pub const SCRIPT_MONEY_MUTATION_COMMANDS: &[&str] = &["takemoney", "givemoney"];
 pub const SCRIPT_COIN_CHECK_COMMANDS: &[&str] = &["checkcoins"];
@@ -125,6 +138,49 @@ pub fn is_known_script_economy_command(command: &str) -> bool {
         || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command)
         || SCRIPT_COIN_CHECK_COMMANDS.contains(&command)
         || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command)
+}
+
+pub fn script_economy_command_issues(
+    command: &ScriptEconomyCommand,
+    constants: &CurrencyCatalog,
+) -> Vec<ScriptEconomyCommandIssue> {
+    let mut issues = Vec::new();
+    if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command.command.as_str())
+        || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
+    {
+        let Some(account) = command.account.as_deref() else {
+            issues.push(ScriptEconomyCommandIssue::MissingMoneyAccount);
+            return issues;
+        };
+        if account.trim().is_empty() || account.trim() != account {
+            issues.push(ScriptEconomyCommandIssue::InvalidMoneyAccount);
+        } else if MoneyAccount::from_script_id(account).is_err() {
+            issues.push(ScriptEconomyCommandIssue::UnknownMoneyAccount);
+        }
+        if SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
+            && constants.get("MAX_MONEY").is_none()
+        {
+            issues.push(ScriptEconomyCommandIssue::MissingMoneyCap);
+        }
+    } else if SCRIPT_COIN_CHECK_COMMANDS.contains(&command.command.as_str())
+        || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
+    {
+        if command.account.is_some() {
+            issues.push(ScriptEconomyCommandIssue::UnexpectedCoinAccount);
+        }
+        if SCRIPT_COIN_MUTATION_COMMANDS.contains(&command.command.as_str())
+            && constants.get("MAX_COINS").is_none()
+        {
+            issues.push(ScriptEconomyCommandIssue::MissingCoinCap);
+        }
+    } else {
+        issues.push(ScriptEconomyCommandIssue::UnknownCommand);
+        return issues;
+    }
+    if let Err(error) = resolve_amount(&command.amount_tokens, constants) {
+        issues.push(ScriptEconomyCommandIssue::UnresolvedAmount { error });
+    }
+    issues
 }
 
 pub fn apply_script_economy_command(
@@ -575,6 +631,60 @@ mod tests {
         assert!(is_known_script_economy_command("checkmoney"));
         assert!(!is_known_script_economy_command("CheckMoney"));
         assert!(!is_known_script_economy_command("paymoney"));
+    }
+
+    #[test]
+    fn script_economy_issue_collector_reports_exact_pack_shape_errors() {
+        let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("takemoney", None, &["PRICE"]),
+                &constants,
+            ),
+            vec![ScriptEconomyCommandIssue::MissingMoneyAccount]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("takemoney", Some("your_money"), &["PRICE"]),
+                &constants,
+            ),
+            vec![
+                ScriptEconomyCommandIssue::UnknownMoneyAccount,
+                ScriptEconomyCommandIssue::MissingMoneyCap,
+            ]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("takemoney", Some(" YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            vec![
+                ScriptEconomyCommandIssue::InvalidMoneyAccount,
+                ScriptEconomyCommandIssue::MissingMoneyCap,
+            ]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("givecoins", Some("YOUR_MONEY"), &["price"]),
+                &constants,
+            ),
+            vec![
+                ScriptEconomyCommandIssue::UnexpectedCoinAccount,
+                ScriptEconomyCommandIssue::MissingCoinCap,
+                ScriptEconomyCommandIssue::UnresolvedAmount {
+                    error: EconomyError::UnknownCurrencyConstant {
+                        token: "price".to_string(),
+                    },
+                },
+            ]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("paymoney", Some("YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            vec![ScriptEconomyCommandIssue::UnknownCommand]
+        );
     }
 
     #[test]

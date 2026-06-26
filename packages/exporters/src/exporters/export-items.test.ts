@@ -844,7 +844,7 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: null,
       battle_stat_drop_guard: true,
-      battle_stat_drop_guard_turns: null,
+      battle_stat_drop_guard_turns: 5,
       confusion_heal: null,
     });
   });
@@ -1013,7 +1013,7 @@ describe("exportItems", () => {
       effect: "NONE",
       pocket: "TM_HM",
       consumable: true,
-      tmhm_index: 0,
+      tmhm_index: 1,
       tmhm_move: "DYNAMICPUNCH",
     });
     expect(items[1]).toMatchObject({
@@ -1021,7 +1021,7 @@ describe("exportItems", () => {
       effect: "NONE",
       pocket: "TM_HM",
       consumable: false,
-      tmhm_index: 50,
+      tmhm_index: 51,
       tmhm_move: "CUT",
     });
   });

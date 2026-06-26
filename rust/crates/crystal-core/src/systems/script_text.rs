@@ -45,6 +45,69 @@ pub struct ScriptMenuCommand {
     pub command_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptTextBodyIssue {
+    InvalidKey {
+        key: String,
+    },
+    InvalidLabel {
+        label: String,
+    },
+    LabelMismatch {
+        key: String,
+        label: String,
+    },
+    UnknownCommand {
+        command_index: usize,
+        command: String,
+    },
+    MalformedCommand {
+        command_index: usize,
+        command: String,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptMenuDefinitionIssue {
+    InvalidKey {
+        key: String,
+    },
+    InvalidLabel {
+        label: String,
+    },
+    LabelMismatch {
+        key: String,
+        label: String,
+    },
+    UnknownCommand {
+        command_index: usize,
+        command: String,
+    },
+    MalformedCommand {
+        command_index: usize,
+        command: String,
+        expected: BTreeSet<usize>,
+        actual: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsmTextCatalogIssue {
+    InvalidText { label: String },
+}
+
+pub fn asm_text_catalog_issues(asm_text: &BTreeMap<String, String>) -> Vec<AsmTextCatalogIssue> {
+    asm_text
+        .iter()
+        .filter(|(label, text)| !is_exact_nonempty_label(label) || !is_exact_nonempty_label(text))
+        .map(|(label, _)| AsmTextCatalogIssue::InvalidText {
+            label: label.clone(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptTextAction {
@@ -81,6 +144,8 @@ pub enum ScriptTextCommandError {
     UnknownCommand { command: String },
     #[error("script text command '{command}' is missing a text label")]
     MissingTextLabel { command: String },
+    #[error("script text command '{command}' has invalid text label '{text_label}'")]
+    InvalidTextLabel { command: String, text_label: String },
     #[error("script text command '{command}' references unknown text label '{text_label}'")]
     UnknownTextLabel { command: String, text_label: String },
     #[error("script text command '{command}' has unexpected text label")]
@@ -100,6 +165,123 @@ pub const SCRIPT_TEXT_LABEL_COMMANDS: &[&str] = &["writetext", "jumptext", "jump
 pub fn is_known_script_text_command(command: &str) -> bool {
     SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command)
         || SCRIPT_TEXT_LABEL_COMMANDS.contains(&command)
+}
+
+pub fn script_text_command_issues(
+    command: &ScriptTextCommand,
+    text_labels: &BTreeSet<String>,
+) -> Vec<ScriptTextCommandError> {
+    let mut issues = Vec::new();
+    if SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command.command.as_str()) {
+        if command.text_label.is_some() {
+            issues.push(ScriptTextCommandError::UnexpectedTextLabel {
+                command: command.command.clone(),
+            });
+        }
+    } else if SCRIPT_TEXT_LABEL_COMMANDS.contains(&command.command.as_str()) {
+        match command.text_label.as_deref() {
+            Some(text_label) if text_labels.contains(text_label) => {}
+            Some(text_label) if !is_exact_nonempty_label(text_label) => {
+                issues.push(ScriptTextCommandError::InvalidTextLabel {
+                    command: command.command.clone(),
+                    text_label: text_label.to_string(),
+                });
+            }
+            Some(text_label) => issues.push(ScriptTextCommandError::UnknownTextLabel {
+                command: command.command.clone(),
+                text_label: text_label.to_string(),
+            }),
+            None => issues.push(ScriptTextCommandError::MissingTextLabel {
+                command: command.command.clone(),
+            }),
+        }
+    } else {
+        issues.push(ScriptTextCommandError::UnknownCommand {
+            command: command.command.clone(),
+        });
+    }
+    issues
+}
+
+pub fn script_text_body_issues(key: &str, body: &ScriptTextBody) -> Vec<ScriptTextBodyIssue> {
+    let expected_arg_counts = text_body_command_arg_counts();
+    let mut issues = Vec::new();
+    if !is_exact_nonempty_label(key) {
+        issues.push(ScriptTextBodyIssue::InvalidKey {
+            key: key.to_string(),
+        });
+    }
+    if !is_exact_nonempty_label(&body.label) {
+        issues.push(ScriptTextBodyIssue::InvalidLabel {
+            label: body.label.clone(),
+        });
+    }
+    if body.label != key {
+        issues.push(ScriptTextBodyIssue::LabelMismatch {
+            key: key.to_string(),
+            label: body.label.clone(),
+        });
+    }
+    for command in &body.commands {
+        let Some(expected) = expected_arg_counts.get(command.command.as_str()) else {
+            issues.push(ScriptTextBodyIssue::UnknownCommand {
+                command_index: command.command_index,
+                command: command.command.clone(),
+            });
+            continue;
+        };
+        if command.args.len() != *expected {
+            issues.push(ScriptTextBodyIssue::MalformedCommand {
+                command_index: command.command_index,
+                command: command.command.clone(),
+                expected: *expected,
+                actual: command.args.len(),
+            });
+        }
+    }
+    issues
+}
+
+pub fn script_menu_definition_issues(
+    key: &str,
+    menu: &ScriptMenuDefinition,
+) -> Vec<ScriptMenuDefinitionIssue> {
+    let expected_arg_counts = menu_definition_command_arg_counts();
+    let mut issues = Vec::new();
+    if !is_exact_nonempty_label(key) {
+        issues.push(ScriptMenuDefinitionIssue::InvalidKey {
+            key: key.to_string(),
+        });
+    }
+    if !is_exact_nonempty_label(&menu.label) {
+        issues.push(ScriptMenuDefinitionIssue::InvalidLabel {
+            label: menu.label.clone(),
+        });
+    }
+    if menu.label != key {
+        issues.push(ScriptMenuDefinitionIssue::LabelMismatch {
+            key: key.to_string(),
+            label: menu.label.clone(),
+        });
+    }
+    for command in &menu.commands {
+        let Some(expected) = expected_arg_counts.get(command.command.as_str()) else {
+            issues.push(ScriptMenuDefinitionIssue::UnknownCommand {
+                command_index: command.command_index,
+                command: command.command.clone(),
+            });
+            continue;
+        };
+        if !expected.contains(&command.args.len()) {
+            issues.push(ScriptMenuDefinitionIssue::MalformedCommand {
+                command_index: command.command_index,
+                command: command.command.clone(),
+                expected: expected.clone(),
+                actual: command.args.len(),
+            });
+        }
+    }
+    issues
 }
 
 pub fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
@@ -321,6 +503,12 @@ fn require_known_text_label<'a>(
             .ok_or_else(|| ScriptTextCommandError::MissingTextLabel {
                 command: command.command.clone(),
             })?;
+    if !is_exact_nonempty_label(text_label) {
+        return Err(ScriptTextCommandError::InvalidTextLabel {
+            command: command.command.clone(),
+            text_label: text_label.to_string(),
+        });
+    }
     if !text_labels.contains(text_label) {
         return Err(ScriptTextCommandError::UnknownTextLabel {
             command: command.command.clone(),
@@ -338,6 +526,10 @@ fn reject_text_label(command: &ScriptTextCommand) -> Result<(), ScriptTextComman
     } else {
         Ok(())
     }
+}
+
+fn is_exact_nonempty_label(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 #[cfg(test)]
@@ -385,6 +577,42 @@ mod tests {
     }
 
     #[test]
+    fn script_text_issue_collector_reports_exact_pack_shape_errors() {
+        assert_eq!(
+            script_text_command_issues(&command("waitbutton", Some("GreetingText")), &labels()),
+            vec![ScriptTextCommandError::UnexpectedTextLabel {
+                command: "waitbutton".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("jumptext", None), &labels()),
+            vec![ScriptTextCommandError::MissingTextLabel {
+                command: "jumptext".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("writetext", Some("greetingtext")), &labels()),
+            vec![ScriptTextCommandError::UnknownTextLabel {
+                command: "writetext".to_string(),
+                text_label: "greetingtext".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("writetext", Some(" GreetingText")), &labels()),
+            vec![ScriptTextCommandError::InvalidTextLabel {
+                command: "writetext".to_string(),
+                text_label: " GreetingText".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("text", Some("GreetingText")), &labels()),
+            vec![ScriptTextCommandError::UnknownCommand {
+                command: "text".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn resolves_dialog_flow_and_text_writes() {
         assert_eq!(
             resolve_script_text_command(command("opentext", None), &labels()).expect("open"),
@@ -424,6 +652,10 @@ mod tests {
         assert!(matches!(
             resolve_script_text_command(command("writetext", Some("greetingtext")), &labels()),
             Err(ScriptTextCommandError::UnknownTextLabel { .. })
+        ));
+        assert!(matches!(
+            resolve_script_text_command(command("writetext", Some(" GreetingText")), &labels()),
+            Err(ScriptTextCommandError::InvalidTextLabel { .. })
         ));
         assert!(matches!(
             resolve_script_text_command(command("waitbutton", Some("GreetingText")), &labels()),
@@ -563,5 +795,154 @@ mod tests {
         .expect_err("missing menu command args must not default to empty")
         .to_string();
         assert!(error.contains("missing field `args`"), "{error}");
+    }
+
+    #[test]
+    fn script_text_body_issues_validate_exact_label_and_command_arity() {
+        let body = ScriptTextBody {
+            label: " OtherText".to_string(),
+            commands: vec![
+                ScriptTextBodyCommand {
+                    command: "text".to_string(),
+                    args: Vec::new(),
+                    command_index: 0,
+                },
+                ScriptTextBodyCommand {
+                    command: "unknown_text_op".to_string(),
+                    args: vec!["arg".to_string()],
+                    command_index: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            script_text_body_issues("GreetingText", &body),
+            vec![
+                ScriptTextBodyIssue::InvalidLabel {
+                    label: " OtherText".to_string(),
+                },
+                ScriptTextBodyIssue::LabelMismatch {
+                    key: "GreetingText".to_string(),
+                    label: " OtherText".to_string(),
+                },
+                ScriptTextBodyIssue::MalformedCommand {
+                    command_index: 0,
+                    command: "text".to_string(),
+                    expected: 1,
+                    actual: 0,
+                },
+                ScriptTextBodyIssue::UnknownCommand {
+                    command_index: 1,
+                    command: "unknown_text_op".to_string(),
+                },
+            ]
+        );
+
+        let exact_body = ScriptTextBody {
+            label: "GreetingText".to_string(),
+            commands: Vec::new(),
+        };
+        assert_eq!(
+            script_text_body_issues(" GreetingText", &exact_body),
+            vec![
+                ScriptTextBodyIssue::InvalidKey {
+                    key: " GreetingText".to_string(),
+                },
+                ScriptTextBodyIssue::LabelMismatch {
+                    key: " GreetingText".to_string(),
+                    label: "GreetingText".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn script_menu_definition_issues_validate_exact_label_and_command_arity() {
+        let menu = ScriptMenuDefinition {
+            label: " OtherMenu".to_string(),
+            commands: vec![
+                ScriptMenuCommand {
+                    command: "db".to_string(),
+                    args: vec!["one".to_string(), "two".to_string()],
+                    command_index: 0,
+                },
+                ScriptMenuCommand {
+                    command: "verticalmenu".to_string(),
+                    args: Vec::new(),
+                    command_index: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            script_menu_definition_issues("ChoiceMenu", &menu),
+            vec![
+                ScriptMenuDefinitionIssue::InvalidLabel {
+                    label: " OtherMenu".to_string(),
+                },
+                ScriptMenuDefinitionIssue::LabelMismatch {
+                    key: "ChoiceMenu".to_string(),
+                    label: " OtherMenu".to_string(),
+                },
+                ScriptMenuDefinitionIssue::MalformedCommand {
+                    command_index: 0,
+                    command: "db".to_string(),
+                    expected: BTreeSet::from([1, 3]),
+                    actual: 2,
+                },
+                ScriptMenuDefinitionIssue::UnknownCommand {
+                    command_index: 1,
+                    command: "verticalmenu".to_string(),
+                },
+            ]
+        );
+
+        let exact_menu = ScriptMenuDefinition {
+            label: "ChoiceMenu".to_string(),
+            commands: Vec::new(),
+        };
+        assert_eq!(
+            script_menu_definition_issues(" ChoiceMenu", &exact_menu),
+            vec![
+                ScriptMenuDefinitionIssue::InvalidKey {
+                    key: " ChoiceMenu".to_string(),
+                },
+                ScriptMenuDefinitionIssue::LabelMismatch {
+                    key: " ChoiceMenu".to_string(),
+                    label: "ChoiceMenu".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn asm_text_catalog_issues_require_nonempty_labels_and_text() {
+        let asm_text = [
+            ("".to_string(), "Hello!".to_string()),
+            ("GreetingText".to_string(), "Hello!".to_string()),
+            ("RouteSignText".to_string(), " ".to_string()),
+            (" PaddedLabel".to_string(), "Hello!".to_string()),
+            ("PaddedText".to_string(), " Hello!".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            asm_text_catalog_issues(&asm_text),
+            vec![
+                AsmTextCatalogIssue::InvalidText {
+                    label: String::new(),
+                },
+                AsmTextCatalogIssue::InvalidText {
+                    label: " PaddedLabel".to_string(),
+                },
+                AsmTextCatalogIssue::InvalidText {
+                    label: "PaddedText".to_string(),
+                },
+                AsmTextCatalogIssue::InvalidText {
+                    label: "RouteSignText".to_string(),
+                },
+            ],
+        );
     }
 }

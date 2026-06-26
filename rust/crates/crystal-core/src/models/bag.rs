@@ -166,8 +166,11 @@ fn add_to_inventory(
     stack_limit: u16,
     capacity: Option<usize>,
 ) -> Result<bool, String> {
-    if item_id.trim().is_empty() {
+    if item_id.is_empty() {
         return Err("item id is required".to_string());
+    }
+    if item_id.trim() != item_id {
+        return Err(format!("item id '{item_id}' must be exact and untrimmed"));
     }
     let current = inventory.get(item_id).copied().unwrap_or(0);
     if current >= stack_limit {
@@ -222,8 +225,13 @@ fn validate_inventory(
         ));
     }
     for (item_id, quantity) in inventory {
-        if item_id.trim().is_empty() {
+        if item_id.is_empty() {
             return Err(format!("{label} contains an empty item id"));
+        }
+        if item_id.trim() != item_id {
+            return Err(format!(
+                "{label} contains item id '{item_id}' that must be exact and untrimmed"
+            ));
         }
         if *quantity > stack_limit {
             return Err(format!(
@@ -304,6 +312,27 @@ mod tests {
         assert!(!bag.add_item(&extra, 1).expect("ball pocket full"));
         assert_eq!(bag.quantity(&extra), 0);
         bag.validate().expect("valid bag");
+    }
+
+    #[test]
+    fn bag_rejects_malformed_item_ids_without_trimming() {
+        let padded_ball = item(" POKE_BALL", item_pocket("BALL"));
+        let mut bag = Bag::default();
+
+        assert_eq!(
+            bag.add_item(&padded_ball, 1),
+            Err("item id ' POKE_BALL' must be exact and untrimmed".to_string()),
+        );
+        assert_eq!(bag.quantity(&padded_ball), 0);
+
+        bag.balls.insert("POKE_BALL ".to_string(), 1);
+        assert_eq!(
+            bag.validate(),
+            Err(
+                "balls contains item id 'POKE_BALL ' that must be exact and untrimmed"
+                    .to_string()
+            ),
+        );
     }
 
     #[test]

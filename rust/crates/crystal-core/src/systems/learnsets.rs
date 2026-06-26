@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::models::PokemonSpecies;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearnsetEntry(pub u8, pub String);
@@ -12,6 +14,93 @@ pub type SpeciesLearnsets = BTreeMap<String, Vec<LearnsetEntry>>;
 pub enum LearnsetError {
     #[error("missing level-up learnset for species '{species_id}'")]
     MissingSpecies { species_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LearnsetCatalogIssue {
+    MissingSpeciesLearnset { species_id: String },
+    InvalidSpeciesHeldItem { species_id: String, item_id: String },
+    UnknownSpeciesHeldItem { species_id: String, item_id: String },
+    InvalidTmHmMove { species_id: String, move_id: String },
+    UnknownTmHmMove { species_id: String, move_id: String },
+    InvalidLearnsetSpecies { species_id: String },
+    UnknownLearnsetSpecies { species_id: String },
+    InvalidLevelMove { species_id: String, move_id: String },
+    UnknownLevelMove { species_id: String, move_id: String },
+}
+
+pub fn learnset_catalog_issues(
+    species: &BTreeMap<String, PokemonSpecies>,
+    learnsets: &SpeciesLearnsets,
+    item_ids: &BTreeSet<String>,
+    move_ids: &BTreeSet<String>,
+) -> Vec<LearnsetCatalogIssue> {
+    let mut issues = Vec::new();
+    for (species_id, species_data) in species {
+        if !learnsets.contains_key(species_id) {
+            issues.push(LearnsetCatalogIssue::MissingSpeciesLearnset {
+                species_id: species_id.clone(),
+            });
+        }
+        for item_id in [species_data.item1.as_deref(), species_data.item2.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !is_exact_nonempty_learnset_token(item_id) {
+                issues.push(LearnsetCatalogIssue::InvalidSpeciesHeldItem {
+                    species_id: species_id.clone(),
+                    item_id: item_id.to_string(),
+                });
+            } else if !item_ids.contains(item_id) {
+                issues.push(LearnsetCatalogIssue::UnknownSpeciesHeldItem {
+                    species_id: species_id.clone(),
+                    item_id: item_id.to_string(),
+                });
+            }
+        }
+        for move_id in &species_data.tmhm_learnset {
+            if !is_exact_nonempty_learnset_token(move_id) {
+                issues.push(LearnsetCatalogIssue::InvalidTmHmMove {
+                    species_id: species_id.clone(),
+                    move_id: move_id.clone(),
+                });
+            } else if !move_ids.contains(move_id) {
+                issues.push(LearnsetCatalogIssue::UnknownTmHmMove {
+                    species_id: species_id.clone(),
+                    move_id: move_id.clone(),
+                });
+            }
+        }
+    }
+    for (species_id, learnset) in learnsets {
+        if !is_exact_nonempty_learnset_token(species_id) {
+            issues.push(LearnsetCatalogIssue::InvalidLearnsetSpecies {
+                species_id: species_id.clone(),
+            });
+        } else if !species.contains_key(species_id) {
+            issues.push(LearnsetCatalogIssue::UnknownLearnsetSpecies {
+                species_id: species_id.clone(),
+            });
+        }
+        for entry in learnset {
+            if !is_exact_nonempty_learnset_token(&entry.1) {
+                issues.push(LearnsetCatalogIssue::InvalidLevelMove {
+                    species_id: species_id.clone(),
+                    move_id: entry.1.clone(),
+                });
+            } else if !move_ids.contains(&entry.1) {
+                issues.push(LearnsetCatalogIssue::UnknownLevelMove {
+                    species_id: species_id.clone(),
+                    move_id: entry.1.clone(),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn is_exact_nonempty_learnset_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 pub fn level_up_moves_for_species<'a>(
@@ -56,6 +145,100 @@ pub fn default_moves_for_level(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{BaseStats, growth_rate, pokemon_type};
+
+    fn species(id: &str) -> PokemonSpecies {
+        let mut species = PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 65, 45, 49, 65));
+        species.growth_rate = growth_rate("GROWTH_MEDIUM_FAST");
+        species.type1 = pokemon_type("GRASS");
+        species.type2 = pokemon_type("GRASS");
+        species
+    }
+
+    #[test]
+    fn learnset_catalog_issues_validate_exact_modpack_ids_without_coercion() {
+        let mut chikorita = species("CHIKORITA");
+        chikorita.item1 = Some(" BERRY".to_string());
+        chikorita.item2 = Some("MIRACLE_SEED".to_string());
+        chikorita.tmhm_learnset = vec![
+            " HEADBUTT".to_string(),
+            "headbutt".to_string(),
+            "CUT".to_string(),
+        ];
+        let mut bayleef = species("BAYLEEF");
+        bayleef.tmhm_learnset.clear();
+        let species = [
+            ("CHIKORITA".to_string(), chikorita),
+            ("BAYLEEF".to_string(), bayleef),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            (
+                "CHIKORITA".to_string(),
+                vec![
+                    LearnsetEntry(1, "TACKLE".to_string()),
+                    LearnsetEntry(8, "razor_leaf".to_string()),
+                ],
+            ),
+            (
+                " BAYLEEF".to_string(),
+                vec![
+                    LearnsetEntry(1, "TACKLE ".to_string()),
+                    LearnsetEntry(1, "tackle".to_string()),
+                ],
+            ),
+            (
+                "bayleef".to_string(),
+                vec![LearnsetEntry(1, "TACKLE".to_string())],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let item_ids = ["MIRACLE_SEED".to_string()].into_iter().collect();
+        let move_ids = ["TACKLE".to_string(), "CUT".to_string()]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            learnset_catalog_issues(&species, &learnsets, &item_ids, &move_ids),
+            vec![
+                LearnsetCatalogIssue::MissingSpeciesLearnset {
+                    species_id: "BAYLEEF".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidSpeciesHeldItem {
+                    species_id: "CHIKORITA".to_string(),
+                    item_id: " BERRY".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidTmHmMove {
+                    species_id: "CHIKORITA".to_string(),
+                    move_id: " HEADBUTT".to_string(),
+                },
+                LearnsetCatalogIssue::UnknownTmHmMove {
+                    species_id: "CHIKORITA".to_string(),
+                    move_id: "headbutt".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidLearnsetSpecies {
+                    species_id: " BAYLEEF".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidLevelMove {
+                    species_id: " BAYLEEF".to_string(),
+                    move_id: "TACKLE ".to_string(),
+                },
+                LearnsetCatalogIssue::UnknownLevelMove {
+                    species_id: " BAYLEEF".to_string(),
+                    move_id: "tackle".to_string(),
+                },
+                LearnsetCatalogIssue::UnknownLevelMove {
+                    species_id: "CHIKORITA".to_string(),
+                    move_id: "razor_leaf".to_string(),
+                },
+                LearnsetCatalogIssue::UnknownLearnsetSpecies {
+                    species_id: "bayleef".to_string(),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn default_moves_follow_typescript_slot_replacement_behavior() {

@@ -938,7 +938,7 @@ describe("exportRuntimeAssets", () => {
       move_effect_modifiers: [
         {
           weather: "WEATHER_RAIN",
-          move_effect: "EFFECT_SOLARBEAM",
+          move_effect: "SOLARBEAM",
           multiplier: { numerator: 1, denominator: 2 },
         },
       ],

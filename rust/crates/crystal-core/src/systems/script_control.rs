@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,10 @@ pub enum ScriptControlAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum ScriptControlCommandError {
+    #[error("script control command name is empty")]
+    EmptyCommand,
+    #[error("script control command name is whitespace-padded '{command}'")]
+    PaddedCommand { command: String },
     #[error("unknown script control command '{command}'")]
     UnknownCommand { command: String },
     #[error("script control command '{command}' is missing target label")]
@@ -51,20 +55,64 @@ pub enum ScriptControlCommandError {
     UnexpectedTarget { command: String },
     #[error("script control command '{command}' references empty target label")]
     EmptyTarget { command: String },
+    #[error("script control command '{command}' references invalid target label '{target}'")]
+    InvalidTarget { command: String, target: String },
     #[error("script control command '{command}' is missing compare value")]
     MissingCompareValue { command: String },
     #[error("script control command '{command}' has unexpected compare value")]
     UnexpectedCompareValue { command: String },
     #[error("script control command '{command}' references empty compare value")]
     EmptyCompareValue { command: String },
+    #[error("script control command '{command}' references invalid compare value '{value}'")]
+    InvalidCompareValue { command: String, value: String },
     #[error("script control command '{command}' is missing resolved target script")]
     MissingResolvedTarget { command: String },
+    #[error(
+        "script control command '{command}' references invalid resolved target script '{target_script}'"
+    )]
+    InvalidResolvedTarget {
+        command: String,
+        target_script: String,
+    },
     #[error("script accumulator is unset for '{command}'")]
     UnsetAccumulator { command: String },
     #[error("script accumulator value '{value}' is not an exact TRUE/FALSE token")]
     UnknownBoolean { value: String },
     #[error("cannot resolve numeric script token '{token}'")]
     UnknownNumericToken { token: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptControlCommandIssue {
+    InvalidCommand { error: ScriptControlCommandError },
+    InvalidTargetScript { target_script: String },
+    UnknownTargetScript { target_script: String },
+}
+
+pub fn script_control_command_issues(
+    command: &ScriptControlCommand,
+    script_labels: &BTreeSet<String>,
+) -> Vec<ScriptControlCommandIssue> {
+    let mut issues = Vec::new();
+    if let Err(error) = validate_script_control_command(command) {
+        issues.push(ScriptControlCommandIssue::InvalidCommand { error });
+        return issues;
+    }
+    if command.command != "jumpstd" {
+        if let Some(target_script) = command.resolved_target_script.as_deref() {
+            if !is_exact_nonempty_token(target_script) {
+                issues.push(ScriptControlCommandIssue::InvalidTargetScript {
+                    target_script: target_script.to_string(),
+                });
+            } else if !script_labels.contains(target_script) {
+                issues.push(ScriptControlCommandIssue::UnknownTargetScript {
+                    target_script: target_script.to_string(),
+                });
+            }
+        }
+    }
+    issues
 }
 
 pub fn resolve_script_control_command(
@@ -202,6 +250,14 @@ pub fn apply_script_control_action_to_state(state: &mut GameState, action: &Scri
 pub fn validate_script_control_command(
     command: &ScriptControlCommand,
 ) -> Result<(), ScriptControlCommandError> {
+    if command.command.is_empty() {
+        return Err(ScriptControlCommandError::EmptyCommand);
+    }
+    if command.command.trim() != command.command {
+        return Err(ScriptControlCommandError::PaddedCommand {
+            command: command.command.clone(),
+        });
+    }
     match command.command.as_str() {
         "ifequal" | "ifnotequal" | "ifgreater" | "ifless" => {
             require_compare_value(command)?;
@@ -305,6 +361,12 @@ fn require_compare_value(
             command: command.command.clone(),
         });
     }
+    if value.trim() != value {
+        return Err(ScriptControlCommandError::InvalidCompareValue {
+            command: command.command.clone(),
+            value: value.to_string(),
+        });
+    }
     Ok(value)
 }
 
@@ -329,6 +391,12 @@ fn require_target(command: &ScriptControlCommand) -> Result<&str, ScriptControlC
             command: command.command.clone(),
         });
     }
+    if target.trim() != target {
+        return Err(ScriptControlCommandError::InvalidTarget {
+            command: command.command.clone(),
+            target: target.to_string(),
+        });
+    }
     Ok(target)
 }
 
@@ -345,11 +413,18 @@ fn reject_target(command: &ScriptControlCommand) -> Result<(), ScriptControlComm
 fn require_resolved_target(
     command: &ScriptControlCommand,
 ) -> Result<&str, ScriptControlCommandError> {
-    command.resolved_target_script.as_deref().ok_or_else(|| {
+    let target_script = command.resolved_target_script.as_deref().ok_or_else(|| {
         ScriptControlCommandError::MissingResolvedTarget {
             command: command.command.clone(),
         }
-    })
+    })?;
+    if !is_exact_nonempty_token(target_script) {
+        return Err(ScriptControlCommandError::InvalidResolvedTarget {
+            command: command.command.clone(),
+            target_script: target_script.to_string(),
+        });
+    }
+    Ok(target_script)
 }
 
 fn parse_numeric_token(
@@ -390,6 +465,10 @@ fn parse_numeric_atom(
         .map_err(|_| ScriptControlCommandError::UnknownNumericToken {
             token: token.to_string(),
         })
+}
+
+fn is_exact_nonempty_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 #[cfg(test)]
@@ -477,6 +556,57 @@ mod tests {
     }
 
     #[test]
+    fn command_issues_validate_structure_and_same_map_targets_without_fallbacks() {
+        let labels = BTreeSet::from([".Done@Script".to_string()]);
+
+        assert_eq!(
+            script_control_command_issues(&command("iftrue", Some("TRUE"), Some(".Done")), &labels),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::UnexpectedCompareValue {
+                    command: "iftrue".to_string()
+                }
+            }]
+        );
+        assert_eq!(
+            script_control_command_issues(
+                &command("ifequal", Some("TRUE"), Some(".missing")),
+                &labels
+            ),
+            vec![ScriptControlCommandIssue::UnknownTargetScript {
+                target_script: ".missing@Script".to_string()
+            }]
+        );
+        assert_eq!(
+            script_control_command_issues(
+                &command("ifequal", Some(" TRUE"), Some(".Done")),
+                &labels
+            ),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::InvalidCompareValue {
+                    command: "ifequal".to_string(),
+                    value: " TRUE".to_string(),
+                }
+            }]
+        );
+
+        let mut invalid_resolved = command("ifequal", Some("TRUE"), Some(".Done"));
+        invalid_resolved.resolved_target_script = Some(" .Done@Script".to_string());
+        assert_eq!(
+            script_control_command_issues(&invalid_resolved, &labels),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::InvalidResolvedTarget {
+                    command: "ifequal".to_string(),
+                    target_script: " .Done@Script".to_string(),
+                }
+            }]
+        );
+
+        let mut jumpstd = command("jumpstd", None, Some("PokecenterSignScript"));
+        jumpstd.resolved_target_script = None;
+        assert_eq!(script_control_command_issues(&jumpstd, &labels), []);
+    }
+
+    #[test]
     fn rejects_unset_or_case_changed_boolean_accumulators() {
         let state = GameState::default();
         assert!(matches!(
@@ -497,6 +627,45 @@ mod tests {
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::UnknownBoolean { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_padded_control_targets_without_normalization() {
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("TRUE".to_string());
+
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("", None, Some(".Done")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::EmptyCommand)
+        ));
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command(" iftrue", None, Some(".Done")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::PaddedCommand { .. })
+        ));
+
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("iftrue", None, Some(" .Done")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::InvalidTarget { .. })
+        ));
+
+        let mut command = command("iftrue", None, Some(".Done"));
+        command.resolved_target_script = Some(" .Done@Script".to_string());
+        assert!(matches!(
+            resolve_script_control_command(&state, command, &BTreeMap::new()),
+            Err(ScriptControlCommandError::InvalidResolvedTarget { .. })
         ));
     }
 

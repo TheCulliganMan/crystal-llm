@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -67,6 +67,332 @@ pub struct FishingSwarmRule {
 pub struct FishingRodItemRule {
     pub item_id: String,
     pub rod: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FishingCatalogIssue {
+    MissingCatalog {
+        map_name: String,
+        group: String,
+    },
+    MissingRodItems,
+    InvalidRodItemId {
+        item_id: String,
+    },
+    DuplicateRodItemId {
+        item_id: String,
+    },
+    UnknownRodItemRod {
+        item_id: String,
+        rod: String,
+    },
+    UnknownRodItemId {
+        item_id: String,
+    },
+    InvalidMapFishingGroup {
+        map_name: String,
+        group: String,
+    },
+    UnknownMapFishingGroup {
+        map_name: String,
+        group: String,
+    },
+    InvalidFishingGroupId {
+        group_id: String,
+    },
+    UnknownFishingRod {
+        group_id: String,
+        rod: String,
+    },
+    EmptyFishingRodTable {
+        group_id: String,
+        rod: String,
+    },
+    InvalidFishingSlotThreshold {
+        group_id: String,
+        rod: String,
+        slot_index: usize,
+        threshold: u8,
+    },
+    UnorderedFishingSlotThreshold {
+        group_id: String,
+        rod: String,
+        slot_index: usize,
+        threshold: u8,
+        previous: u8,
+    },
+    IncompleteFishingRodTable {
+        group_id: String,
+        rod: String,
+        last_threshold: u8,
+    },
+    InvalidFishingSlotLevel {
+        group_id: String,
+        rod: String,
+        slot_index: usize,
+        level: u8,
+    },
+    MissingFishingSlotSpecies {
+        group_id: String,
+        rod: String,
+        slot_index: usize,
+    },
+    InvalidFishingSpecies {
+        group_id: String,
+        species: String,
+    },
+    UnknownFishingSpecies {
+        group_id: String,
+        species: String,
+    },
+    UnknownFishingTimeGroup {
+        group_id: String,
+        time_group: usize,
+    },
+    InvalidFishingTimeGroupSpecies {
+        index: usize,
+        species: String,
+    },
+    UnknownFishingTimeGroupSpecies {
+        index: usize,
+        species: String,
+    },
+    InvalidSwarmFlagBit {
+        index: usize,
+        daily_flag_bit: u8,
+    },
+    InvalidSwarmBaseGroup {
+        index: usize,
+    },
+    UnknownSwarmBaseGroup {
+        index: usize,
+        base_group: String,
+    },
+    InvalidSwarmGroup {
+        index: usize,
+    },
+    UnknownSwarmGroup {
+        index: usize,
+        swarm_group: String,
+    },
+    DuplicateSwarmRule {
+        index: usize,
+    },
+}
+
+pub fn fishing_catalog_issues(
+    catalog: &FishingCatalog,
+    referenced_groups: &[(String, String)],
+    item_ids: &BTreeSet<String>,
+    species_ids: &BTreeSet<String>,
+) -> Vec<FishingCatalogIssue> {
+    let mut issues = Vec::new();
+    if catalog.groups.is_empty() {
+        for (map_name, group) in referenced_groups {
+            issues.push(FishingCatalogIssue::MissingCatalog {
+                map_name: map_name.clone(),
+                group: group.clone(),
+            });
+        }
+        return issues;
+    }
+
+    if catalog.rod_items.is_empty() {
+        issues.push(FishingCatalogIssue::MissingRodItems);
+    }
+    let mut rod_item_ids = BTreeSet::new();
+    for rule in &catalog.rod_items {
+        if !is_exact_nonempty_fishing_token(&rule.item_id) {
+            issues.push(FishingCatalogIssue::InvalidRodItemId {
+                item_id: rule.item_id.clone(),
+            });
+        }
+        if !rod_item_ids.insert(rule.item_id.as_str()) {
+            issues.push(FishingCatalogIssue::DuplicateRodItemId {
+                item_id: rule.item_id.clone(),
+            });
+        }
+        if !is_known_fishing_rod(&rule.rod) {
+            issues.push(FishingCatalogIssue::UnknownRodItemRod {
+                item_id: rule.item_id.clone(),
+                rod: rule.rod.clone(),
+            });
+        }
+        if is_exact_nonempty_fishing_token(&rule.item_id)
+            && !item_ids.contains(rule.item_id.as_str())
+        {
+            issues.push(FishingCatalogIssue::UnknownRodItemId {
+                item_id: rule.item_id.clone(),
+            });
+        }
+    }
+
+    for (map_name, group) in referenced_groups {
+        if !is_exact_nonempty_fishing_token(group) {
+            issues.push(FishingCatalogIssue::InvalidMapFishingGroup {
+                map_name: map_name.clone(),
+                group: group.clone(),
+            });
+        } else if !catalog.groups.contains_key(group) {
+            issues.push(FishingCatalogIssue::UnknownMapFishingGroup {
+                map_name: map_name.clone(),
+                group: group.clone(),
+            });
+        }
+    }
+
+    for (group_id, group) in &catalog.groups {
+        if !is_exact_nonempty_fishing_token(group_id) {
+            issues.push(FishingCatalogIssue::InvalidFishingGroupId {
+                group_id: group_id.clone(),
+            });
+        }
+        for (rod, table) in &group.rod_tables {
+            if !is_known_fishing_rod(rod) {
+                issues.push(FishingCatalogIssue::UnknownFishingRod {
+                    group_id: group_id.clone(),
+                    rod: rod.clone(),
+                });
+            }
+            if table.slots.is_empty() {
+                issues.push(FishingCatalogIssue::EmptyFishingRodTable {
+                    group_id: group_id.clone(),
+                    rod: rod.clone(),
+                });
+            }
+            let mut previous_threshold = 0;
+            for (slot_index, slot) in table.slots.iter().enumerate() {
+                if slot.threshold == 0 {
+                    issues.push(FishingCatalogIssue::InvalidFishingSlotThreshold {
+                        group_id: group_id.clone(),
+                        rod: rod.clone(),
+                        slot_index,
+                        threshold: slot.threshold,
+                    });
+                }
+                if slot.threshold < previous_threshold {
+                    issues.push(FishingCatalogIssue::UnorderedFishingSlotThreshold {
+                        group_id: group_id.clone(),
+                        rod: rod.clone(),
+                        slot_index,
+                        threshold: slot.threshold,
+                        previous: previous_threshold,
+                    });
+                }
+                previous_threshold = slot.threshold;
+                if slot.species.is_some() && slot.level == 0 {
+                    issues.push(FishingCatalogIssue::InvalidFishingSlotLevel {
+                        group_id: group_id.clone(),
+                        rod: rod.clone(),
+                        slot_index,
+                        level: slot.level,
+                    });
+                }
+                if slot.species.is_none() && slot.time_group.is_none() {
+                    issues.push(FishingCatalogIssue::MissingFishingSlotSpecies {
+                        group_id: group_id.clone(),
+                        rod: rod.clone(),
+                        slot_index,
+                    });
+                }
+                if let Some(species) = slot.species.as_deref() {
+                    if !is_exact_nonempty_fishing_token(species) {
+                        issues.push(FishingCatalogIssue::InvalidFishingSpecies {
+                            group_id: group_id.clone(),
+                            species: species.to_string(),
+                        });
+                    } else if !species_ids.contains(species) {
+                        issues.push(FishingCatalogIssue::UnknownFishingSpecies {
+                            group_id: group_id.clone(),
+                            species: species.to_string(),
+                        });
+                    }
+                }
+                if let Some(time_group) = slot.time_group {
+                    let Some(entry) = catalog.time_groups.get(time_group) else {
+                        issues.push(FishingCatalogIssue::UnknownFishingTimeGroup {
+                            group_id: group_id.clone(),
+                            time_group,
+                        });
+                        continue;
+                    };
+                    for species in [&entry.day_species, &entry.night_species] {
+                        if !is_exact_nonempty_fishing_token(species) {
+                            issues.push(FishingCatalogIssue::InvalidFishingSpecies {
+                                group_id: group_id.clone(),
+                                species: species.clone(),
+                            });
+                        } else if !species_ids.contains(species.as_str()) {
+                            issues.push(FishingCatalogIssue::UnknownFishingSpecies {
+                                group_id: group_id.clone(),
+                                species: species.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(last_slot) = table.slots.last()
+                && last_slot.threshold != u8::MAX
+            {
+                issues.push(FishingCatalogIssue::IncompleteFishingRodTable {
+                    group_id: group_id.clone(),
+                    rod: rod.clone(),
+                    last_threshold: last_slot.threshold,
+                });
+            }
+        }
+    }
+
+    for (index, entry) in catalog.time_groups.iter().enumerate() {
+        for species in [&entry.day_species, &entry.night_species] {
+            if !is_exact_nonempty_fishing_token(species) {
+                issues.push(FishingCatalogIssue::InvalidFishingTimeGroupSpecies {
+                    index,
+                    species: species.clone(),
+                });
+            } else if !species_ids.contains(species.as_str()) {
+                issues.push(FishingCatalogIssue::UnknownFishingTimeGroupSpecies {
+                    index,
+                    species: species.clone(),
+                });
+            }
+        }
+    }
+
+    let mut seen_swarm_rules = BTreeSet::new();
+    for (index, rule) in catalog.swarm_rules.iter().enumerate() {
+        if rule.daily_flag_bit >= u8::BITS as u8 {
+            issues.push(FishingCatalogIssue::InvalidSwarmFlagBit {
+                index,
+                daily_flag_bit: rule.daily_flag_bit,
+            });
+        }
+        if rule.base_group.trim().is_empty() || rule.base_group.trim() != rule.base_group {
+            issues.push(FishingCatalogIssue::InvalidSwarmBaseGroup { index });
+        } else if !catalog.groups.contains_key(&rule.base_group) {
+            issues.push(FishingCatalogIssue::UnknownSwarmBaseGroup {
+                index,
+                base_group: rule.base_group.clone(),
+            });
+        }
+        if rule.swarm_group.trim().is_empty() || rule.swarm_group.trim() != rule.swarm_group {
+            issues.push(FishingCatalogIssue::InvalidSwarmGroup { index });
+        } else if !catalog.groups.contains_key(&rule.swarm_group) {
+            issues.push(FishingCatalogIssue::UnknownSwarmGroup {
+                index,
+                swarm_group: rule.swarm_group.clone(),
+            });
+        }
+        if !seen_swarm_rules.insert((rule.daily_flag_bit, rule.swarm, rule.base_group.as_str())) {
+            issues.push(FishingCatalogIssue::DuplicateSwarmRule { index });
+        }
+    }
+
+    issues
+}
+
+fn is_exact_nonempty_fishing_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +779,301 @@ mod tests {
             Err(FishingError::UnknownRod {
                 rod: "good_rod".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn fishing_catalog_issues_validate_definitive_catalog() {
+        let referenced_groups = vec![
+            ("ROUTE_32".to_string(), "FISHGROUP_LAKE".to_string()),
+            ("ROUTE_42".to_string(), "FISHGROUP_MISSING".to_string()),
+        ];
+        assert_eq!(
+            fishing_catalog_issues(
+                &FishingCatalog::default(),
+                &referenced_groups,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            ),
+            vec![
+                FishingCatalogIssue::MissingCatalog {
+                    map_name: "ROUTE_32".to_string(),
+                    group: "FISHGROUP_LAKE".to_string(),
+                },
+                FishingCatalogIssue::MissingCatalog {
+                    map_name: "ROUTE_42".to_string(),
+                    group: "FISHGROUP_MISSING".to_string(),
+                },
+            ],
+        );
+
+        let mut catalog = catalog();
+        catalog.rod_items = vec![
+            FishingRodItemRule {
+                item_id: "OLD_ROD".to_string(),
+                rod: "OLD_ROD".to_string(),
+            },
+            FishingRodItemRule {
+                item_id: "OLD_ROD".to_string(),
+                rod: "BAD_ROD".to_string(),
+            },
+        ];
+        catalog.groups.insert(
+            "FISHGROUP_BAD".to_string(),
+            FishingGroup {
+                bite_threshold: threshold(50, true),
+                rod_tables: [(
+                    "BAD_ROD".to_string(),
+                    RodTable {
+                        slots: vec![
+                            FishingSlot {
+                                threshold: threshold(35, false),
+                                species: Some("MISSINGNO".to_string()),
+                                level: 20,
+                                time_group: None,
+                            },
+                            FishingSlot {
+                                threshold: threshold(100, false),
+                                species: None,
+                                level: 0,
+                                time_group: Some(9),
+                            },
+                        ],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        catalog.time_groups[0].night_species = "MISSINGNO".to_string();
+        catalog.swarm_rules = vec![
+            FishingSwarmRule {
+                daily_flag_bit: 8,
+                swarm: 1,
+                base_group: " FISHGROUP_LAKE".to_string(),
+                swarm_group: String::new(),
+            },
+            FishingSwarmRule {
+                daily_flag_bit: 1,
+                swarm: 1,
+                base_group: "FISHGROUP_MISSING".to_string(),
+                swarm_group: "FISHGROUP_SWARM".to_string(),
+            },
+            FishingSwarmRule {
+                daily_flag_bit: 1,
+                swarm: 1,
+                base_group: "FISHGROUP_MISSING".to_string(),
+                swarm_group: "FISHGROUP_SWARM".to_string(),
+            },
+        ];
+        let item_ids = BTreeSet::from(["OLD_ROD".to_string()]);
+        let species_ids = BTreeSet::from(["MAGIKARP".to_string(), "CORSOLA".to_string()]);
+
+        assert_eq!(
+            fishing_catalog_issues(&catalog, &referenced_groups, &item_ids, &species_ids),
+            vec![
+                FishingCatalogIssue::DuplicateRodItemId {
+                    item_id: "OLD_ROD".to_string(),
+                },
+                FishingCatalogIssue::UnknownRodItemRod {
+                    item_id: "OLD_ROD".to_string(),
+                    rod: "BAD_ROD".to_string(),
+                },
+                FishingCatalogIssue::UnknownMapFishingGroup {
+                    map_name: "ROUTE_42".to_string(),
+                    group: "FISHGROUP_MISSING".to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingRod {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: "BAD_ROD".to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingSpecies {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    species: "MISSINGNO".to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingTimeGroup {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    time_group: 9,
+                },
+                FishingCatalogIssue::UnknownFishingSpecies {
+                    group_id: "FISHGROUP_LAKE".to_string(),
+                    species: "MISSINGNO".to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingTimeGroupSpecies {
+                    index: 0,
+                    species: "MISSINGNO".to_string(),
+                },
+                FishingCatalogIssue::InvalidSwarmFlagBit {
+                    index: 0,
+                    daily_flag_bit: 8,
+                },
+                FishingCatalogIssue::InvalidSwarmBaseGroup { index: 0 },
+                FishingCatalogIssue::InvalidSwarmGroup { index: 0 },
+                FishingCatalogIssue::UnknownSwarmBaseGroup {
+                    index: 1,
+                    base_group: "FISHGROUP_MISSING".to_string(),
+                },
+                FishingCatalogIssue::UnknownSwarmGroup {
+                    index: 1,
+                    swarm_group: "FISHGROUP_SWARM".to_string(),
+                },
+                FishingCatalogIssue::UnknownSwarmBaseGroup {
+                    index: 2,
+                    base_group: "FISHGROUP_MISSING".to_string(),
+                },
+                FishingCatalogIssue::UnknownSwarmGroup {
+                    index: 2,
+                    swarm_group: "FISHGROUP_SWARM".to_string(),
+                },
+                FishingCatalogIssue::DuplicateSwarmRule { index: 2 },
+            ],
+        );
+    }
+
+    #[test]
+    fn fishing_catalog_issues_reject_malformed_tokens_and_unusable_tables() {
+        let catalog = FishingCatalog {
+            groups: [
+                (
+                    " BAD".to_string(),
+                    FishingGroup {
+                        bite_threshold: threshold(50, true),
+                        rod_tables: [(ROD_OLD.to_string(), RodTable { slots: Vec::new() })]
+                            .into_iter()
+                            .collect(),
+                    },
+                ),
+                (
+                    "FISHGROUP_BAD".to_string(),
+                    FishingGroup {
+                        bite_threshold: threshold(50, true),
+                        rod_tables: [(
+                            " OLD_ROD".to_string(),
+                            RodTable {
+                                slots: vec![
+                                    FishingSlot {
+                                        threshold: 0,
+                                        species: Some(" MAGIKARP".to_string()),
+                                        level: 5,
+                                        time_group: None,
+                                    },
+                                    FishingSlot {
+                                        threshold: 10,
+                                        species: Some("MAGIKARP".to_string()),
+                                        level: 0,
+                                        time_group: None,
+                                    },
+                                    FishingSlot {
+                                        threshold: 5,
+                                        species: None,
+                                        level: 0,
+                                        time_group: None,
+                                    },
+                                ],
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            time_groups: vec![TimeFishEntry {
+                day_species: " MAGIKARP".to_string(),
+                day_level: 10,
+                night_species: "STARYU".to_string(),
+                night_level: 10,
+            }],
+            swarm_rules: Vec::new(),
+            rod_items: vec![
+                FishingRodItemRule {
+                    item_id: " OLD_ROD".to_string(),
+                    rod: ROD_OLD.to_string(),
+                },
+                FishingRodItemRule {
+                    item_id: "MISSING_ROD".to_string(),
+                    rod: ROD_OLD.to_string(),
+                },
+            ],
+        };
+        let referenced_groups = vec![
+            ("LAKE".to_string(), " FISHGROUP_BAD".to_string()),
+            ("POND".to_string(), "FISHGROUP_MISSING".to_string()),
+        ];
+        let item_ids = BTreeSet::from(["OLD_ROD".to_string()]);
+        let species_ids = BTreeSet::from(["MAGIKARP".to_string()]);
+
+        assert_eq!(
+            fishing_catalog_issues(&catalog, &referenced_groups, &item_ids, &species_ids),
+            vec![
+                FishingCatalogIssue::InvalidRodItemId {
+                    item_id: " OLD_ROD".to_string(),
+                },
+                FishingCatalogIssue::UnknownRodItemId {
+                    item_id: "MISSING_ROD".to_string(),
+                },
+                FishingCatalogIssue::InvalidMapFishingGroup {
+                    map_name: "LAKE".to_string(),
+                    group: " FISHGROUP_BAD".to_string(),
+                },
+                FishingCatalogIssue::UnknownMapFishingGroup {
+                    map_name: "POND".to_string(),
+                    group: "FISHGROUP_MISSING".to_string(),
+                },
+                FishingCatalogIssue::InvalidFishingGroupId {
+                    group_id: " BAD".to_string(),
+                },
+                FishingCatalogIssue::EmptyFishingRodTable {
+                    group_id: " BAD".to_string(),
+                    rod: ROD_OLD.to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingRod {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                },
+                FishingCatalogIssue::InvalidFishingSlotThreshold {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                    slot_index: 0,
+                    threshold: 0,
+                },
+                FishingCatalogIssue::InvalidFishingSpecies {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    species: " MAGIKARP".to_string(),
+                },
+                FishingCatalogIssue::InvalidFishingSlotLevel {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                    slot_index: 1,
+                    level: 0,
+                },
+                FishingCatalogIssue::UnorderedFishingSlotThreshold {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                    slot_index: 2,
+                    threshold: 5,
+                    previous: 10,
+                },
+                FishingCatalogIssue::MissingFishingSlotSpecies {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                    slot_index: 2,
+                },
+                FishingCatalogIssue::IncompleteFishingRodTable {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    rod: " OLD_ROD".to_string(),
+                    last_threshold: 5,
+                },
+                FishingCatalogIssue::InvalidFishingTimeGroupSpecies {
+                    index: 0,
+                    species: " MAGIKARP".to_string(),
+                },
+                FishingCatalogIssue::UnknownFishingTimeGroupSpecies {
+                    index: 0,
+                    species: "STARYU".to_string(),
+                },
+            ],
         );
     }
 

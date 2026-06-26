@@ -331,7 +331,10 @@ describe("export-core-content-pack", () => {
       currencyConstants: { MAX_MONEY: 999999, MAX_COINS: 9999 },
       mapDimensions: { ROUTE_1: { width: 10, height: 8 } },
       mapAttributes: { Route1: { environment: "TOWN", map_constant: "ROUTE_1" } },
-      items: [{ name: "POTION", price: 300 } as never],
+      items: [
+        { name: "$00", script_name: "$00", price: 9999 } as never,
+        { name: "POTION", script_name: "POTION", price: 300 } as never,
+      ],
       pcStrings: { PCString_ChooseaPKMN: "Choose a PKMN." },
       menuIcons: { TOTODILE: "ICON_TOTODILE" },
       trainers: [{ trainer_id: "YOUNGSTER_JOE", name: "Youngster Joe" } as never],
@@ -393,7 +396,14 @@ describe("export-core-content-pack", () => {
         require_all_maps_reachable: false,
         require_walkable_maps: true,
       },
-      audioAssets: [{ id: "MUSIC_ROUTE_29", path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid", kind: "music" }],
+      audioAssets: [{
+        id: "MUSIC_ROUTE_29",
+        path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+        kind: "music",
+        source: "midi",
+        sample_rate_hz: null,
+        channels: null,
+      }],
     });
 
     expect(mockRemoveMatchingOutputs).toHaveBeenCalledWith("content-packs/core-modular", ".json");
@@ -634,7 +644,7 @@ describe("export-core-content-pack", () => {
               map_to_landmark: { NewBarkTown: "LANDMARK_NEW_BARK_TOWN" },
             }),
           ],
-          items: [{ name: "POTION", price: 300 }],
+          items: [{ name: "POTION", script_name: "POTION", price: 300 }],
           pc_strings: [{ PCString_ChooseaPKMN: "Choose a PKMN." }],
           menu_icons: [{ TOTODILE: "ICON_TOTODILE" }],
           playability: [
@@ -662,7 +672,14 @@ describe("export-core-content-pack", () => {
             },
           ]],
           pokemon_frontpic_anim: [{ TOTODILE: { commands: [{ kind: "endanim" }] } }],
-          audio: [{ id: "MUSIC_ROUTE_29", path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid", kind: "music" }],
+          audio: [{
+            id: "MUSIC_ROUTE_29",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+            kind: "music",
+            source: "midi",
+            sample_rate_hz: null,
+            channels: null,
+          }],
         }),
       })
     );

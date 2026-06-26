@@ -28,6 +28,42 @@ impl Default for StepEventRules {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepEventRulesIssue {
+    MissingPoisonStepInterval,
+    InvalidPoisonStatus { poison_status: String },
+    InvalidEggNickname { egg_nickname: String },
+    HappinessTargetOutsideMask { target: u8, mask: u8 },
+}
+
+pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssue> {
+    if rules == &StepEventRules::default() {
+        return Vec::new();
+    }
+
+    let mut issues = Vec::new();
+    if rules.poison_step_interval == 0 {
+        issues.push(StepEventRulesIssue::MissingPoisonStepInterval);
+    }
+    if rules.poison_status.trim().is_empty() || rules.poison_status.trim() != rules.poison_status {
+        issues.push(StepEventRulesIssue::InvalidPoisonStatus {
+            poison_status: rules.poison_status.clone(),
+        });
+    }
+    if rules.egg_nickname.trim().is_empty() || rules.egg_nickname.trim() != rules.egg_nickname {
+        issues.push(StepEventRulesIssue::InvalidEggNickname {
+            egg_nickname: rules.egg_nickname.clone(),
+        });
+    }
+    if rules.happiness_step_counter_target > rules.happiness_step_counter_mask {
+        issues.push(StepEventRulesIssue::HappinessTargetOutsideMask {
+            target: rules.happiness_step_counter_target,
+            mask: rules.happiness_step_counter_mask,
+        });
+    }
+    issues
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepEventCounters {
@@ -224,6 +260,34 @@ mod tests {
             happiness_step_counter_mask: 1,
             happiness_step_counter_target: 0,
         }
+    }
+
+    #[test]
+    fn step_event_rules_issues_validate_exact_pack_tokens() {
+        assert_eq!(step_event_rules_issues(&StepEventRules::default()), []);
+
+        let rules = StepEventRules {
+            poison_step_interval: 0,
+            egg_step_trigger: 0x80,
+            hatched_egg_happiness: 0x78,
+            poison_status: " POISON".to_string(),
+            egg_nickname: String::new(),
+            happiness_step_counter_mask: 1,
+            happiness_step_counter_target: 2,
+        };
+        assert_eq!(
+            step_event_rules_issues(&rules),
+            vec![
+                StepEventRulesIssue::MissingPoisonStepInterval,
+                StepEventRulesIssue::InvalidPoisonStatus {
+                    poison_status: " POISON".to_string(),
+                },
+                StepEventRulesIssue::InvalidEggNickname {
+                    egg_nickname: String::new(),
+                },
+                StepEventRulesIssue::HappinessTargetOutsideMask { target: 2, mask: 1 },
+            ],
+        );
     }
 
     fn pokemon(id: &str) -> Pokemon {

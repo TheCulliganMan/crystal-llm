@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::battle::turn::BattleAction;
+use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::models::{PARTY_SIZE, Party, Pokemon};
 use crate::save::SaveModpackIdentity;
 use crate::state::GameState;
@@ -19,25 +20,56 @@ pub const LINK_PREAMBLE_RESPONSE: u8 = 0x61;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerIdentity {
-    pub id: PlayerId,
-    pub display_name: String,
+    id: PlayerId,
+    display_name: String,
 }
 
 impl PlayerIdentity {
+    pub fn new(id: PlayerId, display_name: impl Into<String>) -> Result<Self, LinkHandshakeError> {
+        let player = Self {
+            id,
+            display_name: display_name.into(),
+        };
+        player.validate()?;
+        Ok(player)
+    }
+
     pub fn validate(&self) -> Result<(), LinkHandshakeError> {
-        if self.display_name.trim().is_empty() {
+        if self.display_name.is_empty() {
             return Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: self.id });
         }
+        if self.display_name.trim() != self.display_name {
+            return Err(LinkHandshakeError::InvalidPlayerDisplayName {
+                player_id: self.id,
+                display_name: self.display_name.clone(),
+            });
+        }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(id: PlayerId, display_name: impl Into<String>) -> Self {
+        Self {
+            id,
+            display_name: display_name.into(),
+        }
+    }
+
+    pub fn id(&self) -> PlayerId {
+        self.id
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkSessionIdentity {
-    pub protocol_version: u16,
-    pub session_id: SessionId,
-    pub modpack: SaveModpackIdentity,
+    protocol_version: u16,
+    session_id: SessionId,
+    modpack: SaveModpackIdentity,
 }
 
 impl LinkSessionIdentity {
@@ -50,16 +82,23 @@ impl LinkSessionIdentity {
             .map_err(|error| LinkHandshakeError::InvalidModpackIdentity {
                 message: error.to_string(),
             })?;
-        Ok(Self {
+        let session = Self {
             protocol_version: LINK_PROTOCOL_VERSION,
             session_id: session_id.into(),
             modpack,
-        })
+        };
+        session.validate()?;
+        Ok(session)
     }
 
     pub fn validate(&self) -> Result<(), LinkHandshakeError> {
-        if self.session_id.trim().is_empty() {
+        if self.session_id.is_empty() {
             return Err(LinkHandshakeError::MissingSessionId);
+        }
+        if self.session_id.trim() != self.session_id {
+            return Err(LinkHandshakeError::InvalidSessionId {
+                session_id: self.session_id.clone(),
+            });
         }
         if self.protocol_version != LINK_PROTOCOL_VERSION {
             return Err(LinkHandshakeError::ProtocolVersionMismatch {
@@ -73,13 +112,38 @@ impl LinkSessionIdentity {
                 message: error.to_string(),
             })
     }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        protocol_version: u16,
+        session_id: impl Into<String>,
+        modpack: SaveModpackIdentity,
+    ) -> Self {
+        Self {
+            protocol_version,
+            session_id: session_id.into(),
+            modpack,
+        }
+    }
+
+    pub fn protocol_version(&self) -> u16 {
+        self.protocol_version
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn modpack(&self) -> &SaveModpackIdentity {
+        &self.modpack
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkHello {
-    pub session: LinkSessionIdentity,
-    pub player: PlayerIdentity,
+    session: LinkSessionIdentity,
+    player: PlayerIdentity,
 }
 
 impl LinkHello {
@@ -96,9 +160,35 @@ impl LinkHello {
         Ok(hello)
     }
 
+    pub fn from_session(
+        session: LinkSessionIdentity,
+        player: PlayerIdentity,
+    ) -> Result<Self, LinkHandshakeError> {
+        let hello = Self { session, player };
+        hello.validate()?;
+        Ok(hello)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(session: LinkSessionIdentity, player: PlayerIdentity) -> Self {
+        Self { session, player }
+    }
+
     pub fn validate(&self) -> Result<(), LinkHandshakeError> {
         self.session.validate()?;
         self.player.validate()
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn player(&self) -> &PlayerIdentity {
+        &self.player
+    }
+
+    pub fn into_player(self) -> PlayerIdentity {
+        self.player
     }
 }
 
@@ -106,6 +196,8 @@ impl LinkHello {
 pub enum LinkHandshakeError {
     #[error("link session id is required")]
     MissingSessionId,
+    #[error("link session id {session_id} must be an exact non-empty value")]
+    InvalidSessionId { session_id: String },
     #[error("link protocol version {actual} does not match expected {expected}")]
     ProtocolVersionMismatch { expected: u16, actual: u16 },
     #[error("link session id {actual} does not match expected {expected}")]
@@ -118,6 +210,11 @@ pub enum LinkHandshakeError {
     UnknownPlayer { player_id: PlayerId },
     #[error("link player {player_id} display name is required")]
     MissingPlayerDisplayName { player_id: PlayerId },
+    #[error("link player {player_id} display name {display_name} must be an exact non-empty value")]
+    InvalidPlayerDisplayName {
+        player_id: PlayerId,
+        display_name: String,
+    },
     #[error(
         "link player {player_id} display name {actual_display_name} does not match expected {expected_display_name}"
     )]
@@ -136,22 +233,22 @@ pub fn validate_link_hello(
 ) -> Result<(), LinkHandshakeError> {
     local.validate()?;
     remote.validate()?;
-    if remote.session.session_id != local.session_id {
+    if remote.session().session_id() != local.session_id() {
         return Err(LinkHandshakeError::SessionMismatch {
-            expected: local.session_id.clone(),
-            actual: remote.session.session_id.clone(),
+            expected: local.session_id().to_string(),
+            actual: remote.session().session_id().to_string(),
         });
     }
-    if remote.session.modpack.id != local.modpack.id {
+    if remote.session().modpack().id() != local.modpack().id() {
         return Err(LinkHandshakeError::ModpackIdMismatch {
-            expected: local.modpack.id.clone(),
-            actual: remote.session.modpack.id.clone(),
+            expected: local.modpack().id().to_string(),
+            actual: remote.session().modpack().id().to_string(),
         });
     }
-    if remote.session.modpack.hash != local.modpack.hash {
+    if remote.session().modpack().hash() != local.modpack().hash() {
         return Err(LinkHandshakeError::ModpackHashMismatch {
-            expected: local.modpack.hash.clone(),
-            actual: remote.session.modpack.hash.clone(),
+            expected: local.modpack().hash().to_string(),
+            actual: remote.session().modpack().hash().to_string(),
         });
     }
     Ok(())
@@ -203,15 +300,16 @@ impl LinkLobby {
         hello: LinkHello,
     ) -> Result<AcceptPlayerResult, LinkHandshakeError> {
         validate_link_hello(&self.session, &hello)?;
-        match self.players.get(&hello.player.id) {
-            Some(existing) if existing == &hello.player => Ok(AcceptPlayerResult::Duplicate),
+        let player_id = hello.player().id();
+        match self.players.get(&player_id) {
+            Some(existing) if existing == hello.player() => Ok(AcceptPlayerResult::Duplicate),
             Some(existing) => Err(LinkHandshakeError::PlayerIdentityConflict {
-                player_id: hello.player.id,
+                player_id,
                 expected_display_name: existing.display_name.clone(),
-                actual_display_name: hello.player.display_name,
+                actual_display_name: hello.player().display_name().to_string(),
             }),
             None => {
-                self.players.insert(hello.player.id, hello.player);
+                self.players.insert(player_id, hello.into_player());
                 Ok(AcceptPlayerResult::Added)
             }
         }
@@ -225,11 +323,11 @@ impl LinkLobby {
         self.players.keys().copied().collect()
     }
 
-    pub fn lockstep_buffer(&self) -> LockstepBuffer {
+    pub fn lockstep_buffer(&self) -> Result<LockstepBuffer, LockstepSyncError> {
         LockstepBuffer::new(self.player_ids())
     }
 
-    pub fn battle_action_buffer(&self) -> BattleActionSyncBuffer {
+    pub fn battle_action_buffer(&self) -> Result<BattleActionSyncBuffer, BattleSyncError> {
         BattleActionSyncBuffer::from_lobby(self)
     }
 
@@ -253,18 +351,95 @@ pub enum PresenceEntityType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldPresence {
-    pub user_id: String,
-    pub player_name: String,
-    pub entity_type: PresenceEntityType,
-    pub map_name: String,
-    pub tile: TilePosition,
-    pub direction: Direction,
-    pub updated_at_ms: u64,
+    user_id: String,
+    player_name: String,
+    entity_type: PresenceEntityType,
+    map_name: String,
+    tile: TilePosition,
+    direction: Direction,
+    updated_at_ms: u64,
 }
 
 impl OverworldPresence {
+    pub fn new(
+        user_id: impl Into<String>,
+        player_name: impl Into<String>,
+        entity_type: PresenceEntityType,
+        map_name: impl Into<String>,
+        tile: TilePosition,
+        direction: Direction,
+        updated_at_ms: u64,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let presence = Self {
+            user_id: user_id.into(),
+            player_name: player_name.into(),
+            entity_type,
+            map_name: map_name.into(),
+            tile,
+            direction,
+            updated_at_ms,
+        };
+        presence.validate()?;
+        Ok(presence)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        validate_multiplayer_text("presence user id", &self.user_id)?;
+        validate_multiplayer_text("presence player name", &self.player_name)?;
+        validate_multiplayer_text("presence map name", &self.map_name)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        user_id: impl Into<String>,
+        player_name: impl Into<String>,
+        entity_type: PresenceEntityType,
+        map_name: impl Into<String>,
+        tile: TilePosition,
+        direction: Direction,
+        updated_at_ms: u64,
+    ) -> Self {
+        Self {
+            user_id: user_id.into(),
+            player_name: player_name.into(),
+            entity_type,
+            map_name: map_name.into(),
+            tile,
+            direction,
+            updated_at_ms,
+        }
+    }
+
     pub fn is_stale(&self, now_ms: u64, stale_ms: u64) -> bool {
         now_ms.saturating_sub(self.updated_at_ms) > stale_ms
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub fn player_name(&self) -> &str {
+        &self.player_name
+    }
+
+    pub const fn entity_type(&self) -> PresenceEntityType {
+        self.entity_type
+    }
+
+    pub fn map_name(&self) -> &str {
+        &self.map_name
+    }
+
+    pub const fn tile(&self) -> TilePosition {
+        self.tile
+    }
+
+    pub const fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    pub const fn updated_at_ms(&self) -> u64 {
+        self.updated_at_ms
     }
 }
 
@@ -278,34 +453,227 @@ pub enum MultiplayerInteractionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplayerInteractionRequest {
-    pub request_id: String,
-    pub from_user_id: String,
-    pub from_player_name: String,
-    pub to_user_id: String,
-    pub kind: MultiplayerInteractionKind,
-    pub timestamp_ms: u64,
+    request_id: String,
+    from_user_id: String,
+    from_player_name: String,
+    to_user_id: String,
+    kind: MultiplayerInteractionKind,
+    timestamp_ms: u64,
+}
+
+impl MultiplayerInteractionRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        from_user_id: impl Into<String>,
+        from_player_name: impl Into<String>,
+        to_user_id: impl Into<String>,
+        kind: MultiplayerInteractionKind,
+        timestamp_ms: u64,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let request = Self {
+            request_id: request_id.into(),
+            from_user_id: from_user_id.into(),
+            from_player_name: from_player_name.into(),
+            to_user_id: to_user_id.into(),
+            kind,
+            timestamp_ms,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        validate_multiplayer_text("interaction request id", &self.request_id)?;
+        validate_multiplayer_text("interaction request source user id", &self.from_user_id)?;
+        validate_multiplayer_text(
+            "interaction request source player name",
+            &self.from_player_name,
+        )?;
+        validate_multiplayer_text("interaction request target user id", &self.to_user_id)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        request_id: impl Into<String>,
+        from_user_id: impl Into<String>,
+        from_player_name: impl Into<String>,
+        to_user_id: impl Into<String>,
+        kind: MultiplayerInteractionKind,
+        timestamp_ms: u64,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            from_user_id: from_user_id.into(),
+            from_player_name: from_player_name.into(),
+            to_user_id: to_user_id.into(),
+            kind,
+            timestamp_ms,
+        }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn from_user_id(&self) -> &str {
+        &self.from_user_id
+    }
+
+    pub fn from_player_name(&self) -> &str {
+        &self.from_player_name
+    }
+
+    pub fn to_user_id(&self) -> &str {
+        &self.to_user_id
+    }
+
+    pub const fn kind(&self) -> MultiplayerInteractionKind {
+        self.kind
+    }
+
+    pub const fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplayerInteractionResponse {
-    pub request_id: String,
-    pub from_user_id: String,
-    pub to_user_id: String,
-    pub kind: MultiplayerInteractionKind,
-    pub accepted: bool,
-    pub timestamp_ms: u64,
+    request_id: String,
+    from_user_id: String,
+    to_user_id: String,
+    kind: MultiplayerInteractionKind,
+    accepted: bool,
+    timestamp_ms: u64,
+}
+
+impl MultiplayerInteractionResponse {
+    pub fn new(
+        request_id: impl Into<String>,
+        from_user_id: impl Into<String>,
+        to_user_id: impl Into<String>,
+        kind: MultiplayerInteractionKind,
+        accepted: bool,
+        timestamp_ms: u64,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let response = Self {
+            request_id: request_id.into(),
+            from_user_id: from_user_id.into(),
+            to_user_id: to_user_id.into(),
+            kind,
+            accepted,
+            timestamp_ms,
+        };
+        response.validate()?;
+        Ok(response)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        validate_multiplayer_text("interaction response id", &self.request_id)?;
+        validate_multiplayer_text("interaction response source user id", &self.from_user_id)?;
+        validate_multiplayer_text("interaction response target user id", &self.to_user_id)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        request_id: impl Into<String>,
+        from_user_id: impl Into<String>,
+        to_user_id: impl Into<String>,
+        kind: MultiplayerInteractionKind,
+        accepted: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            from_user_id: from_user_id.into(),
+            to_user_id: to_user_id.into(),
+            kind,
+            accepted,
+            timestamp_ms,
+        }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn from_user_id(&self) -> &str {
+        &self.from_user_id
+    }
+
+    pub fn to_user_id(&self) -> &str {
+        &self.to_user_id
+    }
+
+    pub const fn kind(&self) -> MultiplayerInteractionKind {
+        self.kind
+    }
+
+    pub const fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    pub const fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum MultiplayerMessageError {
+    #[error("{field} must be non-empty")]
+    EmptyText { field: &'static str },
+    #[error("{field} must be exact and untrimmed")]
+    InvalidText { field: &'static str },
+    #[error("{message}")]
+    InvalidLinkHandshake { message: String },
+    #[error("{message}")]
+    InvalidBattleAction { message: String },
+    #[error("{message}")]
+    InvalidBattleRng { message: String },
+    #[error("{message}")]
+    InvalidTradeFrame { message: String },
+    #[error("{message}")]
+    InvalidLinkCableFrame { message: String },
+    #[error("{message}")]
+    InvalidLockstepFrame { message: String },
+}
+
+fn validate_multiplayer_text(
+    field: &'static str,
+    value: &str,
+) -> Result<(), MultiplayerMessageError> {
+    if value.is_empty() {
+        return Err(MultiplayerMessageError::EmptyText { field });
+    }
+    if value.trim() != value {
+        return Err(MultiplayerMessageError::InvalidText { field });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleRngState {
-    pub hardware_divider: u16,
-    pub h_random_add: u8,
-    pub h_random_sub: u8,
+    hardware_divider: u16,
+    h_random_add: u8,
+    h_random_sub: u8,
 }
 
 impl BattleRngState {
+    pub fn new(
+        hardware_divider: u16,
+        h_random_add: u8,
+        h_random_sub: u8,
+    ) -> Result<Self, BattleRngError> {
+        let state = Self {
+            hardware_divider,
+            h_random_add,
+            h_random_sub,
+        };
+        state.validate()?;
+        Ok(state)
+    }
+
     pub fn from_seed(seed: u32) -> Self {
         let divider = ((seed ^ 0xa5a5) & 0xffff) as u16;
         Self {
@@ -314,39 +682,126 @@ impl BattleRngState {
             h_random_sub: (seed & 0xff) as u8,
         }
     }
+
+    pub fn validate(&self) -> Result<(), BattleRngError> {
+        if self.hardware_divider == 0 {
+            return Err(BattleRngError::InvalidHardwareDivider);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(
+        hardware_divider: u16,
+        h_random_add: u8,
+        h_random_sub: u8,
+    ) -> Self {
+        Self {
+            hardware_divider,
+            h_random_add,
+            h_random_sub,
+        }
+    }
+
+    pub const fn hardware_divider(&self) -> u16 {
+        self.hardware_divider
+    }
+
+    pub const fn h_random_add(&self) -> u8 {
+        self.h_random_add
+    }
+
+    pub const fn h_random_sub(&self) -> u8 {
+        self.h_random_sub
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum BattleRngError {
+    #[error("battle rng hardware divider must be nonzero")]
+    InvalidHardwareDivider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerInputFrame {
-    pub player_id: PlayerId,
-    pub frame: u64,
-    pub joypad_mask: u8,
+    player_id: PlayerId,
+    frame: u64,
+    joypad_mask: u8,
 }
 
 impl PlayerInputFrame {
-    pub const fn new(player_id: PlayerId, frame: Frame, joypad_mask: u8) -> Self {
-        Self {
+    pub fn new(
+        player_id: PlayerId,
+        frame: Frame,
+        joypad_mask: u8,
+    ) -> Result<Self, LockstepSyncError> {
+        let input = Self {
             player_id,
             frame: frame.0,
             joypad_mask,
+        };
+        input.validate()?;
+        Ok(input)
+    }
+
+    pub fn validate(&self) -> Result<(), LockstepSyncError> {
+        validate_lockstep_joypad_mask(self.joypad_mask)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(player_id: PlayerId, frame: u64, joypad_mask: u8) -> Self {
+        Self {
+            player_id,
+            frame,
+            joypad_mask,
         }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub const fn joypad_mask(&self) -> u8 {
+        self.joypad_mask
+    }
+
+    pub const fn into_parts(self) -> (PlayerId, u64, u8) {
+        (self.player_id, self.frame, self.joypad_mask)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateChecksum {
-    pub frame: u64,
-    pub hash: u32,
+    frame: u64,
+    hash: u32,
+}
+
+impl StateChecksum {
+    pub const fn new(frame: u64, hash: u32) -> Self {
+        Self { frame, hash }
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub const fn hash(&self) -> u32 {
+        self.hash
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateChecksumFrame {
-    pub player_id: PlayerId,
-    pub frame: u64,
-    pub hash: u32,
+    player_id: PlayerId,
+    frame: u64,
+    hash: u32,
 }
 
 impl StateChecksumFrame {
@@ -359,10 +814,7 @@ impl StateChecksumFrame {
     }
 
     pub const fn checksum(&self) -> StateChecksum {
-        StateChecksum {
-            frame: self.frame,
-            hash: self.hash,
-        }
+        StateChecksum::new(self.frame, self.hash)
     }
 
     pub fn from_game_state(
@@ -372,9 +824,21 @@ impl StateChecksumFrame {
         let checksum = game_state_checksum(state)?;
         Ok(Self {
             player_id,
-            frame: checksum.frame,
-            hash: checksum.hash,
+            frame: checksum.frame(),
+            hash: checksum.hash(),
         })
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub const fn hash(&self) -> u32 {
+        self.hash
     }
 }
 
@@ -385,31 +849,43 @@ pub enum StateChecksumError {
 }
 
 pub fn game_state_checksum(state: &GameState) -> Result<StateChecksum, StateChecksumError> {
-    let bytes = bincode::serde::encode_to_vec(state, bincode::config::standard())
+    let bytes = bincode::serde::encode_to_vec(state, state_checksum_binary_config())
         .map_err(|error| StateChecksumError::Encode(error.to_string()))?;
-    Ok(StateChecksum {
-        frame: state.frame_counter,
-        hash: fnv1a32_bytes(&bytes),
-    })
+    Ok(StateChecksum::new(
+        state.frame_counter,
+        fnv1a32_bytes(&bytes),
+    ))
+}
+
+fn state_checksum_binary_config() -> impl bincode::config::Config {
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleActionFrame {
-    pub player_id: PlayerId,
-    pub turn: u64,
-    pub action: BattleAction,
-    pub state_hash: Option<String>,
+    player_id: PlayerId,
+    turn: u64,
+    action: BattleAction,
+    state_hash: Option<String>,
 }
 
 impl BattleActionFrame {
-    pub fn new(player_id: PlayerId, turn: u64, action: BattleAction) -> Self {
-        Self {
+    pub fn new(
+        player_id: PlayerId,
+        turn: u64,
+        action: BattleAction,
+    ) -> Result<Self, BattleSyncError> {
+        let frame = Self {
             player_id,
             turn,
             action,
             state_hash: None,
-        }
+        };
+        frame.validate()?;
+        Ok(frame)
     }
 
     pub fn with_state_hash(
@@ -422,27 +898,108 @@ impl BattleActionFrame {
         if state_hash.is_empty() {
             return Err(BattleSyncError::EmptyStateHash);
         }
-        Ok(Self {
+        if state_hash.trim() != state_hash {
+            return Err(BattleSyncError::InvalidStateHash { state_hash });
+        }
+        let frame = Self {
             player_id,
             turn,
             action,
             state_hash: Some(state_hash),
-        })
+        };
+        frame.validate()?;
+        Ok(frame)
     }
+
+    pub fn validate(&self) -> Result<(), BattleSyncError> {
+        validate_battle_action(&self.action)?;
+        if let Some(state_hash) = &self.state_hash {
+            if state_hash.is_empty() {
+                return Err(BattleSyncError::EmptyStateHash);
+            }
+            if state_hash.trim() != state_hash {
+                return Err(BattleSyncError::InvalidStateHash {
+                    state_hash: state_hash.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        player_id: PlayerId,
+        turn: u64,
+        action: BattleAction,
+        state_hash: Option<String>,
+    ) -> Self {
+        Self {
+            player_id,
+            turn,
+            action,
+            state_hash,
+        }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    pub const fn action(&self) -> &BattleAction {
+        &self.action
+    }
+
+    pub fn state_hash(&self) -> Option<&str> {
+        self.state_hash.as_deref()
+    }
+
+    pub fn into_parts(self) -> (PlayerId, u64, BattleAction, Option<String>) {
+        (self.player_id, self.turn, self.action, self.state_hash)
+    }
+}
+
+fn validate_battle_action(action: &BattleAction) -> Result<(), BattleSyncError> {
+    if let BattleAction::Item { item_id } = action {
+        if item_id.is_empty() {
+            return Err(BattleSyncError::EmptyItemId);
+        }
+        if item_id.trim() != item_id {
+            return Err(BattleSyncError::InvalidItemId {
+                item_id: item_id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum BattleSyncError {
     #[error("battle sync player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("battle sync roster must contain at least one player")]
+    EmptyRoster,
     #[error("battle sync state hash must be non-empty")]
     EmptyStateHash,
+    #[error("battle sync state hash {state_hash} must be exact and untrimmed")]
+    InvalidStateHash { state_hash: String },
+    #[error("battle sync item id must be non-empty")]
+    EmptyItemId,
+    #[error("battle sync item id {item_id} must be exact and untrimmed")]
+    InvalidItemId { item_id: String },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LockstepSyncError {
     #[error("lockstep player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("lockstep roster must contain at least one player")]
+    EmptyRoster,
+    #[error("lockstep input mask {mask:#010b} has conflicting direction buttons")]
+    ConflictingJoypadDirections { mask: u8 },
     #[error("lockstep frame {actual} does not match expected frame {expected}")]
     FrameOutOfOrder { expected: u64, actual: u64 },
     #[error("lockstep frame {frame} is missing input for player {player_id}")]
@@ -465,8 +1022,8 @@ pub enum InsertTradeFrameResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeParticipants {
-    pub trade_id: TradeId,
-    pub players: [PlayerId; 2],
+    trade_id: TradeId,
+    players: [PlayerId; 2],
 }
 
 impl TradeParticipants {
@@ -476,9 +1033,7 @@ impl TradeParticipants {
         player_b: PlayerId,
     ) -> Result<Self, TradeError> {
         let trade_id = trade_id.into();
-        if trade_id.is_empty() {
-            return Err(TradeError::MissingTradeId);
-        }
+        validate_trade_id(&trade_id)?;
         if player_a == player_b {
             return Err(TradeError::DuplicateParticipant {
                 player_id: player_a,
@@ -491,6 +1046,14 @@ impl TradeParticipants {
 
     pub fn contains(&self, player_id: PlayerId) -> bool {
         self.players.contains(&player_id)
+    }
+
+    pub fn trade_id(&self) -> &str {
+        &self.trade_id
+    }
+
+    pub fn players(&self) -> [PlayerId; 2] {
+        self.players
     }
 
     pub fn other_player(&self, player_id: PlayerId) -> Option<PlayerId> {
@@ -507,13 +1070,29 @@ impl TradeParticipants {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeOffer {
-    pub trade_id: TradeId,
-    pub player_id: PlayerId,
-    pub party_slot: usize,
-    pub pokemon: Pokemon,
+    trade_id: TradeId,
+    player_id: PlayerId,
+    party_slot: usize,
+    pokemon: Pokemon,
 }
 
 impl TradeOffer {
+    pub fn new(
+        trade_id: impl Into<String>,
+        player_id: PlayerId,
+        party_slot: usize,
+        pokemon: Pokemon,
+    ) -> Result<Self, TradeError> {
+        let offer = Self {
+            trade_id: trade_id.into(),
+            player_id,
+            party_slot,
+            pokemon,
+        };
+        offer.validate()?;
+        Ok(offer)
+    }
+
     pub fn from_party(
         trade_id: impl Into<String>,
         player_id: PlayerId,
@@ -521,9 +1100,7 @@ impl TradeOffer {
         party_slot: usize,
     ) -> Result<Self, TradeError> {
         let trade_id = trade_id.into();
-        if trade_id.is_empty() {
-            return Err(TradeError::MissingTradeId);
-        }
+        validate_trade_id(&trade_id)?;
         if party_slot >= PARTY_SIZE {
             return Err(TradeError::InvalidPartySlot { party_slot });
         }
@@ -537,42 +1114,155 @@ impl TradeOffer {
             pokemon,
         })
     }
+
+    pub fn validate(&self) -> Result<(), TradeError> {
+        validate_trade_id(&self.trade_id)?;
+        if self.party_slot >= PARTY_SIZE {
+            return Err(TradeError::InvalidPartySlot {
+                party_slot: self.party_slot,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        trade_id: impl Into<String>,
+        player_id: PlayerId,
+        party_slot: usize,
+        pokemon: Pokemon,
+    ) -> Self {
+        Self {
+            trade_id: trade_id.into(),
+            player_id,
+            party_slot,
+            pokemon,
+        }
+    }
+
+    pub fn trade_id(&self) -> &str {
+        &self.trade_id
+    }
+
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn party_slot(&self) -> usize {
+        self.party_slot
+    }
+
+    pub fn pokemon(&self) -> &Pokemon {
+        &self.pokemon
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfirmation {
-    pub trade_id: TradeId,
-    pub player_id: PlayerId,
-    pub confirm: bool,
+    trade_id: TradeId,
+    player_id: PlayerId,
+    confirm: bool,
 }
 
 impl TradeConfirmation {
-    pub fn new(trade_id: impl Into<String>, player_id: PlayerId, confirm: bool) -> Self {
+    pub fn new(
+        trade_id: impl Into<String>,
+        player_id: PlayerId,
+        confirm: bool,
+    ) -> Result<Self, TradeError> {
+        let confirmation = Self {
+            trade_id: trade_id.into(),
+            player_id,
+            confirm,
+        };
+        confirmation.validate()?;
+        Ok(confirmation)
+    }
+
+    pub fn validate(&self) -> Result<(), TradeError> {
+        validate_trade_id(&self.trade_id)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        trade_id: impl Into<String>,
+        player_id: PlayerId,
+        confirm: bool,
+    ) -> Self {
         Self {
             trade_id: trade_id.into(),
             player_id,
             confirm,
         }
     }
+
+    pub fn trade_id(&self) -> &str {
+        &self.trade_id
+    }
+
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn confirm(&self) -> bool {
+        self.confirm
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeReplacement {
-    pub party_slot: usize,
-    pub received: Pokemon,
+    party_slot: usize,
+    received: Pokemon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeOutcome {
-    pub trade_id: TradeId,
-    pub cancelled: bool,
-    pub replacements: BTreeMap<PlayerId, TradeReplacement>,
+    trade_id: TradeId,
+    cancelled: bool,
+    replacements: BTreeMap<PlayerId, TradeReplacement>,
 }
 
 impl TradeOutcome {
+    pub fn new(
+        trade_id: impl Into<String>,
+        cancelled: bool,
+        replacements: BTreeMap<PlayerId, TradeReplacement>,
+    ) -> Result<Self, TradeError> {
+        let outcome = Self {
+            trade_id: trade_id.into(),
+            cancelled,
+            replacements,
+        };
+        outcome.validate()?;
+        Ok(outcome)
+    }
+
+    pub fn trade_id(&self) -> &str {
+        &self.trade_id
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    pub fn replacements(&self) -> &BTreeMap<PlayerId, TradeReplacement> {
+        &self.replacements
+    }
+
+    pub fn validate(&self) -> Result<(), TradeError> {
+        validate_trade_id(&self.trade_id)?;
+        if self.cancelled {
+            return Ok(());
+        }
+        for replacement in self.replacements.values() {
+            replacement.validate()?;
+        }
+        Ok(())
+    }
+
     pub fn apply_to_party(
         &self,
         player_id: PlayerId,
@@ -588,17 +1278,41 @@ impl TradeOutcome {
                     player_id,
                     trade_id: self.trade_id.clone(),
                 })?;
-        if replacement.party_slot >= PARTY_SIZE {
-            return Err(TradeError::InvalidPartySlot {
-                party_slot: replacement.party_slot,
-            });
-        }
-        let previous = party.pokemon[replacement.party_slot]
-            .replace(replacement.received.clone())
+        replacement.validate()?;
+        let previous = party.pokemon[replacement.party_slot()]
+            .replace(replacement.received().clone())
             .ok_or(TradeError::EmptyPartySlot {
-                party_slot: replacement.party_slot,
+                party_slot: replacement.party_slot(),
             })?;
         Ok(Some(previous))
+    }
+}
+
+impl TradeReplacement {
+    pub fn new(party_slot: usize, received: Pokemon) -> Result<Self, TradeError> {
+        let replacement = Self {
+            party_slot,
+            received,
+        };
+        replacement.validate()?;
+        Ok(replacement)
+    }
+
+    pub fn validate(&self) -> Result<(), TradeError> {
+        if self.party_slot >= PARTY_SIZE {
+            return Err(TradeError::InvalidPartySlot {
+                party_slot: self.party_slot,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn party_slot(&self) -> usize {
+        self.party_slot
+    }
+
+    pub fn received(&self) -> &Pokemon {
+        &self.received
     }
 }
 
@@ -606,6 +1320,8 @@ impl TradeOutcome {
 pub enum TradeError {
     #[error("trade id is required")]
     MissingTradeId,
+    #[error("trade id {trade_id} must be exact and untrimmed")]
+    InvalidTradeId { trade_id: TradeId },
     #[error("trade {actual} does not match expected {expected}")]
     TradeIdMismatch { expected: TradeId, actual: TradeId },
     #[error("trade player {player_id} is not in the accepted link roster")]
@@ -630,21 +1346,123 @@ pub enum TradeError {
     },
 }
 
+fn validate_trade_id(trade_id: &TradeId) -> Result<(), TradeError> {
+    if trade_id.is_empty() {
+        return Err(TradeError::MissingTradeId);
+    }
+    if trade_id.trim() != trade_id {
+        return Err(TradeError::InvalidTradeId {
+            trade_id: trade_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkByteFrame {
-    pub player_id: PlayerId,
-    pub byte: u8,
-    pub clock: u64,
+    player_id: PlayerId,
+    byte: u8,
+    clock: u64,
+}
+
+impl LinkByteFrame {
+    pub fn new(player_id: PlayerId, byte: u8, clock: u64) -> Result<Self, LinkCableError> {
+        let frame = Self {
+            player_id,
+            byte,
+            clock,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), LinkCableError> {
+        if self.clock == 0 {
+            return Err(LinkCableError::InvalidClock { clock: self.clock });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(player_id: PlayerId, byte: u8, clock: u64) -> Self {
+        Self {
+            player_id,
+            byte,
+            clock,
+        }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn byte(&self) -> u8 {
+        self.byte
+    }
+
+    pub const fn clock(&self) -> u64 {
+        self.clock
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkClockSyncFrame {
-    pub player_id: PlayerId,
-    pub t0: u64,
-    pub t1: u64,
-    pub t2: u64,
+    player_id: PlayerId,
+    t0: u64,
+    t1: u64,
+    t2: u64,
+}
+
+impl LinkClockSyncFrame {
+    pub fn new(player_id: PlayerId, t0: u64, t1: u64, t2: u64) -> Result<Self, LinkCableError> {
+        let frame = Self {
+            player_id,
+            t0,
+            t1,
+            t2,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), LinkCableError> {
+        if self.t0 > self.t1 || self.t1 > self.t2 {
+            return Err(LinkCableError::InvalidClockSync {
+                t0: self.t0,
+                t1: self.t1,
+                t2: self.t2,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(player_id: PlayerId, t0: u64, t1: u64, t2: u64) -> Self {
+        Self {
+            player_id,
+            t0,
+            t1,
+            t2,
+        }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn t0(&self) -> u64 {
+        self.t0
+    }
+
+    pub const fn t1(&self) -> u64 {
+        self.t1
+    }
+
+    pub const fn t2(&self) -> u64 {
+        self.t2
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -658,8 +1476,12 @@ pub enum LinkCableError {
         expected: PlayerId,
         player_id: PlayerId,
     },
+    #[error("link cable clock {clock} must be nonzero")]
+    InvalidClock { clock: u64 },
     #[error("link cable clock {clock} did not advance beyond remote clock {remote_clock}")]
     ClockRegression { remote_clock: u64, clock: u64 },
+    #[error("link cable clock sync requires t0 <= t1 <= t2 but got t0={t0}, t1={t1}, t2={t2}")]
+    InvalidClockSync { t0: u64, t1: u64, t2: u64 },
     #[error("link cable expected preamble response 0x61 but got 0x{byte:02x}")]
     BadPreambleResponse { byte: u8 },
     #[error("link cable has no received bytes buffered")]
@@ -746,11 +1568,8 @@ impl LinkCableState {
 
     pub fn send_byte(&mut self, byte: u8) -> LinkByteFrame {
         self.local_clock = self.local_clock.saturating_add(1);
-        LinkByteFrame {
-            player_id: self.local_player,
-            byte,
-            clock: self.local_clock,
-        }
+        LinkByteFrame::new(self.local_player, byte, self.local_clock)
+            .expect("saturating local clock is nonzero")
     }
 
     pub fn send_bytes(&mut self, bytes: impl IntoIterator<Item = u8>) -> Vec<LinkByteFrame> {
@@ -758,9 +1577,10 @@ impl LinkCableState {
     }
 
     pub fn receive_byte_frame(&mut self, frame: LinkByteFrame) -> Result<(), LinkCableError> {
-        self.validate_remote_frame(frame.player_id, frame.clock)?;
-        self.remote_clock = frame.clock;
-        self.receive_buffer.push_back(frame.byte);
+        frame.validate()?;
+        self.validate_remote_frame(frame.player_id(), frame.clock())?;
+        self.remote_clock = frame.clock();
+        self.receive_buffer.push_back(frame.byte());
         Ok(())
     }
 
@@ -802,12 +1622,13 @@ impl LinkCableState {
 
     pub fn sync_frame(&mut self, now_tick: u64) -> LinkClockSyncFrame {
         self.local_clock = self.local_clock.saturating_add(1).max(now_tick);
-        LinkClockSyncFrame {
-            player_id: self.local_player,
-            t0: self.local_clock,
-            t1: self.local_clock,
-            t2: self.local_clock,
-        }
+        LinkClockSyncFrame::new(
+            self.local_player,
+            self.local_clock,
+            self.local_clock,
+            self.local_clock,
+        )
+        .expect("local link clock sync frame is monotonic")
     }
 
     pub fn receive_sync_frame(
@@ -815,11 +1636,12 @@ impl LinkCableState {
         frame: LinkClockSyncFrame,
         receive_tick: u64,
     ) -> Result<(), LinkCableError> {
-        self.validate_remote_frame(frame.player_id, frame.t2)?;
-        self.remote_clock = frame.t2;
-        let remote_processing = frame.t2.saturating_sub(frame.t1);
+        frame.validate()?;
+        self.validate_remote_frame(frame.player_id(), frame.t2())?;
+        self.remote_clock = frame.t2();
+        let remote_processing = frame.t2().saturating_sub(frame.t1());
         let round_trip = receive_tick
-            .saturating_sub(frame.t0)
+            .saturating_sub(frame.t0())
             .saturating_sub(remote_processing);
         self.latency_samples.push(round_trip);
         Ok(())
@@ -865,7 +1687,7 @@ impl TradeSyncBuffer {
         player_b: PlayerId,
     ) -> Result<Self, TradeError> {
         let participants = TradeParticipants::new(trade_id, player_a, player_b)?;
-        for player_id in participants.players {
+        for player_id in participants.players() {
             if !lobby.players.contains_key(&player_id) {
                 return Err(TradeError::UnknownPlayer { player_id });
             }
@@ -881,17 +1703,13 @@ impl TradeSyncBuffer {
         &mut self,
         offer: TradeOffer,
     ) -> Result<InsertTradeFrameResult, TradeError> {
-        self.validate_trade_player(&offer.trade_id, offer.player_id)?;
-        if offer.party_slot >= PARTY_SIZE {
-            return Err(TradeError::InvalidPartySlot {
-                party_slot: offer.party_slot,
-            });
-        }
-        match self.offers.get(&offer.player_id) {
+        offer.validate()?;
+        self.validate_trade_player(offer.trade_id(), offer.player_id())?;
+        match self.offers.get(&offer.player_id()) {
             Some(existing) if existing == &offer => Ok(InsertTradeFrameResult::Duplicate),
             Some(_) => Ok(InsertTradeFrameResult::Conflict),
             None => {
-                self.offers.insert(offer.player_id, offer);
+                self.offers.insert(offer.player_id(), offer);
                 Ok(InsertTradeFrameResult::Inserted)
             }
         }
@@ -901,15 +1719,16 @@ impl TradeSyncBuffer {
         &mut self,
         confirmation: TradeConfirmation,
     ) -> Result<InsertTradeFrameResult, TradeError> {
-        self.validate_trade_player(&confirmation.trade_id, confirmation.player_id)?;
-        match self.confirmations.get(&confirmation.player_id) {
-            Some(existing) if *existing == confirmation.confirm => {
+        confirmation.validate()?;
+        self.validate_trade_player(confirmation.trade_id(), confirmation.player_id())?;
+        match self.confirmations.get(&confirmation.player_id()) {
+            Some(existing) if *existing == confirmation.confirm() => {
                 Ok(InsertTradeFrameResult::Duplicate)
             }
             Some(_) => Ok(InsertTradeFrameResult::Conflict),
             None => {
                 self.confirmations
-                    .insert(confirmation.player_id, confirmation.confirm);
+                    .insert(confirmation.player_id(), confirmation.confirm());
                 Ok(InsertTradeFrameResult::Inserted)
             }
         }
@@ -917,12 +1736,12 @@ impl TradeSyncBuffer {
 
     pub fn is_ready(&self) -> bool {
         self.participants
-            .players
+            .players()
             .iter()
             .all(|player_id| self.offers.contains_key(player_id))
             && self
                 .participants
-                .players
+                .players()
                 .iter()
                 .all(|player_id| self.confirmations.contains_key(player_id))
     }
@@ -930,13 +1749,13 @@ impl TradeSyncBuffer {
     pub fn outcome(&self) -> Result<TradeOutcome, TradeError> {
         if !self.is_ready() {
             return Err(TradeError::TradeNotReady {
-                trade_id: self.participants.trade_id.clone(),
+                trade_id: self.participants.trade_id().to_string(),
             });
         }
         let cancelled = self.confirmations.values().any(|confirm| !confirm);
         let mut replacements = BTreeMap::new();
         if !cancelled {
-            for player_id in self.participants.players {
+            for player_id in self.participants.players() {
                 let other_player = self
                     .participants
                     .other_player(player_id)
@@ -945,18 +1764,18 @@ impl TradeSyncBuffer {
                 let remote_offer = self.offers.get(&other_player).expect("ready offer");
                 replacements.insert(
                     player_id,
-                    TradeReplacement {
-                        party_slot: local_offer.party_slot,
-                        received: remote_offer.pokemon.clone(),
-                    },
+                    TradeReplacement::new(
+                        local_offer.party_slot(),
+                        remote_offer.pokemon().clone(),
+                    )?,
                 );
             }
         }
-        Ok(TradeOutcome {
-            trade_id: self.participants.trade_id.clone(),
+        TradeOutcome::new(
+            self.participants.trade_id().to_string(),
             cancelled,
             replacements,
-        })
+        )
     }
 
     fn validate_trade_player(
@@ -964,16 +1783,17 @@ impl TradeSyncBuffer {
         trade_id: &TradeId,
         player_id: PlayerId,
     ) -> Result<(), TradeError> {
-        if trade_id != &self.participants.trade_id {
+        validate_trade_id(trade_id)?;
+        if trade_id != self.participants.trade_id() {
             return Err(TradeError::TradeIdMismatch {
-                expected: self.participants.trade_id.clone(),
+                expected: self.participants.trade_id().to_string(),
                 actual: trade_id.clone(),
             });
         }
         if !self.participants.contains(player_id) {
             return Err(TradeError::NotParticipant {
                 player_id,
-                trade_id: self.participants.trade_id.clone(),
+                trade_id: self.participants.trade_id().to_string(),
             });
         }
         Ok(())
@@ -994,14 +1814,47 @@ pub enum InsertBattleActionResult {
     Conflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertChecksumResult {
+    Inserted,
+    Duplicate,
+    Conflict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockstepFrame {
-    pub frame: u64,
-    pub inputs: BTreeMap<PlayerId, u8>,
+    frame: u64,
+    inputs: BTreeMap<PlayerId, u8>,
 }
 
 impl LockstepFrame {
+    pub fn new(frame: u64, inputs: BTreeMap<PlayerId, u8>) -> Result<Self, LockstepSyncError> {
+        let lockstep_frame = Self { frame, inputs };
+        lockstep_frame.validate_inputs()?;
+        Ok(lockstep_frame)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(frame: u64, inputs: BTreeMap<PlayerId, u8>) -> Self {
+        Self { frame, inputs }
+    }
+
+    fn validate_inputs(&self) -> Result<(), LockstepSyncError> {
+        for mask in self.inputs.values() {
+            validate_lockstep_joypad_mask(*mask)?;
+        }
+        Ok(())
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub fn inputs(&self) -> &BTreeMap<PlayerId, u8> {
+        &self.inputs
+    }
+
     pub fn joypad_mask_for(&self, player_id: PlayerId) -> Option<u8> {
         self.inputs.get(&player_id).copied()
     }
@@ -1017,12 +1870,52 @@ impl LockstepFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleActionTurn {
-    pub turn: u64,
-    pub actions: BTreeMap<PlayerId, BattleAction>,
-    pub state_hashes: BTreeMap<PlayerId, String>,
+    turn: u64,
+    actions: BTreeMap<PlayerId, BattleAction>,
+    state_hashes: BTreeMap<PlayerId, String>,
 }
 
 impl BattleActionTurn {
+    pub fn new(
+        turn: u64,
+        actions: BTreeMap<PlayerId, BattleAction>,
+        state_hashes: BTreeMap<PlayerId, String>,
+    ) -> Result<Self, BattleSyncError> {
+        let action_turn = Self {
+            turn,
+            actions,
+            state_hashes,
+        };
+        action_turn.validate_state_hashes()?;
+        Ok(action_turn)
+    }
+
+    fn validate_state_hashes(&self) -> Result<(), BattleSyncError> {
+        for state_hash in self.state_hashes.values() {
+            if state_hash.is_empty() {
+                return Err(BattleSyncError::EmptyStateHash);
+            }
+            if state_hash.trim() != state_hash {
+                return Err(BattleSyncError::InvalidStateHash {
+                    state_hash: state_hash.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub const fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    pub fn actions(&self) -> &BTreeMap<PlayerId, BattleAction> {
+        &self.actions
+    }
+
+    pub fn state_hashes(&self) -> &BTreeMap<PlayerId, String> {
+        &self.state_hashes
+    }
+
     pub fn ordered_actions(&self, players: &[PlayerId]) -> Option<Vec<BattleAction>> {
         players
             .iter()
@@ -1039,15 +1932,19 @@ pub struct BattleActionSyncBuffer {
 }
 
 impl BattleActionSyncBuffer {
-    pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Self {
-        Self {
-            players: players.into_iter().collect(),
+    pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Result<Self, BattleSyncError> {
+        let players = players.into_iter().collect();
+        if players.is_empty() {
+            return Err(BattleSyncError::EmptyRoster);
+        }
+        Ok(Self {
+            players,
             actions: BTreeMap::new(),
             state_hashes: BTreeMap::new(),
-        }
+        })
     }
 
-    pub fn from_lobby(lobby: &LinkLobby) -> Self {
+    pub fn from_lobby(lobby: &LinkLobby) -> Result<Self, BattleSyncError> {
         Self::new(lobby.player_ids())
     }
 
@@ -1059,28 +1956,24 @@ impl BattleActionSyncBuffer {
         &mut self,
         action: BattleActionFrame,
     ) -> Result<InsertBattleActionResult, BattleSyncError> {
-        if !self.players.contains(&action.player_id) {
-            return Err(BattleSyncError::UnknownPlayer {
-                player_id: action.player_id,
-            });
+        action.validate()?;
+        let (player_id, turn, battle_action, state_hash) = action.into_parts();
+        if !self.players.contains(&player_id) {
+            return Err(BattleSyncError::UnknownPlayer { player_id });
         }
-        if let Some(state_hash) = action.state_hash {
-            if state_hash.is_empty() {
-                return Err(BattleSyncError::EmptyStateHash);
-            }
-
+        if let Some(state_hash) = state_hash {
             if let Some(existing_action) = self
                 .actions
-                .get(&action.turn)
-                .and_then(|turn_actions| turn_actions.get(&action.player_id))
+                .get(&turn)
+                .and_then(|turn_actions| turn_actions.get(&player_id))
             {
-                if existing_action != &action.action {
+                if existing_action != &battle_action {
                     return Ok(InsertBattleActionResult::Conflict);
                 }
                 if let Some(existing_hash) = self
                     .state_hashes
-                    .get(&action.turn)
-                    .and_then(|turn_hashes| turn_hashes.get(&action.player_id))
+                    .get(&turn)
+                    .and_then(|turn_hashes| turn_hashes.get(&player_id))
                 {
                     if existing_hash != &state_hash {
                         return Ok(InsertBattleActionResult::Conflict);
@@ -1088,29 +1981,29 @@ impl BattleActionSyncBuffer {
                     return Ok(InsertBattleActionResult::Duplicate);
                 }
                 self.state_hashes
-                    .entry(action.turn)
+                    .entry(turn)
                     .or_default()
-                    .insert(action.player_id, state_hash);
+                    .insert(player_id, state_hash);
                 return Ok(InsertBattleActionResult::Duplicate);
             }
 
             self.actions
-                .entry(action.turn)
+                .entry(turn)
                 .or_default()
-                .insert(action.player_id, action.action);
+                .insert(player_id, battle_action);
             self.state_hashes
-                .entry(action.turn)
+                .entry(turn)
                 .or_default()
-                .insert(action.player_id, state_hash);
+                .insert(player_id, state_hash);
             return Ok(InsertBattleActionResult::Inserted);
         }
 
-        let turn_actions = self.actions.entry(action.turn).or_default();
-        Ok(match turn_actions.get(&action.player_id) {
-            Some(existing) if existing == &action.action => InsertBattleActionResult::Duplicate,
+        let turn_actions = self.actions.entry(turn).or_default();
+        Ok(match turn_actions.get(&player_id) {
+            Some(existing) if existing == &battle_action => InsertBattleActionResult::Duplicate,
             Some(_) => InsertBattleActionResult::Conflict,
             None => {
-                turn_actions.insert(action.player_id, action.action);
+                turn_actions.insert(player_id, battle_action);
                 InsertBattleActionResult::Inserted
             }
         })
@@ -1137,11 +2030,10 @@ impl BattleActionSyncBuffer {
             Some(state_hashes) => state_hashes.clone(),
             None => BTreeMap::new(),
         };
-        Some(BattleActionTurn {
-            turn,
-            actions: self.actions.get(&turn)?.clone(),
-            state_hashes,
-        })
+        Some(
+            BattleActionTurn::new(turn, self.actions.get(&turn)?.clone(), state_hashes)
+                .expect("battle action buffer stores validated state hashes"),
+        )
     }
 
     pub fn next_ready_turn(&self, after_turn: u64) -> Option<BattleActionTurn> {
@@ -1179,12 +2071,16 @@ pub struct LockstepBuffer {
 }
 
 impl LockstepBuffer {
-    pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Self {
-        Self {
-            players: players.into_iter().collect(),
+    pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Result<Self, LockstepSyncError> {
+        let players = players.into_iter().collect();
+        if players.is_empty() {
+            return Err(LockstepSyncError::EmptyRoster);
+        }
+        Ok(Self {
+            players,
             inputs: BTreeMap::new(),
             checksums: BTreeMap::new(),
-        }
+        })
     }
 
     pub fn players(&self) -> Vec<PlayerId> {
@@ -1195,17 +2091,17 @@ impl LockstepBuffer {
         &mut self,
         input: PlayerInputFrame,
     ) -> Result<InsertInputResult, LockstepSyncError> {
-        if !self.players.contains(&input.player_id) {
-            return Err(LockstepSyncError::UnknownPlayer {
-                player_id: input.player_id,
-            });
+        input.validate()?;
+        let (player_id, frame, joypad_mask) = input.into_parts();
+        if !self.players.contains(&player_id) {
+            return Err(LockstepSyncError::UnknownPlayer { player_id });
         }
-        let frame_inputs = self.inputs.entry(input.frame).or_default();
-        Ok(match frame_inputs.get(&input.player_id) {
-            Some(existing) if *existing == input.joypad_mask => InsertInputResult::Duplicate,
+        let frame_inputs = self.inputs.entry(frame).or_default();
+        Ok(match frame_inputs.get(&player_id) {
+            Some(existing) if *existing == joypad_mask => InsertInputResult::Duplicate,
             Some(_) => InsertInputResult::Conflict,
             None => {
-                frame_inputs.insert(input.player_id, input.joypad_mask);
+                frame_inputs.insert(player_id, joypad_mask);
                 InsertInputResult::Inserted
             }
         })
@@ -1228,10 +2124,10 @@ impl LockstepBuffer {
         if !self.is_frame_ready(frame) {
             return None;
         }
-        Some(LockstepFrame {
-            frame,
-            inputs: self.inputs.get(&frame)?.clone(),
-        })
+        Some(
+            LockstepFrame::new(frame, self.inputs.get(&frame)?.clone())
+                .expect("lockstep buffer stores validated input masks"),
+        )
     }
 
     pub fn next_ready_frame(&self, after_frame: u64) -> Option<LockstepFrame> {
@@ -1244,22 +2140,26 @@ impl LockstepBuffer {
         &mut self,
         player_id: PlayerId,
         checksum: StateChecksum,
-    ) -> Result<(), LockstepSyncError> {
+    ) -> Result<InsertChecksumResult, LockstepSyncError> {
         if !self.players.contains(&player_id) {
             return Err(LockstepSyncError::UnknownPlayer { player_id });
         }
-        self.checksums
-            .entry(checksum.frame)
-            .or_default()
-            .insert(player_id, checksum.hash);
-        Ok(())
+        let frame_checksums = self.checksums.entry(checksum.frame()).or_default();
+        Ok(match frame_checksums.get(&player_id) {
+            Some(existing) if *existing == checksum.hash() => InsertChecksumResult::Duplicate,
+            Some(_) => InsertChecksumResult::Conflict,
+            None => {
+                frame_checksums.insert(player_id, checksum.hash());
+                InsertChecksumResult::Inserted
+            }
+        })
     }
 
     pub fn insert_checksum_frame(
         &mut self,
         checksum: StateChecksumFrame,
-    ) -> Result<(), LockstepSyncError> {
-        self.insert_checksum(checksum.player_id, checksum.checksum())
+    ) -> Result<InsertChecksumResult, LockstepSyncError> {
+        self.insert_checksum(checksum.player_id(), checksum.checksum())
     }
 
     pub fn checksum_disagreement(&self, frame: u64) -> Option<Vec<(PlayerId, u32)>> {
@@ -1283,13 +2183,24 @@ impl LockstepBuffer {
     }
 }
 
+fn validate_lockstep_joypad_mask(mask: u8) -> Result<(), LockstepSyncError> {
+    let directions = [B_PAD_RIGHT, B_PAD_LEFT, B_PAD_UP, B_PAD_DOWN]
+        .into_iter()
+        .filter(|direction| mask & *direction != 0)
+        .count();
+    if directions > 1 {
+        return Err(LockstepSyncError::ConflictingJoypadDirections { mask });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeterministicLockstep {
-    pub local_player_id: PlayerId,
-    pub players: BTreeSet<PlayerId>,
-    pub next_frame: u64,
-    pub previous_local_joypad_mask: u8,
+    local_player_id: PlayerId,
+    players: BTreeSet<PlayerId>,
+    next_frame: u64,
+    previous_local_joypad_mask: u8,
 }
 
 impl DeterministicLockstep {
@@ -1311,6 +2222,33 @@ impl DeterministicLockstep {
         })
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        local_player_id: PlayerId,
+        players: BTreeSet<PlayerId>,
+        next_frame: u64,
+        previous_local_joypad_mask: u8,
+    ) -> Self {
+        Self {
+            local_player_id,
+            players,
+            next_frame,
+            previous_local_joypad_mask,
+        }
+    }
+
+    pub const fn local_player_id(&self) -> PlayerId {
+        self.local_player_id
+    }
+
+    pub const fn next_frame(&self) -> u64 {
+        self.next_frame
+    }
+
+    pub const fn previous_local_joypad_mask(&self) -> u8 {
+        self.previous_local_joypad_mask
+    }
+
     pub fn from_lobby(
         lobby: &LinkLobby,
         local_player_id: PlayerId,
@@ -1329,7 +2267,7 @@ impl DeterministicLockstep {
         self.validate_frame(&frame)?;
         let local_joypad_mask = frame.joypad_mask_for(self.local_player_id).ok_or(
             LockstepSyncError::MissingPlayerInput {
-                frame: frame.frame,
+                frame: frame.frame(),
                 player_id: self.local_player_id,
             },
         )?;
@@ -1339,7 +2277,7 @@ impl DeterministicLockstep {
         for player_id in &self.players {
             ordered_inputs.push(frame.joypad_mask_for(*player_id).ok_or(
                 LockstepSyncError::MissingPlayerInput {
-                    frame: frame.frame,
+                    frame: frame.frame(),
                     player_id: *player_id,
                 },
             )?);
@@ -1351,34 +2289,35 @@ impl DeterministicLockstep {
                 .ok_or(LockstepSyncError::FrameCursorOverflow {
                     frame: self.next_frame,
                 })?;
-        Ok(AppliedLockstepFrame {
-            frame: frame.frame,
-            local_player_id: self.local_player_id,
+        Ok(AppliedLockstepFrame::new(
+            frame.frame(),
+            self.local_player_id,
             local_joypad_mask,
             local_pressed_mask,
             ordered_inputs,
-        })
+        ))
     }
 
     fn validate_frame(&self, frame: &LockstepFrame) -> Result<(), LockstepSyncError> {
-        if frame.frame != self.next_frame {
+        if frame.frame() != self.next_frame {
             return Err(LockstepSyncError::FrameOutOfOrder {
                 expected: self.next_frame,
-                actual: frame.frame,
+                actual: frame.frame(),
             });
         }
-        for player_id in frame.inputs.keys() {
+        for player_id in frame.inputs().keys() {
             if !self.players.contains(player_id) {
                 return Err(LockstepSyncError::NonRosterPlayerInput {
-                    frame: frame.frame,
+                    frame: frame.frame(),
                     player_id: *player_id,
                 });
             }
         }
+        frame.validate_inputs()?;
         for player_id in &self.players {
-            if !frame.inputs.contains_key(player_id) {
+            if !frame.inputs().contains_key(player_id) {
                 return Err(LockstepSyncError::MissingPlayerInput {
-                    frame: frame.frame,
+                    frame: frame.frame(),
                     player_id: *player_id,
                 });
             }
@@ -1390,11 +2329,49 @@ impl DeterministicLockstep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppliedLockstepFrame {
-    pub frame: u64,
-    pub local_player_id: PlayerId,
-    pub local_joypad_mask: u8,
-    pub local_pressed_mask: u8,
-    pub ordered_inputs: Vec<u8>,
+    frame: u64,
+    local_player_id: PlayerId,
+    local_joypad_mask: u8,
+    local_pressed_mask: u8,
+    ordered_inputs: Vec<u8>,
+}
+
+impl AppliedLockstepFrame {
+    pub fn new(
+        frame: u64,
+        local_player_id: PlayerId,
+        local_joypad_mask: u8,
+        local_pressed_mask: u8,
+        ordered_inputs: Vec<u8>,
+    ) -> Self {
+        Self {
+            frame,
+            local_player_id,
+            local_joypad_mask,
+            local_pressed_mask,
+            ordered_inputs,
+        }
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub const fn local_player_id(&self) -> PlayerId {
+        self.local_player_id
+    }
+
+    pub const fn local_joypad_mask(&self) -> u8 {
+        self.local_joypad_mask
+    }
+
+    pub const fn local_pressed_mask(&self) -> u8 {
+        self.local_pressed_mask
+    }
+
+    pub fn ordered_inputs(&self) -> &[u8] {
+        &self.ordered_inputs
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1413,6 +2390,63 @@ pub enum LinkMessage {
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
     Disconnect { player_id: PlayerId, reason: String },
+}
+
+impl LinkMessage {
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        match self {
+            Self::Hello(hello) => hello
+                .validate()
+                .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
+                    message: error.to_string(),
+                }),
+            Self::BattleAction(action) => action
+                .validate()
+                .map_err(|error| MultiplayerMessageError::InvalidBattleAction {
+                    message: error.to_string(),
+                }),
+            Self::TradeOffer(offer) => offer
+                .validate()
+                .map_err(|error| MultiplayerMessageError::InvalidTradeFrame {
+                    message: error.to_string(),
+                }),
+            Self::TradeConfirmation(confirmation) => confirmation.validate().map_err(|error| {
+                MultiplayerMessageError::InvalidTradeFrame {
+                    message: error.to_string(),
+                }
+            }),
+            Self::LinkByte(frame) => {
+                frame
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLinkCableFrame {
+                        message: error.to_string(),
+                    })
+            }
+            Self::LinkClockSync(sync) => {
+                sync.validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLinkCableFrame {
+                        message: error.to_string(),
+                    })
+            }
+            Self::Input(input) => input
+                .validate()
+                .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
+                    message: error.to_string(),
+                }),
+            Self::Presence(presence) => presence.validate(),
+            Self::InteractionRequest(request) => request.validate(),
+            Self::InteractionResponse(response) => response.validate(),
+            Self::Disconnect { reason, .. } => {
+                validate_multiplayer_text("disconnect reason", reason)
+            }
+            Self::RngInit { state } => state
+                .validate()
+                .map_err(|error| MultiplayerMessageError::InvalidBattleRng {
+                    message: error.to_string(),
+                }),
+            Self::StateHash(_) => Ok(()),
+        }
+    }
 }
 
 pub fn fnv1a32(input: &str) -> u32 {
@@ -1444,13 +2478,13 @@ pub fn latest_remote_presence<'a>(
 ) -> Vec<OverworldPresence> {
     let mut by_user: BTreeMap<&str, &OverworldPresence> = BTreeMap::new();
     for entry in entries {
-        if entry.user_id == local_user_id || entry.is_stale(now_ms, stale_ms) {
+        if entry.user_id() == local_user_id || entry.is_stale(now_ms, stale_ms) {
             continue;
         }
-        match by_user.get(entry.user_id.as_str()) {
-            Some(previous) if previous.updated_at_ms >= entry.updated_at_ms => {}
+        match by_user.get(entry.user_id()) {
+            Some(previous) if previous.updated_at_ms() >= entry.updated_at_ms() => {}
             _ => {
-                by_user.insert(entry.user_id.as_str(), entry);
+                by_user.insert(entry.user_id(), entry);
             }
         }
     }
@@ -1467,10 +2501,11 @@ mod tests {
     }
 
     fn player(id: PlayerId) -> PlayerIdentity {
-        PlayerIdentity {
-            id,
-            display_name: format!("P{id}"),
-        }
+        PlayerIdentity::new(id, format!("P{id}")).expect("player")
+    }
+
+    fn confirmation(trade_id: &str, player_id: PlayerId, confirm: bool) -> TradeConfirmation {
+        TradeConfirmation::new(trade_id, player_id, confirm).expect("trade confirmation")
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
@@ -1493,7 +2528,9 @@ mod tests {
 
     #[test]
     fn link_messages_are_serializable_for_transport_neutral_netcode() {
-        let message = LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000));
+        let message = LinkMessage::Input(
+            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+        );
         let json = serde_json::to_string(&message).expect("serialize link message");
         assert_eq!(
             json,
@@ -1542,8 +2579,8 @@ mod tests {
         let checksum = game_state_checksum(&state).expect("checksum");
         let frame = StateChecksumFrame::from_game_state(2, &state).expect("checksum frame");
 
-        assert_eq!(checksum.frame, 144);
-        assert_eq!(frame.player_id, 2);
+        assert_eq!(checksum.frame(), 144);
+        assert_eq!(frame.player_id(), 2);
         assert_eq!(frame.checksum(), checksum);
 
         let mut moved = state;
@@ -1554,8 +2591,8 @@ mod tests {
             mode: crate::world::movement::MovementMode::Normal,
         };
         assert_ne!(
-            game_state_checksum(&moved).expect("moved checksum").hash,
-            checksum.hash
+            game_state_checksum(&moved).expect("moved checksum").hash(),
+            checksum.hash()
         );
     }
 
@@ -1573,7 +2610,7 @@ mod tests {
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize hello"),
             message
         );
-        assert_eq!(hello.session.modpack.id, "core-modular");
+        assert_eq!(hello.session().modpack().id(), "core-modular");
     }
 
     #[test]
@@ -1663,10 +2700,7 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_empty_player_display_names_without_placeholders() {
-        let empty_player = PlayerIdentity {
-            id: 2,
-            display_name: "  ".to_string(),
-        };
+        let empty_player = PlayerIdentity::new_unchecked_for_tests(2, "");
         assert_eq!(
             LinkHello::new(
                 "session-1",
@@ -1676,29 +2710,80 @@ mod tests {
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 2 })
         );
 
+        let padded_player = PlayerIdentity::new_unchecked_for_tests(2, " P2");
+        assert_eq!(
+            LinkHello::new(
+                "session-1",
+                modpack("core-modular", "1234abcd"),
+                padded_player
+            ),
+            Err(LinkHandshakeError::InvalidPlayerDisplayName {
+                player_id: 2,
+                display_name: " P2".to_string(),
+            })
+        );
+
         let local = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
             .expect("local");
-        let bypassed = LinkHello {
-            session: local.clone(),
-            player: PlayerIdentity {
-                id: 3,
-                display_name: String::new(),
-            },
-        };
+        let bypassed = LinkHello::new_unchecked_for_tests(
+            local.clone(),
+            PlayerIdentity::new_unchecked_for_tests(3, ""),
+        );
         assert_eq!(
             validate_link_hello(&local, &bypassed),
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 3 })
         );
 
+        let padded_bypassed = LinkHello::new_unchecked_for_tests(
+            local.clone(),
+            PlayerIdentity::new_unchecked_for_tests(3, "P3 "),
+        );
+        assert_eq!(
+            validate_link_hello(&local, &padded_bypassed),
+            Err(LinkHandshakeError::InvalidPlayerDisplayName {
+                player_id: 3,
+                display_name: "P3 ".to_string(),
+            })
+        );
+
         assert_eq!(
             LinkLobby::new(
                 local,
-                PlayerIdentity {
-                    id: 1,
-                    display_name: String::new(),
-                },
+                PlayerIdentity::new_unchecked_for_tests(1, ""),
             ),
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 1 })
+        );
+    }
+
+    #[test]
+    fn link_handshake_rejects_malformed_session_ids_without_trimming() {
+        let modpack = modpack("core-modular", "1234abcd");
+        assert_eq!(
+            LinkSessionIdentity::new("", modpack.clone()).and_then(|session| session.validate()),
+            Err(LinkHandshakeError::MissingSessionId)
+        );
+        assert_eq!(
+            LinkSessionIdentity::new(" session-1", modpack.clone())
+                .and_then(|session| session.validate()),
+            Err(LinkHandshakeError::InvalidSessionId {
+                session_id: " session-1".to_string(),
+            })
+        );
+
+        let local = LinkSessionIdentity::new("session-1", modpack.clone()).expect("local");
+        let remote = LinkHello::new_unchecked_for_tests(
+            LinkSessionIdentity::new_unchecked_for_tests(
+                LINK_PROTOCOL_VERSION,
+                "session-1 ",
+                modpack,
+            ),
+            player(2),
+        );
+        assert_eq!(
+            validate_link_hello(&local, &remote),
+            Err(LinkHandshakeError::InvalidSessionId {
+                session_id: "session-1 ".to_string(),
+            })
         );
     }
 
@@ -1706,10 +2791,14 @@ mod tests {
     fn link_handshake_rejects_protocol_drift() {
         let local = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
             .expect("local");
-        let mut remote =
-            LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
-                .expect("remote");
-        remote.session.protocol_version = LINK_PROTOCOL_VERSION + 1;
+        let remote = LinkHello::new_unchecked_for_tests(
+            LinkSessionIdentity::new_unchecked_for_tests(
+                LINK_PROTOCOL_VERSION + 1,
+                "session-1",
+                modpack("core-modular", "1234abcd"),
+            ),
+            player(2),
+        );
 
         assert_eq!(
             validate_link_hello(&local, &remote),
@@ -1772,10 +2861,7 @@ mod tests {
         let conflict = LinkHello::new(
             "session-1",
             modpack("core-modular", "1234abcd"),
-            PlayerIdentity {
-                id: 2,
-                display_name: "P02".to_string(),
-            },
+            PlayerIdentity::new(2, "P02").expect("player"),
         )
         .expect("conflict");
 
@@ -1821,15 +2907,15 @@ mod tests {
             )
             .expect("accept");
 
-        let mut buffer = lobby.lockstep_buffer();
+        let mut buffer = lobby.lockstep_buffer().expect("lockstep buffer");
         assert_eq!(buffer.players(), vec![2, 4]);
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(4, Frame(12), 0x10)),
+            buffer.insert_input(PlayerInputFrame::new(4, Frame(12), 0x10).expect("input")),
             Ok(InsertInputResult::Inserted)
         );
         assert!(!buffer.is_frame_ready(12));
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(2, Frame(12), 0x20)),
+            buffer.insert_input(PlayerInputFrame::new(2, Frame(12), 0x20).expect("input")),
             Ok(InsertInputResult::Inserted)
         );
         assert_eq!(
@@ -1849,10 +2935,7 @@ mod tests {
 
         assert_eq!(
             lobby.local_hello(1).expect("hello"),
-            LinkHello {
-                session,
-                player: player(1),
-            }
+            LinkHello::from_session(session, player(1)).expect("hello")
         );
         assert_eq!(
             lobby.local_hello(2),
@@ -1871,7 +2954,7 @@ mod tests {
                     .expect("hello"),
             )
             .expect("accept");
-        let mut sync = lobby.battle_action_buffer();
+        let mut sync = lobby.battle_action_buffer().expect("battle action buffer");
 
         assert_eq!(
             sync.insert_action(
@@ -1913,11 +2996,11 @@ mod tests {
             ])
         );
         assert_eq!(
-            turn.state_hashes.get(&2).map(String::as_str),
+            turn.state_hashes().get(&2).map(String::as_str),
             Some("aaaabbbb")
         );
         assert_eq!(
-            turn.state_hashes.get(&4).map(String::as_str),
+            turn.state_hashes().get(&4).map(String::as_str),
             Some("aaaabbbb")
         );
         assert_eq!(sync.state_hash_disagreement(1), None);
@@ -1925,21 +3008,52 @@ mod tests {
 
     #[test]
     fn battle_action_sync_rejects_unknown_players_and_empty_hashes() {
-        let mut sync = BattleActionSyncBuffer::new([1, 2]);
+        let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
 
         assert_eq!(
-            sync.insert_action(BattleActionFrame::new(3, 1, BattleAction::Move { slot: 0 })),
+            sync.insert_action(
+                BattleActionFrame::new(3, 1, BattleAction::Move { slot: 0 }).expect("action"),
+            ),
             Err(BattleSyncError::UnknownPlayer { player_id: 3 })
         );
         assert_eq!(
             BattleActionFrame::with_state_hash(1, 1, BattleAction::Move { slot: 0 }, ""),
             Err(BattleSyncError::EmptyStateHash)
         );
+        assert_eq!(
+            BattleActionFrame::with_state_hash(1, 1, BattleAction::Move { slot: 0 }, " 1111"),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: " 1111".to_string(),
+            })
+        );
+        assert_eq!(
+            sync.insert_action(BattleActionFrame::new_unchecked_for_tests(
+                1,
+                1,
+                BattleAction::Move { slot: 0 },
+                Some("2222 ".to_string()),
+            )),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: "2222 ".to_string(),
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::Item {
+                    item_id: " POTION".to_string(),
+                },
+            ),
+            Err(BattleSyncError::InvalidItemId {
+                item_id: " POTION".to_string(),
+            })
+        );
     }
 
     #[test]
     fn battle_action_sync_reports_duplicates_conflicts_and_hash_disagreements() {
-        let mut sync = BattleActionSyncBuffer::new([1, 2]);
+        let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
         let action =
             BattleActionFrame::with_state_hash(1, 7, BattleAction::Move { slot: 0 }, "1111")
                 .expect("action");
@@ -1996,7 +3110,7 @@ mod tests {
 
     #[test]
     fn battle_action_sync_requires_exact_roster_cardinality_for_ready_turns() {
-        let mut sync = BattleActionSyncBuffer::new([1, 2]);
+        let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
         sync.actions.insert(
             4,
             BTreeMap::from([
@@ -2012,14 +3126,25 @@ mod tests {
     }
 
     #[test]
+    fn battle_action_sync_rejects_empty_rosters() {
+        assert_eq!(
+            BattleActionSyncBuffer::new(std::iter::empty::<PlayerId>()),
+            Err(BattleSyncError::EmptyRoster)
+        );
+    }
+
+    #[test]
     fn battle_action_link_message_carries_exact_modpack_item_ids() {
-        let message = LinkMessage::BattleAction(BattleActionFrame::new(
-            2,
-            9,
-            BattleAction::Item {
-                item_id: "johto_plus:EMBER_ORB".to_string(),
-            },
-        ));
+        let message = LinkMessage::BattleAction(
+            BattleActionFrame::new(
+                2,
+                9,
+                BattleAction::Item {
+                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                },
+            )
+            .expect("action"),
+        );
         let json = serde_json::to_string(&message).expect("serialize action message");
 
         assert!(json.contains(r#""type":"battle_action""#));
@@ -2048,7 +3173,7 @@ mod tests {
         let mut party_two = party_with(3, eevee.clone());
         let mut trade = lobby.trade_buffer("trade-1", 2, 1).expect("trade");
 
-        assert_eq!(trade.participants().players, [1, 2]);
+        assert_eq!(trade.participants().players(), [1, 2]);
         assert_eq!(
             trade.insert_offer(
                 TradeOffer::from_party("trade-1", 1, &party_one, 0).expect("offer one")
@@ -2062,16 +3187,16 @@ mod tests {
             Ok(InsertTradeFrameResult::Inserted)
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 1, true)),
+            trade.insert_confirmation(confirmation("trade-1", 1, true)),
             Ok(InsertTradeFrameResult::Inserted)
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 2, true)),
+            trade.insert_confirmation(confirmation("trade-1", 2, true)),
             Ok(InsertTradeFrameResult::Inserted)
         );
 
         let outcome = trade.outcome().expect("outcome");
-        assert!(!outcome.cancelled);
+        assert!(!outcome.cancelled());
         assert_eq!(
             outcome
                 .apply_to_party(1, &mut party_one)
@@ -2110,23 +3235,18 @@ mod tests {
             .insert_offer(TradeOffer::from_party("trade-1", 1, &party_one, 0).expect("offer one"))
             .expect("offer one");
         trade
-            .insert_offer(TradeOffer {
-                trade_id: "trade-1".to_string(),
-                player_id: 2,
-                party_slot: 1,
-                pokemon: eevee,
-            })
+            .insert_offer(TradeOffer::new("trade-1", 2, 1, eevee).expect("offer two"))
             .expect("offer two");
         trade
-            .insert_confirmation(TradeConfirmation::new("trade-1", 1, false))
+            .insert_confirmation(confirmation("trade-1", 1, false))
             .expect("cancel");
         trade
-            .insert_confirmation(TradeConfirmation::new("trade-1", 2, true))
+            .insert_confirmation(confirmation("trade-1", 2, true))
             .expect("confirm");
 
         let outcome = trade.outcome().expect("outcome");
-        assert!(outcome.cancelled);
-        assert_eq!(outcome.replacements.len(), 0);
+        assert!(outcome.cancelled());
+        assert_eq!(outcome.replacements().len(), 0);
         assert_eq!(outcome.apply_to_party(1, &mut party_one), Ok(None));
         assert_eq!(party_one.pokemon[0], Some(pikachu));
     }
@@ -2146,21 +3266,45 @@ mod tests {
             Err(TradeError::DuplicateParticipant { player_id: 1 })
         );
         assert_eq!(
+            TradeParticipants::new(" trade-1", 1, 2),
+            Err(TradeError::InvalidTradeId {
+                trade_id: " trade-1".to_string(),
+            })
+        );
+        assert_eq!(
+            TradeOffer::from_party("trade-1 ", 1, &Party::default(), 0),
+            Err(TradeError::InvalidTradeId {
+                trade_id: "trade-1 ".to_string(),
+            })
+        );
+        assert_eq!(
             TradeOffer::from_party("trade-1", 1, &Party::default(), 0),
             Err(TradeError::EmptyPartySlot { party_slot: 0 })
         );
+        assert_eq!(
+            TradeOffer::new("trade-1", 1, PARTY_SIZE, pokemon("PIKACHU", None)),
+            Err(TradeError::InvalidPartySlot {
+                party_slot: PARTY_SIZE,
+            })
+        );
 
+        assert_eq!(
+            TradeConfirmation::new(" trade-1", 1, true),
+            Err(TradeError::InvalidTradeId {
+                trade_id: " trade-1".to_string(),
+            })
+        );
         let mut trade =
             TradeSyncBuffer::new(TradeParticipants::new("trade-1", 1, 2).expect("participants"));
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-2", 1, true)),
+            trade.insert_confirmation(confirmation("trade-2", 1, true)),
             Err(TradeError::TradeIdMismatch {
                 expected: "trade-1".to_string(),
                 actual: "trade-2".to_string(),
             })
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 3, true)),
+            trade.insert_confirmation(confirmation("trade-1", 3, true)),
             Err(TradeError::NotParticipant {
                 player_id: 3,
                 trade_id: "trade-1".to_string(),
@@ -2174,12 +3318,7 @@ mod tests {
         let eevee = pokemon("EEVEE", None);
         let mut trade =
             TradeSyncBuffer::new(TradeParticipants::new("trade-1", 1, 2).expect("participants"));
-        let offer = TradeOffer {
-            trade_id: "trade-1".to_string(),
-            player_id: 1,
-            party_slot: 0,
-            pokemon: pikachu,
-        };
+        let offer = TradeOffer::new("trade-1", 1, 0, pikachu).expect("offer");
 
         assert_eq!(
             trade.insert_offer(offer.clone()),
@@ -2190,36 +3329,32 @@ mod tests {
             Ok(InsertTradeFrameResult::Duplicate)
         );
         assert_eq!(
-            trade.insert_offer(TradeOffer {
-                trade_id: "trade-1".to_string(),
-                player_id: 1,
-                party_slot: 1,
-                pokemon: eevee,
-            }),
+            trade.insert_offer(TradeOffer::new("trade-1", 1, 1, eevee).expect("conflict offer")),
             Ok(InsertTradeFrameResult::Conflict)
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 1, true)),
+            trade.insert_confirmation(confirmation("trade-1", 1, true)),
             Ok(InsertTradeFrameResult::Inserted)
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 1, true)),
+            trade.insert_confirmation(confirmation("trade-1", 1, true)),
             Ok(InsertTradeFrameResult::Duplicate)
         );
         assert_eq!(
-            trade.insert_confirmation(TradeConfirmation::new("trade-1", 1, false)),
+            trade.insert_confirmation(confirmation("trade-1", 1, false)),
             Ok(InsertTradeFrameResult::Conflict)
         );
     }
 
     #[test]
     fn trade_link_messages_carry_exact_pokemon_payloads() {
-        let offer = TradeOffer {
-            trade_id: "trade-1".to_string(),
-            player_id: 1,
-            party_slot: 0,
-            pokemon: pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
-        };
+        let offer = TradeOffer::new(
+            "trade-1",
+            1,
+            0,
+            pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
+        )
+        .expect("offer");
         let offer_message = LinkMessage::TradeOffer(offer.clone());
         let offer_json = serde_json::to_string(&offer_message).expect("serialize offer");
 
@@ -2231,7 +3366,7 @@ mod tests {
         );
 
         let confirm_message =
-            LinkMessage::TradeConfirmation(TradeConfirmation::new("trade-1", 1, true));
+            LinkMessage::TradeConfirmation(confirmation("trade-1", 1, true));
         let confirm_json = serde_json::to_string(&confirm_message).expect("serialize confirm");
         assert!(confirm_json.contains(r#""type":"trade_confirmation""#));
         assert_eq!(
@@ -2246,13 +3381,13 @@ mod tests {
         let mut client = LinkCableState::new(2, 1).expect("client");
 
         let preamble = host.host_preamble();
-        assert_eq!(preamble.byte, LINK_PREAMBLE_BYTE);
-        assert_eq!(preamble.clock, 1);
+        assert_eq!(preamble.byte(), LINK_PREAMBLE_BYTE);
+        assert_eq!(preamble.clock(), 1);
         let response = client
             .client_accept_preamble(preamble)
             .expect("client accept")
             .expect("response");
-        assert_eq!(response.byte, LINK_PREAMBLE_RESPONSE);
+        assert_eq!(response.byte(), LINK_PREAMBLE_RESPONSE);
         assert!(client.is_established());
 
         host.host_accept_preamble_response(response)
@@ -2286,29 +3421,21 @@ mod tests {
         let mut cable = LinkCableState::new(1, 2).expect("cable");
 
         assert_eq!(
-            cable.receive_byte_frame(LinkByteFrame {
-                player_id: 3,
-                byte: 0x42,
-                clock: 1,
-            }),
+            cable.receive_byte_frame(LinkByteFrame::new_unchecked_for_tests(2, 0x42, 0)),
+            Err(LinkCableError::InvalidClock { clock: 0 })
+        );
+        assert_eq!(
+            cable.receive_byte_frame(LinkByteFrame::new(3, 0x42, 1).expect("frame")),
             Err(LinkCableError::UnexpectedPeer {
                 expected: 2,
                 player_id: 3,
             })
         );
         cable
-            .receive_byte_frame(LinkByteFrame {
-                player_id: 2,
-                byte: 0x42,
-                clock: 1,
-            })
+            .receive_byte_frame(LinkByteFrame::new(2, 0x42, 1).expect("frame"))
             .expect("first");
         assert_eq!(
-            cable.receive_byte_frame(LinkByteFrame {
-                player_id: 2,
-                byte: 0x99,
-                clock: 1,
-            }),
+            cable.receive_byte_frame(LinkByteFrame::new(2, 0x99, 1).expect("frame")),
             Err(LinkCableError::ClockRegression {
                 remote_clock: 1,
                 clock: 1,
@@ -2354,6 +3481,23 @@ mod tests {
     }
 
     #[test]
+    fn link_cable_sync_rejects_impossible_clock_ordering() {
+        let mut client = LinkCableState::new(2, 1).expect("client");
+        let invalid = LinkClockSyncFrame::new_unchecked_for_tests(1, 12, 11, 13);
+
+        assert_eq!(
+            client.receive_sync_frame(invalid, 20),
+            Err(LinkCableError::InvalidClockSync {
+                t0: 12,
+                t1: 11,
+                t2: 13,
+            })
+        );
+        assert_eq!(client.remote_clock(), 0);
+        assert_eq!(client.average_latency_ticks(), None);
+    }
+
+    #[test]
     fn link_cable_sync_frames_are_monotonic_when_caller_tick_stalls() {
         let mut host = LinkCableState::new(1, 2).expect("host");
         let mut client = LinkCableState::new(2, 1).expect("client");
@@ -2362,9 +3506,9 @@ mod tests {
         let second = host.sync_frame(7);
         let third = host.sync_frame(6);
 
-        assert_eq!(first.t2, 7);
-        assert_eq!(second.t2, 8);
-        assert_eq!(third.t2, 9);
+        assert_eq!(first.t2(), 7);
+        assert_eq!(second.t2(), 8);
+        assert_eq!(third.t2(), 9);
         client
             .receive_sync_frame(first, 12)
             .expect("first sync accepted");
@@ -2379,11 +3523,9 @@ mod tests {
 
     #[test]
     fn link_byte_messages_are_transport_neutral_json() {
-        let message = LinkMessage::LinkByte(LinkByteFrame {
-            player_id: 2,
-            byte: LINK_PREAMBLE_RESPONSE,
-            clock: 7,
-        });
+        let message = LinkMessage::LinkByte(
+            LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("frame"),
+        );
         let json = serde_json::to_string(&message).expect("serialize byte");
 
         assert_eq!(
@@ -2400,13 +3542,18 @@ mod tests {
     fn rng_state_from_seed_matches_typescript_synchronizer_formula() {
         assert_eq!(
             BattleRngState::from_seed(0x1234_5678),
-            BattleRngState {
-                hardware_divider: 0xf3dd,
-                h_random_add: 0x56,
-                h_random_sub: 0x78,
-            }
+            BattleRngState::new(0xf3dd, 0x56, 0x78).expect("rng state")
         );
-        assert_eq!(BattleRngState::from_seed(0xa5a5).hardware_divider, 1);
+        assert_eq!(BattleRngState::from_seed(0xa5a5).hardware_divider(), 1);
+        assert_eq!(
+            LinkMessage::RngInit {
+                state: BattleRngState::new_unchecked_for_tests(0, 0x56, 0x78),
+            }
+            .validate(),
+            Err(MultiplayerMessageError::InvalidBattleRng {
+                message: "battle rng hardware divider must be nonzero".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -2418,19 +3565,19 @@ mod tests {
 
     #[test]
     fn lockstep_buffer_waits_for_all_players_and_orders_inputs() {
-        let mut buffer = LockstepBuffer::new([2, 1]);
+        let mut buffer = LockstepBuffer::new([2, 1]).expect("lockstep buffer");
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(2, Frame(7), 0b0001_0000)),
+            buffer.insert_input(PlayerInputFrame::new(2, Frame(7), 0b0001_0000).expect("input")),
             Ok(InsertInputResult::Inserted)
         );
         assert!(!buffer.is_frame_ready(7));
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(1, Frame(7), 0b1000_0000)),
+            buffer.insert_input(PlayerInputFrame::new(1, Frame(7), 0b1000_0000).expect("input")),
             Ok(InsertInputResult::Inserted)
         );
 
         let frame = buffer.frame(7).expect("ready frame");
-        assert_eq!(frame.frame, 7);
+        assert_eq!(frame.frame(), 7);
         assert_eq!(buffer.players(), vec![1, 2]);
         assert_eq!(
             frame.ordered_inputs(&buffer.players()),
@@ -2444,46 +3591,46 @@ mod tests {
         assert_eq!(lockstep.players(), vec![2, 4]);
 
         let first = lockstep
-            .apply_frame(LockstepFrame {
-                frame: 0,
-                inputs: BTreeMap::from([(4, 0b0001_0001), (2, 0b1000_0000)]),
-            })
+            .apply_frame(
+                LockstepFrame::new(0, BTreeMap::from([(4, 0b0001_0001), (2, 0b1000_0000)]))
+                    .expect("frame"),
+            )
             .expect("apply first");
 
         assert_eq!(
             first,
-            AppliedLockstepFrame {
-                frame: 0,
-                local_player_id: 4,
-                local_joypad_mask: 0b0001_0001,
-                local_pressed_mask: 0b0001_0001,
-                ordered_inputs: vec![0b1000_0000, 0b0001_0001],
-            }
+            AppliedLockstepFrame::new(
+                0,
+                4,
+                0b0001_0001,
+                0b0001_0001,
+                vec![0b1000_0000, 0b0001_0001],
+            )
         );
-        assert_eq!(lockstep.next_frame, 1);
-        assert_eq!(lockstep.previous_local_joypad_mask, 0b0001_0001);
+        assert_eq!(lockstep.next_frame(), 1);
+        assert_eq!(lockstep.previous_local_joypad_mask(), 0b0001_0001);
 
         let held_right = lockstep
-            .apply_frame(LockstepFrame {
-                frame: 1,
-                inputs: BTreeMap::from([(2, 0), (4, 0b0000_0001)]),
-            })
+            .apply_frame(
+                LockstepFrame::new(1, BTreeMap::from([(2, 0), (4, 0b0000_0001)]))
+                    .expect("frame"),
+            )
             .expect("apply second");
 
-        assert_eq!(held_right.local_joypad_mask, 0b0000_0001);
-        assert_eq!(held_right.local_pressed_mask, 0);
-        assert_eq!(held_right.ordered_inputs, vec![0, 0b0000_0001]);
-        assert_eq!(lockstep.next_frame, 2);
+        assert_eq!(held_right.local_joypad_mask(), 0b0000_0001);
+        assert_eq!(held_right.local_pressed_mask(), 0);
+        assert_eq!(held_right.ordered_inputs(), &[0, 0b0000_0001]);
+        assert_eq!(lockstep.next_frame(), 2);
     }
 
     #[test]
     fn deterministic_lockstep_serializes_exact_saveable_cursor() {
         let mut lockstep = DeterministicLockstep::new([1, 2], 1).expect("lockstep");
         lockstep
-            .apply_frame(LockstepFrame {
-                frame: 0,
-                inputs: BTreeMap::from([(1, 0x10), (2, 0x20)]),
-            })
+            .apply_frame(
+                LockstepFrame::new(0, BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                    .expect("frame"),
+            )
             .expect("apply");
 
         let json = serde_json::to_string(&lockstep).expect("serialize lockstep");
@@ -2507,70 +3654,123 @@ mod tests {
 
         let mut lockstep = DeterministicLockstep::new([1, 2], 1).expect("lockstep");
         assert_eq!(
-            lockstep.apply_frame(LockstepFrame {
-                frame: 1,
-                inputs: BTreeMap::from([(1, 0), (2, 0)]),
-            }),
+            lockstep.apply_frame(
+                LockstepFrame::new(1, BTreeMap::from([(1, 0), (2, 0)])).expect("frame"),
+            ),
             Err(LockstepSyncError::FrameOutOfOrder {
                 expected: 0,
                 actual: 1,
             })
         );
-        assert_eq!(lockstep.next_frame, 0);
+        assert_eq!(lockstep.next_frame(), 0);
 
         assert_eq!(
-            lockstep.apply_frame(LockstepFrame {
-                frame: 0,
-                inputs: BTreeMap::from([(1, 0)]),
-            }),
+            lockstep.apply_frame(
+                LockstepFrame::new(0, BTreeMap::from([(1, 0)])).expect("frame"),
+            ),
             Err(LockstepSyncError::MissingPlayerInput {
                 frame: 0,
                 player_id: 2,
             })
         );
-        assert_eq!(lockstep.next_frame, 0);
+        assert_eq!(lockstep.next_frame(), 0);
 
         assert_eq!(
-            lockstep.apply_frame(LockstepFrame {
-                frame: 0,
-                inputs: BTreeMap::from([(1, 0), (2, 0), (3, 0)]),
-            }),
+            lockstep.apply_frame(
+                LockstepFrame::new(0, BTreeMap::from([(1, 0), (2, 0), (3, 0)]))
+                    .expect("frame"),
+            ),
             Err(LockstepSyncError::NonRosterPlayerInput {
                 frame: 0,
                 player_id: 3,
             })
         );
-        assert_eq!(lockstep.next_frame, 0);
+        assert_eq!(lockstep.next_frame(), 0);
 
-        lockstep.next_frame = u64::MAX;
         assert_eq!(
-            lockstep.apply_frame(LockstepFrame {
-                frame: u64::MAX,
-                inputs: BTreeMap::from([(1, 0), (2, 0)]),
-            }),
+            lockstep.apply_frame(LockstepFrame::new_unchecked_for_tests(
+                0,
+                BTreeMap::from([(1, B_PAD_LEFT | B_PAD_RIGHT), (2, 0)]),
+            )),
+            Err(LockstepSyncError::ConflictingJoypadDirections {
+                mask: B_PAD_LEFT | B_PAD_RIGHT,
+            })
+        );
+        assert_eq!(lockstep.next_frame(), 0);
+
+        let mut lockstep = DeterministicLockstep::new_unchecked_for_tests(
+            1,
+            BTreeSet::from([1, 2]),
+            u64::MAX,
+            0,
+        );
+        assert_eq!(
+            lockstep.apply_frame(
+                LockstepFrame::new(u64::MAX, BTreeMap::from([(1, 0), (2, 0)]))
+                    .expect("frame"),
+            ),
             Err(LockstepSyncError::FrameCursorOverflow { frame: u64::MAX })
         );
-        assert_eq!(lockstep.next_frame, u64::MAX);
+        assert_eq!(lockstep.next_frame(), u64::MAX);
     }
 
     #[test]
     fn lockstep_buffer_reports_duplicates_and_conflicts() {
-        let mut buffer = LockstepBuffer::new([1, 2]);
-        let input = PlayerInputFrame::new(1, Frame(3), 0x10);
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
+        let input = PlayerInputFrame::new(1, Frame(3), 0x10).expect("input");
         assert_eq!(
             buffer.insert_input(input.clone()),
             Ok(InsertInputResult::Inserted)
         );
         assert_eq!(buffer.insert_input(input), Ok(InsertInputResult::Duplicate));
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(1, Frame(3), 0x20)),
+            buffer.insert_input(PlayerInputFrame::new(1, Frame(3), 0x20).expect("input")),
             Ok(InsertInputResult::Conflict)
         );
     }
 
     #[test]
+    fn lockstep_buffer_rejects_conflicting_direction_masks() {
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
+        assert_eq!(
+            buffer.insert_input(PlayerInputFrame::new_unchecked_for_tests(
+                1,
+                3,
+                B_PAD_LEFT | B_PAD_RIGHT,
+            )),
+            Err(LockstepSyncError::ConflictingJoypadDirections {
+                mask: B_PAD_LEFT | B_PAD_RIGHT,
+            })
+        );
+        assert_eq!(buffer.frame(3), None);
+    }
+
+    #[test]
+    fn lockstep_buffer_reports_checksum_duplicates_and_conflicts_without_overwrite() {
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
+        let checksum = StateChecksumFrame::new(1, Frame(3), 0xaaaa);
+        assert_eq!(
+            buffer.insert_checksum_frame(checksum.clone()),
+            Ok(InsertChecksumResult::Inserted)
+        );
+        assert_eq!(
+            buffer.insert_checksum_frame(checksum),
+            Ok(InsertChecksumResult::Duplicate)
+        );
+        assert_eq!(
+            buffer.insert_checksum_frame(StateChecksumFrame::new(1, Frame(3), 0xbbbb)),
+            Ok(InsertChecksumResult::Conflict)
+        );
+        buffer
+            .insert_checksum_frame(StateChecksumFrame::new(2, Frame(3), 0xaaaa))
+            .expect("player 2 checksum");
+
+        assert_eq!(buffer.checksum_disagreement(3), None);
+    }
+
+    #[test]
     fn lockstep_buffer_detects_state_hash_disagreement_after_all_players_report() {
-        let mut buffer = LockstepBuffer::new([1, 2]);
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
         buffer
             .insert_checksum_frame(StateChecksumFrame::new(1, Frame(9), 0xaaaa))
             .expect("player 1 checksum");
@@ -2586,20 +3786,17 @@ mod tests {
 
     #[test]
     fn lockstep_buffer_rejects_unknown_players_without_roster_fallback() {
-        let mut buffer = LockstepBuffer::new([1, 2]);
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
 
         assert_eq!(
-            buffer.insert_input(PlayerInputFrame::new(3, Frame(7), 0x10)),
+            buffer.insert_input(PlayerInputFrame::new(3, Frame(7), 0x10).expect("input")),
             Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
         );
         assert_eq!(buffer.players(), vec![1, 2]);
         assert_eq!(
             buffer.insert_checksum(
                 3,
-                StateChecksum {
-                    frame: 7,
-                    hash: 0xaaaa,
-                },
+                StateChecksum::new(7, 0xaaaa),
             ),
             Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
         );
@@ -2608,7 +3805,7 @@ mod tests {
 
     #[test]
     fn lockstep_buffer_requires_exact_roster_cardinality_for_ready_frames() {
-        let mut buffer = LockstepBuffer::new([1, 2]);
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
         buffer
             .inputs
             .insert(8, BTreeMap::from([(1, 0x10), (2, 0x20), (3, 0x30)]));
@@ -2619,69 +3816,160 @@ mod tests {
     }
 
     #[test]
+    fn lockstep_buffer_rejects_empty_rosters() {
+        assert_eq!(
+            LockstepBuffer::new(std::iter::empty::<PlayerId>()),
+            Err(LockstepSyncError::EmptyRoster)
+        );
+    }
+
+    #[test]
     fn latest_remote_presence_filters_local_stale_and_keeps_newest_per_user() {
         let entries = vec![
-            OverworldPresence {
-                user_id: "local".to_string(),
-                player_name: "Local".to_string(),
-                entity_type: PresenceEntityType::Player,
-                map_name: "NEW_BARK_TOWN".to_string(),
-                tile: TilePosition::new(1, 1),
-                direction: Direction::Down,
-                updated_at_ms: 100,
-            },
-            OverworldPresence {
-                user_id: "remote".to_string(),
-                player_name: "Old".to_string(),
-                entity_type: PresenceEntityType::Player,
-                map_name: "ROUTE_29".to_string(),
-                tile: TilePosition::new(2, 2),
-                direction: Direction::Left,
-                updated_at_ms: 50,
-            },
-            OverworldPresence {
-                user_id: "remote".to_string(),
-                player_name: "New".to_string(),
-                entity_type: PresenceEntityType::Player,
-                map_name: "ROUTE_29".to_string(),
-                tile: TilePosition::new(3, 4),
-                direction: Direction::Right,
-                updated_at_ms: 150,
-            },
-            OverworldPresence {
-                user_id: "stale".to_string(),
-                player_name: "Stale".to_string(),
-                entity_type: PresenceEntityType::Ai,
-                map_name: "ROUTE_30".to_string(),
-                tile: TilePosition::new(5, 6),
-                direction: Direction::Up,
-                updated_at_ms: 1,
-            },
+            OverworldPresence::new(
+                "local",
+                "Local",
+                PresenceEntityType::Player,
+                "NEW_BARK_TOWN",
+                TilePosition::new(1, 1),
+                Direction::Down,
+                100,
+            )
+            .expect("presence"),
+            OverworldPresence::new(
+                "remote",
+                "Old",
+                PresenceEntityType::Player,
+                "ROUTE_29",
+                TilePosition::new(2, 2),
+                Direction::Left,
+                50,
+            )
+            .expect("presence"),
+            OverworldPresence::new(
+                "remote",
+                "New",
+                PresenceEntityType::Player,
+                "ROUTE_29",
+                TilePosition::new(3, 4),
+                Direction::Right,
+                150,
+            )
+            .expect("presence"),
+            OverworldPresence::new(
+                "stale",
+                "Stale",
+                PresenceEntityType::Ai,
+                "ROUTE_30",
+                TilePosition::new(5, 6),
+                Direction::Up,
+                1,
+            )
+            .expect("presence"),
         ];
 
         let remote = latest_remote_presence(&entries, "local", 200, 100);
         assert_eq!(remote.len(), 1);
-        assert_eq!(remote[0].user_id, "remote");
-        assert_eq!(remote[0].player_name, "New");
-        assert_eq!(remote[0].tile, TilePosition::new(3, 4));
+        assert_eq!(remote[0].user_id(), "remote");
+        assert_eq!(remote[0].player_name(), "New");
+        assert_eq!(remote[0].tile(), TilePosition::new(3, 4));
     }
 
     #[test]
     fn presence_and_interaction_messages_are_transport_neutral_json() {
-        let message = LinkMessage::Presence(OverworldPresence {
-            user_id: "u1".to_string(),
-            player_name: "CHRIS".to_string(),
-            entity_type: PresenceEntityType::Player,
-            map_name: "ROUTE_29".to_string(),
-            tile: TilePosition::new(10, 12),
-            direction: Direction::Up,
-            updated_at_ms: 1234,
-        });
+        let message = LinkMessage::Presence(
+            OverworldPresence::new(
+                "u1",
+                "CHRIS",
+                PresenceEntityType::Player,
+                "ROUTE_29",
+                TilePosition::new(10, 12),
+                Direction::Up,
+                1234,
+            )
+            .expect("presence"),
+        );
         let json = serde_json::to_string(&message).expect("serialize presence");
         assert!(json.contains(r#""type":"presence""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize presence"),
             message
+        );
+    }
+
+    #[test]
+    fn presence_and_interaction_validate_exact_identity_fields() {
+        let presence = OverworldPresence::new_unchecked_for_tests(
+            " u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            presence.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "presence user id",
+            })
+        );
+
+        let request = MultiplayerInteractionRequest::new_unchecked_for_tests(
+            "",
+            "u1",
+            "CHRIS",
+            "u2",
+            MultiplayerInteractionKind::Trade,
+            1234,
+        );
+        assert_eq!(
+            request.validate(),
+            Err(MultiplayerMessageError::EmptyText {
+                field: "interaction request id",
+            })
+        );
+
+        let response = MultiplayerInteractionResponse::new_unchecked_for_tests(
+            "request-1",
+            "u2",
+            " u1",
+            MultiplayerInteractionKind::Trade,
+            true,
+            1235,
+        );
+        assert_eq!(
+            response.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "interaction response target user id",
+            })
+        );
+    }
+
+    #[test]
+    fn link_message_validate_owns_protocol_payload_rules() {
+        assert_eq!(
+            LinkMessage::Disconnect {
+                player_id: 1,
+                reason: " done".to_string(),
+            }
+            .validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "disconnect reason",
+            })
+        );
+
+        assert_eq!(
+            LinkMessage::BattleAction(BattleActionFrame::new_unchecked_for_tests(
+                1,
+                7,
+                BattleAction::Run,
+                Some(String::new()),
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidBattleAction {
+                message: "battle sync state hash must be non-empty".to_string(),
+            })
         );
     }
 }

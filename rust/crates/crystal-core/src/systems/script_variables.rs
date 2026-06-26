@@ -55,8 +55,12 @@ pub enum ScriptVariableCommandError {
     UnexpectedValue { command: String },
     #[error("script variable command '{command}' references empty target")]
     EmptyTarget { command: String },
+    #[error("script variable command '{command}' references invalid target '{target}'")]
+    InvalidTarget { command: String, target: String },
     #[error("script variable command '{command}' has an empty value token")]
     EmptyValueToken { command: String },
+    #[error("script variable command '{command}' has invalid value token '{token}'")]
+    InvalidValueToken { command: String, token: String },
     #[error("script variable '{variable}' is unset")]
     UnsetVariable { variable: String },
     #[error("script memory '{memory}' is unset")]
@@ -65,6 +69,30 @@ pub enum ScriptVariableCommandError {
     UnsetAccumulator,
     #[error("unknown script time token '{time_token}'")]
     UnknownTimeToken { time_token: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptVariableCommandIssue {
+    pub source_script: String,
+    pub command_index: usize,
+    pub error: ScriptVariableCommandError,
+}
+
+pub fn script_variable_command_issues(
+    commands: &[ScriptVariableCommand],
+) -> Vec<ScriptVariableCommandIssue> {
+    commands
+        .iter()
+        .filter_map(|command| {
+            validate_script_variable_command(command)
+                .err()
+                .map(|error| ScriptVariableCommandIssue {
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                    error,
+                })
+        })
+        .collect()
 }
 
 pub fn apply_script_variable_command(
@@ -228,6 +256,12 @@ fn require_target(command: &ScriptVariableCommand) -> Result<&str, ScriptVariabl
             command: command.command.clone(),
         });
     }
+    if target.trim() != target {
+        return Err(ScriptVariableCommandError::InvalidTarget {
+            command: command.command.clone(),
+            target: target.to_string(),
+        });
+    }
     Ok(target)
 }
 
@@ -252,6 +286,16 @@ fn require_joined_value(
     if command.value_tokens.iter().any(|token| token.is_empty()) {
         return Err(ScriptVariableCommandError::EmptyValueToken {
             command: command.command.clone(),
+        });
+    }
+    if let Some(token) = command
+        .value_tokens
+        .iter()
+        .find(|token| token.trim() != **token)
+    {
+        return Err(ScriptVariableCommandError::InvalidValueToken {
+            command: command.command.clone(),
+            token: token.clone(),
         });
     }
     Ok(command.value_tokens.join(" "))
@@ -405,5 +449,87 @@ mod tests {
             })
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("FALSE"));
+    }
+
+    #[test]
+    fn rejects_padded_targets_and_value_tokens_without_normalization() {
+        assert!(matches!(
+            validate_script_variable_command(&command("readvar", Some(" VAR_CALLERID"), &[])),
+            Err(ScriptVariableCommandError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
+            validate_script_variable_command(&command("setval", None, &[" TRUE"])),
+            Err(ScriptVariableCommandError::InvalidValueToken { .. })
+        ));
+        assert!(matches!(
+            validate_script_variable_command(&command("checktime", None, &[" NITE"])),
+            Err(ScriptVariableCommandError::InvalidValueToken { .. })
+        ));
+
+        let mut state = GameState::default();
+        assert!(matches!(
+            apply_script_variable_command(
+                &mut state,
+                command("loadmem", Some(" wVanceFightCount"), &["2"]),
+                None,
+            ),
+            Err(ScriptVariableCommandError::InvalidTarget { .. })
+        ));
+        assert!(state.script_runtime.memory.is_empty());
+    }
+
+    #[test]
+    fn script_variable_command_issues_preserve_exact_source_positions() {
+        let commands = vec![
+            command("checktime", None, &["night"]),
+            command("readvar", Some(""), &[]),
+            command("readmem", Some(" wVanceFightCount"), &[]),
+            command("setval", None, &[" TRUE"]),
+            command("setval", Some("VAR_BADGES"), &["7"]),
+            command("loadvar", Some("VAR_CALLERID"), &["PHONE_BIRDKEEPER_VANCE"]),
+        ];
+
+        assert_eq!(
+            script_variable_command_issues(&commands),
+            vec![
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::UnknownTimeToken {
+                        time_token: "night".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::EmptyTarget {
+                        command: "readvar".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::InvalidTarget {
+                        command: "readmem".to_string(),
+                        target: " wVanceFightCount".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::InvalidValueToken {
+                        command: "setval".to_string(),
+                        token: " TRUE".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::UnexpectedTarget {
+                        command: "setval".to_string(),
+                    },
+                },
+            ]
+        );
     }
 }

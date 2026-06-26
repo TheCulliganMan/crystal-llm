@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::map::{MapAttributes, MapConnection};
@@ -52,6 +54,86 @@ pub struct OverworldMapData {
     pub border_block: u16,
     pub connections: Vec<MapConnection>,
     pub metatile_ids: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeMapMetadata {
+    pub constant: String,
+    pub name: String,
+    pub group_name: String,
+    pub group_id: u16,
+    pub map_id: u16,
+    pub width: u16,
+    pub height: u16,
+    pub environment: String,
+    pub phone_service: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeMapMetadataIssue {
+    ConstantMismatch {
+        key: String,
+        record_constant: String,
+    },
+    NameMismatch {
+        key: String,
+        constant: String,
+        metadata_name: String,
+        map_name: String,
+    },
+    UnknownMapConstant {
+        key: String,
+        constant: String,
+    },
+    InvalidMetadata {
+        key: String,
+    },
+}
+
+pub fn runtime_map_metadata_issues(
+    metadata: &BTreeMap<String, RuntimeMapMetadata>,
+    map_names: &BTreeMap<String, String>,
+) -> Vec<RuntimeMapMetadataIssue> {
+    let mut issues = Vec::new();
+
+    for (key, metadata) in metadata {
+        let invalid_metadata = !is_exact_nonempty_metadata_token(key)
+            || !is_exact_nonempty_metadata_token(&metadata.constant)
+            || !is_exact_nonempty_metadata_token(&metadata.name)
+            || !is_exact_nonempty_metadata_token(&metadata.group_name)
+            || !is_exact_nonempty_metadata_token(&metadata.environment);
+        if invalid_metadata {
+            issues.push(RuntimeMapMetadataIssue::InvalidMetadata { key: key.clone() });
+        }
+        if key != &metadata.constant {
+            issues.push(RuntimeMapMetadataIssue::ConstantMismatch {
+                key: key.clone(),
+                record_constant: metadata.constant.clone(),
+            });
+        }
+        if is_exact_nonempty_metadata_token(&metadata.constant) {
+            match map_names.get(&metadata.constant) {
+                Some(map_name) if map_name == &metadata.name => {}
+                Some(map_name) => issues.push(RuntimeMapMetadataIssue::NameMismatch {
+                    key: key.clone(),
+                    constant: metadata.constant.clone(),
+                    metadata_name: metadata.name.clone(),
+                    map_name: map_name.clone(),
+                }),
+                None => issues.push(RuntimeMapMetadataIssue::UnknownMapConstant {
+                    key: key.clone(),
+                    constant: metadata.constant.clone(),
+                }),
+            }
+        }
+    }
+
+    issues
+}
+
+fn is_exact_nonempty_metadata_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
 }
 
 impl OverworldMapData {
@@ -152,6 +234,85 @@ mod tests {
             OverworldMapData::from_attributes("test", &attributes(2, 2, 7), vec![1, 2, 3, 4, 5]);
         assert_eq!((truncated.width, truncated.height), (2, 2));
         assert_eq!(truncated.metatile_ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn runtime_map_metadata_issues_validate_exact_pack_records() {
+        let metadata = [
+            (
+                "ROUTE_29".to_string(),
+                RuntimeMapMetadata {
+                    constant: "ROUTE_29_ALIAS".to_string(),
+                    name: "Route29".to_string(),
+                    group_name: String::new(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: 10,
+                    height: 9,
+                    environment: "TOWN".to_string(),
+                    phone_service: 1,
+                },
+            ),
+            (
+                " ROUTE_30".to_string(),
+                RuntimeMapMetadata {
+                    constant: " ROUTE_30".to_string(),
+                    name: " Route30".to_string(),
+                    group_name: "GROUP_ROUTE_30".to_string(),
+                    group_id: 1,
+                    map_id: 3,
+                    width: 10,
+                    height: 9,
+                    environment: "ROUTE".to_string(),
+                    phone_service: 1,
+                },
+            ),
+            (
+                "NEW_BARK_TOWN".to_string(),
+                RuntimeMapMetadata {
+                    constant: "NEW_BARK_TOWN".to_string(),
+                    name: "WrongName".to_string(),
+                    group_name: "GROUP_NEW_BARK".to_string(),
+                    group_id: 1,
+                    map_id: 2,
+                    width: 10,
+                    height: 9,
+                    environment: "TOWN".to_string(),
+                    phone_service: 1,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let map_names = [("NEW_BARK_TOWN".to_string(), "NewBarkTown".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            runtime_map_metadata_issues(&metadata, &map_names),
+            vec![
+                RuntimeMapMetadataIssue::InvalidMetadata {
+                    key: " ROUTE_30".to_string(),
+                },
+                RuntimeMapMetadataIssue::NameMismatch {
+                    key: "NEW_BARK_TOWN".to_string(),
+                    constant: "NEW_BARK_TOWN".to_string(),
+                    metadata_name: "WrongName".to_string(),
+                    map_name: "NewBarkTown".to_string(),
+                },
+                RuntimeMapMetadataIssue::InvalidMetadata {
+                    key: "ROUTE_29".to_string(),
+                },
+                RuntimeMapMetadataIssue::ConstantMismatch {
+                    key: "ROUTE_29".to_string(),
+                    record_constant: "ROUTE_29_ALIAS".to_string(),
+                },
+                RuntimeMapMetadataIssue::UnknownMapConstant {
+                    key: "ROUTE_29".to_string(),
+                    constant: "ROUTE_29_ALIAS".to_string(),
+                },
+            ],
+        );
     }
 
     #[test]

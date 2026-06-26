@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -196,6 +196,92 @@ impl EncounterSlotTables {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncounterSlotTableIssue {
+    MissingTable {
+        surface: EncounterSurface,
+    },
+    InvalidThreshold {
+        surface: EncounterSurface,
+        threshold: u8,
+    },
+    UnorderedThreshold {
+        surface: EncounterSurface,
+        threshold: u8,
+        previous: u8,
+    },
+    DuplicateSlotIndex {
+        surface: EncounterSurface,
+        slot: usize,
+    },
+    IncompleteTable {
+        surface: EncounterSurface,
+    },
+}
+
+impl EncounterSlotTableIssue {
+    pub fn surface(&self) -> EncounterSurface {
+        match self {
+            Self::MissingTable { surface }
+            | Self::InvalidThreshold { surface, .. }
+            | Self::UnorderedThreshold { surface, .. }
+            | Self::DuplicateSlotIndex { surface, .. }
+            | Self::IncompleteTable { surface } => *surface,
+        }
+    }
+}
+
+pub fn encounter_slot_table_issues(
+    tables: &EncounterSlotTables,
+    required: bool,
+) -> Vec<EncounterSlotTableIssue> {
+    if !required {
+        return Vec::new();
+    }
+    let mut issues = Vec::new();
+    push_encounter_slot_table_issues(EncounterSurface::Grass, &tables.grass, &mut issues);
+    push_encounter_slot_table_issues(EncounterSurface::Water, &tables.water, &mut issues);
+    issues
+}
+
+fn push_encounter_slot_table_issues(
+    surface: EncounterSurface,
+    table: &[EncounterSlotChance],
+    issues: &mut Vec<EncounterSlotTableIssue>,
+) {
+    if table.is_empty() {
+        issues.push(EncounterSlotTableIssue::MissingTable { surface });
+        return;
+    }
+    let mut previous_threshold = 0;
+    let mut slots = BTreeSet::new();
+    for entry in table {
+        if entry.threshold == 0 || entry.threshold > 100 {
+            issues.push(EncounterSlotTableIssue::InvalidThreshold {
+                surface,
+                threshold: entry.threshold,
+            });
+        }
+        if entry.threshold < previous_threshold {
+            issues.push(EncounterSlotTableIssue::UnorderedThreshold {
+                surface,
+                threshold: entry.threshold,
+                previous: previous_threshold,
+            });
+        }
+        previous_threshold = entry.threshold;
+        if !slots.insert(entry.slot) {
+            issues.push(EncounterSlotTableIssue::DuplicateSlotIndex {
+                surface,
+                slot: entry.slot,
+            });
+        }
+    }
+    if previous_threshold != 100 {
+        issues.push(EncounterSlotTableIssue::IncompleteTable { surface });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncounterMusicModifier {
@@ -216,6 +302,52 @@ impl EncounterMusicModifiers {
             .iter()
             .find(|modifier| modifier.music_id == music_id)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncounterMusicModifierIssue {
+    MissingTable,
+    MissingMusicId { music_id: String },
+    UnknownMusicId { music_id: String },
+    DuplicateMusicId { music_id: String },
+    InvalidRatio { music_id: String },
+}
+
+pub fn encounter_music_modifier_issues(
+    modifiers: &EncounterMusicModifiers,
+    music_ids: &BTreeSet<String>,
+    required: bool,
+) -> Vec<EncounterMusicModifierIssue> {
+    if !required {
+        return Vec::new();
+    }
+    if modifiers.modifiers.is_empty() {
+        return vec![EncounterMusicModifierIssue::MissingTable];
+    }
+    let mut issues = Vec::new();
+    let mut seen = BTreeSet::new();
+    for modifier in &modifiers.modifiers {
+        if modifier.music_id.is_empty() {
+            issues.push(EncounterMusicModifierIssue::MissingMusicId {
+                music_id: modifier.music_id.clone(),
+            });
+        } else if !music_ids.contains(&modifier.music_id) {
+            issues.push(EncounterMusicModifierIssue::UnknownMusicId {
+                music_id: modifier.music_id.clone(),
+            });
+        }
+        if !seen.insert(modifier.music_id.as_str()) {
+            issues.push(EncounterMusicModifierIssue::DuplicateMusicId {
+                music_id: modifier.music_id.clone(),
+            });
+        }
+        if modifier.denominator == 0 {
+            issues.push(EncounterMusicModifierIssue::InvalidRatio {
+                music_id: modifier.music_id.clone(),
+            });
+        }
+    }
+    issues
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +441,335 @@ pub fn percent_to_byte(value: f64) -> u8 {
         return 255;
     }
     ((value * 255.0) / 100.0).floor() as u8
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WildEncounterCatalogIssue {
+    InvalidMap {
+        map_name: String,
+    },
+    UnknownMap {
+        map_name: String,
+    },
+    InvalidSpecies {
+        map_name: String,
+        species_id: String,
+    },
+    UnknownSpecies {
+        map_name: String,
+        species_id: String,
+    },
+    InvalidGrassRateTime {
+        map_name: String,
+        time_key: String,
+    },
+    UnknownGrassRateTime {
+        map_name: String,
+        time_key: String,
+    },
+    MissingGrassRate {
+        map_name: String,
+        time_key: &'static str,
+    },
+    EmptyGrassSlots {
+        map_name: String,
+        time_key: &'static str,
+    },
+    MissingGrassTable {
+        map_name: String,
+    },
+    MissingWaterRate {
+        map_name: String,
+    },
+    EmptyWaterSlots {
+        map_name: String,
+        time_key: &'static str,
+    },
+    MissingWaterTable {
+        map_name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldEncounterCatalogIssue {
+    InvalidMap {
+        map_name: String,
+    },
+    UnknownMap {
+        map_name: String,
+    },
+    InvalidSpecies {
+        map_name: String,
+        species_id: String,
+    },
+    UnknownSpecies {
+        map_name: String,
+        species_id: String,
+    },
+    EmptyBucket {
+        map_name: String,
+        kind: &'static str,
+        bucket: &'static str,
+    },
+    ZeroWeight {
+        map_name: String,
+        kind: &'static str,
+        bucket: &'static str,
+        entry_index: usize,
+        species_id: String,
+    },
+    InvalidWeightTotal {
+        map_name: String,
+        kind: &'static str,
+        bucket: &'static str,
+        total_weight: u16,
+    },
+}
+
+pub fn wild_encounter_catalog_issues(
+    encounters: &BTreeMap<String, WildEncounterData>,
+    map_ids: &BTreeSet<String>,
+    species_ids: &BTreeSet<String>,
+) -> Vec<WildEncounterCatalogIssue> {
+    let mut issues = Vec::new();
+    for (map_name, encounter_data) in encounters {
+        if !is_exact_nonempty_encounter_token(map_name) {
+            issues.push(WildEncounterCatalogIssue::InvalidMap {
+                map_name: map_name.clone(),
+            });
+        } else if !map_ids.contains(map_name) {
+            issues.push(WildEncounterCatalogIssue::UnknownMap {
+                map_name: map_name.clone(),
+            });
+        }
+        for species_id in wild_encounter_species(encounter_data) {
+            if !is_exact_nonempty_encounter_token(&species_id) {
+                issues.push(WildEncounterCatalogIssue::InvalidSpecies {
+                    map_name: map_name.clone(),
+                    species_id,
+                });
+            } else if !species_ids.contains(&species_id) {
+                issues.push(WildEncounterCatalogIssue::UnknownSpecies {
+                    map_name: map_name.clone(),
+                    species_id,
+                });
+            }
+        }
+        push_wild_encounter_table_issues(map_name, encounter_data, &mut issues);
+    }
+    issues
+}
+
+pub fn field_encounter_catalog_issues(
+    encounters: &BTreeMap<String, FieldEncounterData>,
+    map_ids: &BTreeSet<String>,
+    species_ids: &BTreeSet<String>,
+) -> Vec<FieldEncounterCatalogIssue> {
+    let mut issues = Vec::new();
+    for (map_name, encounter_data) in encounters {
+        if !is_exact_nonempty_encounter_token(map_name) {
+            issues.push(FieldEncounterCatalogIssue::InvalidMap {
+                map_name: map_name.clone(),
+            });
+        } else if !map_ids.contains(map_name) {
+            issues.push(FieldEncounterCatalogIssue::UnknownMap {
+                map_name: map_name.clone(),
+            });
+        }
+        for species_id in field_encounter_species(encounter_data) {
+            if !is_exact_nonempty_encounter_token(&species_id) {
+                issues.push(FieldEncounterCatalogIssue::InvalidSpecies {
+                    map_name: map_name.clone(),
+                    species_id,
+                });
+            } else if !species_ids.contains(&species_id) {
+                issues.push(FieldEncounterCatalogIssue::UnknownSpecies {
+                    map_name: map_name.clone(),
+                    species_id,
+                });
+            }
+        }
+        push_field_encounter_table_issues(map_name, encounter_data, &mut issues);
+    }
+    issues
+}
+
+fn wild_encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
+    let mut species = BTreeSet::new();
+    for table in [data.grass.as_ref(), data.water.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        for encounter in table
+            .morning
+            .iter()
+            .chain(table.day.iter())
+            .chain(table.night.iter())
+        {
+            species.insert(encounter.species.clone());
+        }
+    }
+    species
+}
+
+fn is_exact_nonempty_encounter_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
+fn field_encounter_species(data: &FieldEncounterData) -> BTreeSet<String> {
+    let mut species = BTreeSet::new();
+    for table in [data.headbutt.as_ref(), data.rock_smash.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        for encounter in table.common.iter().chain(table.rare.iter()) {
+            species.insert(encounter.species.clone());
+        }
+    }
+    species
+}
+
+fn push_wild_encounter_table_issues(
+    map_name: &str,
+    encounters: &WildEncounterData,
+    issues: &mut Vec<WildEncounterCatalogIssue>,
+) {
+    if let Some(rates) = encounters.grass_rates.as_ref() {
+        for time_key in rates.keys() {
+            if !is_exact_nonempty_encounter_token(time_key) {
+                issues.push(WildEncounterCatalogIssue::InvalidGrassRateTime {
+                    map_name: map_name.to_string(),
+                    time_key: time_key.clone(),
+                });
+            } else if !ENCOUNTER_TIME_KEYS.contains(&time_key.as_str()) {
+                issues.push(WildEncounterCatalogIssue::UnknownGrassRateTime {
+                    map_name: map_name.to_string(),
+                    time_key: time_key.clone(),
+                });
+            }
+        }
+    }
+
+    if let Some(grass) = encounters.grass.as_ref() {
+        for time_key in ENCOUNTER_TIME_KEYS {
+            let time_of_day =
+                resolve_encounter_time_key(time_key).expect("core encounter time key must resolve");
+            let rate = encounters
+                .grass_rates
+                .as_ref()
+                .and_then(|rates| rates.get(*time_key))
+                .copied();
+            if rate.is_none() {
+                issues.push(WildEncounterCatalogIssue::MissingGrassRate {
+                    map_name: map_name.to_string(),
+                    time_key,
+                });
+            }
+            if rate.is_some_and(|rate| rate > 0) && grass.slots(time_of_day).is_empty() {
+                issues.push(WildEncounterCatalogIssue::EmptyGrassSlots {
+                    map_name: map_name.to_string(),
+                    time_key,
+                });
+            }
+        }
+    } else if encounters
+        .grass_rates
+        .as_ref()
+        .is_some_and(|rates| rates.values().any(|rate| *rate > 0))
+    {
+        issues.push(WildEncounterCatalogIssue::MissingGrassTable {
+            map_name: map_name.to_string(),
+        });
+    }
+
+    if let Some(water) = encounters.water.as_ref() {
+        if encounters.water_rate.is_none() {
+            issues.push(WildEncounterCatalogIssue::MissingWaterRate {
+                map_name: map_name.to_string(),
+            });
+        }
+        if encounters.water_rate.is_some_and(|rate| rate > 0) {
+            for time_key in ENCOUNTER_TIME_KEYS {
+                let time_of_day = resolve_encounter_time_key(time_key)
+                    .expect("core encounter time key must resolve");
+                if water.slots(time_of_day).is_empty() {
+                    issues.push(WildEncounterCatalogIssue::EmptyWaterSlots {
+                        map_name: map_name.to_string(),
+                        time_key,
+                    });
+                }
+            }
+        }
+    } else if encounters.water_rate.is_some_and(|rate| rate > 0) {
+        issues.push(WildEncounterCatalogIssue::MissingWaterTable {
+            map_name: map_name.to_string(),
+        });
+    }
+}
+
+fn push_field_encounter_table_issues(
+    map_name: &str,
+    encounters: &FieldEncounterData,
+    issues: &mut Vec<FieldEncounterCatalogIssue>,
+) {
+    if let Some(headbutt) = encounters.headbutt.as_ref() {
+        push_field_encounter_bucket_issues(
+            map_name,
+            "headbutt",
+            "common",
+            &headbutt.common,
+            issues,
+        );
+        push_field_encounter_bucket_issues(map_name, "headbutt", "rare", &headbutt.rare, issues);
+    }
+    if let Some(rock_smash) = encounters.rock_smash.as_ref() {
+        push_field_encounter_bucket_issues(
+            map_name,
+            "rock_smash",
+            "common",
+            &rock_smash.common,
+            issues,
+        );
+    }
+}
+
+fn push_field_encounter_bucket_issues(
+    map_name: &str,
+    kind: &'static str,
+    bucket: &'static str,
+    entries: &[FieldEncounterEntry],
+    issues: &mut Vec<FieldEncounterCatalogIssue>,
+) {
+    if entries.is_empty() {
+        issues.push(FieldEncounterCatalogIssue::EmptyBucket {
+            map_name: map_name.to_string(),
+            kind,
+            bucket,
+        });
+        return;
+    }
+
+    for (entry_index, entry) in entries.iter().enumerate() {
+        if entry.weight == 0 {
+            issues.push(FieldEncounterCatalogIssue::ZeroWeight {
+                map_name: map_name.to_string(),
+                kind,
+                bucket,
+                entry_index,
+                species_id: entry.species.clone(),
+            });
+        }
+    }
+
+    let total_weight: u16 = entries.iter().map(|entry| u16::from(entry.weight)).sum();
+    if total_weight != 100 {
+        issues.push(FieldEncounterCatalogIssue::InvalidWeightTotal {
+            map_name: map_name.to_string(),
+            kind,
+            bucket,
+            total_weight,
+        });
+    }
 }
 
 pub fn table_for_surface(
@@ -799,6 +1260,271 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn encounter_slot_table_issues_validate_exact_threshold_tables() {
+        let tables = EncounterSlotTables {
+            grass: vec![
+                EncounterSlotChance {
+                    threshold: 60,
+                    slot: 0,
+                },
+                EncounterSlotChance {
+                    threshold: 50,
+                    slot: 0,
+                },
+                EncounterSlotChance {
+                    threshold: 0,
+                    slot: 1,
+                },
+            ],
+            water: Vec::new(),
+        };
+
+        assert_eq!(
+            encounter_slot_table_issues(&tables, true),
+            vec![
+                EncounterSlotTableIssue::UnorderedThreshold {
+                    surface: EncounterSurface::Grass,
+                    threshold: 50,
+                    previous: 60,
+                },
+                EncounterSlotTableIssue::DuplicateSlotIndex {
+                    surface: EncounterSurface::Grass,
+                    slot: 0,
+                },
+                EncounterSlotTableIssue::InvalidThreshold {
+                    surface: EncounterSurface::Grass,
+                    threshold: 0,
+                },
+                EncounterSlotTableIssue::UnorderedThreshold {
+                    surface: EncounterSurface::Grass,
+                    threshold: 0,
+                    previous: 50,
+                },
+                EncounterSlotTableIssue::IncompleteTable {
+                    surface: EncounterSurface::Grass,
+                },
+                EncounterSlotTableIssue::MissingTable {
+                    surface: EncounterSurface::Water,
+                },
+            ]
+        );
+        assert_eq!(encounter_slot_table_issues(&tables, false), []);
+    }
+
+    #[test]
+    fn encounter_music_modifier_issues_validate_exact_music_ids() {
+        let modifiers = EncounterMusicModifiers {
+            modifiers: vec![
+                EncounterMusicModifier {
+                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                    numerator: 2,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
+                    music_id: "music_pokemon_march".to_string(),
+                    numerator: 1,
+                    denominator: 0,
+                },
+                EncounterMusicModifier {
+                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                    numerator: 1,
+                    denominator: 1,
+                },
+            ],
+        };
+        let music_ids = ["MUSIC_POKEMON_MARCH".to_string()].into_iter().collect();
+
+        assert_eq!(
+            encounter_music_modifier_issues(&modifiers, &music_ids, true),
+            vec![
+                EncounterMusicModifierIssue::UnknownMusicId {
+                    music_id: "music_pokemon_march".to_string(),
+                },
+                EncounterMusicModifierIssue::InvalidRatio {
+                    music_id: "music_pokemon_march".to_string(),
+                },
+                EncounterMusicModifierIssue::DuplicateMusicId {
+                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            encounter_music_modifier_issues(&EncounterMusicModifiers::default(), &music_ids, true),
+            vec![EncounterMusicModifierIssue::MissingTable]
+        );
+        assert_eq!(
+            encounter_music_modifier_issues(&EncounterMusicModifiers::default(), &music_ids, false),
+            []
+        );
+    }
+
+    #[test]
+    fn wild_encounter_catalog_issues_validate_exact_ids_and_required_tables() {
+        let mut route = sample_data();
+        route.grass_rates = Some(
+            [
+                ("morning".to_string(), 10),
+                ("day".to_string(), 10),
+                ("night".to_string(), 10),
+                (" night".to_string(), 5),
+                ("dusk".to_string(), 5),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        route.grass.as_mut().expect("grass").day.clear();
+        route.water_rate = Some(10);
+        route.water.as_mut().expect("water").night.clear();
+        route.grass.as_mut().expect("grass").morning[0].species = " PIDGEY".to_string();
+        route.grass.as_mut().expect("grass").morning[1].species = "pidgey".to_string();
+        let mut missing_table = sample_data();
+        missing_table.map_name = "ROUTE_30".to_string();
+        missing_table.grass = None;
+        missing_table.water = None;
+        missing_table.water_rate = Some(5);
+        let invalid_map = WildEncounterData {
+            map_name: " route_29".to_string(),
+            grass_rates: None,
+            water_rate: None,
+            grass: None,
+            water: None,
+        };
+        let encounters = [
+            (" route_29".to_string(), invalid_map),
+            ("route_29".to_string(), route),
+            ("ROUTE_30".to_string(), missing_table),
+        ]
+        .into_iter()
+        .collect();
+        let map_ids = ["ROUTE_29".to_string(), "ROUTE_30".to_string()]
+            .into_iter()
+            .collect();
+        let species_ids = ["PIDGEY".to_string(), "RATTATA".to_string()]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            wild_encounter_catalog_issues(&encounters, &map_ids, &species_ids),
+            vec![
+                WildEncounterCatalogIssue::InvalidMap {
+                    map_name: " route_29".to_string(),
+                },
+                WildEncounterCatalogIssue::MissingGrassTable {
+                    map_name: "ROUTE_30".to_string(),
+                },
+                WildEncounterCatalogIssue::MissingWaterTable {
+                    map_name: "ROUTE_30".to_string(),
+                },
+                WildEncounterCatalogIssue::UnknownMap {
+                    map_name: "route_29".to_string(),
+                },
+                WildEncounterCatalogIssue::InvalidSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: " PIDGEY".to_string(),
+                },
+                WildEncounterCatalogIssue::UnknownSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: "MAGIKARP".to_string(),
+                },
+                WildEncounterCatalogIssue::UnknownSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: "pidgey".to_string(),
+                },
+                WildEncounterCatalogIssue::InvalidGrassRateTime {
+                    map_name: "route_29".to_string(),
+                    time_key: " night".to_string(),
+                },
+                WildEncounterCatalogIssue::UnknownGrassRateTime {
+                    map_name: "route_29".to_string(),
+                    time_key: "dusk".to_string(),
+                },
+                WildEncounterCatalogIssue::EmptyGrassSlots {
+                    map_name: "route_29".to_string(),
+                    time_key: "day",
+                },
+                WildEncounterCatalogIssue::EmptyGrassSlots {
+                    map_name: "route_29".to_string(),
+                    time_key: "night",
+                },
+                WildEncounterCatalogIssue::EmptyWaterSlots {
+                    map_name: "route_29".to_string(),
+                    time_key: "day",
+                },
+                WildEncounterCatalogIssue::EmptyWaterSlots {
+                    map_name: "route_29".to_string(),
+                    time_key: "night",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn field_encounter_catalog_issues_validate_exact_ids_and_weights() {
+        let mut data = field_data();
+        data.headbutt.as_mut().expect("headbutt").common[0].species = " PIDGEY".to_string();
+        data.rock_smash.as_mut().expect("rock smash").common[0].species = "pidgey".to_string();
+        data.headbutt.as_mut().expect("headbutt").common[0].weight = 0;
+        data.headbutt.as_mut().expect("headbutt").rare.clear();
+        let invalid_map = FieldEncounterData {
+            map_name: " route_29".to_string(),
+            headbutt: None,
+            rock_smash: None,
+        };
+        let encounters = [
+            (" route_29".to_string(), invalid_map),
+            ("route_29".to_string(), data),
+        ]
+        .into_iter()
+        .collect();
+        let map_ids = ["Route29".to_string()].into_iter().collect();
+        let species_ids = ["HOOTHOOT".to_string(), "PINECO".to_string()]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            field_encounter_catalog_issues(&encounters, &map_ids, &species_ids),
+            vec![
+                FieldEncounterCatalogIssue::InvalidMap {
+                    map_name: " route_29".to_string(),
+                },
+                FieldEncounterCatalogIssue::UnknownMap {
+                    map_name: "route_29".to_string(),
+                },
+                FieldEncounterCatalogIssue::InvalidSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: " PIDGEY".to_string(),
+                },
+                FieldEncounterCatalogIssue::UnknownSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: "SHUCKLE".to_string(),
+                },
+                FieldEncounterCatalogIssue::UnknownSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: "pidgey".to_string(),
+                },
+                FieldEncounterCatalogIssue::ZeroWeight {
+                    map_name: "route_29".to_string(),
+                    kind: "headbutt",
+                    bucket: "common",
+                    entry_index: 0,
+                    species_id: " PIDGEY".to_string(),
+                },
+                FieldEncounterCatalogIssue::InvalidWeightTotal {
+                    map_name: "route_29".to_string(),
+                    kind: "headbutt",
+                    bucket: "common",
+                    total_weight: 0,
+                },
+                FieldEncounterCatalogIssue::EmptyBucket {
+                    map_name: "route_29".to_string(),
+                    kind: "headbutt",
+                    bucket: "rare",
+                },
+            ]
+        );
     }
 
     #[test]

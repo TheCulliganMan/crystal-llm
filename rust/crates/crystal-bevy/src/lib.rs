@@ -3,117 +3,116 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use crystal_assets::modpack::{
-    CompiledGamePack, GameDataSet, LoadedCompiledGamePack, ModpackAudioKind,
+    CompiledGamePack, GameDataSet, LoadedCompiledGamePack, ModpackAudioKind, ModpackAudioSource,
 };
 use crystal_assets::{AssetRoot, RuntimeMapMetadata, RuntimeSpawnPoint};
 use crystal_audio::{AudioKind, AudioProgram, AudioProgramSource};
 use crystal_core::battle::capture::{
-    CaptureAttemptContext, CaptureOutcome, StoredCapture, complete_captured_pokemon,
-    throw_ball_from_bag, validate_capture_ball_item,
+    complete_captured_pokemon, throw_ball_from_bag, validate_capture_ball_item,
+    CaptureAttemptContext, CaptureOutcome, StoredCapture,
 };
 use crystal_core::battle::start::{
-    StaticWildBattleStart, TrainerBattleCompletion, TrainerBattleStartStatus, WildBattleStart,
-    complete_trainer_battle,
+    complete_trainer_battle, StaticWildBattleStart, TrainerBattleCompletion,
+    TrainerBattleStartStatus, WildBattleStart,
 };
 use crystal_core::battle::turn::{
-    BattleAction, BattleCombatState, BattleTurnInput, BattleTurnOutcome,
-    resolve_battle_turn_with_items,
+    resolve_battle_turn_with_items, BattleAction, BattleCombatState, BattleTurnInput,
+    BattleTurnOutcome,
 };
 use crystal_core::input::{
-    B_PAD_A, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP, GameButton, JoypadState,
+    GameButton, JoypadState, B_PAD_A, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP,
 };
 use crystal_core::models::{Dv, Item, Move, Pokemon, PokemonSpecies};
-use crystal_core::multiplayer::{PlayerId, StateChecksum, StateChecksumFrame, game_state_checksum};
+use crystal_core::multiplayer::{game_state_checksum, PlayerId, StateChecksum, StateChecksumFrame};
 use crystal_core::random::Random;
 use crystal_core::save::{
-    SaveGame, SaveModpackIdentity, assert_save_matches_modpack, read_save_game, write_save_game,
+    read_save_game_for_modpack, write_save_game_for_modpack, SaveModpackIdentity,
 };
 use crystal_core::state::{
     BattleMemory, GameState, OverworldFollowMemory, OverworldMemory, OverworldObjectMapMemory,
     OverworldObjectMemory,
 };
-use crystal_core::systems::battle_escape::{BattleEscapeAttempt, attempt_wild_battle_escape};
+use crystal_core::systems::battle_escape::{attempt_wild_battle_escape, BattleEscapeAttempt};
 use crystal_core::systems::battle_items::{
-    BattleItemError, BattleItemOutcome, PartyItemOutcome, apply_active_battle_item_effect,
-    apply_battle_pp_item_effect, apply_evolution_stone_item_effect, apply_party_wide_item_effect,
-    apply_rare_candy_item_effect, validate_battle_escape_item,
-    validate_battle_stat_drop_guard_item,
+    apply_active_battle_item_effect, apply_battle_pp_item_effect,
+    apply_evolution_stone_item_effect, apply_party_wide_item_effect, apply_rare_candy_item_effect,
+    validate_battle_escape_item, validate_battle_stat_drop_guard_item, BattleItemError,
+    BattleItemOutcome, PartyItemOutcome,
 };
 use crystal_core::systems::battle_rewards::{
-    BattleRewardOutcome, BattleRewardRules, apply_trainer_battle_rewards, apply_wild_battle_rewards,
+    apply_trainer_battle_rewards, apply_wild_battle_rewards, BattleRewardOutcome, BattleRewardRules,
 };
-use crystal_core::systems::economy::{ScriptEconomyOutcome, apply_script_economy_command};
+use crystal_core::systems::economy::{apply_script_economy_command, ScriptEconomyOutcome};
 use crystal_core::systems::evolution::EvolutionTable;
-use crystal_core::systems::field_items::{FieldItemPickupOutcome, pickup_script_field_item};
+use crystal_core::systems::field_items::{pickup_script_field_item, FieldItemPickupOutcome};
 use crystal_core::systems::field_moves::{
-    FieldMoveBlockOutcome, FieldMoveFlagOutcome, FieldMoveTravelOutcome, apply_cut_field_move,
-    apply_flash_field_move, apply_strength_field_move, apply_surf_field_move,
+    apply_cut_field_move, apply_flash_field_move, apply_strength_field_move, apply_surf_field_move,
     apply_waterfall_field_move, apply_whirlpool_field_move, validate_bicycle_item,
     validate_blue_card_item, validate_coin_case_item, validate_dig_field_move,
     validate_field_escape_item, validate_fly_field_move, validate_itemfinder_item,
     validate_repel_item, validate_squirtbottle_item, validate_teleport_field_move,
-    validate_town_map_item,
+    validate_town_map_item, FieldMoveBlockOutcome, FieldMoveFlagOutcome, FieldMoveTravelOutcome,
 };
 use crystal_core::systems::gift_pokemon::{
-    GiftPokemonOutcome, GiftPokemonRequest, give_gift_pokemon,
+    give_gift_pokemon, GiftPokemonOutcome, GiftPokemonRequest,
 };
 use crystal_core::systems::item_use::{
-    ItemUseContext, ItemUseOutcome, ItemUseRequest, use_bag_item,
+    use_bag_item, ItemUseContext, ItemUseOutcome, ItemUseRequest,
 };
 use crystal_core::systems::learnsets::SpeciesLearnsets;
 use crystal_core::systems::phone::{
-    ScriptPhoneInputs, ScriptPhoneOutcome, apply_script_phone_command,
-    initialize_permanent_phone_numbers,
+    apply_script_phone_command, initialize_permanent_phone_numbers, ScriptPhoneInputs,
+    ScriptPhoneOutcome,
 };
-use crystal_core::systems::script_audio::{ScriptAudioCue, apply_script_audio_command};
-use crystal_core::systems::script_blocks::{ScriptBlockChangeOutcome, apply_script_block_change};
-use crystal_core::systems::script_control::{ScriptControlAction, apply_script_control_command};
+use crystal_core::systems::script_audio::{apply_script_audio_command, ScriptAudioCue};
+use crystal_core::systems::script_blocks::{apply_script_block_change, ScriptBlockChangeOutcome};
+use crystal_core::systems::script_control::{apply_script_control_command, ScriptControlAction};
 use crystal_core::systems::script_flags::{
-    ScriptFlagCheckOutcome, ScriptFlagMutationOutcome, apply_script_flag_mutation,
-    check_script_flag,
+    apply_script_flag_mutation, check_script_flag, ScriptFlagCheckOutcome,
+    ScriptFlagMutationOutcome,
 };
 use crystal_core::systems::script_items::{
-    ScriptItemCheckOutcome, ScriptItemGrantOutcome, ScriptItemTakeOutcome, check_script_item,
-    grant_script_item, take_script_item,
+    check_script_item, grant_script_item, take_script_item, ScriptItemCheckOutcome,
+    ScriptItemGrantOutcome, ScriptItemTakeOutcome,
 };
 use crystal_core::systems::script_objects::{
-    ScriptMovementOutcome, ScriptObjectMutationOutcome, apply_script_movement,
-    apply_script_object_mutation,
+    apply_script_movement, apply_script_object_mutation, ScriptMovementOutcome,
+    ScriptObjectMutationOutcome,
 };
 use crystal_core::systems::script_runtime::{
-    ScriptRuntimeInputs, ScriptRuntimeOutcome, apply_script_runtime_command,
+    apply_script_runtime_command, ScriptRuntimeInputs, ScriptRuntimeOutcome,
 };
-use crystal_core::systems::script_scenes::{ScriptSceneOutcome, apply_script_scene_command};
-use crystal_core::systems::script_text::{ScriptTextAction, apply_script_text_command};
+use crystal_core::systems::script_scenes::{apply_script_scene_command, ScriptSceneOutcome};
+use crystal_core::systems::script_text::{apply_script_text_command, ScriptTextAction};
 use crystal_core::systems::script_variables::{
-    ScriptVariableOutcome, apply_script_variable_command,
+    apply_script_variable_command, ScriptVariableOutcome,
 };
-use crystal_core::systems::script_warps::{ScriptMapAction, apply_script_map_command};
+use crystal_core::systems::script_warps::{apply_script_map_command, ScriptMapAction};
 use crystal_core::systems::scripted_battles::{
-    ScriptedBattleEffects, ScriptedBattleEffectsOutcome, apply_scripted_battle_effects_to_session,
+    apply_scripted_battle_effects_to_session, ScriptedBattleEffects, ScriptedBattleEffectsOutcome,
 };
 use crystal_core::systems::shop::{
-    ScriptShopOutcome, ShopResult, apply_script_shop_command, buy_item, sell_item,
+    apply_script_shop_command, buy_item, sell_item, ScriptShopOutcome, ShopResult,
 };
 use crystal_core::systems::special_routines::{
-    RuntimeSpawnPointRef, SpecialRoutineContext, SpecialRoutineOutcome,
-    apply_special_routine_with_context,
+    apply_special_routine_with_context, RuntimeSpawnPointRef, SpecialRoutineContext,
+    SpecialRoutineOutcome,
 };
-use crystal_core::systems::step_events::{StepEventResult, process_step};
+use crystal_core::systems::step_events::{process_step, StepEventResult};
 use crystal_core::systems::time::{ClockTime, GameDate};
-use crystal_core::systems::tmhm::{TmHmLearnOutcome, teach_tmhm_move};
+use crystal_core::systems::tmhm::{teach_tmhm_move, TmHmLearnOutcome};
 use crystal_core::world::collision::{permissions, sample_collision};
 use crystal_core::world::encounters::{
-    EncounterSurface, FieldEncounterKind, FieldEncounterRoll, ResolvedWildEncounter, TimeOfDay,
     require_encounter_table_for_surface, select_headbutt_encounter, select_rock_smash_encounter,
-    select_sweet_scent_encounter,
+    select_sweet_scent_encounter, EncounterSurface, FieldEncounterKind, FieldEncounterRoll,
+    ResolvedWildEncounter, TimeOfDay,
 };
 use crystal_core::world::fishing::{
-    FishingSession, ROD_GOOD, ROD_OLD, ROD_SUPER, do_fishing, fishing_battle_trigger, fishing_bite,
-    fishing_rod_for_item_id,
+    do_fishing, fishing_battle_trigger, fishing_bite, fishing_rod_for_item_id, FishingSession,
+    ROD_GOOD, ROD_OLD, ROD_SUPER,
 };
 use crystal_core::world::map::{Direction, OverworldMapData, TilePosition};
-use crystal_core::world::movement::{MovementMode, StepOptions, StepOutcome, move_by_stride};
+use crystal_core::world::movement::{move_by_stride, MovementMode, StepOptions, StepOutcome};
 use crystal_core::world::session::{
     ConnectionTransition, CoordEventTrigger, EncounterCheckOptions, OverworldFollowState,
     OverworldInteraction, OverworldSession, OverworldSnapshot, WarpTransition, WildEncounterRoll,
@@ -143,23 +142,51 @@ impl Default for GameViewport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAudioCatalog {
-    pub music: BTreeMap<String, AudioProgram>,
-    pub sound_effects: BTreeMap<String, AudioProgram>,
-    pub cries: BTreeMap<String, AudioProgram>,
+    music: BTreeMap<String, AudioProgram>,
+    sound_effects: BTreeMap<String, AudioProgram>,
+    cries: BTreeMap<String, AudioProgram>,
 }
 
 impl RuntimeAudioCatalog {
     pub fn is_empty(&self) -> bool {
         self.music.is_empty() && self.sound_effects.is_empty() && self.cries.is_empty()
     }
+
+    pub fn music(&self) -> &BTreeMap<String, AudioProgram> {
+        &self.music
+    }
+
+    pub fn sound_effects(&self) -> &BTreeMap<String, AudioProgram> {
+        &self.sound_effects
+    }
+
+    pub fn cries(&self) -> &BTreeMap<String, AudioProgram> {
+        &self.cries
+    }
+
+    pub fn music_count(&self) -> usize {
+        self.music.len()
+    }
+
+    pub fn sound_effect_count(&self) -> usize {
+        self.sound_effects.len()
+    }
+
+    pub fn cry_count(&self) -> usize {
+        self.cries.len()
+    }
+
+    pub fn contains_music(&self, id: &str) -> bool {
+        self.music.contains_key(id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrystalRuntime {
-    pub modpack: SaveModpackIdentity,
-    pub data: GameDataSet,
-    pub audio: RuntimeAudioCatalog,
-    pub viewport: GameViewport,
+    modpack: SaveModpackIdentity,
+    data: GameDataSet,
+    audio: RuntimeAudioCatalog,
+    viewport: GameViewport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,8 +206,8 @@ pub struct RuntimeBootSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOverworldSession {
-    pub state: GameState,
-    pub overworld: OverworldSession,
+    state: GameState,
+    overworld: OverworldSession,
     joypad: JoypadState,
 }
 
@@ -683,7 +710,7 @@ impl CrystalRuntime {
         asset_root: &AssetRoot,
         compiled_pack_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        let loaded = asset_root.load_loaded_compiled_game_pack(compiled_pack_path)?;
+        let loaded = asset_root.load_loaded_verified_compiled_game_pack(compiled_pack_path)?;
         Self::from_loaded_compiled_pack(asset_root, loaded)
     }
 
@@ -691,61 +718,79 @@ impl CrystalRuntime {
         asset_root: &AssetRoot,
         loaded: LoadedCompiledGamePack,
     ) -> Result<Self> {
-        let modpack_id = runtime_modpack_id(&loaded.pack)?;
-        let modpack = SaveModpackIdentity::from_compiled_pack_bytes(modpack_id, &loaded.bytes)
+        crystal_assets::verify_compiled_game_pack_for_runtime(loaded.pack())?;
+        let modpack_id = runtime_modpack_id(loaded.pack())?;
+        let modpack = SaveModpackIdentity::from_compiled_pack_bytes(modpack_id, loaded.bytes())
             .context("compute compiled game pack save identity")?;
-        Self::from_compiled_pack(asset_root, loaded.pack, modpack)
+        let (_, _, pack) = loaded.into_parts();
+        Self::from_compiled_pack(asset_root, pack, modpack)
     }
 
-    pub fn from_compiled_pack(
+    fn from_compiled_pack(
         asset_root: &AssetRoot,
         pack: CompiledGamePack,
         modpack: SaveModpackIdentity,
     ) -> Result<Self> {
         modpack.validate()?;
         let expected_id = runtime_modpack_id(&pack)?;
-        if modpack.id != expected_id {
+        if modpack.id() != expected_id {
             anyhow::bail!(
                 "compiled game pack identity '{}' does not match report manifest id '{}'",
-                modpack.id,
+                modpack.id(),
                 expected_id
             );
         }
         reject_pack_with_error_diagnostics(&pack)?;
         reject_pack_without_runtime_game_data(&pack)?;
-        let audio = RuntimeAudioCatalog::from_game_data(asset_root, &pack.data)?;
+        let (_, data, _) = pack.into_parts();
+        let audio = RuntimeAudioCatalog::from_game_data(asset_root, &data)?;
         Ok(Self {
             modpack,
-            data: pack.data,
+            data,
             audio,
             viewport: GameViewport::default(),
         })
     }
 
+    pub fn modpack(&self) -> &SaveModpackIdentity {
+        &self.modpack
+    }
+
+    pub fn data(&self) -> &GameDataSet {
+        &self.data
+    }
+
+    pub fn audio(&self) -> &RuntimeAudioCatalog {
+        &self.audio
+    }
+
+    pub fn viewport(&self) -> &GameViewport {
+        &self.viewport
+    }
+
     pub fn save_game(&self, path: impl AsRef<Path>, state: GameState) -> Result<()> {
-        let save = SaveGame::new(state, self.modpack.clone());
-        write_save_game(path, &save).context("write Crystal runtime save")
+        write_save_game_for_modpack(path, state, &self.modpack)
+            .context("write Crystal runtime save")
     }
 
     pub fn load_save(&self, path: impl AsRef<Path>) -> Result<GameState> {
-        let save = read_save_game(path).context("read Crystal runtime save")?;
-        assert_save_matches_modpack(&save, &self.modpack)
-            .context("validate save compiled modpack identity")?;
-        Ok(save.state)
+        let save = read_save_game_for_modpack(path, &self.modpack)
+            .context("read Crystal runtime save for compiled modpack identity")?;
+        Ok(save.into_state())
     }
 
     pub fn boot_summary(&self) -> RuntimeBootSummary {
         RuntimeBootSummary {
-            modpack_id: self.modpack.id.clone(),
-            modpack_hash: self.modpack.hash.clone(),
+            modpack_id: self.modpack.id().to_string(),
+            modpack_hash: self.modpack.hash().to_string(),
             pokemon_species: self.data.pokemon.len(),
             moves: self.data.moves.len(),
             maps: self.data.maps.len(),
             items: self.data.items.len(),
             wild_encounter_tables: self.data.wild_encounters.len(),
-            music_tracks: self.audio.music.len(),
-            sound_effects: self.audio.sound_effects.len(),
-            cries: self.audio.cries.len(),
+            music_tracks: self.audio.music_count(),
+            sound_effects: self.audio.sound_effect_count(),
+            cries: self.audio.cry_count(),
             viewport: self.viewport,
         }
     }
@@ -842,7 +887,7 @@ impl CrystalRuntime {
         let Some(music) = &module.attributes.music else {
             return Ok(None);
         };
-        if !self.audio.music.contains_key(music) {
+        if !self.audio.contains_music(music) {
             anyhow::bail!("map {map_name} references missing runtime music asset {music}");
         }
         Ok(Some(music.clone()))
@@ -964,7 +1009,7 @@ impl RuntimeOverworldSession {
         apply_state_object_overrides(&mut overworld, &state)?;
         runtime.sync_current_map_scene(&mut state, &map_name)?;
         if let Some(music) = state.script_runtime.current_music.as_deref() {
-            if !runtime.audio.music.contains_key(music) {
+            if !runtime.audio.contains_music(music) {
                 anyhow::bail!("saved state references missing runtime music asset {music}");
             }
         }
@@ -1084,6 +1129,14 @@ impl RuntimeOverworldSession {
 
     pub fn snapshot(&self) -> OverworldSnapshot {
         self.overworld.snapshot()
+    }
+
+    pub fn state(&self) -> &GameState {
+        &self.state
+    }
+
+    pub fn overworld(&self) -> &OverworldSession {
+        &self.overworld
     }
 
     pub fn state_checksum_frame(&self, player_id: PlayerId) -> Result<StateChecksumFrame> {
@@ -3380,7 +3433,7 @@ impl RuntimeOverworldSession {
         if !runtime.data.special_routines.contains(routine) {
             anyhow::bail!("compiled game pack missing exact special routine {routine}");
         }
-        if routine == "FadeOutMusic" && !runtime.audio.music.contains_key("MUSIC_NONE") {
+        if routine == "FadeOutMusic" && !runtime.audio.contains_music("MUSIC_NONE") {
             anyhow::bail!("special routine FadeOutMusic requires compiled music asset MUSIC_NONE");
         }
         let cry_by_species = runtime.cry_by_species();
@@ -4810,12 +4863,36 @@ impl RuntimeAudioCatalog {
             asset.validate()?;
             let path = asset_root
                 .resolve_data_path(&asset.path)
-                .with_context(|| format!("resolve runtime MIDI asset {}", asset.path))?;
+                .with_context(|| format!("resolve runtime audio asset {}", asset.path))?;
             let bytes = std::fs::read(&path)
-                .with_context(|| format!("read runtime MIDI asset {}", path.display()))?;
-            if !bytes.starts_with(b"MThd") {
-                anyhow::bail!("runtime audio asset {} is not a MIDI file", path.display());
-            }
+                .with_context(|| format!("read runtime audio asset {}", path.display()))?;
+            let source = match asset.source {
+                ModpackAudioSource::Midi => {
+                    if !bytes.starts_with(b"MThd") {
+                        anyhow::bail!(
+                            "runtime audio asset {} is not a MIDI file",
+                            path.display()
+                        );
+                    }
+                    AudioProgramSource::Midi(bytes)
+                }
+                ModpackAudioSource::Pcm => {
+                    if bytes.is_empty() {
+                        anyhow::bail!("runtime PCM audio asset {} is empty", path.display());
+                    }
+                    let sample_rate_hz = asset.sample_rate_hz.ok_or_else(|| {
+                        anyhow::anyhow!("PCM audio asset '{}' must declare sample_rate_hz", asset.id)
+                    })?;
+                    let channels = asset.channels.ok_or_else(|| {
+                        anyhow::anyhow!("PCM audio asset '{}' must declare channels", asset.id)
+                    })?;
+                    AudioProgramSource::Pcm {
+                        sample_rate_hz,
+                        channels,
+                        bytes,
+                    }
+                }
+            };
             let program = AudioProgram {
                 cache_key: format!(
                     "{}:{}:{}",
@@ -4823,7 +4900,7 @@ impl RuntimeAudioCatalog {
                     asset.id,
                     path.display()
                 ),
-                source: AudioProgramSource::Midi(bytes),
+                source,
             };
             let previous = match asset.kind {
                 ModpackAudioKind::Music => catalog.music.insert(asset.id.clone(), program),
@@ -4866,11 +4943,11 @@ impl RuntimeAudioCatalog {
 }
 
 fn reject_pack_with_error_diagnostics(pack: &CompiledGamePack) -> Result<()> {
-    if !pack.report.has_errors() {
+    if !pack.report().has_errors() {
         return Ok(());
     }
     let summary = pack
-        .report
+        .report()
         .diagnostics
         .iter()
         .filter(|diagnostic| {
@@ -4889,7 +4966,7 @@ fn reject_pack_with_error_diagnostics(pack: &CompiledGamePack) -> Result<()> {
 }
 
 fn reject_pack_without_runtime_game_data(pack: &CompiledGamePack) -> Result<()> {
-    let data = &pack.data;
+    let data = pack.data();
     if data.pokemon.is_empty() {
         anyhow::bail!("compiled game pack has no Pokemon species data");
     }
@@ -4915,10 +4992,10 @@ fn reject_pack_without_runtime_game_data(pack: &CompiledGamePack) -> Result<()> 
 }
 
 fn runtime_modpack_id(pack: &CompiledGamePack) -> Result<String> {
-    if pack.report.manifests.is_empty() {
+    if pack.report().manifests.is_empty() {
         anyhow::bail!("compiled game pack report must include at least one manifest id");
     }
-    Ok(pack.report.manifests.join("+"))
+    Ok(pack.report().manifests.join("+"))
 }
 
 fn audio_kind_name(kind: ModpackAudioKind) -> &'static str {
@@ -4948,8 +5025,8 @@ mod tests {
         ObjectEvent, WarpEvent,
     };
     use crystal_core::models::{
-        BaseStats, CaptureStorageLocation, Dv, Item, ItemPocket, LearnedMove, Move, Pokemon,
-        PokemonSpecies, Trainer, TrainerPartyPokemon, growth_rate, item_pocket, pokemon_type,
+        growth_rate, item_pocket, pokemon_type, BaseStats, CaptureStorageLocation, Dv, Item,
+        ItemPocket, LearnedMove, Move, Pokemon, PokemonSpecies, Trainer, TrainerPartyPokemon,
     };
     use crystal_core::state::{FishingRodState, ScriptGraphicsRuntimeKind};
     use crystal_core::systems::evolution::EvolutionEntry;
@@ -4983,7 +5060,7 @@ mod tests {
     };
     use crystal_core::world::encounters::{WildEncounter, WildEncounterData, WildEncounterTable};
     use crystal_core::world::fishing::{
-        FishingCatalog, FishingGroup, FishingRodItemRule, FishingSlot, ROD_GOOD, RodTable,
+        FishingCatalog, FishingGroup, FishingRodItemRule, FishingSlot, RodTable, ROD_GOOD,
     };
     use crystal_core::world::movement::MovementMode;
 
@@ -5008,6 +5085,13 @@ mod tests {
         }
         std::fs::write(path, b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60")
             .expect("write midi fixture");
+    }
+
+    fn write_pcm(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create pcm parent");
+        }
+        std::fs::write(path, [0_u8, 0, 0xff, 0x7f]).expect("write pcm fixture");
     }
 
     fn write_floor_tileset(root: &std::path::Path, tileset_name: &str) {
@@ -5394,7 +5478,7 @@ mod tests {
                 move_effect_modifiers: vec![
                     crystal_core::battle::damage::WeatherMoveEffectModifier {
                         weather: "WEATHER_RAIN".to_string(),
-                        move_effect: "EFFECT_SOLARBEAM".to_string(),
+                        move_effect: "SOLARBEAM".to_string(),
                         multiplier: crystal_core::battle::damage::TypeMultiplier {
                             numerator: 1,
                             denominator: 2,
@@ -5407,6 +5491,250 @@ mod tests {
             field_moves: minimal_field_move_catalog(),
             ..GameDataSet::default()
         }
+    }
+
+    fn verified_runtime_bootstrap_data() -> GameDataSet {
+        let mut data = minimal_runtime_data();
+        data.learnsets.insert(
+            "CHIKORITA".to_string(),
+            vec![crystal_core::systems::learnsets::LearnsetEntry(
+                1,
+                "TACKLE".to_string(),
+            )],
+        );
+        data.items
+            .insert("POKE_BALL".to_string(), runtime_ball_item("POKE_BALL"));
+        data.items.insert(
+            "BLU_APRICORN".to_string(),
+            runtime_item("BLU_APRICORN", item_pocket("ITEM")),
+        );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .objects
+            .push(runtime_object("RuntimeNpc", "EVENT_RUNTIME_NPC"));
+        data.map_scripts.insert(
+            "RuntimeMap".to_string(),
+            serde_json::json!({ "RuntimeScript": [] }),
+        );
+        data.marts
+            .0
+            .insert("MART_RUNTIME".to_string(), vec!["POKE_BALL".to_string()]);
+        data.fishing.groups.insert(
+            "FISHGROUP_RUNTIME".to_string(),
+            crystal_core::world::fishing::FishingGroup {
+                bite_threshold: 255,
+                rod_tables: [(
+                    crystal_core::world::fishing::ROD_OLD.to_string(),
+                    crystal_core::world::fishing::RodTable {
+                        slots: vec![crystal_core::world::fishing::FishingSlot {
+                            threshold: 255,
+                            species: Some("CHIKORITA".to_string()),
+                            level: 5,
+                            time_group: None,
+                        }],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        data.fishing.rod_items = vec![crystal_core::world::fishing::FishingRodItemRule {
+            item_id: "OLD_ROD".to_string(),
+            rod: crystal_core::world::fishing::ROD_OLD.to_string(),
+        }];
+        data.fruit_trees
+            .0
+            .insert("FRUITTREE_RUNTIME".to_string(), "BLU_APRICORN".to_string());
+        data.pc_strings
+            .insert("PC_RUNTIME".to_string(), "Runtime PC".to_string());
+        data.menu_icons
+            .insert("CHIKORITA".to_string(), "ICON_CHIKORITA".to_string());
+        data.pokedex_entries.insert(
+            "CHIKORITA".to_string(),
+            crystal_core::models::RuntimePokedexEntry {
+                species: "CHIKORITA".to_string(),
+                classification: "Leaf".to_string(),
+                height_digits: 9,
+                weight_digits: 64,
+                pages: vec!["A sweet leaf Pokemon.".to_string()],
+            },
+        );
+        data.pokemon_frontpic_anim.insert(
+            "CHIKORITA".to_string(),
+            crystal_core::models::FrontpicAnimProgram {
+                commands: Vec::new(),
+            },
+        );
+        data.move_names = vec!["TACKLE".to_string()];
+        data.asm_text
+            .insert("RuntimeText".to_string(), "Runtime text.".to_string());
+        data.battle_animations
+            .insert("TACKLE".to_string(), vec!["BATTLE_ANIM_END".to_string()]);
+        data.battle_animation_table = vec!["TACKLE".to_string()];
+        data.battle_anim_bundle = serde_json::json!({ "animations": ["TACKLE"] }).to_string();
+        data.sprite_anim_bundle = serde_json::json!({ "sprites": ["SPRITE_MON"] }).to_string();
+        data.sprite_palette_defaults
+            .insert("SPRITE_MON".to_string(), 0);
+        data.pokegear_town_map_palette_map
+            .insert("RuntimeMap".to_string(), vec!["PAL_RUNTIME".to_string()]);
+        data.pokegear_landmarks.landmarks = vec![crystal_core::models::PokegearLandmark {
+            id: 1,
+            constant: "LANDMARK_RUNTIME".to_string(),
+            label: "RuntimeLandmark".to_string(),
+            name: "Runtime".to_string(),
+            x: 1,
+            y: 1,
+            region: "johto".to_string(),
+        }];
+        data.pokegear_landmarks
+            .map_to_landmark
+            .insert("RuntimeMap".to_string(), "LANDMARK_RUNTIME".to_string());
+        data.pokemon_cries.insert(
+            "CHIKORITA".to_string(),
+            crystal_assets::PokemonCryMetadata {
+                cry: "CRY_NIDORAN_M".to_string(),
+                pitch: 0,
+                length: 0,
+            },
+        );
+        data.trainers.trainers.insert(
+            "TRAINER_RUNTIME".to_string(),
+            crystal_core::models::Trainer {
+                name: "Runtime".to_string(),
+                trainer_id: "TRAINER_RUNTIME".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                party: vec![crystal_core::models::TrainerPartyPokemon {
+                    species: "CHIKORITA".to_string(),
+                    level: 5,
+                    item: None,
+                    moves: Vec::new(),
+                    dvs: Dv::default(),
+                }],
+                win_quote: "Win".to_string(),
+                lose_quote: "Lose".to_string(),
+                items: Vec::new(),
+                base_reward: 1,
+                ai_move_flags: 0,
+                ai_item_switch_flags: 0,
+                encounter_music: "MUSIC_ROUTE_29".to_string(),
+                ai_layers: Vec::new(),
+            },
+        );
+        data.phone_contacts.0.insert(
+            "PHONE_RUNTIME".to_string(),
+            crystal_core::systems::phone::PhoneContactRecord {
+                contact_id: "PHONE_RUNTIME".to_string(),
+                trainer_class: None,
+                trainer_label: None,
+                lines: vec!["Hello.".to_string()],
+                primary_label: "RuntimePhone".to_string(),
+                map_constant: Some("RUNTIME_MAP".to_string()),
+                callee_time_mask: 0xff,
+                callee_script: Some("RuntimePhoneScript".to_string()),
+                caller_time_mask: 0xff,
+                caller_script: Some("RuntimePhoneScript".to_string()),
+            },
+        );
+        data.permanent_phone_numbers = vec!["PHONE_RUNTIME".to_string()];
+        data.special_phone_calls = ["RuntimePhoneScript".to_string()].into_iter().collect();
+        data.phone_scripts = vec![serde_json::json!({ "RuntimePhoneScript": [] })];
+        data.flee_mons.always = vec!["CHIKORITA".to_string()];
+        data.buena_password_categories = vec![
+            crystal_core::systems::special_routines::BuenaPasswordCategoryDefinition {
+                id: "BUENA_RUNTIME".to_string(),
+                category_type: crystal_core::systems::special_routines::BUENA_PASSWORD_CATEGORY_MON
+                    .to_string(),
+                points: 1,
+                options: vec!["CHIKORITA".to_string()],
+            },
+        ];
+        data.roaming_pokemon = vec![
+            crystal_core::systems::special_routines::RoamingPokemonDefinition {
+                species: "CHIKORITA".to_string(),
+                level: 40,
+                map_group: 1,
+                map_number: 1,
+            },
+        ];
+        data.buena_prizes = vec![
+            crystal_core::systems::special_routines::BuenaPrizeDefinition {
+                item_id: "POKE_BALL".to_string(),
+                cost: 1,
+            },
+        ];
+        data.kurt_apricorn_recipes = vec![
+            crystal_core::systems::special_routines::KurtApricornRecipe {
+                apricorn: "BLU_APRICORN".to_string(),
+                ball: "POKE_BALL".to_string(),
+            },
+        ];
+        data.shuckie_gift = Some(
+            crystal_core::systems::special_routines::ShuckieGiftDefinition {
+                species: "CHIKORITA".to_string(),
+                level: 15,
+                held_item: "POKE_BALL".to_string(),
+                nickname: "SHUCKIE".to_string(),
+                original_trainer_name: "MANIA".to_string(),
+                original_trainer_id: 1,
+                got_today_engine_flag: "ENGINE_GOT_SHUCKIE_TODAY".to_string(),
+            },
+        );
+        data.dratini_move_sets = vec![
+            crystal_core::systems::special_routines::DratiniMoveSetDefinition {
+                mode: 0,
+                moves: vec!["TACKLE".to_string()],
+            },
+        ];
+        data.bug_contest_config = Some(crystal_core::systems::special_routines::BugContestConfig {
+            park_balls: 20,
+            timer_minutes: 20,
+            timer_seconds: 0,
+            selected_contestant_count: 1,
+            contestant_flags: vec!["EVENT_RUNTIME_CONTESTANT".to_string()],
+        });
+        data.battle_tower_rules = Some(crystal_core::systems::special_routines::BattleTowerRules {
+            banned_species: Vec::new(),
+            required_party_count: 3,
+            challenge_streak_length: 7,
+            minimum_level_group: 10,
+            maximum_level_group: 100,
+            level_group_size: 10,
+            party_count_failure_text: "Need three.".to_string(),
+            duplicate_species_failure_text: "No duplicates.".to_string(),
+            duplicate_held_item_failure_text: "No duplicate items.".to_string(),
+            egg_failure_text: "No eggs.".to_string(),
+        });
+        data.odd_egg_definitions =
+            vec![crystal_core::systems::special_routines::OddEggDefinition {
+                species: "CHIKORITA".to_string(),
+                moves: vec!["TACKLE".to_string()],
+                original_trainer_id: 1,
+                dvs: [0; 4],
+                probability: 100,
+                level: 5,
+                experience: 0,
+                hatch_cycles: 1,
+                nickname: "EGG".to_string(),
+                original_trainer_name: "DAYCARE".to_string(),
+            }];
+        data.magikarp_lengths = vec![
+            crystal_core::systems::special_routines::MagikarpLengthEntry {
+                threshold: 1,
+                divisor: 1,
+            },
+        ];
+        data.happiness_data = Some(crystal_core::systems::special_routines::HappinessData {
+            changes: Vec::new(),
+            services: Vec::new(),
+        });
+        data.initialize_events.event_flags = vec!["EVENT_RUNTIME_CONTESTANT".to_string()];
+        data.initialize_events.engine_flags = vec!["ENGINE_GOT_SHUCKIE_TODAY".to_string()];
+        data.story_event_script_constants
+            .global
+            .insert("EVENT_RUNTIME".to_string(), 1);
+        data.tilesets = vec![serde_json::json!({ "id": "johto" })];
+        data
     }
 
     fn minimal_step_event_rules() -> StepEventRules {
@@ -5662,13 +5990,11 @@ mod tests {
             .expect("runtime map")
             .attributes
             .music = Some("MUSIC_ROUTE_29".to_string());
-        data.audio = vec![
-            ModpackAudioAsset::music(
-                "MUSIC_ROUTE_29",
-                "content-packs/test/music/MUSIC_ROUTE_29.mid",
-            )
-            .expect("music asset"),
-        ];
+        data.audio = vec![ModpackAudioAsset::music(
+            "MUSIC_ROUTE_29",
+            "content-packs/test/music/MUSIC_ROUTE_29.mid",
+        )
+        .expect("music asset")];
         data
     }
 
@@ -6302,7 +6628,7 @@ mod tests {
         write_midi(&data_root.join("content-packs/test/music/MUSIC_ROUTE_29.mid"));
         write_midi(&data_root.join("content-packs/test/sfx/SFX_TACKLE.mid"));
         write_midi(&data_root.join("content-packs/test/cries/CRY_NIDORAN_M.mid"));
-        let mut data = minimal_runtime_data();
+        let mut data = verified_runtime_bootstrap_data();
         data.audio = vec![
             ModpackAudioAsset::music(
                 "MUSIC_ROUTE_29",
@@ -6317,34 +6643,31 @@ mod tests {
             )
             .expect("cry asset"),
         ];
-        let pack = CompiledGamePack::new(data, report());
-        crystal_assets::write_compiled_game_pack(data_root.join("runtime.crystalpack"), &pack)
-            .expect("write compiled runtime pack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report());
+        crystal_assets::write_compiled_game_pack_for_tests(
+            data_root.join("runtime.crystalpack"),
+            &pack,
+        )
+        .expect("write compiled runtime pack");
         let asset_root = AssetRoot::new(&root);
 
         let runtime = CrystalRuntime::load_from_compiled_pack(&asset_root, "runtime.crystalpack")
             .expect("load runtime");
 
-        assert_eq!(runtime.modpack.id, "core-modular");
-        assert_eq!(runtime.modpack.hash.len(), 8);
-        assert!(
-            runtime
-                .audio
-                .program(AudioKind::Music, "MUSIC_ROUTE_29")
-                .is_some()
-        );
-        assert!(
-            runtime
-                .audio
-                .program(AudioKind::SoundEffect, "SFX_TACKLE")
-                .is_some()
-        );
-        assert!(
-            runtime
-                .audio
-                .program(AudioKind::Cry, "CRY_NIDORAN_M")
-                .is_some()
-        );
+        assert_eq!(runtime.modpack.id(), "core-modular");
+        assert_eq!(runtime.modpack.hash().len(), 8);
+        assert!(runtime
+            .audio
+            .program(AudioKind::Music, "MUSIC_ROUTE_29")
+            .is_some());
+        assert!(runtime
+            .audio
+            .program(AudioKind::SoundEffect, "SFX_TACKLE")
+            .is_some());
+        assert!(runtime
+            .audio
+            .program(AudioKind::Cry, "CRY_NIDORAN_M")
+            .is_some());
         let summary = runtime.boot_summary();
         assert_eq!(summary.modpack_id, "core-modular");
         assert_eq!(summary.pokemon_species, 1);
@@ -6357,13 +6680,60 @@ mod tests {
     }
 
     #[test]
+    fn runtime_bootstrap_loads_declared_pcm_cries() {
+        let root = temp_repository_root("pcm-cry");
+        let data_root = root.join("apps/web/assets/data");
+        write_midi(&data_root.join("content-packs/test/music/MUSIC_ROUTE_29.mid"));
+        write_pcm(&data_root.join("content-packs/test/cries/CRY_NIDORAN_M.pcm"));
+        let mut data = verified_runtime_bootstrap_data();
+        data.audio = vec![
+            ModpackAudioAsset::music(
+                "MUSIC_ROUTE_29",
+                "content-packs/test/music/MUSIC_ROUTE_29.mid",
+            )
+            .expect("music asset"),
+            ModpackAudioAsset::cry_pcm(
+                "CRY_NIDORAN_M",
+                "content-packs/test/cries/CRY_NIDORAN_M.pcm",
+                22050,
+                1,
+            )
+            .expect("pcm cry asset"),
+        ];
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report());
+        crystal_assets::write_compiled_game_pack_for_tests(
+            data_root.join("runtime.crystalpack"),
+            &pack,
+        )
+        .expect("write compiled runtime pack");
+        let asset_root = AssetRoot::new(&root);
+
+        let runtime = CrystalRuntime::load_from_compiled_pack(&asset_root, "runtime.crystalpack")
+            .expect("load runtime with PCM cry");
+        let cry = runtime
+            .audio
+            .program(AudioKind::Cry, "CRY_NIDORAN_M")
+            .expect("pcm cry program");
+
+        assert_eq!(
+            cry.source,
+            AudioProgramSource::Pcm {
+                sample_rate_hz: 22050,
+                channels: 1,
+                bytes: vec![0_u8, 0, 0xff, 0x7f],
+            }
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_overworld_starts_from_declared_spawn_and_steps_from_joypad() {
         let root = temp_repository_root("overworld");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -6411,7 +6781,7 @@ mod tests {
         );
         assert_eq!(second.input_mask, B_PAD_RIGHT);
         assert_eq!(second.pressed_mask, 0);
-        assert_eq!(second.state_checksum.frame, 2);
+        assert_eq!(second.state_checksum.frame(), 2);
         assert_eq!(
             session
                 .state_checksum_frame(7)
@@ -6429,7 +6799,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -6517,7 +6887,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_music(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_music(), report()),
             identity(),
         )
         .expect("runtime");
@@ -6552,7 +6922,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -6598,7 +6968,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_coord_event(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_coord_event(), report()),
             identity(),
         )
         .expect("runtime");
@@ -6661,7 +7031,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(
+            CompiledGamePack::new_unchecked_for_tests(
                 minimal_runtime_data_with_script_audio_and_map_commands(),
                 report(),
             ),
@@ -6714,11 +7084,9 @@ mod tests {
         let missing_exact_case = session
             .apply_script_audio_command(&runtime, "RuntimeMap", "runtimeaudioscript", 0)
             .expect_err("script labels are exact");
-        assert!(
-            missing_exact_case
-                .to_string()
-                .contains("has no script audio command")
-        );
+        assert!(missing_exact_case
+            .to_string()
+            .contains("has no script audio command"));
 
         let wrong_command_case = session
             .apply_script_audio_command(&runtime, "RuntimeMap", "RuntimeAudioScript", 3)
@@ -6749,7 +7117,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(
+            CompiledGamePack::new_unchecked_for_tests(
                 minimal_runtime_data_with_script_audio_and_map_commands(),
                 report(),
             ),
@@ -6814,11 +7182,9 @@ mod tests {
         let missing_index = session
             .apply_script_map_command(&runtime, "RuntimeMap", "RuntimeWarpScript", 9)
             .expect_err("command index is exact");
-        assert!(
-            missing_index
-                .to_string()
-                .contains("has no script map command")
-        );
+        assert!(missing_index
+            .to_string()
+            .contains("has no script map command"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6829,7 +7195,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(
+            CompiledGamePack::new_unchecked_for_tests(
                 minimal_runtime_data_with_text_variable_and_control_commands(),
                 report(),
             ),
@@ -6966,19 +7332,15 @@ mod tests {
         let missing_exact_script = session
             .apply_script_variable_command(&runtime, "RuntimeMap", "runtimevariablescript", 0)
             .expect_err("script labels are exact");
-        assert!(
-            missing_exact_script
-                .to_string()
-                .contains("has no script variable command")
-        );
+        assert!(missing_exact_script
+            .to_string()
+            .contains("has no script variable command"));
         let missing_control_index = session
             .apply_script_control_command(&runtime, "RuntimeMap", "RuntimeControlScript", 9)
             .expect_err("control command indexes are exact");
-        assert!(
-            missing_control_index
-                .to_string()
-                .contains("has no script control command")
-        );
+        assert!(missing_control_index
+            .to_string()
+            .contains("has no script control command"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6989,7 +7351,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(
+            CompiledGamePack::new_unchecked_for_tests(
                 minimal_runtime_data_with_object_and_movement_commands(),
                 report(),
             ),
@@ -7106,19 +7468,15 @@ mod tests {
         let bad_movement_case = session
             .apply_script_movement(&runtime, "RuntimeMap", "RuntimeObjectScript", 7)
             .expect_err("movement labels are exact");
-        assert!(
-            bad_movement_case
-                .to_string()
-                .contains("has no exact movement runtimenpcmovement")
-        );
+        assert!(bad_movement_case
+            .to_string()
+            .contains("has no exact movement runtimenpcmovement"));
         let missing_command = session
             .apply_script_object_mutation(&runtime, "RuntimeMap", "RuntimeObjectScript", 99)
             .expect_err("object command indexes are exact");
-        assert!(
-            missing_command
-                .to_string()
-                .contains("has no script object command")
-        );
+        assert!(missing_command
+            .to_string()
+            .contains("has no script object command"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7129,7 +7487,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_runtime_commands(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_runtime_commands(), report()),
             identity(),
         )
         .expect("runtime");
@@ -7304,11 +7662,9 @@ mod tests {
                 ScriptRuntimeInputs::default(),
             )
             .expect_err("object ids are exact");
-        assert!(
-            bad_last_talked
-                .to_string()
-                .contains("missing exact object id runtime_npc")
-        );
+        assert!(bad_last_talked
+            .to_string()
+            .contains("missing exact object id runtime_npc"));
         let missing_index = session
             .apply_script_runtime_command(
                 &runtime,
@@ -7318,11 +7674,9 @@ mod tests {
                 ScriptRuntimeInputs::default(),
             )
             .expect_err("runtime command indexes are exact");
-        assert!(
-            missing_index
-                .to_string()
-                .contains("has no script runtime command")
-        );
+        assert!(missing_index
+            .to_string()
+            .contains("has no script runtime command"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7338,7 +7692,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_grass_encounter(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_grass_encounter(), report()),
             identity(),
         )
         .expect("runtime");
@@ -7416,7 +7770,7 @@ mod tests {
         data.items.insert("REPEL".to_string(), repel);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7502,7 +7856,7 @@ mod tests {
         data.items.insert("REPEL".to_string(), repel);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7634,7 +7988,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7679,12 +8033,10 @@ mod tests {
         assert_eq!(escape.destination_tile, TilePosition::new(2, 0));
         assert_eq!(session.overworld.map.name, "RuntimeMap");
         assert_eq!(session.overworld.player.tile, TilePosition::new(2, 0));
-        assert!(
-            !session
-                .state
-                .bag
-                .has_item(&runtime.data.items["ESCAPE_ROPE"])
-        );
+        assert!(!session
+            .state
+            .bag
+            .has_item(&runtime.data.items["ESCAPE_ROPE"]));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7702,7 +8054,7 @@ mod tests {
         data.field_moves.dig.move_id = "TELEPORT".to_string();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7722,12 +8074,10 @@ mod tests {
 
         assert!(error.to_string().contains("has no saved dig warp map"));
         assert_eq!(session.state, before);
-        assert!(
-            session
-                .state
-                .bag
-                .has_item(&runtime.data.items["ESCAPE_ROPE"])
-        );
+        assert!(session
+            .state
+            .bag
+            .has_item(&runtime.data.items["ESCAPE_ROPE"]));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7745,7 +8095,7 @@ mod tests {
         data.field_moves.dig.move_id = "TELEPORT".to_string();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7808,7 +8158,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(runtime_data_with_escape_rope_maps(), report()),
+            CompiledGamePack::new_unchecked_for_tests(runtime_data_with_escape_rope_maps(), report()),
             identity(),
         )
         .expect("runtime");
@@ -7834,11 +8184,9 @@ mod tests {
             .use_dig_field_move(&runtime, &asset_root, 0)
             .expect_err("missing dig warp rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("DIG field move has no saved dig warp map")
-        );
+        assert!(error
+            .to_string()
+            .contains("DIG field move has no saved dig warp map"));
         assert_eq!(session.state, before_state);
         assert_eq!(session.overworld.snapshot(), before_snapshot);
         let _ = std::fs::remove_dir_all(root);
@@ -7851,7 +8199,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_fishing(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_fishing(), report()),
             identity(),
         )
         .expect("runtime");
@@ -7880,11 +8228,9 @@ mod tests {
         let bad_rod = session
             .cast_fishing_rod(&runtime, "good_rod")
             .expect_err("rod ids are exact");
-        assert!(
-            bad_rod
-                .to_string()
-                .contains("validate fishing rod good_rod before cast")
-        );
+        assert!(bad_rod
+            .to_string()
+            .contains("validate fishing rod good_rod before cast"));
         assert_eq!(session.state, before_bad_rod_state);
         assert_eq!(session.overworld.snapshot(), before_bad_rod_snapshot);
         let _ = std::fs::remove_dir_all(root);
@@ -7903,7 +8249,7 @@ mod tests {
         data.items.insert("GOOD_ROD".to_string(), good_rod);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7964,7 +8310,7 @@ mod tests {
         data.items.insert("BAD_CASE_ROD".to_string(), bad_case_rod);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -7987,11 +8333,9 @@ mod tests {
         let bad_case = session
             .use_bag_fishing_rod_in_field(&runtime, "BAD_CASE_ROD")
             .expect_err("case changed rod item id rejects");
-        assert!(
-            bad_case
-                .to_string()
-                .contains("not declared by exact fishing rod item rules")
-        );
+        assert!(bad_case
+            .to_string()
+            .contains("not declared by exact fishing rod item rules"));
         assert_eq!(session.state, before_bad_case);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8003,7 +8347,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8030,7 +8374,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8084,11 +8428,9 @@ mod tests {
         let error = session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "runtimewildscript", 4)
             .expect_err("script names are exact");
-        assert!(
-            error
-                .to_string()
-                .contains("has no scripted wild battle at runtimewildscript:4")
-        );
+        assert!(error
+            .to_string()
+            .contains("has no scripted wild battle at runtimewildscript:4"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8099,7 +8441,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8197,7 +8539,7 @@ mod tests {
         data.items.insert("POTION".to_string(), potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -8266,7 +8608,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8336,7 +8678,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8392,7 +8734,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8419,11 +8761,9 @@ mod tests {
             )
             .expect_err("empty party slot rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("active battle party index 2 has no Pokemon")
-        );
+        assert!(error
+            .to_string()
+            .contains("active battle party index 2 has no Pokemon"));
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8435,7 +8775,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8481,7 +8821,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8527,7 +8867,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8579,7 +8919,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8635,7 +8975,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8685,7 +9025,7 @@ mod tests {
         data.items.insert("POKE_DOLL".to_string(), poke_doll);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -8743,7 +9083,7 @@ mod tests {
         data.items.insert("POKE_DOLL".to_string(), poke_doll);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -8771,11 +9111,9 @@ mod tests {
             .use_bag_item_to_escape_active_wild_battle(&runtime, "POKE_DOLL")
             .expect_err("Poke Doll cannot escape trainer battle");
 
-        assert!(
-            error
-                .to_string()
-                .contains("cannot use battle escape item POKE_DOLL in trainer battle")
-        );
+        assert!(error
+            .to_string()
+            .contains("cannot use battle escape item POKE_DOLL in trainer battle"));
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8796,7 +9134,7 @@ mod tests {
         data.items.insert("GUARD_SPEC".to_string(), guard_spec);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -8828,12 +9166,10 @@ mod tests {
         assert_eq!(guard.stat_drop_guard_turns_before, 0);
         assert_eq!(guard.stat_drop_guard_turns_after, 5);
         assert_eq!(session.state.battle_player_stat_drop_guard_turns, 5);
-        assert!(
-            !session
-                .state
-                .bag
-                .has_item(&runtime.data.items["GUARD_SPEC"])
-        );
+        assert!(!session
+            .state
+            .bag
+            .has_item(&runtime.data.items["GUARD_SPEC"]));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8844,7 +9180,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8867,11 +9203,9 @@ mod tests {
             .attempt_escape_active_wild_battle(&runtime)
             .expect_err("trainer battles cannot be escaped");
 
-        assert!(
-            error
-                .to_string()
-                .contains("cannot escape from trainer battle")
-        );
+        assert!(error
+            .to_string()
+            .contains("cannot escape from trainer battle"));
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8883,7 +9217,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_battle_rewards(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_battle_rewards(), report()),
             identity(),
         )
         .expect("runtime");
@@ -8975,7 +9309,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_battle_rewards(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_battle_rewards(), report()),
             identity(),
         )
         .expect("runtime");
@@ -9023,7 +9357,7 @@ mod tests {
             .effect = "MOD_MASTER_BALL".to_string();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9101,7 +9435,7 @@ mod tests {
         data.items.insert("BAD_BALL".to_string(), bad_ball);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9150,7 +9484,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -9198,7 +9532,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -9218,11 +9552,9 @@ mod tests {
                 None,
             )
             .expect_err("nickname label must be resolved by caller");
-        assert!(
-            nickname_error
-                .to_string()
-                .contains("requires resolved nickname label RuntimeGiftName")
-        );
+        assert!(nickname_error
+            .to_string()
+            .contains("requires resolved nickname label RuntimeGiftName"));
 
         let egg = session
             .grant_scripted_gift_pokemon(
@@ -9250,7 +9582,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -9360,11 +9692,9 @@ mod tests {
         let error = session
             .start_scripted_trainer_battle(&runtime, "RuntimeMap", "RuntimeTrainerScript", 9)
             .expect_err("command indexes are exact");
-        assert!(
-            error
-                .to_string()
-                .contains("has no scripted trainer battle at RuntimeTrainerScript:9")
-        );
+        assert!(error
+            .to_string()
+            .contains("has no scripted trainer battle at RuntimeTrainerScript:9"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9388,7 +9718,7 @@ mod tests {
         });
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9425,11 +9755,9 @@ mod tests {
         let unclaimed = session
             .advance_active_trainer_battle()
             .expect_err("cannot advance before reward claim");
-        assert!(
-            unclaimed
-                .to_string()
-                .contains("rewards have not been claimed")
-        );
+        assert!(unclaimed
+            .to_string()
+            .contains("rewards have not been claimed"));
         assert_eq!(session.state, before_unclaimed_advance);
         let first_rewards = session
             .claim_active_trainer_battle_rewards(&runtime)
@@ -9448,11 +9776,9 @@ mod tests {
         let duplicate_rewards = session
             .claim_active_trainer_battle_rewards(&runtime)
             .expect_err("trainer rewards cannot be claimed twice");
-        assert!(
-            duplicate_rewards
-                .to_string()
-                .contains("rewards already claimed")
-        );
+        assert!(duplicate_rewards
+            .to_string()
+            .contains("rewards already claimed"));
 
         let advance = session
             .advance_active_trainer_battle()
@@ -9548,7 +9874,7 @@ mod tests {
         data.items.insert("ITEMFINDER".to_string(), itemfinder);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9610,7 +9936,7 @@ mod tests {
         data.items.insert("BICYCLE".to_string(), bicycle);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9678,7 +10004,7 @@ mod tests {
         data.items.insert("BAD_BICYCLE".to_string(), bad_bicycle);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9733,7 +10059,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9762,7 +10088,7 @@ mod tests {
             .insert("BICYCLE".to_string(), route_bicycle);
         let route_runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(route_data, report()),
+            CompiledGamePack::new_unchecked_for_tests(route_data, report()),
             identity(),
         )
         .expect("route runtime");
@@ -9842,7 +10168,7 @@ mod tests {
         )];
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9902,7 +10228,7 @@ mod tests {
         ];
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -9944,7 +10270,7 @@ mod tests {
             .insert("BAD_ITEMFINDER".to_string(), bad_itemfinder);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10041,7 +10367,7 @@ mod tests {
         data.special_routines.insert("HealParty".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10106,7 +10432,7 @@ mod tests {
         data.special_routines.insert("FadeOutMusic".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10201,7 +10527,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10242,7 +10568,7 @@ mod tests {
                 .as_deref(),
             Some("MUSIC_NONE")
         );
-        assert_ne!(fade.state_checksum.hash, 0);
+        assert_ne!(fade.state_checksum.hash(), 0);
 
         let wait_sfx = session
             .apply_special_routine(&runtime, "WaitSFX")
@@ -10369,7 +10695,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10450,7 +10776,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10564,7 +10890,7 @@ mod tests {
         data.special_routines.insert("UnusedSetSeenMon".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -10828,7 +11154,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11029,7 +11355,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11156,7 +11482,7 @@ mod tests {
         });
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11348,7 +11674,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11431,11 +11757,9 @@ mod tests {
             let error = session
                 .apply_special_routine(&runtime, routine)
                 .expect_err("inactive declared service must reject");
-            assert!(
-                error
-                    .to_string()
-                    .contains("is inactive in the definitive modpack scripts")
-            );
+            assert!(error
+                .to_string()
+                .contains("is inactive in the definitive modpack scripts"));
             assert_eq!(session.state, before);
         }
         let _ = std::fs::remove_dir_all(root);
@@ -11453,7 +11777,7 @@ mod tests {
             .insert("ActivateFishingSwarm".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11527,7 +11851,7 @@ mod tests {
         }
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11851,7 +12175,7 @@ mod tests {
         data.special_routines.insert("HealParty".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11889,7 +12213,7 @@ mod tests {
         add_runtime_landmark(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11939,7 +12263,7 @@ mod tests {
         data.items.insert("TOWN_MAP".to_string(), town_map_item());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -11991,7 +12315,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12029,7 +12353,7 @@ mod tests {
         data.items.insert("COIN_CASE".to_string(), coin_case);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12071,7 +12395,7 @@ mod tests {
         data.items.insert("BLUE_CARD".to_string(), blue_card);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12123,7 +12447,7 @@ mod tests {
         data.items.insert("BLUE_CARD".to_string(), blue_card_item());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12167,7 +12491,7 @@ mod tests {
         data.items.insert("BLUE_CARD".to_string(), blue_card_item());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12264,7 +12588,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12333,7 +12657,7 @@ mod tests {
         map.objects = vec![npc];
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12384,7 +12708,7 @@ mod tests {
         map.objects = vec![weird_tree];
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12443,7 +12767,7 @@ mod tests {
         data.items.insert("POTION".to_string(), potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12508,7 +12832,7 @@ mod tests {
         data.items.insert("X_ATTACK".to_string(), x_attack);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12573,7 +12897,7 @@ mod tests {
         data.items.insert("X_ATTACK".to_string(), x_attack);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12637,7 +12961,7 @@ mod tests {
         data.items.insert("FULL_RESTORE".to_string(), full_restore);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12708,7 +13032,7 @@ mod tests {
         data.items.insert("ANTIDOTE".to_string(), antidote);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12773,7 +13097,7 @@ mod tests {
         data.items.insert("ANTIDOTE".to_string(), antidote);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12828,7 +13152,7 @@ mod tests {
         data.items.insert("REVIVE".to_string(), revive);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12897,7 +13221,7 @@ mod tests {
         data.items.insert("REVIVE".to_string(), revive);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -12948,7 +13272,7 @@ mod tests {
         data.items.insert("POTION".to_string(), potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13006,7 +13330,7 @@ mod tests {
         data.items.insert("ANTIDOTE".to_string(), antidote);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13067,7 +13391,7 @@ mod tests {
         data.items.insert("REVIVE".to_string(), revive);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13123,7 +13447,7 @@ mod tests {
         data.items.insert("POTION".to_string(), potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13173,7 +13497,7 @@ mod tests {
         data.items.insert("PROTEIN".to_string(), protein);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13240,7 +13564,7 @@ mod tests {
         data.items.insert("PROTEIN".to_string(), protein);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13304,7 +13628,7 @@ mod tests {
             .insert("CHIKORITA".to_string(), Vec::new());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13380,7 +13704,7 @@ mod tests {
         data.items.insert("RARE_CANDY".to_string(), rare_candy);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13453,7 +13777,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13535,7 +13859,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13590,7 +13914,7 @@ mod tests {
         data.items.insert("MOD_ASH".to_string(), sacred_ash);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13666,7 +13990,7 @@ mod tests {
         data.items.insert("MOD_ASH".to_string(), sacred_ash);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13720,7 +14044,7 @@ mod tests {
         data.items.insert("ETHER".to_string(), ether);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13788,7 +14112,7 @@ mod tests {
         data.items.insert("ETHER".to_string(), ether);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13841,7 +14165,7 @@ mod tests {
         data.items.insert("TM_HEADBUTT".to_string(), tm);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13911,7 +14235,7 @@ mod tests {
         data.items.insert("HM_CUT".to_string(), hm);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -13961,7 +14285,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14026,7 +14350,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14076,7 +14400,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14124,7 +14448,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -14200,7 +14524,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14260,7 +14584,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14315,7 +14639,7 @@ mod tests {
             .insert("RuntimeMap".to_string(), module.attributes.clone());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14365,7 +14689,7 @@ mod tests {
         data.field_moves.fly.badge = field_move_badge(0);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14423,7 +14747,7 @@ mod tests {
         add_runtime_fly_destination(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14469,7 +14793,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14517,7 +14841,7 @@ mod tests {
         data.field_moves.teleport.move_id = "DIG".to_string();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14565,7 +14889,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_scripted_battles(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_scripted_battles(), report()),
             identity(),
         )
         .expect("runtime");
@@ -14592,11 +14916,9 @@ mod tests {
             .use_teleport_field_move(&runtime, &asset_root, 0)
             .expect_err("missing saved spawn rejects teleport");
 
-        assert!(
-            error
-                .to_string()
-                .contains("TELEPORT field move has no saved spawn identifier")
-        );
+        assert!(error
+            .to_string()
+            .contains("TELEPORT field move has no saved spawn identifier"));
         assert_eq!(session.state, before_state);
         assert_eq!(session.overworld.snapshot(), before_snapshot);
         let _ = std::fs::remove_dir_all(root);
@@ -14615,7 +14937,7 @@ mod tests {
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14657,7 +14979,7 @@ mod tests {
         add_runtime_field_encounters(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14706,7 +15028,7 @@ mod tests {
         add_runtime_field_encounters(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14752,7 +15074,7 @@ mod tests {
         let data = minimal_runtime_data_with_scripted_battles();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14796,7 +15118,7 @@ mod tests {
             .headbutt = None;
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14822,11 +15144,9 @@ mod tests {
             .use_headbutt_field_move(&runtime, 0, 0)
             .expect_err("present map missing headbutt table");
 
-        assert!(
-            error
-                .to_string()
-                .contains("Headbutt field encounter table for map 'RuntimeMap' is missing")
-        );
+        assert!(error
+            .to_string()
+            .contains("Headbutt field encounter table for map 'RuntimeMap' is missing"));
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -14848,7 +15168,7 @@ mod tests {
             .clear();
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -14894,7 +15214,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_grass_encounter(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_grass_encounter(), report()),
             identity(),
         )
         .expect("runtime");
@@ -14957,7 +15277,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data_with_grass_encounter(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_grass_encounter(), report()),
             identity(),
         )
         .expect("runtime");
@@ -14983,11 +15303,9 @@ mod tests {
             .use_sweet_scent_field_move(&runtime, 0, EncounterSurface::Water)
             .expect_err("missing water table rejects sweet scent");
 
-        assert!(
-            error
-                .to_string()
-                .contains("validate SWEET_SCENT encounters on RuntimeMap")
-        );
+        assert!(error
+            .to_string()
+            .contains("validate SWEET_SCENT encounters on RuntimeMap"));
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -15009,7 +15327,7 @@ mod tests {
         data.items.insert("TM_HEADBUTT".to_string(), tm);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15069,7 +15387,7 @@ mod tests {
         data.items.insert("TM_HEADBUTT".to_string(), tm);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15156,7 +15474,7 @@ mod tests {
         data.items.insert("PP_UP".to_string(), pp_up);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15214,7 +15532,7 @@ mod tests {
         data.items.insert("PP_UP".to_string(), pp_up);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15270,7 +15588,7 @@ mod tests {
         data.items.insert("ETHER".to_string(), ether);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15341,7 +15659,7 @@ mod tests {
         data.items.insert("ETHER".to_string(), ether);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15397,7 +15715,7 @@ mod tests {
         data.items.insert("BAD_POTION".to_string(), bad_potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15457,7 +15775,7 @@ mod tests {
         data.items.insert("POTION".to_string(), potion);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15557,7 +15875,7 @@ mod tests {
             });
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -15619,19 +15937,15 @@ mod tests {
         let wrong_index = session
             .open_script_shop(&runtime, "RuntimeMap", "RuntimeShopScript", 7)
             .expect_err("script shop command indexes are exact");
-        assert!(
-            wrong_index
-                .to_string()
-                .contains("has no script shop command at RuntimeShopScript:7")
-        );
+        assert!(wrong_index
+            .to_string()
+            .contains("has no script shop command at RuntimeShopScript:7"));
         let wrong_item = session
             .buy_shop_item(&runtime, "poke_ball", 1)
             .expect_err("active shop item ids are exact");
-        assert!(
-            wrong_item
-                .to_string()
-                .contains("does not sell exact item id poke_ball")
-        );
+        assert!(wrong_item
+            .to_string()
+            .contains("does not sell exact item id poke_ball"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -15738,19 +16052,17 @@ mod tests {
             });
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("session starts");
-        assert!(
-            session
-                .overworld
-                .visible_object_at(TilePosition::new(1, 0))
-                .is_some()
-        );
+        assert!(session
+            .overworld
+            .visible_object_at(TilePosition::new(1, 0))
+            .is_some());
 
         let permanent = session
             .initialize_permanent_phone_numbers(&runtime)
@@ -15824,12 +16136,10 @@ mod tests {
                 ..
             } if item_id == "POTION" && event_flag == "EVENT_RUNTIME_POTION"
         ));
-        assert!(
-            session
-                .overworld
-                .visible_object_at(TilePosition::new(1, 0))
-                .is_none()
-        );
+        assert!(session
+            .overworld
+            .visible_object_at(TilePosition::new(1, 0))
+            .is_none());
         assert!(matches!(
             fruit.outcome,
             FieldItemPickupOutcome::Collected {
@@ -15851,19 +16161,15 @@ mod tests {
                 ScriptPhoneInputs::default(),
             )
             .expect_err("phone command indexes are exact");
-        assert!(
-            wrong_phone
-                .to_string()
-                .contains("has no script phone command at RuntimePhoneScript:4")
-        );
+        assert!(wrong_phone
+            .to_string()
+            .contains("has no script phone command at RuntimePhoneScript:4"));
         let wrong_fruit = session
             .pickup_script_field_item(&runtime, "RuntimeMap", "runtimefruittreescript", 1)
             .expect_err("field pickup script ids are exact");
-        assert!(
-            wrong_fruit
-                .to_string()
-                .contains("has no script field pickup at runtimefruittreescript:1")
-        );
+        assert!(wrong_fruit
+            .to_string()
+            .contains("has no script field pickup at runtimefruittreescript:1"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -15952,19 +16258,17 @@ mod tests {
             });
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("session starts");
-        assert!(
-            session
-                .overworld
-                .visible_object_at(TilePosition::new(1, 0))
-                .is_some()
-        );
+        assert!(session
+            .overworld
+            .visible_object_at(TilePosition::new(1, 0))
+            .is_some());
 
         let flag = session
             .apply_script_flag_mutation(&runtime, "RuntimeMap", "RuntimeFlagScript", 0)
@@ -15987,12 +16291,10 @@ mod tests {
 
         assert!(flag.outcome.value);
         assert!(check_flag.outcome.set);
-        assert!(
-            session
-                .overworld
-                .visible_object_at(TilePosition::new(1, 0))
-                .is_none()
-        );
+        assert!(session
+            .overworld
+            .visible_object_at(TilePosition::new(1, 0))
+            .is_none());
         assert_eq!(set_scene.outcome.scene_id, "SCENE_RUNTIME_DONE");
         assert_eq!(check_scene.outcome.scene_id, "SCENE_RUNTIME_DONE");
         assert_eq!(set_map_scene.outcome.scene_id, "SCENE_RUNTIME_START");
@@ -16016,11 +16318,9 @@ mod tests {
         let wrong_scene = session
             .apply_script_scene_command(&runtime, "RuntimeMap", "RuntimeSceneScript", 9)
             .expect_err("scene command indexes are exact");
-        assert!(
-            wrong_scene
-                .to_string()
-                .contains("has no script scene command at RuntimeSceneScript:9")
-        );
+        assert!(wrong_scene
+            .to_string()
+            .contains("has no script scene command at RuntimeSceneScript:9"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -16037,7 +16337,7 @@ mod tests {
             .music = Some("MUSIC_ROUTE_29".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(data, report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -16061,7 +16361,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -16109,7 +16409,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -16130,7 +16430,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -16152,7 +16452,7 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
@@ -16175,13 +16475,13 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let first_runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("first runtime");
         let second_runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             SaveModpackIdentity::new("core-modular", "ffffffff").expect("identity"),
         )
         .expect("second runtime");
@@ -16195,7 +16495,7 @@ mod tests {
             .expect_err("runtime must reject saves from another pack")
             .to_string();
 
-        assert!(error.contains("validate save compiled modpack identity"));
+        assert!(error.contains("read Crystal runtime save for compiled modpack identity"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -16221,9 +16521,12 @@ mod tests {
     fn runtime_bootstrap_rejects_compiled_pack_without_manifest_identity() {
         let root = temp_repository_root("missing-identity");
         let data_root = root.join("apps/web/assets/data");
-        let pack = CompiledGamePack::new(GameDataSet::default(), ModpackCompileReport::default());
-        crystal_assets::write_compiled_game_pack(data_root.join("runtime.crystalpack"), &pack)
-            .expect("write compiled runtime pack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), ModpackCompileReport::default());
+        crystal_assets::write_compiled_game_pack_for_tests(
+            data_root.join("runtime.crystalpack"),
+            &pack,
+        )
+        .expect("write compiled runtime pack");
         let asset_root = AssetRoot::new(&root);
 
         let error = CrystalRuntime::load_from_compiled_pack(&asset_root, "runtime.crystalpack")
@@ -16231,6 +16534,27 @@ mod tests {
             .to_string();
 
         assert!(error.contains("must include at least one manifest id"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_bootstrap_cannot_load_unverified_loaded_pack_publicly() {
+        let root = temp_repository_root("loaded-unverified");
+        let data_root = root.join("apps/web/assets/data");
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), report());
+        crystal_assets::write_compiled_game_pack_for_tests(
+            data_root.join("runtime.crystalpack"),
+            &pack,
+        )
+        .expect("write compiled runtime pack");
+        let asset_root = AssetRoot::new(&root);
+        let error = asset_root
+            .load_loaded_verified_compiled_game_pack("runtime.crystalpack")
+            .expect_err("public loaded pack access must reject unverified packs")
+            .to_string();
+
+        assert!(error.contains("compiled game pack is not verified for runtime"));
+        assert!(error.contains("missing_runtime_pokemon"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -16243,8 +16567,11 @@ mod tests {
             id: "MUSIC_ROUTE_29".to_string(),
             path: "content-packs/test/music/MUSIC_ROUTE_29.mp3".to_string(),
             kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            sample_rate_hz: None,
+            channels: None,
         }];
-        let pack = CompiledGamePack::new(data, report());
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report());
 
         let error = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect_err("runtime must reject mp3 audio")
@@ -16259,20 +16586,19 @@ mod tests {
         let root = temp_repository_root("missing-midi");
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data();
-        data.audio = vec![
-            ModpackAudioAsset::music(
-                "MUSIC_ROUTE_29",
-                "content-packs/test/music/MUSIC_ROUTE_29.mid",
-            )
-            .expect("music asset"),
-        ];
-        let pack = CompiledGamePack::new(data, report());
+        data.audio = vec![ModpackAudioAsset::music(
+            "MUSIC_ROUTE_29",
+            "content-packs/test/music/MUSIC_ROUTE_29.mid",
+        )
+        .expect("music asset")];
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report());
 
         let error = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect_err("runtime must not synthesize missing audio")
             .to_string();
 
-        assert!(error.contains("read runtime MIDI asset"));
+        assert!(error.contains("read runtime audio asset"));
+        assert!(error.contains("content-packs/test/music/MUSIC_ROUTE_29.mid"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -16280,7 +16606,7 @@ mod tests {
     fn runtime_bootstrap_rejects_empty_clean_game_data() {
         let root = temp_repository_root("empty-game");
         let asset_root = AssetRoot::new(&root);
-        let pack = CompiledGamePack::new(GameDataSet::default(), report());
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), report());
 
         let error = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect_err("runtime must not boot a clean report with no game data")
@@ -16304,7 +16630,7 @@ mod tests {
             }],
             ..ModpackCompileReport::default()
         };
-        let pack = CompiledGamePack::new(minimal_runtime_data(), report);
+        let pack = CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report);
 
         CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect("runtime should boot warning-only compiled packs");
@@ -16333,7 +16659,7 @@ mod tests {
             ],
             ..ModpackCompileReport::default()
         };
-        let pack = CompiledGamePack::new(GameDataSet::default(), report);
+        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), report);
 
         let error = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect_err("runtime must reject diagnostic-bearing compiled packs")

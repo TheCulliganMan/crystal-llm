@@ -13,8 +13,8 @@ pub const SAVE_FORMAT_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveModpackIdentity {
-    pub id: String,
-    pub hash: String,
+    id: String,
+    hash: String,
 }
 
 impl SaveModpackIdentity {
@@ -31,12 +31,17 @@ impl SaveModpackIdentity {
         id: impl Into<String>,
         compiled_pack_bytes: &[u8],
     ) -> Result<Self, SaveError> {
+        if compiled_pack_bytes.is_empty() {
+            return Err(SaveError::InvalidIdentity(
+                "save modpack identity requires non-empty compiled pack bytes".to_string(),
+            ));
+        }
         let hash = fnv1a32_hex_bytes(compiled_pack_bytes);
         Self::new(id, hash)
     }
 
     pub fn validate(&self) -> Result<(), SaveError> {
-        if self.id.trim().is_empty() {
+        if self.id.is_empty() {
             return Err(SaveError::InvalidIdentity(
                 "save modpack id is required".to_string(),
             ));
@@ -59,36 +64,56 @@ impl SaveModpackIdentity {
         }
         Ok(())
     }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveMetadata {
-    pub modpack: SaveModpackIdentity,
-    pub created_frame: u64,
-    pub saved_frame: u64,
+    modpack: SaveModpackIdentity,
+    created_frame: u64,
+    saved_frame: u64,
 }
 
 impl SaveMetadata {
-    pub fn new(modpack: SaveModpackIdentity, state: &GameState) -> Self {
+    fn new(modpack: SaveModpackIdentity, state: &GameState) -> Self {
         Self {
             modpack,
             created_frame: state.frame_counter,
             saved_frame: state.frame_counter,
         }
     }
+
+    pub fn modpack(&self) -> &SaveModpackIdentity {
+        &self.modpack
+    }
+
+    pub fn created_frame(&self) -> u64 {
+        self.created_frame
+    }
+
+    pub fn saved_frame(&self) -> u64 {
+        self.saved_frame
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveGame {
-    pub format_version: u16,
-    pub metadata: SaveMetadata,
-    pub state: GameState,
+    format_version: u16,
+    metadata: SaveMetadata,
+    state: GameState,
 }
 
 impl SaveGame {
-    pub fn new(state: GameState, modpack: SaveModpackIdentity) -> Self {
+    fn new(state: GameState, modpack: SaveModpackIdentity) -> Self {
         Self {
             format_version: SAVE_FORMAT_VERSION,
             metadata: SaveMetadata::new(modpack, &state),
@@ -114,6 +139,22 @@ impl SaveGame {
             )));
         }
         Ok(())
+    }
+
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub fn metadata(&self) -> &SaveMetadata {
+        &self.metadata
+    }
+
+    pub fn state(&self) -> &GameState {
+        &self.state
+    }
+
+    pub fn into_state(self) -> GameState {
+        self.state
     }
 }
 
@@ -165,11 +206,11 @@ pub enum SaveError {
     ModpackIdMismatch { expected: String, actual: String },
 }
 
-pub fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveError> {
+fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveError> {
     let path = path.as_ref();
     validate_save_path(path)?;
     save.validate()?;
-    let encoded = bincode::serde::encode_to_vec(save, bincode::config::standard())
+    let encoded = bincode::serde::encode_to_vec(save, save_binary_config())
         .map_err(|error| SaveError::Encode(error.to_string()))?;
     let mut bytes = Vec::with_capacity(SAVE_MAGIC.len() + encoded.len());
     bytes.extend_from_slice(SAVE_MAGIC);
@@ -189,7 +230,17 @@ pub fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), Sa
     })
 }
 
-pub fn read_save_game(path: impl AsRef<Path>) -> Result<SaveGame, SaveError> {
+pub fn write_save_game_for_modpack(
+    path: impl AsRef<Path>,
+    state: GameState,
+    modpack: &SaveModpackIdentity,
+) -> Result<(), SaveError> {
+    modpack.validate()?;
+    let save = SaveGame::new(state, modpack.clone());
+    write_save_game(path, &save)
+}
+
+fn read_save_game(path: impl AsRef<Path>) -> Result<SaveGame, SaveError> {
     let path = path.as_ref();
     validate_save_path(path)?;
     let bytes = std::fs::read(path).map_err(|source| SaveError::Read {
@@ -199,7 +250,16 @@ pub fn read_save_game(path: impl AsRef<Path>) -> Result<SaveGame, SaveError> {
     read_save_game_bytes(&bytes, path.display().to_string())
 }
 
-pub fn read_save_game_bytes(
+pub fn read_save_game_for_modpack(
+    path: impl AsRef<Path>,
+    expected: &SaveModpackIdentity,
+) -> Result<SaveGame, SaveError> {
+    let save = read_save_game(path)?;
+    assert_save_matches_modpack(&save, expected)?;
+    Ok(save)
+}
+
+fn read_save_game_bytes(
     bytes: &[u8],
     source_name: impl Into<String>,
 ) -> Result<SaveGame, SaveError> {
@@ -208,7 +268,7 @@ pub fn read_save_game_bytes(
         .strip_prefix(SAVE_MAGIC)
         .ok_or_else(|| SaveError::InvalidMagic(source_name.clone()))?;
     let (save, consumed): (SaveGame, usize) =
-        bincode::serde::decode_from_slice(payload, bincode::config::standard())
+        bincode::serde::decode_from_slice(payload, save_binary_config())
             .map_err(|error| SaveError::Decode(error.to_string()))?;
     if consumed != payload.len() {
         return Err(SaveError::TrailingBytes(payload.len() - consumed));
@@ -217,12 +277,24 @@ pub fn read_save_game_bytes(
     Ok(save)
 }
 
+pub fn read_save_game_bytes_for_modpack(
+    bytes: &[u8],
+    source_name: impl Into<String>,
+    expected: &SaveModpackIdentity,
+) -> Result<SaveGame, SaveError> {
+    let source_name = source_name.into();
+    validate_save_path(Path::new(&source_name))?;
+    let save = read_save_game_bytes(bytes, source_name)?;
+    assert_save_matches_modpack(&save, expected)?;
+    Ok(save)
+}
+
 pub fn assert_save_matches_modpack(
     save: &SaveGame,
     expected: &SaveModpackIdentity,
 ) -> Result<(), SaveError> {
     expected.validate()?;
-    save.metadata.modpack.validate()?;
+    save.validate()?;
     if save.metadata.modpack.id != expected.id {
         return Err(SaveError::ModpackIdMismatch {
             expected: expected.id.clone(),
@@ -246,6 +318,12 @@ fn validate_save_path(path: &Path) -> Result<(), SaveError> {
             expected: SAVE_EXTENSION,
         }),
     }
+}
+
+fn save_binary_config() -> impl bincode::config::Config {
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
 }
 
 #[cfg(test)]
@@ -274,8 +352,11 @@ mod tests {
 
         write_save_game(&path, &save).expect("write save");
         let loaded = read_save_game(&path).expect("read save");
+        let loaded_for_pack =
+            read_save_game_for_modpack(&path, &modpack).expect("read save for exact pack");
 
         assert_eq!(loaded.state, state);
+        assert_eq!(loaded_for_pack, loaded);
         assert_eq!(loaded.metadata.modpack, modpack);
         assert_eq!(loaded.metadata.saved_frame, 42);
         let bytes = std::fs::read(&path).expect("read raw save");
@@ -363,6 +444,14 @@ mod tests {
                 .contains("id must be exact and untrimmed"),
             "{padded_id}"
         );
+        let whitespace_id =
+            SaveModpackIdentity::new(" ", "1234abcd").expect_err("id whitespace is untrimmed");
+        assert!(
+            whitespace_id
+                .to_string()
+                .contains("id must be exact and untrimmed"),
+            "{whitespace_id}"
+        );
     }
 
     #[test]
@@ -410,6 +499,37 @@ mod tests {
             .expect_err("mismatched modpack hashes must not load silently");
 
         assert!(matches!(error, SaveError::ModpackHashMismatch { .. }));
+
+        let bytes = {
+            let encoded = bincode::serde::encode_to_vec(&save, save_binary_config())
+                .expect("encode save");
+            let mut bytes = SAVE_MAGIC.to_vec();
+            bytes.extend_from_slice(&encoded);
+            bytes
+        };
+        assert!(matches!(
+            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected),
+            Err(SaveError::ModpackHashMismatch { .. })
+        ));
+        assert!(matches!(
+            read_save_game_bytes_for_modpack(&bytes, "slot.json", &expected),
+            Err(SaveError::InvalidExtension { .. })
+        ));
+    }
+
+    #[test]
+    fn save_modpack_match_requires_valid_save_payload() {
+        let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let mut save = SaveGame::new(GameState::default(), expected.clone());
+        save.metadata.saved_frame = 9;
+
+        assert!(matches!(
+            assert_save_matches_modpack(&save, &expected),
+            Err(SaveError::FrameMismatch {
+                metadata_frame: 9,
+                state_frame: 0
+            })
+        ));
     }
 
     #[test]
@@ -434,11 +554,18 @@ mod tests {
 
         assert_eq!(identity.id, "core-modular");
         assert_eq!(identity.hash.len(), 8);
+        assert!(identity
+            .hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        let empty =
+            SaveModpackIdentity::from_compiled_pack_bytes("core-modular", b"")
+                .expect_err("empty compiled pack bytes are not a runtime pack identity");
         assert!(
-            identity
-                .hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            empty
+                .to_string()
+                .contains("requires non-empty compiled pack bytes"),
+            "{empty}"
         );
     }
 }

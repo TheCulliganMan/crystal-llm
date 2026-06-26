@@ -11,3 +11,7 @@ bincode.workspace = true
 crystal-core = { path = "../crystal-core" }
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+crystal-core = { path = "../crystal-core", features = ["test-fixtures"] }
+serde_json.workspace = true

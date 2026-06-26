@@ -73,6 +73,62 @@ pub enum ScriptItemAccessError {
     Bag { error: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptItemGrantIssue {
+    InvalidItem { item_id: String },
+    UnknownItem { item_id: String },
+    InvalidQuantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptItemAccessIssue {
+    InvalidItem { item_id: String },
+    UnknownItem { item_id: String },
+}
+
+pub const SCRIPT_ITEM_FROM_MEMORY_ID: &str = "ITEM_FROM_MEM";
+
+pub fn script_item_grant_issues(
+    grant: &ScriptItemGrant,
+    item_catalog: &BTreeMap<String, Item>,
+) -> Vec<ScriptItemGrantIssue> {
+    let mut issues = Vec::new();
+    if grant.quantity == 0 {
+        issues.push(ScriptItemGrantIssue::InvalidQuantity);
+    }
+    if grant.item_id.trim().is_empty() || grant.item_id.trim() != grant.item_id {
+        issues.push(ScriptItemGrantIssue::InvalidItem {
+            item_id: grant.item_id.clone(),
+        });
+    } else if grant.item_id != SCRIPT_ITEM_FROM_MEMORY_ID
+        && !item_catalog.contains_key(&grant.item_id)
+    {
+        issues.push(ScriptItemGrantIssue::UnknownItem {
+            item_id: grant.item_id.clone(),
+        });
+    }
+    issues
+}
+
+pub fn script_item_access_issues(
+    access: &ScriptItemAccess,
+    item_catalog: &BTreeMap<String, Item>,
+) -> Vec<ScriptItemAccessIssue> {
+    if access.item_id.trim().is_empty() || access.item_id.trim() != access.item_id {
+        vec![ScriptItemAccessIssue::InvalidItem {
+            item_id: access.item_id.clone(),
+        }]
+    } else if item_catalog.contains_key(&access.item_id) {
+        Vec::new()
+    } else {
+        vec![ScriptItemAccessIssue::UnknownItem {
+            item_id: access.item_id.clone(),
+        }]
+    }
+}
+
 pub fn grant_script_item(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
@@ -271,6 +327,63 @@ mod tests {
 
         assert_eq!(error, ScriptItemGrantError::InvalidQuantity);
         assert_eq!(state.bag.quantity(&items["POTION"]), 0);
+    }
+
+    #[test]
+    fn grant_issues_allow_memory_item_sentinel_but_reject_unknown_exact_ids() {
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
+
+        assert_eq!(script_item_grant_issues(&grant("POTION", 1), &items), []);
+        assert_eq!(
+            script_item_grant_issues(&grant(SCRIPT_ITEM_FROM_MEMORY_ID, 1), &items),
+            []
+        );
+        assert_eq!(
+            script_item_grant_issues(&grant("potion", 0), &items),
+            [
+                ScriptItemGrantIssue::InvalidQuantity,
+                ScriptItemGrantIssue::UnknownItem {
+                    item_id: "potion".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            script_item_grant_issues(&grant(" POTION", 1), &items),
+            [ScriptItemGrantIssue::InvalidItem {
+                item_id: " POTION".to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_grant_issues(&grant(" ITEM_FROM_MEM", 1), &items),
+            [ScriptItemGrantIssue::InvalidItem {
+                item_id: " ITEM_FROM_MEM".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn access_issues_reject_unknown_exact_ids_without_memory_sentinel() {
+        let items = catalog(vec![item("PASS", item_pocket("KEY_ITEM"))]);
+
+        assert_eq!(script_item_access_issues(&access("PASS"), &items), []);
+        assert_eq!(
+            script_item_access_issues(&access(SCRIPT_ITEM_FROM_MEMORY_ID), &items),
+            [ScriptItemAccessIssue::UnknownItem {
+                item_id: SCRIPT_ITEM_FROM_MEMORY_ID.to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_access_issues(&access("pass"), &items),
+            [ScriptItemAccessIssue::UnknownItem {
+                item_id: "pass".to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_access_issues(&access(" PASS"), &items),
+            [ScriptItemAccessIssue::InvalidItem {
+                item_id: " PASS".to_string()
+            }]
+        );
     }
 
     #[test]

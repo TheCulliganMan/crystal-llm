@@ -38,6 +38,40 @@ pub enum CaptureBallRuleIssue {
     InvalidMultiplierDenominator,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureRulesIssue {
+    MissingBallRules,
+    UnknownFastBallSpecies {
+        species: String,
+    },
+    UnknownHeavyBallSpecies {
+        species: String,
+    },
+    UnknownBallRuleItem {
+        ball_id: String,
+    },
+    InvalidGuaranteedCaptureBall {
+        ball_id: String,
+    },
+    UnknownGuaranteedCaptureBall {
+        ball_id: String,
+    },
+    InvalidBallRule {
+        ball_id: String,
+        issue: CaptureBallRuleIssue,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWobbleProbabilityIssue {
+    MissingTable,
+    InvalidCatchRate,
+    UnorderedCatchRate { catch_rate: u8, previous: u8 },
+    IncompleteTable,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureWobbleProbability {
@@ -235,6 +269,57 @@ pub fn capture_ball_rule_issues(
     issues
 }
 
+pub fn capture_rules_issues(
+    rules: &CaptureRules,
+    species_ids: &BTreeSet<String>,
+    ball_item_ids: &BTreeSet<String>,
+    has_ball_pocket_items: bool,
+) -> Vec<CaptureRulesIssue> {
+    let mut issues = Vec::new();
+    if has_ball_pocket_items && rules.ball_rules.is_empty() {
+        issues.push(CaptureRulesIssue::MissingBallRules);
+    }
+    for species in &rules.fast_ball_species {
+        if !species_ids.contains(species) {
+            issues.push(CaptureRulesIssue::UnknownFastBallSpecies {
+                species: species.clone(),
+            });
+        }
+    }
+    for species in rules.heavy_ball_modifiers.keys() {
+        if !species_ids.contains(species) {
+            issues.push(CaptureRulesIssue::UnknownHeavyBallSpecies {
+                species: species.clone(),
+            });
+        }
+    }
+    for (ball_id, rule) in &rules.ball_rules {
+        if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
+            issues.push(CaptureRulesIssue::UnknownBallRuleItem {
+                ball_id: ball_id.clone(),
+            });
+        }
+        for issue in capture_ball_rule_issues(ball_id, rule) {
+            issues.push(CaptureRulesIssue::InvalidBallRule {
+                ball_id: ball_id.clone(),
+                issue,
+            });
+        }
+    }
+    for ball_id in &rules.guaranteed_capture_balls {
+        if ball_id.trim().is_empty() || ball_id.trim() != ball_id {
+            issues.push(CaptureRulesIssue::InvalidGuaranteedCaptureBall {
+                ball_id: ball_id.clone(),
+            });
+        } else if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
+            issues.push(CaptureRulesIssue::UnknownGuaranteedCaptureBall {
+                ball_id: ball_id.clone(),
+            });
+        }
+    }
+    issues
+}
+
 pub fn validate_capture_ball_rule_shape(
     ball_id: &str,
     rule: &CaptureBallRule,
@@ -253,6 +338,36 @@ pub fn validate_capture_ball_rule_shape(
         ball_id: ball_id.to_string(),
         message: message.to_string(),
     })
+}
+
+pub fn capture_wobble_probability_issues(
+    probabilities: &[CaptureWobbleProbability],
+    has_ball_pocket_items: bool,
+) -> Vec<CaptureWobbleProbabilityIssue> {
+    if !has_ball_pocket_items {
+        return Vec::new();
+    }
+    if probabilities.is_empty() {
+        return vec![CaptureWobbleProbabilityIssue::MissingTable];
+    }
+    let mut issues = Vec::new();
+    let mut previous = 0;
+    for entry in probabilities {
+        if entry.catch_rate == 0 {
+            issues.push(CaptureWobbleProbabilityIssue::InvalidCatchRate);
+        }
+        if entry.catch_rate < previous {
+            issues.push(CaptureWobbleProbabilityIssue::UnorderedCatchRate {
+                catch_rate: entry.catch_rate,
+                previous,
+            });
+        }
+        previous = entry.catch_rate;
+    }
+    if previous != u8::MAX {
+        issues.push(CaptureWobbleProbabilityIssue::IncompleteTable);
+    }
+    issues
 }
 
 pub fn store_captured_pokemon(
@@ -767,6 +882,118 @@ mod tests {
         assert_eq!(
             capture_ball_rule_issues("LEVEL_BALL", &rule),
             vec![CaptureBallRuleIssue::InvalidMultiplierDenominator]
+        );
+    }
+
+    #[test]
+    fn capture_rules_issues_validate_definitive_pack_references() {
+        let mut rules = CaptureRules {
+            fast_ball_species: BTreeSet::from(["MAGNEMITE".to_string(), "magnemite".to_string()]),
+            heavy_ball_modifiers: BTreeMap::from([
+                ("SNORLAX".to_string(), 40),
+                ("snorlax".to_string(), 40),
+            ]),
+            ball_rules: BTreeMap::from([(" POKE_BALL".to_string(), ball_rule(1, 0))]),
+            guaranteed_capture_balls: BTreeSet::from([
+                " MASTER_BALL".to_string(),
+                "MOD_BALL".to_string(),
+            ]),
+            status_bonus: BTreeMap::new(),
+        };
+        let species = BTreeSet::from(["MAGNEMITE".to_string(), "SNORLAX".to_string()]);
+        let ball_item_ids = BTreeSet::from(["POKE_BALL".to_string(), "MASTER_BALL".to_string()]);
+
+        assert_eq!(
+            capture_rules_issues(&rules, &species, &ball_item_ids, true),
+            vec![
+                CaptureRulesIssue::UnknownFastBallSpecies {
+                    species: "magnemite".to_string()
+                },
+                CaptureRulesIssue::UnknownHeavyBallSpecies {
+                    species: "snorlax".to_string()
+                },
+                CaptureRulesIssue::UnknownBallRuleItem {
+                    ball_id: " POKE_BALL".to_string(),
+                },
+                CaptureRulesIssue::InvalidBallRule {
+                    ball_id: " POKE_BALL".to_string(),
+                    issue: CaptureBallRuleIssue::InvalidBallId,
+                },
+                CaptureRulesIssue::InvalidBallRule {
+                    ball_id: " POKE_BALL".to_string(),
+                    issue: CaptureBallRuleIssue::InvalidMultiplierDenominator,
+                },
+                CaptureRulesIssue::InvalidGuaranteedCaptureBall {
+                    ball_id: " MASTER_BALL".to_string(),
+                },
+                CaptureRulesIssue::UnknownGuaranteedCaptureBall {
+                    ball_id: "MOD_BALL".to_string(),
+                },
+            ]
+        );
+
+        rules.ball_rules.clear();
+        assert_eq!(
+            capture_rules_issues(&rules, &species, &ball_item_ids, true)
+                .into_iter()
+                .next(),
+            Some(CaptureRulesIssue::MissingBallRules)
+        );
+        assert!(
+            !capture_rules_issues(&rules, &species, &ball_item_ids, false)
+                .contains(&CaptureRulesIssue::MissingBallRules)
+        );
+    }
+
+    #[test]
+    fn capture_wobble_probability_issues_validate_complete_exact_table() {
+        assert_eq!(
+            capture_wobble_probability_issues(&[], true),
+            vec![CaptureWobbleProbabilityIssue::MissingTable]
+        );
+        assert_eq!(capture_wobble_probability_issues(&[], false), []);
+
+        let probabilities = vec![
+            CaptureWobbleProbability {
+                catch_rate: 0,
+                chance: 0,
+            },
+            CaptureWobbleProbability {
+                catch_rate: 10,
+                chance: 20,
+            },
+            CaptureWobbleProbability {
+                catch_rate: 9,
+                chance: 30,
+            },
+        ];
+        assert_eq!(
+            capture_wobble_probability_issues(&probabilities, true),
+            vec![
+                CaptureWobbleProbabilityIssue::InvalidCatchRate,
+                CaptureWobbleProbabilityIssue::UnorderedCatchRate {
+                    catch_rate: 9,
+                    previous: 10,
+                },
+                CaptureWobbleProbabilityIssue::IncompleteTable,
+            ]
+        );
+
+        assert_eq!(
+            capture_wobble_probability_issues(
+                &[
+                    CaptureWobbleProbability {
+                        catch_rate: 1,
+                        chance: 63,
+                    },
+                    CaptureWobbleProbability {
+                        catch_rate: 255,
+                        chance: 255,
+                    },
+                ],
+                true,
+            ),
+            []
         );
     }
 

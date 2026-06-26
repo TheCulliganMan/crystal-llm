@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::pokemon::StatExperience;
-use crate::models::{Item, Move, Party, Pokemon, PokemonSpecies, Stat, calculate_stats};
+use crate::models::{
+    ITEM_POCKET_TM_HM, Item, Move, Party, Pokemon, PokemonSpecies, Stat, calculate_stats,
+};
 use crate::systems::battle_rewards::{
     BattleRewardError, BattleRewardRules, apply_direct_level_gain,
 };
@@ -169,6 +171,306 @@ pub enum BattleItemError {
     InvalidBattleStatDropGuardTurns { item_id: String, turns: u8 },
     #[error("battle item {item_id} would not change the target")]
     NoTargetChange { item_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemPayloadIssue {
+    MissingName,
+    InvalidName { name: String },
+    MissingDescription,
+    InvalidDescription { description: String },
+    MissingScriptName,
+    InvalidScriptName { script_name: String },
+    MissingPocket,
+    InvalidPocket { pocket: String },
+    MissingEffect,
+    InvalidEffect { effect: String },
+    MissingHeldEffect,
+    InvalidHeldEffect { held_effect: String },
+    InvalidProperty { property: String },
+    MissingFieldMenu,
+    InvalidFieldMenu { menu: String },
+    MissingBattleMenu,
+    InvalidBattleMenu { menu: String },
+    InvalidStatusHeal { index: usize, status: String },
+    InvalidHealAmount { amount: i16 },
+    InvalidReviveHpPercent { percent: u8 },
+    InvalidPartyReviveHpPercent { percent: u8 },
+    MissingPpRestoreScope,
+    InvalidPpRestoreScope { scope: String },
+    InvalidPpRestorePoints { points: u8 },
+    InvalidPpUpStages { stages: u8 },
+    MissingVitaminStat,
+    InvalidVitaminStat { stat: String },
+    MissingVitaminStatExp,
+    InvalidVitaminStatExp { amount: u16 },
+    MissingVitaminMaxStatExp,
+    InvalidVitaminMaxStatExp { max: u16 },
+    InvalidRareCandyLevelGain { level_gain: u8 },
+    MissingBattleStatBoostStat,
+    InvalidBattleStatBoostStat { stat: String },
+    MissingBattleStatBoostStages,
+    InvalidBattleStatBoostStages { stages: u8 },
+    MissingBattleStatDropGuard,
+    InvalidBattleStatDropGuard,
+    MissingBattleStatDropGuardTurns,
+    InvalidBattleStatDropGuardTurns { turns: u8 },
+    InvalidBattleEscapeMode { mode: String },
+    InvalidRepelSteps { steps: u16 },
+    InvalidBattleFocusEnergy,
+    InvalidConfusionHeal,
+    MissingTmhmIndex,
+    InvalidTmhmIndex { index: usize },
+    MissingTmhmMove,
+    InvalidTmhmMove { move_id: String },
+    InvalidFieldUsableMenu { menu: String, usable: bool },
+    InvalidBattleUsableMenu { menu: String, usable: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemReferenceIssue {
+    UnknownTmhmMove { move_id: String },
+}
+
+pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
+    let mut issues = Vec::new();
+    if item.name.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingName);
+    } else if item.name.trim() != item.name {
+        issues.push(ItemPayloadIssue::InvalidName {
+            name: item.name.clone(),
+        });
+    }
+    if item.description.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingDescription);
+    } else if item.description.trim() != item.description {
+        issues.push(ItemPayloadIssue::InvalidDescription {
+            description: item.description.clone(),
+        });
+    }
+    if item.script_name.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingScriptName);
+    } else if item.script_name.trim() != item.script_name {
+        issues.push(ItemPayloadIssue::InvalidScriptName {
+            script_name: item.script_name.clone(),
+        });
+    }
+    if item.pocket.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingPocket);
+    } else if item.pocket.trim() != item.pocket {
+        issues.push(ItemPayloadIssue::InvalidPocket {
+            pocket: item.pocket.clone(),
+        });
+    }
+    if item.effect.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingEffect);
+    } else if item.effect.trim() != item.effect {
+        issues.push(ItemPayloadIssue::InvalidEffect {
+            effect: item.effect.clone(),
+        });
+    }
+    if item.held_effect.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingHeldEffect);
+    } else if item.held_effect.trim() != item.held_effect {
+        issues.push(ItemPayloadIssue::InvalidHeldEffect {
+            held_effect: item.held_effect.clone(),
+        });
+    }
+    if !item.property.is_empty() && item.property.trim() != item.property {
+        issues.push(ItemPayloadIssue::InvalidProperty {
+            property: item.property.clone(),
+        });
+    }
+    if item.field_menu.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingFieldMenu);
+    } else if item.field_menu.trim() != item.field_menu {
+        issues.push(ItemPayloadIssue::InvalidFieldMenu {
+            menu: item.field_menu.clone(),
+        });
+    }
+    if item.battle_menu.trim().is_empty() {
+        issues.push(ItemPayloadIssue::MissingBattleMenu);
+    } else if item.battle_menu.trim() != item.battle_menu {
+        issues.push(ItemPayloadIssue::InvalidBattleMenu {
+            menu: item.battle_menu.clone(),
+        });
+    }
+    for (index, status) in item.status_heals.iter().enumerate() {
+        if status.trim().is_empty() || status.trim() != status {
+            issues.push(ItemPayloadIssue::InvalidStatusHeal {
+                index,
+                status: status.clone(),
+            });
+        }
+    }
+    if item.parameter != 0 && item.parameter != -1 && item.parameter < 0 {
+        issues.push(ItemPayloadIssue::InvalidHealAmount {
+            amount: item.parameter,
+        });
+    }
+    push_percent_issue(
+        item.revive_hp_percent,
+        |percent| ItemPayloadIssue::InvalidReviveHpPercent { percent },
+        &mut issues,
+    );
+    push_percent_issue(
+        item.party_revive_hp_percent,
+        |percent| ItemPayloadIssue::InvalidPartyReviveHpPercent { percent },
+        &mut issues,
+    );
+    if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
+        match item.pp_restore_scope.as_deref() {
+            Some("MOVE" | "POKEMON") => {}
+            Some(scope) => issues.push(ItemPayloadIssue::InvalidPpRestoreScope {
+                scope: scope.to_string(),
+            }),
+            None => issues.push(ItemPayloadIssue::MissingPpRestoreScope),
+        }
+        if let Some(0) = item.pp_restore_points {
+            issues.push(ItemPayloadIssue::InvalidPpRestorePoints { points: 0 });
+        }
+    }
+    if let Some(stages) = item.pp_up_stages {
+        if !(1..=3).contains(&stages) {
+            issues.push(ItemPayloadIssue::InvalidPpUpStages { stages });
+        }
+    }
+    if item.vitamin_stat.is_some()
+        || item.vitamin_stat_exp.is_some()
+        || item.vitamin_max_stat_exp.is_some()
+    {
+        match item.vitamin_stat.as_deref() {
+            Some("HP" | "ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL") => {}
+            Some(stat) => issues.push(ItemPayloadIssue::InvalidVitaminStat {
+                stat: stat.to_string(),
+            }),
+            None => issues.push(ItemPayloadIssue::MissingVitaminStat),
+        }
+        match item.vitamin_stat_exp {
+            Some(amount) if amount > 0 => {}
+            Some(amount) => issues.push(ItemPayloadIssue::InvalidVitaminStatExp { amount }),
+            None => issues.push(ItemPayloadIssue::MissingVitaminStatExp),
+        }
+        match (item.vitamin_max_stat_exp, item.vitamin_stat_exp) {
+            (Some(max), Some(amount)) if max >= amount && max > 0 => {}
+            (Some(max), _) => issues.push(ItemPayloadIssue::InvalidVitaminMaxStatExp { max }),
+            (None, _) => issues.push(ItemPayloadIssue::MissingVitaminMaxStatExp),
+        }
+    }
+    if let Some(level_gain) = item.rare_candy_level_gain {
+        if level_gain == 0 {
+            issues.push(ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain });
+        }
+    }
+    if item.battle_stat_boost_stat.is_some() || item.battle_stat_boost_stages.is_some() {
+        match item.battle_stat_boost_stat.as_deref() {
+            Some("ATTACK" | "DEFENSE" | "SPEED" | "SPECIAL_ATTACK" | "ACCURACY") => {}
+            Some(stat) => issues.push(ItemPayloadIssue::InvalidBattleStatBoostStat {
+                stat: stat.to_string(),
+            }),
+            None => issues.push(ItemPayloadIssue::MissingBattleStatBoostStat),
+        }
+        match item.battle_stat_boost_stages {
+            Some(stages) if (1..=6).contains(&stages) => {}
+            Some(stages) => issues.push(ItemPayloadIssue::InvalidBattleStatBoostStages { stages }),
+            None => issues.push(ItemPayloadIssue::MissingBattleStatBoostStages),
+        }
+    }
+    if let Some(false) = item.battle_stat_drop_guard {
+        issues.push(ItemPayloadIssue::InvalidBattleStatDropGuard);
+    }
+    if item.battle_stat_drop_guard.is_none() && item.battle_stat_drop_guard_turns.is_some() {
+        issues.push(ItemPayloadIssue::MissingBattleStatDropGuard);
+    }
+    if item.battle_stat_drop_guard.is_some() || item.battle_stat_drop_guard_turns.is_some() {
+        match item.battle_stat_drop_guard_turns {
+            Some(turns) if turns > 0 => {}
+            Some(turns) => issues.push(ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns }),
+            None => issues.push(ItemPayloadIssue::MissingBattleStatDropGuardTurns),
+        }
+    }
+    if let Some(mode) = item.battle_escape_mode.as_deref() {
+        if mode != "WILD_BATTLE" {
+            issues.push(ItemPayloadIssue::InvalidBattleEscapeMode {
+                mode: mode.to_string(),
+            });
+        }
+    }
+    if let Some(0) = item.repel_steps {
+        issues.push(ItemPayloadIssue::InvalidRepelSteps { steps: 0 });
+    }
+    if let Some(false) = item.battle_focus_energy {
+        issues.push(ItemPayloadIssue::InvalidBattleFocusEnergy);
+    }
+    if let Some(false) = item.confusion_heal {
+        issues.push(ItemPayloadIssue::InvalidConfusionHeal);
+    }
+    if item.pocket == ITEM_POCKET_TM_HM {
+        match item.tmhm_index {
+            Some(0) => issues.push(ItemPayloadIssue::InvalidTmhmIndex { index: 0 }),
+            Some(_) => {}
+            None => issues.push(ItemPayloadIssue::MissingTmhmIndex),
+        }
+    }
+    if item.pocket == ITEM_POCKET_TM_HM
+        && match item.tmhm_move.as_deref() {
+            Some(move_id) => move_id.is_empty(),
+            None => true,
+        }
+    {
+        issues.push(ItemPayloadIssue::MissingTmhmMove);
+    }
+    if item.pocket == ITEM_POCKET_TM_HM {
+        if let Some(move_id) = item.tmhm_move.as_deref() {
+            if !move_id.is_empty() && move_id.trim() != move_id {
+                issues.push(ItemPayloadIssue::InvalidTmhmMove {
+                    move_id: move_id.to_string(),
+                });
+            }
+        }
+    }
+    if (item.field_menu == "ITEMMENU_NOUSE") == item.field_usable {
+        issues.push(ItemPayloadIssue::InvalidFieldUsableMenu {
+            menu: item.field_menu.clone(),
+            usable: item.field_usable,
+        });
+    }
+    if (item.battle_menu == "ITEMMENU_NOUSE") == item.battle_usable {
+        issues.push(ItemPayloadIssue::InvalidBattleUsableMenu {
+            menu: item.battle_menu.clone(),
+            usable: item.battle_usable,
+        });
+    }
+    issues
+}
+
+pub fn item_reference_issues(
+    item: &Item,
+    move_ids: &BTreeSet<String>,
+) -> Vec<ItemReferenceIssue> {
+    let mut issues = Vec::new();
+    if item.pocket == ITEM_POCKET_TM_HM {
+        if let Some(move_id) = item.tmhm_move.as_deref() {
+            if !move_id.is_empty() && !move_ids.contains(move_id) {
+                issues.push(ItemReferenceIssue::UnknownTmhmMove {
+                    move_id: move_id.to_string(),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn push_percent_issue(
+    percent: Option<u8>,
+    issue: impl FnOnce(u8) -> ItemPayloadIssue,
+    issues: &mut Vec<ItemPayloadIssue>,
+) {
+    if let Some(percent) = percent {
+        if !(1..=100).contains(&percent) {
+            issues.push(issue(percent));
+        }
+    }
 }
 
 pub fn validate_battle_escape_item(item: &Item) -> Result<&str, BattleItemError> {
@@ -1260,7 +1562,7 @@ mod tests {
     fn test_item(effect: &str, parameter: i16) -> Item {
         let mut item = Item {
             name: "POTION".to_string(),
-            description: String::new(),
+            description: "Restores HP.".to_string(),
             effect: effect.to_string(),
             status_heals: Vec::new(),
             revive_hp_percent: None,
@@ -1373,6 +1675,331 @@ mod tests {
                 turns: 0,
             }
         );
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns: 0 }]
+        );
+
+        item.battle_stat_drop_guard = None;
+        item.battle_stat_drop_guard_turns = Some(5);
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingBattleStatDropGuard]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_validate_declared_payloads_without_effect_inference() {
+        let mut item = test_item("MOD_ITEM", -2);
+        item.status_heals = vec![String::new(), " POISON".to_string()];
+        item.revive_hp_percent = Some(0);
+        item.party_revive_hp_percent = Some(101);
+        item.pp_restore_scope = Some("PARTY".to_string());
+        item.pp_restore_points = Some(0);
+        item.pp_up_stages = Some(4);
+        item.vitamin_stat = Some("LUCK".to_string());
+        item.vitamin_stat_exp = Some(0);
+        item.vitamin_max_stat_exp = Some(0);
+        item.rare_candy_level_gain = Some(0);
+        item.battle_stat_boost_stat = Some("SPECIAL".to_string());
+        item.battle_stat_boost_stages = Some(7);
+        item.battle_stat_drop_guard = Some(false);
+        item.battle_escape_mode = Some("TRAINER_BATTLE".to_string());
+        item.repel_steps = Some(0);
+        item.battle_focus_energy = Some(false);
+        item.confusion_heal = Some(false);
+        item.pocket = ITEM_POCKET_TM_HM.to_string();
+        item.tmhm_index = Some(0);
+        item.script_name = String::new();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![
+                ItemPayloadIssue::MissingScriptName,
+                ItemPayloadIssue::InvalidStatusHeal {
+                    index: 0,
+                    status: String::new(),
+                },
+                ItemPayloadIssue::InvalidStatusHeal {
+                    index: 1,
+                    status: " POISON".to_string(),
+                },
+                ItemPayloadIssue::InvalidHealAmount { amount: -2 },
+                ItemPayloadIssue::InvalidReviveHpPercent { percent: 0 },
+                ItemPayloadIssue::InvalidPartyReviveHpPercent { percent: 101 },
+                ItemPayloadIssue::InvalidPpRestoreScope {
+                    scope: "PARTY".to_string(),
+                },
+                ItemPayloadIssue::InvalidPpRestorePoints { points: 0 },
+                ItemPayloadIssue::InvalidPpUpStages { stages: 4 },
+                ItemPayloadIssue::InvalidVitaminStat {
+                    stat: "LUCK".to_string(),
+                },
+                ItemPayloadIssue::InvalidVitaminStatExp { amount: 0 },
+                ItemPayloadIssue::InvalidVitaminMaxStatExp { max: 0 },
+                ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain: 0 },
+                ItemPayloadIssue::InvalidBattleStatBoostStat {
+                    stat: "SPECIAL".to_string(),
+                },
+                ItemPayloadIssue::InvalidBattleStatBoostStages { stages: 7 },
+                ItemPayloadIssue::InvalidBattleStatDropGuard,
+                ItemPayloadIssue::MissingBattleStatDropGuardTurns,
+                ItemPayloadIssue::InvalidBattleEscapeMode {
+                    mode: "TRAINER_BATTLE".to_string(),
+                },
+                ItemPayloadIssue::InvalidRepelSteps { steps: 0 },
+                ItemPayloadIssue::InvalidBattleFocusEnergy,
+                ItemPayloadIssue::InvalidConfusionHeal,
+                ItemPayloadIssue::InvalidTmhmIndex { index: 0 },
+                ItemPayloadIssue::MissingTmhmMove,
+            ]
+        );
+
+        let mut exact = test_item("MOD_EXACT", 20);
+        exact.status_heals = vec!["POISON".to_string()];
+        exact.revive_hp_percent = Some(50);
+        exact.party_revive_hp_percent = Some(100);
+        exact.pp_restore_scope = Some("MOVE".to_string());
+        exact.pp_restore_points = Some(1);
+        exact.pp_up_stages = Some(3);
+        exact.vitamin_stat = Some("SPECIAL".to_string());
+        exact.vitamin_stat_exp = Some(2560);
+        exact.vitamin_max_stat_exp = Some(25600);
+        exact.rare_candy_level_gain = Some(1);
+        exact.battle_stat_boost_stat = Some("SPECIAL_ATTACK".to_string());
+        exact.battle_stat_boost_stages = Some(6);
+        exact.battle_stat_drop_guard = Some(true);
+        exact.battle_stat_drop_guard_turns = Some(5);
+        exact.battle_escape_mode = Some("WILD_BATTLE".to_string());
+        exact.repel_steps = Some(100);
+        exact.battle_focus_energy = Some(true);
+        exact.confusion_heal = Some(true);
+        exact.pocket = ITEM_POCKET_TM_HM.to_string();
+        exact.tmhm_index = Some(30);
+        exact.tmhm_move = Some("MUD_SLAP".to_string());
+
+        assert_eq!(item_payload_issues(&exact), Vec::new());
+    }
+
+    #[test]
+    fn item_reference_issues_validate_exact_tmhm_move_ids() {
+        let move_ids = BTreeSet::from(["MUD_SLAP".to_string()]);
+        let mut tm = test_item("TM_MUD_SLAP", 0);
+        tm.pocket = ITEM_POCKET_TM_HM.to_string();
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some("mud_slap".to_string());
+
+        assert_eq!(
+            item_reference_issues(&tm, &move_ids),
+            vec![ItemReferenceIssue::UnknownTmhmMove {
+                move_id: "mud_slap".to_string(),
+            }]
+        );
+
+        tm.tmhm_move = Some("MUD_SLAP".to_string());
+        assert_eq!(item_reference_issues(&tm, &move_ids), Vec::new());
+
+        tm.tmhm_move = None;
+        assert_eq!(item_reference_issues(&tm, &move_ids), Vec::new());
+    }
+
+    #[test]
+    fn item_payload_issues_reject_tmhm_move_whitespace_without_reference_lookup() {
+        let mut tm = test_item("TM_MUD_SLAP", 0);
+        tm.pocket = ITEM_POCKET_TM_HM.to_string();
+        tm.tmhm_index = Some(30);
+        tm.tmhm_move = Some(" MUD_SLAP".to_string());
+
+        assert_eq!(
+            item_payload_issues(&tm),
+            vec![ItemPayloadIssue::InvalidTmhmMove {
+                move_id: " MUD_SLAP".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_reject_script_name_whitespace_without_coercion() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.script_name = " MOD_ITEM".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidScriptName {
+                script_name: " MOD_ITEM".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_display_name_without_inference() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.name = " Flash Step Charm".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidName {
+                name: " Flash Step Charm".to_string(),
+            }]
+        );
+
+        item.name = "Flash Step Charm".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.name = String::new();
+        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingName]);
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_description_without_inference() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.description = " A charm with exact text.".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidDescription {
+                description: " A charm with exact text.".to_string(),
+            }]
+        );
+
+        item.description = "A charm with exact text.".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.description = String::new();
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingDescription]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_pocket_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.pocket = " BATTLE_PASS".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidPocket {
+                pocket: " BATTLE_PASS".to_string(),
+            }]
+        );
+
+        item.pocket = "BATTLE_PASS".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.pocket = String::new();
+        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingPocket]);
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_effect_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.effect = " MODDED_FLASH_STEP".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidEffect {
+                effect: " MODDED_FLASH_STEP".to_string(),
+            }]
+        );
+
+        item.effect = "MODDED_FLASH_STEP".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.effect = String::new();
+        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingEffect]);
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_held_effect_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.held_effect = " HELD_MODDED".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidHeldEffect {
+                held_effect: " HELD_MODDED".to_string(),
+            }]
+        );
+
+        item.held_effect = "HELD_MODDED".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.held_effect = String::new();
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingHeldEffect]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_property_without_requiring_property() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.property = " CANT_SELECT".to_string();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidProperty {
+                property: " CANT_SELECT".to_string(),
+            }]
+        );
+
+        item.property = "CANT_SELECT".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+
+        item.property = String::new();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+    }
+
+    #[test]
+    fn item_payload_issues_reject_malformed_menus_without_enum_restriction() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.field_menu = " ITEMMENU_MODDED".to_string();
+        item.battle_menu = String::new();
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![
+                ItemPayloadIssue::InvalidFieldMenu {
+                    menu: " ITEMMENU_MODDED".to_string(),
+                },
+                ItemPayloadIssue::MissingBattleMenu,
+            ]
+        );
+
+        item.field_menu = "ITEMMENU_MODDED".to_string();
+        item.battle_menu = "ITEMMENU_MODDED_BATTLE".to_string();
+        assert_eq!(item_payload_issues(&item), Vec::new());
+    }
+
+    #[test]
+    fn item_payload_issues_reject_menu_usability_contradictions() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.field_menu = "ITEMMENU_NOUSE".to_string();
+        item.field_usable = true;
+        item.battle_menu = "ITEMMENU_PARTY".to_string();
+        item.battle_usable = false;
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![
+                ItemPayloadIssue::InvalidFieldUsableMenu {
+                    menu: "ITEMMENU_NOUSE".to_string(),
+                    usable: true,
+                },
+                ItemPayloadIssue::InvalidBattleUsableMenu {
+                    menu: "ITEMMENU_PARTY".to_string(),
+                    usable: false,
+                },
+            ]
+        );
+
+        item.field_menu = "ITEMMENU_MODDED".to_string();
+        item.field_usable = true;
+        item.battle_menu = "ITEMMENU_NOUSE".to_string();
+        item.battle_usable = false;
+        assert_eq!(item_payload_issues(&item), Vec::new());
     }
 
     fn pp_up_item(stages: Option<u8>) -> Item {

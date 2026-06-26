@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +109,107 @@ pub struct MoveEffectPriority {
 pub struct MovePriorityOverride {
     pub r#move: String,
     pub priority: i8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MovePriorityTableIssue {
+    InvalidBasePriority {
+        priority: i8,
+    },
+    MissingEffectPriorities,
+    InvalidMoveEffectPriorityId {
+        move_effect: String,
+    },
+    DuplicateMoveEffectPriority {
+        move_effect: String,
+    },
+    InvalidMoveEffectPriority {
+        move_effect: String,
+        priority: i8,
+    },
+    MissingMoveEffectPriority {
+        move_name: String,
+        move_effect: String,
+    },
+    InvalidMovePriorityId {
+        move_name: String,
+    },
+    UnknownMovePriority {
+        move_name: String,
+    },
+    InvalidMovePriority {
+        move_name: String,
+        priority: i8,
+    },
+}
+
+pub fn move_priority_table_issues(
+    priorities: &MovePriorityTable,
+    moves: &BTreeMap<String, Move>,
+    required: bool,
+) -> Vec<MovePriorityTableIssue> {
+    let mut issues = Vec::new();
+    if !required {
+        return issues;
+    }
+
+    if priorities.base_priority < 0 {
+        issues.push(MovePriorityTableIssue::InvalidBasePriority {
+            priority: priorities.base_priority,
+        });
+    }
+    if priorities.effect_priorities.is_empty() {
+        issues.push(MovePriorityTableIssue::MissingEffectPriorities);
+    }
+
+    let mut effect_priorities = BTreeSet::new();
+    for entry in &priorities.effect_priorities {
+        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
+            issues.push(MovePriorityTableIssue::InvalidMoveEffectPriorityId {
+                move_effect: entry.move_effect.clone(),
+            });
+        }
+        if !effect_priorities.insert(entry.move_effect.as_str()) {
+            issues.push(MovePriorityTableIssue::DuplicateMoveEffectPriority {
+                move_effect: entry.move_effect.clone(),
+            });
+        }
+        if entry.priority < 0 {
+            issues.push(MovePriorityTableIssue::InvalidMoveEffectPriority {
+                move_effect: entry.move_effect.clone(),
+                priority: entry.priority,
+            });
+        }
+    }
+
+    for move_data in moves.values() {
+        if !effect_priorities.contains(move_data.effect.as_str()) {
+            issues.push(MovePriorityTableIssue::MissingMoveEffectPriority {
+                move_name: move_data.name.clone(),
+                move_effect: move_data.effect.clone(),
+            });
+        }
+    }
+
+    for entry in &priorities.move_priorities {
+        if entry.r#move.trim().is_empty() || entry.r#move.trim() != entry.r#move {
+            issues.push(MovePriorityTableIssue::InvalidMovePriorityId {
+                move_name: entry.r#move.clone(),
+            });
+        } else if !moves.contains_key(&entry.r#move) {
+            issues.push(MovePriorityTableIssue::UnknownMovePriority {
+                move_name: entry.r#move.clone(),
+            });
+        }
+        if entry.priority < 0 {
+            issues.push(MovePriorityTableIssue::InvalidMovePriority {
+                move_name: entry.r#move.clone(),
+                priority: entry.priority,
+            });
+        }
+    }
+
+    issues
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1158,6 +1259,101 @@ mod tests {
         assert_eq!(
             move_priority(&tackle, &move_priorities()).expect("priority"),
             1
+        );
+    }
+
+    #[test]
+    fn move_priority_table_issues_validate_exact_pack_tokens() {
+        let mut moves = BTreeMap::new();
+        moves.insert(
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        );
+        moves.insert(
+            "QUICK_ATTACK".to_string(),
+            move_data_with_effect(
+                "QUICK_ATTACK",
+                pokemon_type("NORMAL"),
+                40,
+                100,
+                "PRIORITY_HIT",
+            ),
+        );
+        let priorities = MovePriorityTable {
+            base_priority: -1,
+            effect_priorities: vec![
+                MoveEffectPriority {
+                    move_effect: "NORMAL_HIT".to_string(),
+                    priority: 1,
+                },
+                MoveEffectPriority {
+                    move_effect: " NORMAL_HIT".to_string(),
+                    priority: 0,
+                },
+                MoveEffectPriority {
+                    move_effect: "NORMAL_HIT".to_string(),
+                    priority: -1,
+                },
+            ],
+            move_priorities: vec![
+                MovePriorityOverride {
+                    r#move: " QUICK_ATTACK".to_string(),
+                    priority: -1,
+                },
+                MovePriorityOverride {
+                    r#move: "EXTREME_SPEED".to_string(),
+                    priority: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            move_priority_table_issues(&priorities, &moves, true),
+            vec![
+                MovePriorityTableIssue::InvalidBasePriority { priority: -1 },
+                MovePriorityTableIssue::InvalidMoveEffectPriorityId {
+                    move_effect: " NORMAL_HIT".to_string(),
+                },
+                MovePriorityTableIssue::DuplicateMoveEffectPriority {
+                    move_effect: "NORMAL_HIT".to_string(),
+                },
+                MovePriorityTableIssue::InvalidMoveEffectPriority {
+                    move_effect: "NORMAL_HIT".to_string(),
+                    priority: -1,
+                },
+                MovePriorityTableIssue::MissingMoveEffectPriority {
+                    move_name: "QUICK_ATTACK".to_string(),
+                    move_effect: "PRIORITY_HIT".to_string(),
+                },
+                MovePriorityTableIssue::InvalidMovePriorityId {
+                    move_name: " QUICK_ATTACK".to_string(),
+                },
+                MovePriorityTableIssue::InvalidMovePriority {
+                    move_name: " QUICK_ATTACK".to_string(),
+                    priority: -1,
+                },
+                MovePriorityTableIssue::UnknownMovePriority {
+                    move_name: "EXTREME_SPEED".to_string(),
+                },
+            ],
+        );
+        assert_eq!(
+            move_priority_table_issues(&MovePriorityTable::default(), &moves, true),
+            vec![
+                MovePriorityTableIssue::MissingEffectPriorities,
+                MovePriorityTableIssue::MissingMoveEffectPriority {
+                    move_name: "QUICK_ATTACK".to_string(),
+                    move_effect: "PRIORITY_HIT".to_string(),
+                },
+                MovePriorityTableIssue::MissingMoveEffectPriority {
+                    move_name: "TACKLE".to_string(),
+                    move_effect: "NORMAL_HIT".to_string(),
+                },
+            ],
+        );
+        assert_eq!(
+            move_priority_table_issues(&MovePriorityTable::default(), &moves, false),
+            []
         );
     }
 

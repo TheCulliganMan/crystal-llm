@@ -59,6 +59,8 @@ pub enum ScriptMapCommandError {
     UnknownCommand { command: String },
     #[error("script map command '{command}' is missing a target map")]
     MissingTargetMap { command: String },
+    #[error("script map command '{command}' has invalid target map '{target_map}'")]
+    InvalidTargetMap { command: String, target_map: String },
     #[error("script map command '{command}' references unknown map '{target_map}'")]
     UnknownTargetMap { command: String, target_map: String },
     #[error("script map command '{command}' has malformed no-warp sentinel")]
@@ -73,10 +75,14 @@ pub enum ScriptMapCommandError {
     MissingFacing { command: String },
     #[error("script map command '{command}' has unexpected facing direction")]
     UnexpectedFacing { command: String },
+    #[error("invalid script facing direction '{facing}'")]
+    InvalidFacing { facing: String },
     #[error("unknown script facing direction '{facing}'")]
     UnknownFacing { facing: String },
     #[error("script map command '{command}' is missing a map setup")]
     MissingMapSetup { command: String },
+    #[error("script map command '{command}' has invalid map setup '{map_setup}'")]
+    InvalidMapSetup { command: String, map_setup: String },
     #[error("script map command '{command}' has unexpected map setup")]
     UnexpectedMapSetup { command: String },
 }
@@ -110,6 +116,58 @@ pub fn is_known_script_map_command(command: &str) -> bool {
         || SCRIPT_MAP_WARP_CHECK_COMMANDS.contains(&command)
         || SCRIPT_MAP_LOAD_COMMANDS.contains(&command)
         || SCRIPT_MAP_REFRESH_COMMANDS.contains(&command)
+}
+
+pub fn script_map_command_issues(
+    command: &ScriptMapCommand,
+    map_ids: &BTreeSet<String>,
+) -> Vec<ScriptMapCommandError> {
+    let mut issues = Vec::new();
+    if SCRIPT_MAP_WARP_COMMANDS.contains(&command.command.as_str()) {
+        push_warp_destination_issues(command, map_ids, &mut issues);
+        push_unexpected_facing(command, &mut issues);
+        push_unexpected_map_setup(command, &mut issues);
+    } else if SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command.command.as_str()) {
+        push_warp_destination_issues(command, map_ids, &mut issues);
+        match command.facing.as_deref() {
+            Some(facing) if parse_script_warp_facing(facing).is_ok() => {}
+            Some(facing) if !is_exact_nonempty_token(facing) => {
+                issues.push(ScriptMapCommandError::InvalidFacing {
+                    facing: facing.to_string(),
+                });
+            }
+            Some(facing) => issues.push(ScriptMapCommandError::UnknownFacing {
+                facing: facing.to_string(),
+            }),
+            None => issues.push(ScriptMapCommandError::MissingFacing {
+                command: command.command.clone(),
+            }),
+        }
+        push_unexpected_map_setup(command, &mut issues);
+    } else if SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
+        push_unexpected_warp_destination(command, &mut issues);
+        push_unexpected_facing(command, &mut issues);
+        push_unexpected_map_setup(command, &mut issues);
+    } else if SCRIPT_MAP_REANCHOR_COMMANDS.contains(&command.command.as_str()) {
+        push_unexpected_warp_destination(command, &mut issues);
+        push_unexpected_facing(command, &mut issues);
+        push_invalid_map_setup(command, &mut issues);
+    } else if SCRIPT_MAP_NEW_LOAD_COMMANDS.contains(&command.command.as_str()) {
+        push_unexpected_warp_destination(command, &mut issues);
+        push_unexpected_facing(command, &mut issues);
+        if command.map_setup.is_none() {
+            issues.push(ScriptMapCommandError::MissingMapSetup {
+                command: command.command.clone(),
+            });
+        } else {
+            push_invalid_map_setup(command, &mut issues);
+        }
+    } else {
+        issues.push(ScriptMapCommandError::UnknownCommand {
+            command: command.command.clone(),
+        });
+    }
+    issues
 }
 
 pub fn resolve_script_map_command(
@@ -165,11 +223,7 @@ pub fn resolve_script_map_command(
         "newloadmap" => {
             reject_warp_destination(&command)?;
             reject_facing(&command)?;
-            let map_setup = command.map_setup.clone().ok_or_else(|| {
-                ScriptMapCommandError::MissingMapSetup {
-                    command: command.command.clone(),
-                }
-            })?;
+            let map_setup = require_map_setup(&command)?;
             Ok(ScriptMapAction::LoadMap {
                 command: command.command,
                 map_setup: Some(map_setup),
@@ -202,6 +256,16 @@ pub fn resolve_script_map_command(
         "reanchormap" => {
             reject_warp_destination(&command)?;
             reject_facing(&command)?;
+            if let Some(map_setup) = command
+                .map_setup
+                .as_deref()
+                .filter(|map_setup| !is_exact_nonempty_token(map_setup))
+            {
+                return Err(ScriptMapCommandError::InvalidMapSetup {
+                    command: command.command.clone(),
+                    map_setup: map_setup.to_string(),
+                });
+            }
             Ok(ScriptMapAction::RefreshMap {
                 command: command.command,
                 map_setup: command.map_setup,
@@ -338,6 +402,11 @@ pub fn apply_script_map_action_to_state(state: &mut GameState, action: &ScriptMa
 }
 
 pub fn parse_script_warp_facing(facing: &str) -> Result<Direction, ScriptMapCommandError> {
+    if !is_exact_nonempty_token(facing) {
+        return Err(ScriptMapCommandError::InvalidFacing {
+            facing: facing.to_string(),
+        });
+    }
     match facing {
         "DOWN" => Ok(Direction::Down),
         "UP" => Ok(Direction::Up),
@@ -360,6 +429,12 @@ fn require_known_target_map<'a>(
             .ok_or_else(|| ScriptMapCommandError::MissingTargetMap {
                 command: command.command.clone(),
             })?;
+    if !is_exact_nonempty_token(target_map) {
+        return Err(ScriptMapCommandError::InvalidTargetMap {
+            command: command.command.clone(),
+            target_map: target_map.to_string(),
+        });
+    }
     if target_map == "NONE" {
         return Err(ScriptMapCommandError::MalformedNoWarpSentinel {
             command: command.command.clone(),
@@ -423,6 +498,105 @@ fn reject_map_setup(command: &ScriptMapCommand) -> Result<(), ScriptMapCommandEr
     }
 }
 
+fn push_warp_destination_issues(
+    command: &ScriptMapCommand,
+    map_ids: &BTreeSet<String>,
+    issues: &mut Vec<ScriptMapCommandError>,
+) {
+    match command.target_map.as_deref() {
+        Some("NONE") if is_no_warp_sentinel(command) => {}
+        Some("NONE") => issues.push(ScriptMapCommandError::MalformedNoWarpSentinel {
+            command: command.command.clone(),
+        }),
+        Some(target_map) if !is_exact_nonempty_token(target_map) => {
+            issues.push(ScriptMapCommandError::InvalidTargetMap {
+                command: command.command.clone(),
+                target_map: target_map.to_string(),
+            });
+        }
+        Some(target_map) if map_ids.contains(target_map) => {}
+        Some(target_map) => issues.push(ScriptMapCommandError::UnknownTargetMap {
+            command: command.command.clone(),
+            target_map: target_map.to_string(),
+        }),
+        None => issues.push(ScriptMapCommandError::MissingTargetMap {
+            command: command.command.clone(),
+        }),
+    }
+    if command.x.is_none() || command.y.is_none() {
+        issues.push(ScriptMapCommandError::MissingCoordinates {
+            command: command.command.clone(),
+        });
+    } else if command.x.is_some_and(|x| i16::try_from(x).is_err())
+        || command.y.is_some_and(|y| i16::try_from(y).is_err())
+    {
+        issues.push(ScriptMapCommandError::CoordinatesOutOfRange {
+            command: command.command.clone(),
+        });
+    }
+}
+
+fn push_unexpected_warp_destination(
+    command: &ScriptMapCommand,
+    issues: &mut Vec<ScriptMapCommandError>,
+) {
+    if command.target_map.is_some() || command.x.is_some() || command.y.is_some() {
+        issues.push(ScriptMapCommandError::UnexpectedWarpDestination {
+            command: command.command.clone(),
+        });
+    }
+}
+
+fn push_unexpected_facing(command: &ScriptMapCommand, issues: &mut Vec<ScriptMapCommandError>) {
+    if command.facing.is_some() {
+        issues.push(ScriptMapCommandError::UnexpectedFacing {
+            command: command.command.clone(),
+        });
+    }
+}
+
+fn push_unexpected_map_setup(command: &ScriptMapCommand, issues: &mut Vec<ScriptMapCommandError>) {
+    if command.map_setup.is_some() {
+        issues.push(ScriptMapCommandError::UnexpectedMapSetup {
+            command: command.command.clone(),
+        });
+    }
+}
+
+fn push_invalid_map_setup(command: &ScriptMapCommand, issues: &mut Vec<ScriptMapCommandError>) {
+    if let Some(map_setup) = command
+        .map_setup
+        .as_deref()
+        .filter(|map_setup| !is_exact_nonempty_token(map_setup))
+    {
+        issues.push(ScriptMapCommandError::InvalidMapSetup {
+            command: command.command.clone(),
+            map_setup: map_setup.to_string(),
+        });
+    }
+}
+
+fn require_map_setup(command: &ScriptMapCommand) -> Result<String, ScriptMapCommandError> {
+    let map_setup =
+        command
+            .map_setup
+            .clone()
+            .ok_or_else(|| ScriptMapCommandError::MissingMapSetup {
+                command: command.command.clone(),
+            })?;
+    if !is_exact_nonempty_token(&map_setup) {
+        return Err(ScriptMapCommandError::InvalidMapSetup {
+            command: command.command.clone(),
+            map_setup,
+        });
+    }
+    Ok(map_setup)
+}
+
+fn is_exact_nonempty_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +635,94 @@ mod tests {
         assert!(is_known_script_map_command("warpfacing"));
         assert!(!is_known_script_map_command("Warp"));
         assert!(!is_known_script_map_command("loadmap"));
+    }
+
+    #[test]
+    fn script_map_issue_collector_reports_exact_pack_shape_errors() {
+        let maps = maps();
+        let mut warp = command("warp");
+        warp.target_map = Some("NONE".to_string());
+        warp.x = Some(1);
+        warp.y = Some(0);
+        warp.facing = Some("DOWN".to_string());
+        assert_eq!(
+            script_map_command_issues(&warp, &maps),
+            vec![
+                ScriptMapCommandError::MalformedNoWarpSentinel {
+                    command: "warp".to_string(),
+                },
+                ScriptMapCommandError::UnexpectedFacing {
+                    command: "warp".to_string(),
+                },
+            ]
+        );
+
+        let mut facing = command("warpfacing");
+        facing.target_map = Some("ROUTE_29".to_string());
+        facing.x = Some(3);
+        facing.y = Some(4);
+        facing.facing = Some("down".to_string());
+        assert_eq!(
+            script_map_command_issues(&facing, &maps),
+            vec![
+                ScriptMapCommandError::UnknownTargetMap {
+                    command: "warpfacing".to_string(),
+                    target_map: "ROUTE_29".to_string(),
+                },
+                ScriptMapCommandError::UnknownFacing {
+                    facing: "down".to_string(),
+                },
+            ]
+        );
+
+        let mut load = command("newloadmap");
+        load.target_map = Some("EcruteakCity".to_string());
+        assert_eq!(
+            script_map_command_issues(&load, &maps),
+            vec![
+                ScriptMapCommandError::UnexpectedWarpDestination {
+                    command: "newloadmap".to_string(),
+                },
+                ScriptMapCommandError::MissingMapSetup {
+                    command: "newloadmap".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(
+            script_map_command_issues(&command("loadmap"), &maps),
+            vec![ScriptMapCommandError::UnknownCommand {
+                command: "loadmap".to_string(),
+            }]
+        );
+
+        let mut padded = command("warpfacing");
+        padded.target_map = Some(" EcruteakCity".to_string());
+        padded.x = Some(3);
+        padded.y = Some(4);
+        padded.facing = Some(" UP".to_string());
+        assert_eq!(
+            script_map_command_issues(&padded, &maps),
+            vec![
+                ScriptMapCommandError::InvalidTargetMap {
+                    command: "warpfacing".to_string(),
+                    target_map: " EcruteakCity".to_string(),
+                },
+                ScriptMapCommandError::InvalidFacing {
+                    facing: " UP".to_string(),
+                },
+            ]
+        );
+
+        let mut reanchor = command("reanchormap");
+        reanchor.map_setup = Some(" MAPSETUP_TRAIN".to_string());
+        assert_eq!(
+            script_map_command_issues(&reanchor, &maps),
+            vec![ScriptMapCommandError::InvalidMapSetup {
+                command: "reanchormap".to_string(),
+                map_setup: " MAPSETUP_TRAIN".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -516,6 +778,35 @@ mod tests {
         assert!(matches!(
             resolve_script_map_command(warpfacing, &maps()),
             Err(ScriptMapCommandError::UnknownFacing { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_padded_map_facing_and_setup_tokens_without_normalization() {
+        let mut warp = command("warp");
+        warp.target_map = Some(" EcruteakCity".to_string());
+        warp.x = Some(6);
+        warp.y = Some(27);
+        assert!(matches!(
+            resolve_script_map_command(warp, &maps()),
+            Err(ScriptMapCommandError::InvalidTargetMap { .. })
+        ));
+
+        let mut warpfacing = command("warpfacing");
+        warpfacing.target_map = Some("BattleTower1F".to_string());
+        warpfacing.x = Some(7);
+        warpfacing.y = Some(7);
+        warpfacing.facing = Some(" UP".to_string());
+        assert!(matches!(
+            resolve_script_map_command(warpfacing, &maps()),
+            Err(ScriptMapCommandError::InvalidFacing { .. })
+        ));
+
+        let mut newloadmap = command("newloadmap");
+        newloadmap.map_setup = Some(" MAPSETUP_TRAIN".to_string());
+        assert!(matches!(
+            resolve_script_map_command(newloadmap, &maps()),
+            Err(ScriptMapCommandError::InvalidMapSetup { .. })
         ));
     }
 

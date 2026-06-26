@@ -974,4 +974,54 @@ mod tests {
 
         assert!(error.contains("unknown field `effect_enum`"), "{error}");
     }
+
+    #[test]
+    fn item_effect_field_rejects_enum_object_values() {
+        let error = serde_json::from_value::<Item>(serde_json::json!({
+            "name": "Flash Step Charm",
+            "description": "A modded effect item.",
+            "effect": { "kind": "MODDED_FLASH_STEP" },
+            "status_heals": [],
+            "revive_hp_percent": null,
+            "party_revive_hp_percent": null,
+            "pp_restore_scope": null,
+            "pp_restore_points": null,
+            "pp_up_stages": null,
+            "vitamin_stat": null,
+            "vitamin_stat_exp": null,
+            "vitamin_max_stat_exp": null,
+            "rare_candy_level_gain": null,
+            "battle_stat_boost_stat": null,
+            "battle_stat_boost_stages": null,
+            "battle_escape_mode": null,
+            "battle_focus_energy": null,
+            "battle_stat_drop_guard": null,
+            "battle_stat_drop_guard_turns": null,
+            "confusion_heal": null,
+            "repel_steps": null,
+            "escape_rope_mode": null,
+            "price": 100,
+            "held_effect": "HELD_NONE",
+            "parameter": 0,
+            "property": "",
+            "pocket": "ITEM",
+            "field_menu": "",
+            "field_usable": true,
+            "battle_menu": "",
+            "battle_usable": true,
+            "script_name": "FLASH_STEP_CHARM",
+            "consumable": true,
+            "tmhm_index": null,
+            "tmhm_move": null
+        }))
+        .expect_err("effect must be the exact modpack string, not an enum object")
+        .to_string();
+
+        assert!(
+            error.contains("invalid type: map")
+                || error.contains("invalid type: enum")
+                || error.contains("expected a string"),
+            "{error}"
+        );
+    }
 }

@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::models::{Item, PokemonStorage};
@@ -101,6 +103,336 @@ pub struct FieldMoveTravelRule {
     pub badge: FieldMoveBadgeRequirement,
     pub blocked_collisions: Vec<u8>,
     pub target_collisions: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldMoveCatalogIssue {
+    InvalidMoveId {
+        subject: String,
+    },
+    UnknownMoveId {
+        subject: String,
+        move_id: String,
+    },
+    InvalidBadgeRegion {
+        subject: String,
+        move_id: String,
+        region: String,
+    },
+    InvalidBadgeIndex {
+        subject: String,
+        move_id: String,
+        index: usize,
+    },
+    MissingTargetCollisions {
+        subject: String,
+        move_id: String,
+    },
+    MissingReplacements {
+        subject: String,
+        move_id: String,
+    },
+    InvalidReplacementTileset {
+        subject: String,
+    },
+    InvalidReplacementVariant {
+        subject: String,
+    },
+    DuplicateReplacement {
+        subject: String,
+    },
+    InvalidEngineFlag {
+        subject: String,
+        move_id: String,
+    },
+    InvalidEscapeItemId,
+    InvalidEscapeItemMode,
+    UnknownEscapeItemRule {
+        item_id: String,
+        escape_rope_mode: String,
+    },
+    MissingRepelItemPayload,
+    InvalidFieldItemId {
+        subject: String,
+    },
+    UnknownFieldItemId {
+        subject: String,
+        item_id: String,
+    },
+}
+
+pub fn field_move_catalog_issues(
+    catalog: &FieldMoveCatalog,
+    moves: &BTreeSet<String>,
+    items: &BTreeMap<String, Item>,
+) -> Vec<FieldMoveCatalogIssue> {
+    if catalog == &FieldMoveCatalog::default() {
+        return Vec::new();
+    }
+
+    let mut issues = Vec::new();
+    collect_block_rule_issues("field_moves:cut", &catalog.cut, moves, false, &mut issues);
+    collect_block_rule_issues(
+        "field_moves:whirlpool",
+        &catalog.whirlpool,
+        moves,
+        false,
+        &mut issues,
+    );
+    collect_flag_rule_issues(
+        "field_moves:strength",
+        &catalog.strength,
+        moves,
+        &mut issues,
+    );
+    collect_flag_rule_issues("field_moves:flash", &catalog.flash, moves, &mut issues);
+    collect_travel_rule_issues("field_moves:surf", &catalog.surf, moves, false, &mut issues);
+    collect_travel_rule_issues(
+        "field_moves:waterfall",
+        &catalog.waterfall,
+        moves,
+        true,
+        &mut issues,
+    );
+    collect_move_rule_issues("field_moves:fly", &catalog.fly, moves, &mut issues);
+    collect_move_only_rule_issues("field_moves:dig", &catalog.dig, moves, &mut issues);
+    collect_move_only_rule_issues(
+        "field_moves:teleport",
+        &catalog.teleport,
+        moves,
+        &mut issues,
+    );
+    collect_escape_item_rule_issues(&catalog.escape_rope, items, &mut issues);
+    collect_repel_rule_issues(items, &mut issues);
+    collect_field_item_rule_issues("field_moves:bicycle", &catalog.bicycle, items, &mut issues);
+    collect_field_item_rule_issues(
+        "field_moves:itemfinder",
+        &catalog.itemfinder,
+        items,
+        &mut issues,
+    );
+    collect_field_item_rule_issues(
+        "field_moves:squirtbottle",
+        &catalog.squirtbottle,
+        items,
+        &mut issues,
+    );
+    collect_field_item_rule_issues(
+        "field_moves:coin_case",
+        &catalog.coin_case,
+        items,
+        &mut issues,
+    );
+    collect_field_item_rule_issues(
+        "field_moves:blue_card",
+        &catalog.blue_card,
+        items,
+        &mut issues,
+    );
+    collect_field_item_rule_issues(
+        "field_moves:town_map",
+        &catalog.town_map,
+        items,
+        &mut issues,
+    );
+    issues
+}
+
+fn collect_move_rule_issues(
+    subject: &str,
+    rule: &FieldMoveRule,
+    moves: &BTreeSet<String>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    collect_move_id_issues(subject, &rule.move_id, moves, issues);
+    collect_badge_issues(subject, &rule.move_id, &rule.badge, issues);
+}
+
+fn collect_move_only_rule_issues(
+    subject: &str,
+    rule: &FieldMoveMoveRule,
+    moves: &BTreeSet<String>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    collect_move_id_issues(subject, &rule.move_id, moves, issues);
+}
+
+fn collect_block_rule_issues(
+    subject: &str,
+    rule: &FieldMoveBlockRule,
+    moves: &BTreeSet<String>,
+    require_target_collisions: bool,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    collect_move_id_issues(subject, &rule.move_id, moves, issues);
+    collect_badge_issues(subject, &rule.move_id, &rule.badge, issues);
+    if require_target_collisions || rule.target_collisions.is_empty() {
+        if rule.target_collisions.is_empty() {
+            issues.push(FieldMoveCatalogIssue::MissingTargetCollisions {
+                subject: subject.to_string(),
+                move_id: rule.move_id.clone(),
+            });
+        }
+    }
+    if rule.replacements.is_empty() {
+        issues.push(FieldMoveCatalogIssue::MissingReplacements {
+            subject: subject.to_string(),
+            move_id: rule.move_id.clone(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for (index, replacement) in rule.replacements.iter().enumerate() {
+        let replacement_subject = format!("{subject}:replacement:{index}");
+        if replacement.tileset.trim().is_empty()
+            || replacement.tileset.trim() != replacement.tileset
+        {
+            issues.push(FieldMoveCatalogIssue::InvalidReplacementTileset {
+                subject: replacement_subject.clone(),
+            });
+        }
+        if replacement.variant.trim().is_empty()
+            || replacement.variant.trim() != replacement.variant
+        {
+            issues.push(FieldMoveCatalogIssue::InvalidReplacementVariant {
+                subject: replacement_subject.clone(),
+            });
+        }
+        if !seen.insert((replacement.tileset.as_str(), replacement.block_id)) {
+            issues.push(FieldMoveCatalogIssue::DuplicateReplacement {
+                subject: replacement_subject,
+            });
+        }
+    }
+}
+
+fn collect_flag_rule_issues(
+    subject: &str,
+    rule: &FieldMoveFlagRule,
+    moves: &BTreeSet<String>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    collect_move_id_issues(subject, &rule.move_id, moves, issues);
+    collect_badge_issues(subject, &rule.move_id, &rule.badge, issues);
+    if rule.engine_flag.trim().is_empty() || rule.engine_flag.trim() != rule.engine_flag {
+        issues.push(FieldMoveCatalogIssue::InvalidEngineFlag {
+            subject: subject.to_string(),
+            move_id: rule.move_id.clone(),
+        });
+    }
+}
+
+fn collect_travel_rule_issues(
+    subject: &str,
+    rule: &FieldMoveTravelRule,
+    moves: &BTreeSet<String>,
+    require_target_collisions: bool,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    collect_move_id_issues(subject, &rule.move_id, moves, issues);
+    collect_badge_issues(subject, &rule.move_id, &rule.badge, issues);
+    if require_target_collisions && rule.target_collisions.is_empty() {
+        issues.push(FieldMoveCatalogIssue::MissingTargetCollisions {
+            subject: subject.to_string(),
+            move_id: rule.move_id.clone(),
+        });
+    }
+}
+
+fn collect_escape_item_rule_issues(
+    rule: &FieldEscapeItemRule,
+    items: &BTreeMap<String, Item>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+        issues.push(FieldMoveCatalogIssue::InvalidEscapeItemId);
+    }
+    if rule.escape_rope_mode.trim().is_empty()
+        || rule.escape_rope_mode.trim() != rule.escape_rope_mode
+    {
+        issues.push(FieldMoveCatalogIssue::InvalidEscapeItemMode);
+    }
+    if items.is_empty() || rule.item_id.is_empty() || rule.escape_rope_mode.is_empty() {
+        return;
+    }
+    match items.get(&rule.item_id) {
+        Some(item) if item.escape_rope_mode.as_deref() == Some(rule.escape_rope_mode.as_str()) => {}
+        _ => issues.push(FieldMoveCatalogIssue::UnknownEscapeItemRule {
+            item_id: rule.item_id.clone(),
+            escape_rope_mode: rule.escape_rope_mode.clone(),
+        }),
+    }
+}
+
+fn collect_repel_rule_issues(
+    items: &BTreeMap<String, Item>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    if items.is_empty() {
+        return;
+    }
+    if !items.values().any(|item| item.repel_steps.is_some()) {
+        issues.push(FieldMoveCatalogIssue::MissingRepelItemPayload);
+    }
+}
+
+fn collect_field_item_rule_issues(
+    subject: &str,
+    rule: &FieldItemRule,
+    items: &BTreeMap<String, Item>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+        issues.push(FieldMoveCatalogIssue::InvalidFieldItemId {
+            subject: subject.to_string(),
+        });
+        return;
+    }
+    if !items.contains_key(&rule.item_id) {
+        issues.push(FieldMoveCatalogIssue::UnknownFieldItemId {
+            subject: subject.to_string(),
+            item_id: rule.item_id.clone(),
+        });
+    }
+}
+
+fn collect_move_id_issues(
+    subject: &str,
+    move_id: &str,
+    moves: &BTreeSet<String>,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    if move_id.trim().is_empty() || move_id.trim() != move_id {
+        issues.push(FieldMoveCatalogIssue::InvalidMoveId {
+            subject: subject.to_string(),
+        });
+    } else if !moves.contains(move_id) {
+        issues.push(FieldMoveCatalogIssue::UnknownMoveId {
+            subject: subject.to_string(),
+            move_id: move_id.to_string(),
+        });
+    }
+}
+
+fn collect_badge_issues(
+    subject: &str,
+    move_id: &str,
+    badge: &FieldMoveBadgeRequirement,
+    issues: &mut Vec<FieldMoveCatalogIssue>,
+) {
+    if badge.region != "johto" {
+        issues.push(FieldMoveCatalogIssue::InvalidBadgeRegion {
+            subject: subject.to_string(),
+            move_id: move_id.to_string(),
+            region: badge.region.clone(),
+        });
+    }
+    if badge.index >= 8 {
+        issues.push(FieldMoveCatalogIssue::InvalidBadgeIndex {
+            subject: subject.to_string(),
+            move_id: move_id.to_string(),
+            index: badge.index,
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1532,5 +1864,150 @@ mod tests {
             )
             .expect("catalog item id accepted");
         }
+    }
+
+    #[test]
+    fn field_move_catalog_issues_validate_exact_move_rules() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.cut = FieldMoveBlockRule {
+            move_id: "CUT".to_string(),
+            badge: FieldMoveBadgeRequirement {
+                region: "kanto".to_string(),
+                index: 8,
+            },
+            target_collisions: Vec::new(),
+            replacements: vec![
+                FieldMoveReplacement {
+                    tileset: "".to_string(),
+                    block_id: 1,
+                    replacement_block_id: 2,
+                    variant: "tree".to_string(),
+                },
+                FieldMoveReplacement {
+                    tileset: "johto".to_string(),
+                    block_id: 3,
+                    replacement_block_id: 4,
+                    variant: " grass".to_string(),
+                },
+                FieldMoveReplacement {
+                    tileset: "johto".to_string(),
+                    block_id: 3,
+                    replacement_block_id: 5,
+                    variant: "tree".to_string(),
+                },
+            ],
+        };
+        catalog.fly = FieldMoveRule {
+            move_id: " FLY".to_string(),
+            badge: badge(BADGE_STORM),
+        };
+        catalog.strength = FieldMoveFlagRule {
+            move_id: "STRENGTH".to_string(),
+            badge: badge(BADGE_PLAIN),
+            engine_flag: "".to_string(),
+        };
+        catalog.waterfall = FieldMoveTravelRule {
+            move_id: "WATERFALL".to_string(),
+            badge: badge(BADGE_RISING),
+            blocked_collisions: Vec::new(),
+            target_collisions: Vec::new(),
+        };
+
+        let moves = BTreeSet::from([
+            "STRENGTH".to_string(),
+            "WATERFALL".to_string(),
+            "FLY".to_string(),
+        ]);
+        let issues = field_move_catalog_issues(&catalog, &moves, &BTreeMap::new());
+
+        assert!(issues.contains(&FieldMoveCatalogIssue::UnknownMoveId {
+            subject: "field_moves:cut".to_string(),
+            move_id: "CUT".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidBadgeRegion {
+            subject: "field_moves:cut".to_string(),
+            move_id: "CUT".to_string(),
+            region: "kanto".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidBadgeIndex {
+            subject: "field_moves:cut".to_string(),
+            move_id: "CUT".to_string(),
+            index: 8,
+        }));
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::MissingTargetCollisions {
+                subject: "field_moves:cut".to_string(),
+                move_id: "CUT".to_string(),
+            })
+        );
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::InvalidReplacementTileset {
+                subject: "field_moves:cut:replacement:0".to_string(),
+            })
+        );
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::InvalidReplacementVariant {
+                subject: "field_moves:cut:replacement:1".to_string(),
+            })
+        );
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::DuplicateReplacement {
+                subject: "field_moves:cut:replacement:2".to_string(),
+            })
+        );
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidMoveId {
+            subject: "field_moves:fly".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEngineFlag {
+            subject: "field_moves:strength".to_string(),
+            move_id: "STRENGTH".to_string(),
+        }));
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::MissingTargetCollisions {
+                subject: "field_moves:waterfall".to_string(),
+                move_id: "WATERFALL".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn field_move_catalog_issues_validate_exact_item_payloads() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.escape_rope = FieldEscapeItemRule {
+            item_id: "MOD_ESCAPE_ROPE".to_string(),
+            escape_rope_mode: "MOD_WARP".to_string(),
+        };
+        catalog.repel = FieldRepelItemRule {};
+        catalog.bicycle = FieldItemRule {
+            item_id: "MOD_BICYCLE".to_string(),
+        };
+        catalog.itemfinder = FieldItemRule {
+            item_id: " ITEMFINDER".to_string(),
+        };
+
+        let mut escape_rope = escape_item("ESCAPE_ROPE", Some("DIG_WARP"));
+        escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
+        let bicycle = field_effect_item("BICYCLE", "BICYCLE");
+        let items = BTreeMap::from([
+            ("ESCAPE_ROPE".to_string(), escape_rope),
+            ("BICYCLE".to_string(), bicycle),
+        ]);
+
+        let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
+
+        assert!(
+            issues.contains(&FieldMoveCatalogIssue::UnknownEscapeItemRule {
+                item_id: "MOD_ESCAPE_ROPE".to_string(),
+                escape_rope_mode: "MOD_WARP".to_string(),
+            })
+        );
+        assert!(issues.contains(&FieldMoveCatalogIssue::MissingRepelItemPayload));
+        assert!(issues.contains(&FieldMoveCatalogIssue::UnknownFieldItemId {
+            subject: "field_moves:bicycle".to_string(),
+            item_id: "MOD_BICYCLE".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidFieldItemId {
+            subject: "field_moves:itemfinder".to_string(),
+        }));
     }
 }

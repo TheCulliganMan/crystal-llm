@@ -200,9 +200,9 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
           pp_ups: 0,
         }));
       } else if (trainerType === "TRAINERTYPE_ITEM") {
-        item = parts[2];
+        item = parts[2] === "NO_ITEM" ? null : parts[2];
       } else if (trainerType === "TRAINERTYPE_ITEM_MOVES") {
-        item = parts[2];
+        item = parts[2] === "NO_ITEM" ? null : parts[2];
         moves = parts.slice(3).filter((move) => move !== "NO_MOVE").map((move) => ({
           name: move as Trainer["party"][number]["moves"][number]["name"],
           current_pp: movesMap[move].pp,

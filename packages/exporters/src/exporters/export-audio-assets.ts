@@ -6,6 +6,9 @@ export type ExportedAudioAsset = {
   id: string;
   path: string;
   kind: "music" | "sound_effect" | "cry";
+  source: "midi" | "pcm";
+  sample_rate_hz: number | null;
+  channels: number | null;
 };
 
 const CORE_AUDIO_ROOT = "content-packs/core-modular";
@@ -141,6 +144,9 @@ export function exportAudioAssets(
         id,
         path: `${CORE_AUDIO_ROOT}/music/${id}.mid`,
         kind: "music" as const,
+        source: "midi" as const,
+        sample_rate_hz: null,
+        channels: null,
       };
     });
 
@@ -157,6 +163,9 @@ export function exportAudioAssets(
       id,
       path: `${CORE_AUDIO_ROOT}/sfx/${id}.mid`,
       kind: "sound_effect" as const,
+      source: "midi" as const,
+      sample_rate_hz: null,
+      channels: null,
     };
   });
 
@@ -167,6 +176,9 @@ export function exportAudioAssets(
     id: label,
     path: `${CORE_AUDIO_ROOT}/cries/${label}.mid`,
     kind: "cry" as const,
+    source: "midi" as const,
+    sample_rate_hz: null,
+    channels: null,
   }));
 
   return [...music, ...sfx, ...cries];
