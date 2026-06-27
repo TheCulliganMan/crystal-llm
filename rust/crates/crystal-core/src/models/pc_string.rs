@@ -10,15 +10,17 @@ pub fn pc_string_catalog_issues(
 ) -> Vec<PcStringCatalogIssue> {
     pc_strings
         .iter()
-        .filter(|(key, value)| {
-            !is_exact_nonempty_pc_string_key(key) || value.trim().is_empty()
-        })
+        .filter(|(key, value)| !is_exact_nonempty_pc_string_key(key) || value.trim().is_empty())
         .map(|(key, _)| PcStringCatalogIssue::InvalidString { key: key.clone() })
         .collect()
 }
 
 fn is_exact_nonempty_pc_string_key(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -31,6 +33,10 @@ mod tests {
             ("".to_string(), "Choose a <PK><MN>.".to_string()),
             (
                 " PCString_Deposit".to_string(),
+                "Deposit <PK><MN>.".to_string(),
+            ),
+            (
+                "PCString Deposit".to_string(),
                 "Deposit <PK><MN>.".to_string(),
             ),
             (
@@ -50,6 +56,9 @@ mod tests {
                 PcStringCatalogIssue::InvalidString { key: String::new() },
                 PcStringCatalogIssue::InvalidString {
                     key: " PCString_Deposit".to_string(),
+                },
+                PcStringCatalogIssue::InvalidString {
+                    key: "PCString Deposit".to_string(),
                 },
                 PcStringCatalogIssue::InvalidString {
                     key: "PCString_Withdraw".to_string(),

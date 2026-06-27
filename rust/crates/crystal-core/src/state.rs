@@ -2,13 +2,41 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::map::MapSceneTable;
-use crate::models::{Bag, PokedexState, Pokemon, PokemonStorage};
+use crate::models::{Bag, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonStorage};
+use crate::systems::script_audio::{
+    SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
+    SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS, SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS,
+};
+use crate::systems::script_runtime::script_runtime_command_arg_counts;
+use crate::systems::script_text::SCRIPT_TEXT_LABEL_COMMANDS;
+use crate::systems::script_warps::{SCRIPT_MAP_LOAD_COMMANDS, SCRIPT_MAP_REFRESH_COMMANDS};
+use crate::systems::shop::{SCRIPT_SHOP_ZERO_MART_TYPES, is_known_script_mart_type};
 use crate::systems::step_events::StepEventCounters;
 use crate::systems::time::TimeState;
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
 use crate::world::session::OverworldSnapshot;
+
+pub const PLAYER_NAME_LENGTH: usize = 8;
+const MOBILE_LOGIN_PASSWORD_LENGTH: usize = 17;
+const BATTLE_TOWER_SAVE_FILE_FLAG_YOURS: u8 = 0x1;
+const BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION: u8 = 0x2;
+const BATTLE_TOWER_SAVE_FILE_FLAGS_MASK: u8 =
+    BATTLE_TOWER_SAVE_FILE_FLAG_YOURS | BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION;
+const BATTLE_TOWER_RULE_FAILURES: &[&str] = &[
+    "OnlyThreeMonMayBeEnteredText",
+    "TheMonMustAllBeDifferentKindsText",
+    "TheMonMustNotHoldTheSameItemsText",
+    "YouCantTakeAnEggText",
+];
+const BATTLE_TOWER_MOBILE_FLAGS: &[&str] = &[
+    "function103780",
+    "function1037c2",
+    "function1037eb",
+    "function10383c",
+    "function10387b",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -159,6 +187,23 @@ pub enum LinkSerialConnectionStatus {
     UsingExternalClock,
 }
 
+impl LinkSessionState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_optional_script_runtime_token(
+            "link_session.active_room",
+            self.active_room.as_deref(),
+        )?;
+        if let Some(room) = &self.active_room {
+            if self.link_mode == 0 {
+                return Err(format!(
+                    "link_session.active_room {room} cannot be saved with link_mode 0"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleTowerState {
@@ -215,6 +260,82 @@ impl Default for BattleTowerState {
     }
 }
 
+impl BattleTowerState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        if self.challenge_state > 4 {
+            return Err(format!(
+                "battle_tower.challenge_state {} is outside Crystal range 0..4",
+                self.challenge_state
+            ));
+        }
+        let unknown_save_file_flags = self.save_file_flags & !BATTLE_TOWER_SAVE_FILE_FLAGS_MASK;
+        if unknown_save_file_flags != 0 {
+            return Err(format!(
+                "battle_tower.save_file_flags {:#04x} contains unknown bits {:#04x}",
+                self.save_file_flags, unknown_save_file_flags
+            ));
+        }
+        if self.record_reset_counter > 2 {
+            return Err(format!(
+                "battle_tower.record_reset_counter {} is outside Crystal range 0..2",
+                self.record_reset_counter
+            ));
+        }
+        validate_script_runtime_token("battle_tower.reward_item", &self.reward_item)?;
+        validate_optional_script_runtime_token(
+            "battle_tower.last_rule_failure",
+            self.last_rule_failure.as_deref(),
+        )?;
+        if let Some(failure) = &self.last_rule_failure {
+            if !BATTLE_TOWER_RULE_FAILURES.contains(&failure.as_str()) {
+                return Err(format!(
+                    "battle_tower.last_rule_failure {failure} is not a saved Battle Tower rule failure"
+                ));
+            }
+        }
+        validate_optional_script_runtime_token(
+            "battle_tower.loaded_trainer_id",
+            self.loaded_trainer_id.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
+            "battle_tower.last_sprite_constant",
+            self.last_sprite_constant.as_deref(),
+        )?;
+        if self.record_streaks.len() != self.record_outcomes.len()
+            || self.record_streaks.len() != self.record_days.len()
+        {
+            return Err(format!(
+                "battle_tower record vectors have inconsistent lengths: streaks {}, outcomes {}, days {}",
+                self.record_streaks.len(),
+                self.record_outcomes.len(),
+                self.record_days.len()
+            ));
+        }
+        let mut selected_party_indexes = BTreeSet::new();
+        for index in &self.selected_party_indexes {
+            if *index >= PARTY_SIZE {
+                return Err(format!(
+                    "battle_tower.selected_party_indexes contains {index}, outside party range 0..{PARTY_SIZE}"
+                ));
+            }
+            if !selected_party_indexes.insert(index) {
+                return Err(format!(
+                    "battle_tower.selected_party_indexes contains duplicate party index {index}"
+                ));
+            }
+        }
+        for flag in &self.mobile_flags {
+            validate_script_runtime_token("battle_tower.mobile_flags", flag)?;
+            if !BATTLE_TOWER_MOBILE_FLAGS.contains(&flag.as_str()) {
+                return Err(format!(
+                    "battle_tower.mobile_flags {flag} is not a saved Battle Tower mobile flag"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MobileLinkState {
@@ -236,6 +357,88 @@ pub struct MobileBattleTowerRecord {
     pub day: u8,
 }
 
+impl MobileLinkState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_optional_script_runtime_token("mobile_link.mode", self.mode.as_deref())?;
+        validate_empty_or_script_runtime_token("mobile_link.adapter_status", &self.adapter_status)?;
+        validate_empty_or_script_runtime_token(
+            "mobile_link.adapter_secondary_status",
+            &self.adapter_secondary_status,
+        )?;
+        if self.login_password.len() > MOBILE_LOGIN_PASSWORD_LENGTH {
+            return Err(format!(
+                "mobile_link.login_password length {} exceeds Crystal mobile password limit {}",
+                self.login_password.len(),
+                MOBILE_LOGIN_PASSWORD_LENGTH
+            ));
+        }
+        if self.terminated && self.handshakes == 0 {
+            return Err(
+                "mobile_link.terminated cannot be saved before a mobile handshake".to_string(),
+            );
+        }
+        if let Some(mode) = &self.mode {
+            if self.handshakes == 0 {
+                return Err(format!(
+                    "mobile_link.mode {mode} cannot be saved before a mobile handshake"
+                ));
+            }
+        }
+        if self.handshakes == 0 {
+            if !self.adapter_status.is_empty() {
+                return Err(format!(
+                    "mobile_link.adapter_status {} cannot be saved before a mobile handshake",
+                    self.adapter_status
+                ));
+            }
+            if !self.adapter_secondary_status.is_empty() {
+                return Err(format!(
+                    "mobile_link.adapter_secondary_status {} cannot be saved before a mobile handshake",
+                    self.adapter_secondary_status
+                ));
+            }
+            if self.battle_timer != [0; 3] {
+                return Err(format!(
+                    "mobile_link.battle_timer {:?} cannot be saved before a mobile handshake",
+                    self.battle_timer
+                ));
+            }
+            if !self.login_password.is_empty() {
+                return Err(
+                    "mobile_link.login_password cannot be saved before a mobile handshake"
+                        .to_string(),
+                );
+            }
+        }
+        for (index, record) in self.leaderboard.iter().enumerate() {
+            record.validate_saved_state(index)?;
+        }
+        if self.handshakes == 0 && !self.leaderboard.is_empty() {
+            return Err(format!(
+                "mobile_link.leaderboard has {} records before a mobile handshake",
+                self.leaderboard.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl MobileBattleTowerRecord {
+    fn validate_saved_state(&self, index: usize) -> Result<(), String> {
+        validate_script_runtime_token(
+            &format!("mobile_link.leaderboard[{index}].outcome"),
+            &self.outcome,
+        )?;
+        if self.day >= 7 {
+            return Err(format!(
+                "mobile_link.leaderboard[{index}].day {} is outside weekday range 0..6",
+                self.day
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BugContestState {
@@ -253,6 +456,65 @@ pub struct BugContestState {
     pub last_result: Option<u8>,
 }
 
+impl BugContestState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        if self.timer_seconds_remaining >= 60 {
+            return Err(format!(
+                "bug_contest.timer_seconds_remaining {} is outside clock range 0..59",
+                self.timer_seconds_remaining
+            ));
+        }
+        validate_optional_script_runtime_token(
+            "bug_contest.second_party_species",
+            self.second_party_species.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
+            "bug_contest.caught_species",
+            self.caught_species.as_deref(),
+        )?;
+        match (&self.caught_mon, &self.caught_species, self.caught_level) {
+            (Some(pokemon), Some(species), Some(level)) => {
+                pokemon
+                    .validate_saved_state()
+                    .map_err(|error| format!("bug_contest.caught_mon: {error}"))?;
+                if pokemon.species.id != *species {
+                    return Err(format!(
+                        "bug_contest.caught_species {species} does not match caught_mon species {}",
+                        pokemon.species.id
+                    ));
+                }
+                if pokemon.level != level {
+                    return Err(format!(
+                        "bug_contest.caught_level {level} does not match caught_mon level {}",
+                        pokemon.level
+                    ));
+                }
+            }
+            (Some(_), _, _) => {
+                return Err(
+                    "bug_contest.caught_mon requires caught_species and caught_level".to_string(),
+                );
+            }
+            (None, Some(species), _) => {
+                return Err(format!(
+                    "bug_contest.caught_species {species} cannot be saved without caught_mon"
+                ));
+            }
+            (None, None, Some(level)) => {
+                return Err(format!(
+                    "bug_contest.caught_level {level} cannot be saved without caught_mon"
+                ));
+            }
+            (None, None, None) => {}
+        }
+        for flag in &self.selected_contestant_flags {
+            validate_flag_name(flag)
+                .map_err(|error| format!("bug_contest.selected_contestant_flags {error}"))?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagikarpRecordState {
@@ -261,6 +523,13 @@ pub struct MagikarpRecordState {
     pub best_feet: u8,
     pub best_inches: u8,
     pub best_owner_name: String,
+}
+
+impl MagikarpRecordState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_inches_field("magikarp_record.current_inches", self.current_inches)?;
+        validate_inches_field("magikarp_record.best_inches", self.best_inches)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,11 +565,272 @@ pub struct DayCareInteractionState {
     pub reason: Option<String>,
 }
 
+impl DayCareState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        self.man.validate_saved_state("day_care.man")?;
+        self.lady.validate_saved_state("day_care.lady")?;
+        let both_residents_active = self.man.active && self.lady.active;
+        if self.egg_present && !both_residents_active {
+            return Err(
+                "day_care.egg_present cannot be saved without both residents active".to_string(),
+            );
+        }
+        if self.compatibility_score != 0 && !both_residents_active {
+            return Err(format!(
+                "day_care.compatibility_score {} cannot be saved without both residents active",
+                self.compatibility_score
+            ));
+        }
+        if self.steps_until_next_egg != 0 && !both_residents_active {
+            return Err(format!(
+                "day_care.steps_until_next_egg {} cannot be saved without both residents active",
+                self.steps_until_next_egg
+            ));
+        }
+        if self.steps_since_last_egg != 0 && !both_residents_active {
+            return Err(format!(
+                "day_care.steps_since_last_egg {} cannot be saved without both residents active",
+                self.steps_since_last_egg
+            ));
+        }
+        if let Some(interaction) = &self.last_interaction {
+            interaction.validate_saved_state()?;
+        }
+        Ok(())
+    }
+}
+
+impl DayCareResidentState {
+    fn validate_saved_state(&self, field: &str) -> Result<(), String> {
+        let Some(pokemon) = &self.pokemon else {
+            if self.active {
+                return Err(format!("{field}.active cannot be saved without a Pokemon"));
+            }
+            if self.initial_experience != 0 {
+                return Err(format!(
+                    "{field}.initial_experience {} cannot be saved without a Pokemon",
+                    self.initial_experience
+                ));
+            }
+            if self.initial_level != 0 {
+                return Err(format!(
+                    "{field}.initial_level {} cannot be saved without a Pokemon",
+                    self.initial_level
+                ));
+            }
+            if self.steps != 0 {
+                return Err(format!(
+                    "{field}.steps {} cannot be saved without a Pokemon",
+                    self.steps
+                ));
+            }
+            return Ok(());
+        };
+        if self.initial_level == 0 {
+            return Err(format!("{field}.initial_level must be nonzero"));
+        }
+        if !self.active {
+            return Err(format!(
+                "{field}.active must be true when a Pokemon is deposited"
+            ));
+        }
+        if self.initial_experience < 0 {
+            return Err(format!(
+                "{field}.initial_experience {} must be nonnegative",
+                self.initial_experience
+            ));
+        }
+        pokemon
+            .validate_saved_state()
+            .map_err(|error| format!("{field}.pokemon: {error}"))?;
+        Ok(())
+    }
+}
+
+impl DayCareInteractionState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_script_runtime_token("day_care.last_interaction.caretaker", &self.caretaker)?;
+        validate_script_runtime_token("day_care.last_interaction.action", &self.action)?;
+        validate_optional_script_runtime_token(
+            "day_care.last_interaction.pokemon",
+            self.pokemon.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
+            "day_care.last_interaction.reason",
+            self.reason.as_deref(),
+        )?;
+        if !matches!(self.caretaker.as_str(), "man" | "lady") {
+            return Err(format!(
+                "day_care.last_interaction.caretaker {} is not a saved Day Care caretaker",
+                self.caretaker
+            ));
+        }
+        if self.action == "collect_egg" && self.caretaker != "man" {
+            return Err(format!(
+                "day_care.last_interaction.action collect_egg requires caretaker man, got {}",
+                self.caretaker
+            ));
+        }
+        if let Some(level) = self.level {
+            if level == 0 {
+                return Err("day_care.last_interaction.level must be nonzero".to_string());
+            }
+        }
+        match self.action.as_str() {
+            "deposit" => validate_day_care_interaction_payload(
+                "day_care.last_interaction",
+                self,
+                DayCareInteractionShape {
+                    success_pokemon: true,
+                    success_reason: None,
+                    failure_reason: Some("occupied"),
+                    failure_pokemon: false,
+                },
+            ),
+            "withdraw" => {
+                if self.success {
+                    validate_day_care_pokemon_and_reason(
+                        "day_care.last_interaction",
+                        self,
+                        true,
+                        None,
+                    )
+                } else {
+                    match self.reason.as_deref() {
+                        Some("empty") => validate_day_care_pokemon_and_reason(
+                            "day_care.last_interaction",
+                            self,
+                            false,
+                            Some("empty"),
+                        ),
+                        Some("party_full") => validate_day_care_pokemon_and_reason(
+                            "day_care.last_interaction",
+                            self,
+                            true,
+                            Some("party_full"),
+                        ),
+                        Some(reason) => Err(format!(
+                            "day_care.last_interaction.reason {reason} is not valid for failed withdraw"
+                        )),
+                        None => Err(
+                            "day_care.last_interaction.reason is required for failed withdraw"
+                                .to_string(),
+                        ),
+                    }
+                }
+            }
+            "inspect" => validate_day_care_interaction_payload(
+                "day_care.last_interaction",
+                self,
+                DayCareInteractionShape {
+                    success_pokemon: true,
+                    success_reason: None,
+                    failure_reason: Some("empty"),
+                    failure_pokemon: false,
+                },
+            ),
+            "collect_egg" => validate_day_care_interaction_payload(
+                "day_care.last_interaction",
+                self,
+                DayCareInteractionShape {
+                    success_pokemon: false,
+                    success_reason: None,
+                    failure_reason: Some("no_egg"),
+                    failure_pokemon: false,
+                },
+            ),
+            action => Err(format!(
+                "day_care.last_interaction.action {action} is not a saved Day Care action"
+            )),
+        }
+    }
+}
+
+struct DayCareInteractionShape {
+    success_pokemon: bool,
+    success_reason: Option<&'static str>,
+    failure_reason: Option<&'static str>,
+    failure_pokemon: bool,
+}
+
+fn validate_day_care_interaction_payload(
+    field: &str,
+    interaction: &DayCareInteractionState,
+    shape: DayCareInteractionShape,
+) -> Result<(), String> {
+    if interaction.success {
+        validate_day_care_pokemon_and_reason(
+            field,
+            interaction,
+            shape.success_pokemon,
+            shape.success_reason,
+        )
+    } else {
+        validate_day_care_pokemon_and_reason(
+            field,
+            interaction,
+            shape.failure_pokemon,
+            shape.failure_reason,
+        )
+    }
+}
+
+fn validate_day_care_pokemon_and_reason(
+    field: &str,
+    interaction: &DayCareInteractionState,
+    expect_pokemon: bool,
+    expected_reason: Option<&str>,
+) -> Result<(), String> {
+    match (expect_pokemon, &interaction.pokemon, interaction.level) {
+        (true, Some(_), Some(_)) | (false, None, None) => {}
+        (true, _, _) => {
+            return Err(format!(
+                "{field}.action {} requires pokemon and level",
+                interaction.action
+            ));
+        }
+        (false, Some(pokemon), _) => {
+            return Err(format!(
+                "{field}.pokemon {pokemon} is not allowed for action {}",
+                interaction.action
+            ));
+        }
+        (false, None, Some(level)) => {
+            return Err(format!(
+                "{field}.level {level} is not allowed for action {}",
+                interaction.action
+            ));
+        }
+    }
+    match (expected_reason, interaction.reason.as_deref()) {
+        (Some(expected), Some(actual)) if expected == actual => Ok(()),
+        (Some(expected), Some(actual)) => Err(format!(
+            "{field}.reason {actual} does not match expected reason {expected}"
+        )),
+        (Some(expected), None) => Err(format!("{field}.reason {expected} is required")),
+        (None, Some(actual)) => Err(format!("{field}.reason {actual} is not allowed")),
+        (None, None) => Ok(()),
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MysteryGiftState {
     pub stored_item: Option<String>,
     pub backup_item: Option<String>,
+}
+
+impl MysteryGiftState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_optional_script_runtime_token(
+            "mystery_gift.stored_item",
+            self.stored_item.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
+            "mystery_gift.backup_item",
+            self.backup_item.as_deref(),
+        )
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +840,30 @@ pub struct BuenasPasswordState {
     pub option_index: usize,
     pub generation_day: u8,
     pub generated: bool,
+}
+
+impl BuenasPasswordState {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        if self.generation_day >= 7 {
+            return Err(format!(
+                "buenas_password.generation_day {} is outside weekday range 0..6",
+                self.generation_day
+            ));
+        }
+        if !self.generated && self.option_index != 0 {
+            return Err(format!(
+                "buenas_password.option_index {} cannot be saved before a password is generated",
+                self.option_index
+            ));
+        }
+        if !self.generated && self.category_index != 0 {
+            return Err(format!(
+                "buenas_password.category_index {} cannot be saved before a password is generated",
+                self.category_index
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -323,6 +877,26 @@ pub struct RoamingPokemonState {
     pub dvs: u16,
 }
 
+impl RoamingPokemonState {
+    fn validate_saved_state(&self, index: usize) -> Result<(), String> {
+        validate_script_runtime_token(&format!("roaming_pokemon[{index}].species"), &self.species)?;
+        if self.level == 0 {
+            return Err(format!("roaming_pokemon[{index}].level must be nonzero"));
+        }
+        if self.map_group == 0 {
+            return Err(format!(
+                "roaming_pokemon[{index}].map_group must be nonzero"
+            ));
+        }
+        if self.map_number == 0 {
+            return Err(format!(
+                "roaming_pokemon[{index}].map_number must be nonzero"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldObjectMapMemory {
@@ -331,6 +905,67 @@ pub struct OverworldObjectMapMemory {
     pub following: Option<OverworldFollowMemory>,
     pub last_talked_object_identifier: Option<String>,
     pub player_hidden: bool,
+}
+
+impl OverworldObjectMapMemory {
+    fn validate_saved_state(&self, map_name: &str) -> Result<(), String> {
+        for object_id in self.objects.keys() {
+            validate_script_runtime_token(
+                &format!("map_object_overrides[{map_name}].objects"),
+                object_id,
+            )?;
+        }
+        for object_id in &self.hidden_object_identifiers {
+            validate_script_runtime_token(
+                &format!("map_object_overrides[{map_name}].hidden_object_identifiers"),
+                object_id,
+            )?;
+            if self.objects.contains_key(object_id) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}] object {object_id} cannot be both overridden and hidden"
+                ));
+            }
+        }
+        validate_optional_script_runtime_token(
+            &format!("map_object_overrides[{map_name}].last_talked_object_identifier"),
+            self.last_talked_object_identifier.as_deref(),
+        )?;
+        if let Some(following) = &self.following {
+            validate_script_runtime_token(
+                &format!("map_object_overrides[{map_name}].following.leader_object_id"),
+                &following.leader_object_id,
+            )?;
+            validate_script_runtime_token(
+                &format!("map_object_overrides[{map_name}].following.follower_object_id"),
+                &following.follower_object_id,
+            )?;
+            if following.leader_object_id == following.follower_object_id {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].following leader and follower cannot both be {}",
+                    following.leader_object_id
+                ));
+            }
+            if self
+                .hidden_object_identifiers
+                .contains(&following.leader_object_id)
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].following leader {} cannot be hidden",
+                    following.leader_object_id
+                ));
+            }
+            if self
+                .hidden_object_identifiers
+                .contains(&following.follower_object_id)
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].following follower {} cannot be hidden",
+                    following.follower_object_id
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +1023,141 @@ pub enum BattleMemory {
     },
 }
 
+impl BattleMemory {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        match self {
+            Self::Inactive => Ok(()),
+            Self::Wild {
+                battle_type,
+                map_name,
+                enemy_pokemon,
+                enemy_party,
+            } => {
+                validate_script_runtime_token("battle.wild.battle_type", battle_type)?;
+                validate_script_runtime_token("battle.wild.map_name", map_name)?;
+                validate_battle_enemy_party_state("battle.wild", enemy_pokemon, enemy_party)
+            }
+            Self::StaticWild {
+                battle_type,
+                species,
+                level,
+                source_script,
+                enemy_pokemon,
+                enemy_party,
+            } => {
+                validate_script_runtime_token("battle.static_wild.battle_type", battle_type)?;
+                validate_script_runtime_token("battle.static_wild.species", species)?;
+                if *level == 0 {
+                    return Err("battle.static_wild.level must be nonzero".to_string());
+                }
+                if enemy_pokemon.species.id != *species {
+                    return Err(format!(
+                        "battle.static_wild.species {species} does not match enemy_pokemon species {}",
+                        enemy_pokemon.species.id
+                    ));
+                }
+                if enemy_pokemon.level != *level {
+                    return Err(format!(
+                        "battle.static_wild.level {level} does not match enemy_pokemon level {}",
+                        enemy_pokemon.level
+                    ));
+                }
+                validate_script_runtime_label("battle.static_wild.source_script", source_script)?;
+                validate_battle_enemy_party_state("battle.static_wild", enemy_pokemon, enemy_party)
+            }
+            Self::Trainer {
+                battle_type,
+                trainer_class,
+                trainer_id,
+                event_flag,
+                seen_text,
+                win_text,
+                loss_text,
+                callback,
+                source_script,
+                encounter_music,
+                ai_layers,
+                enemy_pokemon,
+                enemy_party,
+                reward: _,
+                ai_move_flags: _,
+                ai_item_switch_flags: _,
+                trainer_name: _,
+            } => {
+                validate_script_runtime_token("battle.trainer.battle_type", battle_type)?;
+                validate_script_runtime_token("battle.trainer.trainer_class", trainer_class)?;
+                validate_script_runtime_token("battle.trainer.trainer_id", trainer_id)?;
+                if !event_flag.is_empty() {
+                    validate_flag_name(event_flag)
+                        .map_err(|error| format!("battle.trainer.event_flag {error}"))?;
+                }
+                validate_script_runtime_token("battle.trainer.seen_text", seen_text)?;
+                validate_script_runtime_token("battle.trainer.win_text", win_text)?;
+                validate_script_runtime_token("battle.trainer.loss_text", loss_text)?;
+                validate_script_runtime_token("battle.trainer.callback", callback)?;
+                validate_script_runtime_label("battle.trainer.source_script", source_script)?;
+                validate_script_runtime_token("battle.trainer.encounter_music", encounter_music)?;
+                for (index, ai_layer) in ai_layers.iter().enumerate() {
+                    validate_script_runtime_token(
+                        &format!("battle.trainer.ai_layers[{index}]"),
+                        ai_layer,
+                    )?;
+                }
+                validate_battle_enemy_party_state("battle.trainer", enemy_pokemon, enemy_party)
+            }
+        }
+    }
+
+    fn enemy_party_len(&self) -> Option<usize> {
+        match self {
+            Self::Inactive => None,
+            Self::Wild { enemy_party, .. }
+            | Self::StaticWild { enemy_party, .. }
+            | Self::Trainer { enemy_party, .. } => Some(enemy_party.len()),
+        }
+    }
+
+    fn enemy_party_and_current(&self) -> Option<(&[Pokemon], &Pokemon)> {
+        match self {
+            Self::Inactive => None,
+            Self::Wild {
+                enemy_party,
+                enemy_pokemon,
+                ..
+            }
+            | Self::StaticWild {
+                enemy_party,
+                enemy_pokemon,
+                ..
+            }
+            | Self::Trainer {
+                enemy_party,
+                enemy_pokemon,
+                ..
+            } => Some((enemy_party, enemy_pokemon)),
+        }
+    }
+}
+
+fn validate_battle_enemy_party_state(
+    path: &str,
+    enemy_pokemon: &Pokemon,
+    enemy_party: &[Pokemon],
+) -> Result<(), String> {
+    if enemy_party.is_empty() {
+        return Err(format!("{path}.enemy_party must not be empty"));
+    }
+    enemy_pokemon
+        .validate_saved_state()
+        .map_err(|error| format!("{path}.enemy_pokemon: {error}"))?;
+    for (index, pokemon) in enemy_party.iter().enumerate() {
+        pokemon
+            .validate_saved_state()
+            .map_err(|error| format!("{path}.enemy_party[{index}]: {error}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverworldMemory {
@@ -402,6 +1172,15 @@ pub enum OverworldMemory {
 }
 
 impl OverworldMemory {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        match self {
+            Self::Inactive => Ok(()),
+            Self::Active { map_name, .. } => {
+                validate_script_runtime_token("overworld.active.map_name", map_name)
+            }
+        }
+    }
+
     pub fn from_snapshot(snapshot: &OverworldSnapshot) -> Self {
         Self::Active {
             map_name: snapshot.map_name.clone(),
@@ -493,6 +1272,1258 @@ pub struct ScriptRuntimeMemory {
     pub shop_events: Vec<ScriptShopRuntimeEvent>,
     pub pending_shop: Option<ScriptShopRequest>,
     pub item_use_events: Vec<ItemUseRuntimeEvent>,
+}
+
+impl ScriptRuntimeMemory {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_optional_script_runtime_label("next_script", self.next_script.as_deref())?;
+        validate_optional_script_runtime_label(
+            "last_special_routine",
+            self.last_special_routine.as_deref(),
+        )?;
+        validate_optional_script_runtime_label(
+            "last_talked_object",
+            self.last_talked_object.as_deref(),
+        )?;
+        validate_optional_script_runtime_label("active_menu", self.active_menu.as_deref())?;
+        validate_optional_script_runtime_label(
+            "active_pokemon_picture",
+            self.active_pokemon_picture.as_deref(),
+        )?;
+        validate_optional_script_runtime_token("blackout_mod", self.blackout_mod.as_deref())?;
+        validate_optional_script_runtime_token(
+            "battle_tower_text",
+            self.battle_tower_text.as_deref(),
+        )?;
+        if let Some(coords) = self.menu_coords {
+            validate_menu_coords(coords)?;
+        }
+        for (index, script) in self.deferred_scripts.iter().enumerate() {
+            validate_script_runtime_label(&format!("deferred_scripts[{index}]"), script)?;
+        }
+        for (index, script) in self.stack.iter().enumerate() {
+            validate_script_runtime_label(&format!("stack[{index}]"), script)?;
+        }
+        for key in self.variables.keys() {
+            validate_script_runtime_token(&format!("variables[{key}]"), key)?;
+        }
+        for key in self.memory.keys() {
+            validate_script_runtime_token(&format!("memory[{key}]"), key)?;
+        }
+        for key in self.named_buffers.keys() {
+            validate_script_runtime_token(&format!("named_buffers[{key}]"), key)?;
+        }
+        for (sprite, replacement) in &self.variable_sprites {
+            validate_script_runtime_token(&format!("variable_sprites[{sprite}]"), sprite)?;
+            validate_script_runtime_token(
+                &format!("variable_sprites[{sprite}].replacement"),
+                replacement,
+            )?;
+        }
+        for contact_id in &self.phone_numbers {
+            validate_script_runtime_token(&format!("phone_numbers[{contact_id}]"), contact_id)?;
+        }
+        for (index, call_id) in self.special_phone_calls.iter().enumerate() {
+            validate_script_runtime_token(&format!("special_phone_calls[{index}]"), call_id)?;
+        }
+        for (index, trade_id) in self.completed_trades.iter().enumerate() {
+            validate_script_runtime_token(&format!("completed_trades[{index}]"), trade_id)?;
+        }
+        for (index, species_id) in self.catch_tutorials.iter().enumerate() {
+            validate_script_runtime_token(&format!("catch_tutorials[{index}]"), species_id)?;
+        }
+        for (index, target) in self.checked_mail_targets.iter().enumerate() {
+            validate_script_runtime_label(&format!("checked_mail_targets[{index}]"), target)?;
+        }
+        for (index, target) in self.given_mail_targets.iter().enumerate() {
+            validate_script_runtime_label(&format!("given_mail_targets[{index}]"), target)?;
+        }
+        for (index, frame) in self.call_stack.iter().enumerate() {
+            validate_script_runtime_label(
+                &format!("call_stack[{index}].source_script"),
+                &frame.source_script,
+            )?;
+            validate_return_frame_payload(index, frame)?;
+        }
+        for (index, event) in self.control_events.iter().enumerate() {
+            validate_script_runtime_label(
+                &format!("control_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_optional_script_runtime_label(
+                &format!("control_events[{index}].target_script"),
+                event.target_script.as_deref(),
+            )?;
+            validate_control_event_payload(index, event)?;
+        }
+        if let Some(end) = &self.script_ended {
+            validate_script_runtime_label("script_ended.source_script", &end.source_script)?;
+            validate_script_end_state(end)?;
+        }
+        for (index, effect) in self.effects.iter().enumerate() {
+            validate_script_runtime_token(&format!("effects[{index}].command"), &effect.command)?;
+            validate_script_runtime_label(
+                &format!("effects[{index}].source_script"),
+                &effect.source_script,
+            )?;
+            validate_runtime_effect_payload(index, effect)?;
+        }
+        for (index, write) in self.variable_writes.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("variable_writes[{index}].target"),
+                &write.target,
+            )?;
+            validate_script_runtime_label(
+                &format!("variable_writes[{index}].source_script"),
+                &write.source_script,
+            )?;
+            validate_variable_write_payload(index, write, &self.variables)?;
+        }
+        for (index, directive) in self.asm_directives.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("asm_directives[{index}].command"),
+                &directive.command,
+            )?;
+            validate_script_runtime_label(
+                &format!("asm_directives[{index}].source_script"),
+                &directive.source_script,
+            )?;
+            validate_asm_directive_payload(index, directive)?;
+        }
+        for (index, write) in self.numeric_buffer_writes.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("numeric_buffer_writes[{index}].target_buffer"),
+                &write.target_buffer,
+            )?;
+            validate_script_runtime_label(
+                &format!("numeric_buffer_writes[{index}].source_script"),
+                &write.source_script,
+            )?;
+            validate_numeric_buffer_write_payload(index, write)?;
+        }
+        for (index, floor) in self.elevator_floors.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("elevator_floors[{index}].floor"),
+                &floor.floor,
+            )?;
+            validate_script_runtime_token(
+                &format!("elevator_floors[{index}].target_map"),
+                &floor.target_map,
+            )?;
+            validate_script_runtime_label(
+                &format!("elevator_floors[{index}].source_script"),
+                &floor.source_script,
+            )?;
+        }
+        for (index, entry) in self.stone_table_entries.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("stone_table_entries[{index}].object_event"),
+                &entry.object_event,
+            )?;
+            validate_script_runtime_label(
+                &format!("stone_table_entries[{index}].script"),
+                &entry.script,
+            )?;
+            validate_script_runtime_label(
+                &format!("stone_table_entries[{index}].source_script"),
+                &entry.source_script,
+            )?;
+        }
+        for (index, description) in self.decoration_descriptions.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("decoration_descriptions[{index}].decoration"),
+                &description.decoration,
+            )?;
+            validate_script_runtime_label(
+                &format!("decoration_descriptions[{index}].source_script"),
+                &description.source_script,
+            )?;
+        }
+        for (index, delay) in self.pending_delays.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("pending_delays[{index}].command"),
+                &delay.command,
+            )?;
+            validate_script_runtime_label(
+                &format!("pending_delays[{index}].source_script"),
+                &delay.source_script,
+            )?;
+            validate_delay_payload(index, delay)?;
+        }
+        for (index, earthquake) in self.pending_earthquakes.iter().enumerate() {
+            validate_script_runtime_label(
+                &format!("pending_earthquakes[{index}].source_script"),
+                &earthquake.source_script,
+            )?;
+            validate_earthquake_payload(index, earthquake)?;
+        }
+        for (index, emote) in self.pending_emotes.iter().enumerate() {
+            validate_script_runtime_token(&format!("pending_emotes[{index}].emote"), &emote.emote)?;
+            validate_script_runtime_token(
+                &format!("pending_emotes[{index}].object"),
+                &emote.object,
+            )?;
+            validate_script_runtime_label(
+                &format!("pending_emotes[{index}].source_script"),
+                &emote.source_script,
+            )?;
+        }
+        for (index, command) in self.command_queue.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("command_queue[{index}].command"),
+                &command.command,
+            )?;
+            validate_script_runtime_token(
+                &format!("command_queue[{index}].target"),
+                &command.target,
+            )?;
+            validate_optional_script_runtime_token(
+                &format!("command_queue[{index}].bank"),
+                command.bank.as_deref(),
+            )?;
+            validate_script_runtime_label(
+                &format!("command_queue[{index}].source_script"),
+                &command.source_script,
+            )?;
+            validate_queued_command_payload(index, command)?;
+        }
+        validate_optional_script_runtime_token("current_music", self.current_music.as_deref())?;
+        validate_optional_script_runtime_token(
+            "pending_text_label",
+            self.pending_text_label.as_deref(),
+        )?;
+        if let Some(fade) = &self.pending_music_fade {
+            validate_script_runtime_token("pending_music_fade.audio_id", &fade.audio_id)?;
+            validate_script_runtime_label("pending_music_fade.source_script", &fade.source_script)?;
+        }
+        for (index, event) in self.audio_events.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("audio_events[{index}].command"),
+                &event.command,
+            )?;
+            validate_optional_script_runtime_token(
+                &format!("audio_events[{index}].audio_id"),
+                event.audio_id.as_deref(),
+            )?;
+            validate_script_runtime_label(
+                &format!("audio_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_audio_event_payload(index, event)?;
+        }
+        for (index, event) in self.graphics_events.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("graphics_events[{index}].command"),
+                &event.command,
+            )?;
+            validate_script_runtime_label(
+                &format!("graphics_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_graphics_event_payload(index, event)?;
+        }
+        if let Some(fade) = &self.pending_screen_fade {
+            validate_script_runtime_label(
+                "pending_screen_fade.source_script",
+                &fade.source_script,
+            )?;
+            validate_pending_screen_fade_payload(fade)?;
+        }
+        for (index, event) in self.money_events.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("money_events[{index}].command"),
+                &event.command,
+            )?;
+            validate_script_runtime_label(
+                &format!("money_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_money_event_payload(index, event)?;
+        }
+        for (index, event) in self.map_events.iter().enumerate() {
+            validate_script_runtime_token(&format!("map_events[{index}].command"), &event.command)?;
+            validate_optional_script_runtime_token(
+                &format!("map_events[{index}].target_map"),
+                event.target_map.as_deref(),
+            )?;
+            validate_optional_script_runtime_token(
+                &format!("map_events[{index}].map_setup"),
+                event.map_setup.as_deref(),
+            )?;
+            validate_script_runtime_label(
+                &format!("map_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_map_event_payload(index, event)?;
+        }
+        if let Some(warp) = &self.pending_script_warp {
+            validate_script_runtime_token("pending_script_warp.target_map", &warp.target_map)?;
+            validate_script_runtime_label(
+                "pending_script_warp.source_script",
+                &warp.source_script,
+            )?;
+        }
+        if let Some(load) = &self.pending_map_load {
+            validate_script_runtime_token("pending_map_load.command", &load.command)?;
+            validate_optional_script_runtime_token(
+                "pending_map_load.map_setup",
+                load.map_setup.as_deref(),
+            )?;
+            validate_script_runtime_label("pending_map_load.source_script", &load.source_script)?;
+            validate_pending_map_load_payload(load)?;
+        }
+        if let Some(refresh) = &self.pending_map_refresh {
+            validate_script_runtime_token("pending_map_refresh.command", &refresh.command)?;
+            validate_optional_script_runtime_token(
+                "pending_map_refresh.map_setup",
+                refresh.map_setup.as_deref(),
+            )?;
+            validate_script_runtime_label(
+                "pending_map_refresh.source_script",
+                &refresh.source_script,
+            )?;
+            validate_pending_map_refresh_payload(refresh)?;
+        }
+        for (index, event) in self.text_events.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("text_events[{index}].command"),
+                &event.command,
+            )?;
+            validate_optional_script_runtime_token(
+                &format!("text_events[{index}].text_label"),
+                event.text_label.as_deref(),
+            )?;
+            validate_script_runtime_label(
+                &format!("text_events[{index}].source_script"),
+                &event.source_script,
+            )?;
+            validate_text_event_payload(index, event)?;
+        }
+        if let Some(wait) = &self.pending_text_wait {
+            validate_script_runtime_token("pending_text_wait.command", &wait.command)?;
+            validate_script_runtime_label("pending_text_wait.source_script", &wait.source_script)?;
+            validate_pending_text_wait_command(&wait.command)?;
+        }
+        if let Some(prompt) = &self.pending_yes_no {
+            validate_script_runtime_label("pending_yes_no.source_script", &prompt.source_script)?;
+        }
+        self.validate_text_continuation_state()?;
+        for (index, event) in self.shop_events.iter().enumerate() {
+            validate_script_shop_runtime_event(&format!("shop_events[{index}]"), event)?;
+        }
+        if let Some(shop) = &self.pending_shop {
+            validate_script_shop_request("pending_shop", shop)?;
+        }
+        for (index, event) in self.item_use_events.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("item_use_events[{index}].item_id"),
+                &event.item_id,
+            )?;
+            validate_script_runtime_token(
+                &format!("item_use_events[{index}].context"),
+                &event.context,
+            )?;
+            validate_item_use_event_context(index, &event.context)?;
+        }
+        Ok(())
+    }
+
+    fn validate_text_continuation_state(&self) -> Result<(), String> {
+        if !self.text_window_open {
+            if let Some(text_label) = &self.pending_text_label {
+                return Err(format!(
+                    "pending_text_label {text_label} cannot be saved without an open text window"
+                ));
+            }
+            if self.pending_text_wait.is_some() {
+                return Err(
+                    "pending_text_wait cannot be saved without an open text window".to_string(),
+                );
+            }
+            if self.pending_yes_no.is_some() {
+                return Err(
+                    "pending_yes_no cannot be saved without an open text window".to_string()
+                );
+            }
+        }
+        if self.pending_text_wait.is_some() && self.pending_yes_no.is_some() {
+            return Err("pending_text_wait and pending_yes_no cannot both be saved".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_script_shop_runtime_event(
+    field: &str,
+    event: &ScriptShopRuntimeEvent,
+) -> Result<(), String> {
+    validate_script_shop_mart_type(field, &event.mart_type, &event.mart_id)?;
+    validate_script_runtime_token(&format!("{field}.mart_id"), &event.mart_id)?;
+    for (index, item_id) in event.inventory.iter().enumerate() {
+        validate_script_runtime_token(&format!("{field}.inventory[{index}]"), item_id)?;
+    }
+    validate_script_runtime_label(&format!("{field}.source_script"), &event.source_script)
+}
+
+fn validate_script_shop_request(field: &str, request: &ScriptShopRequest) -> Result<(), String> {
+    validate_script_shop_mart_type(field, &request.mart_type, &request.mart_id)?;
+    validate_script_runtime_token(&format!("{field}.mart_id"), &request.mart_id)?;
+    for (index, item_id) in request.inventory.iter().enumerate() {
+        validate_script_runtime_token(&format!("{field}.inventory[{index}]"), item_id)?;
+    }
+    validate_script_runtime_label(&format!("{field}.source_script"), &request.source_script)
+}
+
+fn validate_script_shop_mart_type(
+    field: &str,
+    mart_type: &str,
+    mart_id: &str,
+) -> Result<(), String> {
+    validate_script_runtime_token(&format!("{field}.mart_type"), mart_type)?;
+    if !is_known_script_mart_type(mart_type) {
+        return Err(format!(
+            "{field}.mart_type {mart_type} is not a saved mart type"
+        ));
+    }
+    if mart_id == "0" && !SCRIPT_SHOP_ZERO_MART_TYPES.contains(&mart_type) {
+        return Err(format!(
+            "{field}.mart_id 0 requires a zero-inventory mart type, got {mart_type}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_menu_coords(coords: [i16; 4]) -> Result<(), String> {
+    let [left, top, right, bottom] = coords;
+    if left < 0 || top < 0 || right < 0 || bottom < 0 {
+        return Err(format!(
+            "menu_coords {:?} cannot contain negative coordinates",
+            coords
+        ));
+    }
+    if right < left {
+        return Err(format!(
+            "menu_coords right {right} cannot be less than left {left}"
+        ));
+    }
+    if bottom < top {
+        return Err(format!(
+            "menu_coords bottom {bottom} cannot be less than top {top}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_item_use_event_context(index: usize, context: &str) -> Result<(), String> {
+    if matches!(context, "field" | "battle") {
+        Ok(())
+    } else {
+        Err(format!(
+            "item_use_events[{index}].context {context} is not a saved item-use context"
+        ))
+    }
+}
+
+fn validate_asm_directive_payload(
+    index: usize,
+    directive: &ScriptRuntimeAsmDirective,
+) -> Result<(), String> {
+    if !matches!(
+        directive.command.as_str(),
+        "dw" | "ldh" | "ld" | "dn" | "dba" | "dbw"
+    ) {
+        return Err(format!(
+            "asm_directives[{index}].command {} is not a saved asm directive",
+            directive.command
+        ));
+    }
+    let expected = script_runtime_command_arg_counts()
+        .get(directive.command.as_str())
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "asm_directives[{index}].command {} is missing runtime arity",
+                directive.command
+            )
+        })?;
+    if directive.args.len() != expected {
+        return Err(format!(
+            "asm_directives[{index}].args has {} entries, expected {expected} for {}",
+            directive.args.len(),
+            directive.command
+        ));
+    }
+    for (arg_index, arg) in directive.args.iter().enumerate() {
+        if arg.is_empty() || arg.trim() != arg {
+            return Err(format!(
+                "asm_directives[{index}].args[{arg_index}] has invalid arg '{arg}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_numeric_buffer_write_payload(
+    index: usize,
+    write: &ScriptRuntimeNumericBufferWrite,
+) -> Result<(), String> {
+    let parsed = write.value.parse::<u16>().map_err(|_| {
+        format!(
+            "numeric_buffer_writes[{index}].value {} is not a saved u16 value",
+            write.value
+        )
+    })?;
+    if write.value != parsed.to_string() {
+        return Err(format!(
+            "numeric_buffer_writes[{index}].value {} is not canonical",
+            write.value
+        ));
+    }
+    if write.width != 3 {
+        return Err(format!(
+            "numeric_buffer_writes[{index}].width {} must be 3",
+            write.width
+        ));
+    }
+    Ok(())
+}
+
+fn validate_delay_payload(index: usize, delay: &ScriptRuntimeDelay) -> Result<(), String> {
+    if matches!(delay.command.as_str(), "pause" | "wait") {
+        Ok(())
+    } else {
+        Err(format!(
+            "pending_delays[{index}].command {} is not a saved delay command",
+            delay.command
+        ))
+    }
+}
+
+fn validate_earthquake_payload(
+    index: usize,
+    earthquake: &ScriptRuntimeEarthquake,
+) -> Result<(), String> {
+    if earthquake.shake_frames != earthquake.parameter {
+        return Err(format!(
+            "pending_earthquakes[{index}].shake_frames {} must equal parameter {}",
+            earthquake.shake_frames, earthquake.parameter
+        ));
+    }
+    let expected_sleep_frames = earthquake.parameter & 0x3f;
+    if earthquake.sleep_frames != expected_sleep_frames {
+        return Err(format!(
+            "pending_earthquakes[{index}].sleep_frames {} must equal parameter & 0x3f ({expected_sleep_frames})",
+            earthquake.sleep_frames
+        ));
+    }
+    Ok(())
+}
+
+fn validate_audio_event_payload(
+    index: usize,
+    event: &ScriptAudioRuntimeEvent,
+) -> Result<(), String> {
+    match event.kind {
+        ScriptAudioRuntimeKind::Music => {
+            if !SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "audio_events[{index}].command {} is not valid for Music",
+                    event.command
+                ));
+            }
+            if event.audio_id.is_none() {
+                return Err(format!(
+                    "audio_events[{index}].audio_id is required for {:?}",
+                    event.kind
+                ));
+            }
+            if event.fade_frames.is_some() {
+                return Err(format!(
+                    "audio_events[{index}].fade_frames is only valid for FadeMusic"
+                ));
+            }
+        }
+        ScriptAudioRuntimeKind::SoundEffect => {
+            if !SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "audio_events[{index}].command {} is not valid for SoundEffect",
+                    event.command
+                ));
+            }
+            if event.audio_id.is_none() {
+                return Err(format!(
+                    "audio_events[{index}].audio_id is required for {:?}",
+                    event.kind
+                ));
+            }
+            if event.fade_frames.is_some() {
+                return Err(format!(
+                    "audio_events[{index}].fade_frames is only valid for FadeMusic"
+                ));
+            }
+        }
+        ScriptAudioRuntimeKind::Cry => {
+            if !SCRIPT_AUDIO_CRY_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "audio_events[{index}].command {} is not valid for Cry",
+                    event.command
+                ));
+            }
+            if event.audio_id.is_none() {
+                return Err(format!(
+                    "audio_events[{index}].audio_id is required for {:?}",
+                    event.kind
+                ));
+            }
+            if event.fade_frames.is_some() {
+                return Err(format!(
+                    "audio_events[{index}].fade_frames is only valid for FadeMusic"
+                ));
+            }
+        }
+        ScriptAudioRuntimeKind::FadeMusic => {
+            if !SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "audio_events[{index}].command {} is not valid for FadeMusic",
+                    event.command
+                ));
+            }
+            if event.audio_id.is_none() {
+                return Err(format!(
+                    "audio_events[{index}].audio_id is required for FadeMusic"
+                ));
+            }
+            if event.fade_frames.is_none() {
+                return Err(format!(
+                    "audio_events[{index}].fade_frames is required for FadeMusic"
+                ));
+            }
+        }
+        ScriptAudioRuntimeKind::WaitForSoundEffect => {
+            if !SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "audio_events[{index}].command {} is not valid for WaitForSoundEffect",
+                    event.command
+                ));
+            }
+            if event.audio_id.is_some() {
+                return Err(format!(
+                    "audio_events[{index}].audio_id is not valid for WaitForSoundEffect"
+                ));
+            }
+            if event.fade_frames.is_some() {
+                return Err(format!(
+                    "audio_events[{index}].fade_frames is not valid for WaitForSoundEffect"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_pending_screen_fade_payload(fade: &ScriptScreenFade) -> Result<(), String> {
+    if fade.command_index != 0 {
+        return Err(format!(
+            "pending_screen_fade.command_index {} must be 0",
+            fade.command_index
+        ));
+    }
+    if fade.frames != 8 {
+        return Err(format!(
+            "pending_screen_fade.frames {} must be 8",
+            fade.frames
+        ));
+    }
+    Ok(())
+}
+
+fn validate_graphics_event_payload(
+    index: usize,
+    event: &ScriptGraphicsRuntimeEvent,
+) -> Result<(), String> {
+    if event.command != "special" {
+        return Err(format!(
+            "graphics_events[{index}].command {} must be special",
+            event.command
+        ));
+    }
+    if event.command_index != 0 {
+        return Err(format!(
+            "graphics_events[{index}].command_index {} must be 0",
+            event.command_index
+        ));
+    }
+    let has_fade_payload =
+        event.color.is_some() || event.direction.is_some() || event.frames.is_some();
+    if event.kind == ScriptGraphicsRuntimeKind::ScreenFade {
+        if event.color.is_none() {
+            return Err(format!(
+                "graphics_events[{index}].color is required for ScreenFade"
+            ));
+        }
+        if event.direction.is_none() {
+            return Err(format!(
+                "graphics_events[{index}].direction is required for ScreenFade"
+            ));
+        }
+        if event.frames.is_none() {
+            return Err(format!(
+                "graphics_events[{index}].frames is required for ScreenFade"
+            ));
+        }
+        if event.frames != Some(8) {
+            return Err(format!(
+                "graphics_events[{index}].frames {} must be 8 for ScreenFade",
+                event.frames.unwrap_or_default()
+            ));
+        }
+    } else if has_fade_payload {
+        return Err(format!(
+            "graphics_events[{index}] fade payload is only valid for ScreenFade"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_money_event_payload(
+    index: usize,
+    event: &ScriptMoneyRuntimeEvent,
+) -> Result<(), String> {
+    if event.command != "special" {
+        return Err(format!(
+            "money_events[{index}].command {} must be special",
+            event.command
+        ));
+    }
+    match event.kind {
+        ScriptMoneyRuntimeKind::PlaceMoneyTopRight => {
+            if event.coins.is_some() {
+                return Err(format!(
+                    "money_events[{index}].coins is not valid for PlaceMoneyTopRight"
+                ));
+            }
+        }
+        ScriptMoneyRuntimeKind::DisplayMoneyAndCoinBalance => {
+            if event.coins.is_none() {
+                return Err(format!(
+                    "money_events[{index}].coins is required for DisplayMoneyAndCoinBalance"
+                ));
+            }
+        }
+        ScriptMoneyRuntimeKind::DisplayCoinCaseBalance => {
+            if event.money != 0 {
+                return Err(format!(
+                    "money_events[{index}].money must be 0 for DisplayCoinCaseBalance"
+                ));
+            }
+            if event.coins.is_none() {
+                return Err(format!(
+                    "money_events[{index}].coins is required for DisplayCoinCaseBalance"
+                ));
+            }
+        }
+    }
+    if event.command_index != 0 {
+        return Err(format!(
+            "money_events[{index}].command_index {} must be 0",
+            event.command_index
+        ));
+    }
+    Ok(())
+}
+
+fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Result<(), String> {
+    match event.kind {
+        ScriptMapRuntimeKind::NoWarp => {
+            if event.command != "warp" {
+                return Err(format!(
+                    "map_events[{index}].command {} is not valid for NoWarp",
+                    event.command
+                ));
+            }
+            if event.target_map.is_some()
+                || event.tile.is_some()
+                || event.facing.is_some()
+                || event.map_setup.is_some()
+            {
+                return Err(format!(
+                    "map_events[{index}] {:?} cannot carry map payload",
+                    event.kind
+                ));
+            }
+        }
+        ScriptMapRuntimeKind::WarpCheck => {
+            if event.command != "warpcheck" {
+                return Err(format!(
+                    "map_events[{index}].command {} is not valid for WarpCheck",
+                    event.command
+                ));
+            }
+            if event.target_map.is_some()
+                || event.tile.is_some()
+                || event.facing.is_some()
+                || event.map_setup.is_some()
+            {
+                return Err(format!(
+                    "map_events[{index}] {:?} cannot carry map payload",
+                    event.kind
+                ));
+            }
+        }
+        ScriptMapRuntimeKind::Warp => {
+            if event.target_map.is_none() {
+                return Err(format!(
+                    "map_events[{index}].target_map is required for Warp"
+                ));
+            }
+            if event.tile.is_none() {
+                return Err(format!("map_events[{index}].tile is required for Warp"));
+            }
+            if event.map_setup.is_some() {
+                return Err(format!(
+                    "map_events[{index}].map_setup is not valid for Warp"
+                ));
+            }
+            let expected_command = if event.facing.is_some() {
+                "warpfacing"
+            } else {
+                "warp"
+            };
+            if event.command != expected_command {
+                return Err(format!(
+                    "map_events[{index}].command {} must be {expected_command} for Warp",
+                    event.command
+                ));
+            }
+        }
+        ScriptMapRuntimeKind::LoadMap => {
+            validate_map_load_command_payload(
+                &format!("map_events[{index}]"),
+                &event.command,
+                event.map_setup.as_deref(),
+            )?;
+            if event.target_map.is_some() || event.tile.is_some() || event.facing.is_some() {
+                return Err(format!(
+                    "map_events[{index}] {:?} cannot carry warp payload",
+                    event.kind
+                ));
+            }
+        }
+        ScriptMapRuntimeKind::RefreshMap => {
+            validate_map_refresh_command_payload(
+                &format!("map_events[{index}]"),
+                &event.command,
+                event.map_setup.as_deref(),
+            )?;
+            if event.target_map.is_some() || event.tile.is_some() || event.facing.is_some() {
+                return Err(format!(
+                    "map_events[{index}] {:?} cannot carry warp payload",
+                    event.kind
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_pending_map_load_payload(load: &ScriptMapLoadRequest) -> Result<(), String> {
+    validate_map_load_command_payload("pending_map_load", &load.command, load.map_setup.as_deref())
+}
+
+fn validate_pending_map_refresh_payload(refresh: &ScriptMapRefreshRequest) -> Result<(), String> {
+    validate_map_refresh_command_payload(
+        "pending_map_refresh",
+        &refresh.command,
+        refresh.map_setup.as_deref(),
+    )
+}
+
+fn validate_map_load_command_payload(
+    field: &str,
+    command: &str,
+    map_setup: Option<&str>,
+) -> Result<(), String> {
+    if !SCRIPT_MAP_LOAD_COMMANDS.contains(&command) {
+        return Err(format!(
+            "{field}.command {command} is not a saved map load command"
+        ));
+    }
+    if command == "newloadmap" {
+        if map_setup.is_none() {
+            return Err(format!("{field}.map_setup is required for newloadmap"));
+        }
+    } else if map_setup.is_some() {
+        return Err(format!("{field}.map_setup is not valid for {command}"));
+    }
+    Ok(())
+}
+
+fn validate_map_refresh_command_payload(
+    field: &str,
+    command: &str,
+    map_setup: Option<&str>,
+) -> Result<(), String> {
+    if !SCRIPT_MAP_REFRESH_COMMANDS.contains(&command) {
+        return Err(format!(
+            "{field}.command {command} is not a saved map refresh command"
+        ));
+    }
+    if command != "reanchormap" && map_setup.is_some() {
+        return Err(format!("{field}.map_setup is not valid for {command}"));
+    }
+    Ok(())
+}
+
+fn validate_control_event_payload(
+    index: usize,
+    event: &ScriptControlRuntimeEvent,
+) -> Result<(), String> {
+    match event.kind {
+        ScriptControlRuntimeKind::Continue | ScriptControlRuntimeKind::End => {
+            if event.target_script.is_some() {
+                return Err(format!(
+                    "control_events[{index}].target_script is not valid for {:?}",
+                    event.kind
+                ));
+            }
+        }
+        ScriptControlRuntimeKind::Jump
+        | ScriptControlRuntimeKind::Call
+        | ScriptControlRuntimeKind::Defer
+        | ScriptControlRuntimeKind::StandardJump => {
+            if event.target_script.is_none() {
+                return Err(format!(
+                    "control_events[{index}].target_script is required for {:?}",
+                    event.kind
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_return_frame_payload(index: usize, frame: &ScriptReturnFrame) -> Result<(), String> {
+    if frame.next_command_index == 0 {
+        return Err(format!(
+            "call_stack[{index}].next_command_index cannot be 0"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_script_end_state(end: &ScriptEndState) -> Result<(), String> {
+    if end.callback && end.just_battled_guard {
+        return Err("script_ended cannot be both callback and just_battled_guard".to_string());
+    }
+    Ok(())
+}
+
+fn validate_variable_write_payload(
+    index: usize,
+    write: &ScriptRuntimeVariableWrite,
+    variables: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    match variables.get(&write.target) {
+        Some(value) if value == &write.value => Ok(()),
+        Some(value) => Err(format!(
+            "variable_writes[{index}].value {} does not match variables[{}] {}",
+            write.value, write.target, value
+        )),
+        None => Err(format!(
+            "variable_writes[{index}].target {} is missing from variables",
+            write.target
+        )),
+    }
+}
+
+fn validate_runtime_effect_payload(
+    index: usize,
+    effect: &ScriptRuntimeEffect,
+) -> Result<(), String> {
+    let expected = script_runtime_command_arg_counts()
+        .get(effect.command.as_str())
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "effects[{index}].command {} is not a saved runtime command",
+                effect.command
+            )
+        })?;
+    if effect.args.len() != expected {
+        return Err(format!(
+            "effects[{index}].args has {} entries, expected {expected} for {}",
+            effect.args.len(),
+            effect.command
+        ));
+    }
+    Ok(())
+}
+
+fn validate_queued_command_payload(
+    index: usize,
+    command: &ScriptRuntimeQueuedCommand,
+) -> Result<(), String> {
+    match command.command.as_str() {
+        "cmdqueue" | "conditional_event" => {
+            if command.bank.is_none() {
+                return Err(format!(
+                    "command_queue[{index}].bank is required for {}",
+                    command.command
+                ));
+            }
+        }
+        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
+            if command.bank.is_some() {
+                return Err(format!(
+                    "command_queue[{index}].bank is not valid for {}",
+                    command.command
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "command_queue[{index}].command {} is not a saved queued command",
+                command.command
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> Result<(), String> {
+    match event.kind {
+        ScriptTextRuntimeKind::Write => {
+            if event.text_label.is_none() {
+                return Err(format!(
+                    "text_events[{index}].text_label is required for Write"
+                ));
+            }
+            if !SCRIPT_TEXT_LABEL_COMMANDS.contains(&event.command.as_str()) {
+                return Err(format!(
+                    "text_events[{index}].command {} is not valid for Write",
+                    event.command
+                ));
+            }
+            match event.command.as_str() {
+                "writetext" => {
+                    if event.face_player {
+                        return Err(format!(
+                            "text_events[{index}].face_player must be false for writetext"
+                        ));
+                    }
+                    if event.closes_text {
+                        return Err(format!(
+                            "text_events[{index}].closes_text must be false for writetext"
+                        ));
+                    }
+                }
+                "jumptext" => {
+                    if event.face_player {
+                        return Err(format!(
+                            "text_events[{index}].face_player must be false for jumptext"
+                        ));
+                    }
+                    if !event.closes_text {
+                        return Err(format!(
+                            "text_events[{index}].closes_text must be true for jumptext"
+                        ));
+                    }
+                }
+                "jumptextfaceplayer" => {
+                    if !event.face_player {
+                        return Err(format!(
+                            "text_events[{index}].face_player must be true for jumptextfaceplayer"
+                        ));
+                    }
+                    if !event.closes_text {
+                        return Err(format!(
+                            "text_events[{index}].closes_text must be true for jumptextfaceplayer"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        ScriptTextRuntimeKind::Open => {
+            if event.text_label.is_some() {
+                return Err(format!(
+                    "text_events[{index}].text_label is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.face_player {
+                return Err(format!(
+                    "text_events[{index}].face_player is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.closes_text {
+                return Err(format!(
+                    "text_events[{index}].closes_text is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.command != "opentext" {
+                return Err(format!(
+                    "text_events[{index}].command {} is not valid for Open",
+                    event.command
+                ));
+            }
+        }
+        ScriptTextRuntimeKind::Close => {
+            if event.text_label.is_some() {
+                return Err(format!(
+                    "text_events[{index}].text_label is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.face_player {
+                return Err(format!(
+                    "text_events[{index}].face_player is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.closes_text {
+                return Err(format!(
+                    "text_events[{index}].closes_text is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.command != "closetext" {
+                return Err(format!(
+                    "text_events[{index}].command {} is not valid for Close",
+                    event.command
+                ));
+            }
+        }
+        ScriptTextRuntimeKind::WaitButton => {
+            if event.text_label.is_some() {
+                return Err(format!(
+                    "text_events[{index}].text_label is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.face_player {
+                return Err(format!(
+                    "text_events[{index}].face_player is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.closes_text {
+                return Err(format!(
+                    "text_events[{index}].closes_text is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if !matches!(event.command.as_str(), "promptbutton" | "waitbutton") {
+                return Err(format!(
+                    "text_events[{index}].command {} is not valid for WaitButton",
+                    event.command
+                ));
+            }
+        }
+        ScriptTextRuntimeKind::YesNo => {
+            if event.text_label.is_some() {
+                return Err(format!(
+                    "text_events[{index}].text_label is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.face_player {
+                return Err(format!(
+                    "text_events[{index}].face_player is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.closes_text {
+                return Err(format!(
+                    "text_events[{index}].closes_text is not valid for {:?}",
+                    event.kind
+                ));
+            }
+            if event.command != "yesorno" {
+                return Err(format!(
+                    "text_events[{index}].command {} is not valid for YesNo",
+                    event.command
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_pending_text_wait_command(command: &str) -> Result<(), String> {
+    if matches!(
+        command,
+        "promptbutton" | "waitbutton" | "jumptext" | "jumptextfaceplayer"
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "pending_text_wait.command {command} is not a saved text wait command"
+        ))
+    }
+}
+
+fn validate_optional_script_runtime_label(field: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_script_runtime_label(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_script_runtime_label(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_script_runtime_label(value) {
+        Ok(())
+    } else {
+        Err(format!("{field} has invalid script label '{value}'"))
+    }
+}
+
+fn validate_optional_script_runtime_token(field: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_script_runtime_token(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_empty_or_script_runtime_token(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        validate_script_runtime_token(field, value)
+    }
+}
+
+fn validate_inches_field(field: &str, value: u8) -> Result<(), String> {
+    if value >= 12 {
+        return Err(format!("{field} {value} is outside inches range 0..11"));
+    }
+    Ok(())
+}
+
+fn validate_script_runtime_token(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_script_runtime_token(value) {
+        Ok(())
+    } else {
+        Err(format!("{field} has invalid token '{value}'"))
+    }
+}
+
+fn is_exact_script_runtime_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_script_runtime_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,18 +2895,236 @@ pub struct ScriptRuntimeQueuedCommand {
 }
 
 impl GameState {
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        validate_saved_player_name(&self.player_name)?;
+        self.bag
+            .validate()
+            .map_err(|error| format!("invalid saved bag: {error}"))?;
+        self.storage
+            .validate_metadata()
+            .map_err(|error| format!("invalid saved storage: {error}"))?;
+        self.time
+            .validate_saved_state()
+            .map_err(|error| format!("invalid saved time: {error}"))?;
+        let projected_party = PartyState::from_storage(&self.storage);
+        if self.party != projected_party {
+            return Err("saved party projection does not match authoritative storage".to_string());
+        }
+        if self.current_pc_box >= MAX_PC_BOXES {
+            return Err(format!(
+                "current_pc_box {} is outside PC box range 0..{}",
+                self.current_pc_box, MAX_PC_BOXES
+            ));
+        }
+        for (index, roamer) in self.roaming_pokemon.iter().enumerate() {
+            roamer.validate_saved_state(index)?;
+        }
+        self.validate_saved_battle_cursors()?;
+        self.validate_saved_identity_fields()?;
+        self.validate_saved_battle_runtime_consistency()?;
+        self.scenes
+            .validate()
+            .map_err(|error| format!("invalid saved scene memory: {error}"))?;
+        self.flags
+            .validate()
+            .map_err(|error| format!("invalid saved event flags: {error}"))?;
+        self.script_runtime
+            .validate()
+            .map_err(|error| format!("invalid saved script runtime: {error}"))?;
+        Ok(())
+    }
+
+    fn validate_saved_battle_cursors(&self) -> Result<(), String> {
+        let Some(enemy_party_len) = self.battle.enemy_party_len() else {
+            if self.battle_active_party_index.is_some() {
+                return Err(
+                    "battle_active_party_index cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
+            if self.battle_active_enemy_party_index.is_some() {
+                return Err(
+                    "battle_active_enemy_party_index cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
+            if !self.battle_rewarded_enemy_party_indices.is_empty() {
+                return Err(
+                    "battle_rewarded_enemy_party_indices cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        };
+
+        if let Some(index) = self.battle_active_party_index {
+            if index >= PARTY_SIZE {
+                return Err(format!(
+                    "battle_active_party_index {index} is outside party range 0..{PARTY_SIZE}"
+                ));
+            }
+            if self.storage.party.pokemon[index].is_none() {
+                return Err(format!(
+                    "battle_active_party_index {index} points to empty party slot"
+                ));
+            }
+        }
+
+        if let Some(index) = self.battle_active_enemy_party_index {
+            if index >= enemy_party_len {
+                return Err(format!(
+                    "battle_active_enemy_party_index {index} is outside enemy party range 0..{enemy_party_len}"
+                ));
+            }
+            if let Some((enemy_party, enemy_pokemon)) = self.battle.enemy_party_and_current() {
+                if enemy_party[index] != *enemy_pokemon {
+                    return Err(format!(
+                        "battle_active_enemy_party_index {index} does not match battle enemy_pokemon"
+                    ));
+                }
+            }
+        }
+        for index in &self.battle_rewarded_enemy_party_indices {
+            if *index >= enemy_party_len {
+                return Err(format!(
+                    "battle_rewarded_enemy_party_indices contains {index}, outside enemy party range 0..{enemy_party_len}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_saved_battle_runtime_consistency(&self) -> Result<(), String> {
+        let Some(enemy_party_len) = self.battle.enemy_party_len() else {
+            if self.battle_escape_attempts != 0 {
+                return Err(
+                    "battle_escape_attempts cannot be saved without an active battle".to_string(),
+                );
+            }
+            if self.battle_player_stat_drop_guard_turns != 0 {
+                return Err(
+                    "battle_player_stat_drop_guard_turns cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        };
+        if enemy_party_len == 0 {
+            return Ok(());
+        }
+        if self.battle_active_enemy_party_index.is_none() {
+            return Err(
+                "battle_active_enemy_party_index must be saved for an active battle".to_string(),
+            );
+        }
+        if !self.battle_rewarded_enemy_party_indices.is_empty()
+            && !matches!(self.battle, BattleMemory::Trainer { .. })
+        {
+            return Err(
+                "battle_rewarded_enemy_party_indices can only be saved for an active trainer battle"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_saved_identity_fields(&self) -> Result<(), String> {
+        self.overworld.validate_saved_state()?;
+        self.battle.validate_saved_state()?;
+        if self.player_palette_id > 7 {
+            return Err(format!(
+                "player_palette_id {} is outside Crystal palette range 0..7",
+                self.player_palette_id
+            ));
+        }
+        validate_optional_script_runtime_token(
+            "active_repel_item",
+            self.active_repel_item.as_deref(),
+        )?;
+        match (self.repel_steps_remaining, &self.active_repel_item) {
+            (0, Some(item_id)) => {
+                return Err(format!(
+                    "active_repel_item {item_id} cannot be saved with zero repel steps"
+                ));
+            }
+            (steps, None) if steps > 0 => {
+                return Err(format!(
+                    "repel_steps_remaining {steps} cannot be saved without active_repel_item"
+                ));
+            }
+            _ => {}
+        }
+        validate_optional_script_runtime_token(
+            "dig_warp_map_name",
+            self.dig_warp_map_name.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
+            "pending_special_battle_type",
+            self.pending_special_battle_type.as_deref(),
+        )?;
+        for map_name in self.map_block_overrides.keys() {
+            validate_script_runtime_token("map_block_overrides map", map_name)?;
+        }
+        for (map_name, memory) in &self.map_object_overrides {
+            validate_script_runtime_token("map_object_overrides map", map_name)?;
+            memory.validate_saved_state(map_name)?;
+        }
+        self.link_session.validate_saved_state()?;
+        self.battle_tower.validate_saved_state()?;
+        self.bug_contest.validate_saved_state()?;
+        self.mystery_gift.validate_saved_state()?;
+        self.day_care.validate_saved_state()?;
+        self.mobile_link.validate_saved_state()?;
+        self.magikarp_record.validate_saved_state()?;
+        self.buenas_password.validate_saved_state()?;
+        Ok(())
+    }
+
     pub fn frame(&self) -> Frame {
         Frame(self.frame_counter)
     }
 
+    pub fn try_advance_frame(&mut self) -> Result<Frame, GameStateFrameError> {
+        let next = self
+            .frame()
+            .checked_next()
+            .ok_or(GameStateFrameError::FrameCursorOverflow {
+                frame: self.frame_counter,
+            })?;
+        self.frame_counter = next.0;
+        Ok(next)
+    }
+
     pub fn advance_frame(&mut self) -> Frame {
-        self.frame_counter += 1;
-        self.frame()
+        self.try_advance_frame()
+            .expect("game state frame cursor overflow")
     }
 
     pub fn sync_party_from_storage(&mut self) {
         self.party = PartyState::from_storage(&self.storage);
     }
+}
+
+fn validate_saved_player_name(player_name: &str) -> Result<(), String> {
+    if player_name.len() > PLAYER_NAME_LENGTH {
+        return Err(format!(
+            "player_name length {} exceeds Crystal limit {}",
+            player_name.len(),
+            PLAYER_NAME_LENGTH
+        ));
+    }
+    if player_name.trim() != player_name || player_name.chars().any(char::is_control) {
+        return Err(
+            "player_name must be exact, untrimmed, and contain no control characters".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum GameStateFrameError {
+    #[error("game state frame cursor overflowed at frame {frame}")]
+    FrameCursorOverflow { frame: u64 },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -889,9 +3138,21 @@ pub struct EventFlagMemory {
 pub enum EventFlagError {
     #[error("empty flag name")]
     EmptyFlagName,
+    #[error("invalid flag name {flag_name}")]
+    InvalidFlagName { flag_name: String },
 }
 
 impl EventFlagMemory {
+    pub fn validate(&self) -> Result<(), EventFlagError> {
+        for flag_name in self.event_flags.keys() {
+            validate_flag_name(flag_name)?;
+        }
+        for flag_name in self.engine_flags.keys() {
+            validate_flag_name(flag_name)?;
+        }
+        Ok(())
+    }
+
     pub fn set_event_flag(&mut self, flag_name: &str, value: bool) -> Result<(), EventFlagError> {
         let flag_name = validate_flag_name(flag_name)?;
         self.event_flags.insert(flag_name.to_string(), value);
@@ -955,10 +3216,20 @@ pub fn is_engine_flag_name(flag_name: &str) -> bool {
 
 fn validate_flag_name(flag_name: &str) -> Result<&str, EventFlagError> {
     if flag_name.is_empty() {
-        Err(EventFlagError::EmptyFlagName)
-    } else {
-        Ok(flag_name)
+        return Err(EventFlagError::EmptyFlagName);
     }
+    if !is_exact_flag_name(flag_name) {
+        return Err(EventFlagError::InvalidFlagName {
+            flag_name: flag_name.to_string(),
+        });
+    }
+    Ok(flag_name)
+}
+
+fn is_exact_flag_name(flag_name: &str) -> bool {
+    flag_name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,21 +3250,62 @@ pub struct SceneStatus {
     pub script_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum SceneError {
-    MissingSceneTable {
-        map_name: String,
-    },
+    #[error("missing scene table for map {map_name}")]
+    MissingSceneTable { map_name: String },
+    #[error("invalid scene map name {map_name}")]
+    InvalidMapName { map_name: String },
+    #[error("invalid scene name {scene_name}")]
+    InvalidSceneName { scene_name: String },
+    #[error("saved scene map {map_name} has no saved scene index")]
+    MissingSceneIndex { map_name: String },
+    #[error("saved scene index for map {map_name} has no saved scene name")]
+    UnexpectedSceneIndex { map_name: String },
+    #[error("unknown scene {scene_name} for map {map_name}")]
     UnknownScene {
         map_name: String,
         scene_name: String,
     },
-    EmptySceneTable {
-        map_name: String,
-    },
+    #[error("empty scene table for map {map_name}")]
+    EmptySceneTable { map_name: String },
 }
 
 impl SceneMemory {
+    pub fn validate(&self) -> Result<(), SceneError> {
+        if !self.current_map_name.is_empty() && !is_exact_scene_token(&self.current_map_name) {
+            return Err(SceneError::InvalidMapName {
+                map_name: self.current_map_name.clone(),
+            });
+        }
+        if !self.scene_name.is_empty() && !is_exact_scene_token(&self.scene_name) {
+            return Err(SceneError::InvalidSceneName {
+                scene_name: self.scene_name.clone(),
+            });
+        }
+        for (map_name, scene_name) in &self.map_scenes {
+            validate_scene_token(map_name)
+                .map_err(|map_name| SceneError::InvalidMapName { map_name })?;
+            validate_scene_token(scene_name)
+                .map_err(|scene_name| SceneError::InvalidSceneName { scene_name })?;
+            if !self.map_scene_indices.contains_key(map_name) {
+                return Err(SceneError::MissingSceneIndex {
+                    map_name: map_name.clone(),
+                });
+            }
+        }
+        for map_name in self.map_scene_indices.keys() {
+            validate_scene_token(map_name)
+                .map_err(|map_name| SceneError::InvalidMapName { map_name })?;
+            if !self.map_scenes.contains_key(map_name) {
+                return Err(SceneError::UnexpectedSceneIndex {
+                    map_name: map_name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn enter_map(
         &mut self,
         map_name: impl Into<String>,
@@ -1093,6 +3405,22 @@ impl SceneMemory {
             script_name: scene.script_name.clone(),
         })
     }
+}
+
+fn validate_scene_token(value: &str) -> Result<(), String> {
+    if is_exact_scene_token(value) {
+        Ok(())
+    } else {
+        Err(value.to_string())
+    }
+}
+
+fn is_exact_scene_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1352,6 +3680,2309 @@ mod tests {
     }
 
     #[test]
+    fn saved_game_state_validates_non_script_pack_identifiers() {
+        let mut state = GameState {
+            active_repel_item: Some("SUPER REPEL".to_string()),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("active_repel_item has invalid token 'SUPER REPEL'".to_string())
+        );
+
+        state = GameState {
+            player_name: " GOLD".to_string(),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "player_name must be exact, untrimmed, and contain no control characters"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            player_name: "GOLD\n".to_string(),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "player_name must be exact, untrimmed, and contain no control characters"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            player_name: "GOLDENROD".to_string(),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(format!(
+                "player_name length 9 exceeds Crystal limit {PLAYER_NAME_LENGTH}"
+            ))
+        );
+
+        state = GameState::default();
+        state.time.registers.minutes = 60;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved time: time.registers.minutes 60 is outside clock range 0..59"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.time.current_day = 8;
+        state.time.day_of_week = 0;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved time: time.day_of_week 0 does not match current_day modulo 7 1"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.time.registers.hours = 10;
+        state.time.game_time_hours = 9;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved time: time.game_time_hours 9 does not match registers.hours 10"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.player_palette_id = 8;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("player_palette_id 8 is outside Crystal palette range 0..7".to_string())
+        );
+
+        state = GameState::default();
+        state.repel_steps_remaining = 10;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("repel_steps_remaining 10 cannot be saved without active_repel_item".to_string())
+        );
+
+        state = GameState::default();
+        state.active_repel_item = Some("REPEL".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("active_repel_item REPEL cannot be saved with zero repel steps".to_string())
+        );
+
+        state = GameState::default();
+        state.link_session.active_room = Some("Trade Center".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("link_session.active_room has invalid token 'Trade Center'".to_string())
+        );
+
+        state = GameState::default();
+        state.link_session.active_room = Some("TradeCenter".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "link_session.active_room TradeCenter cannot be saved with link_mode 0".to_string()
+            )
+        );
+
+        state = GameState::default();
+        state
+            .map_block_overrides
+            .insert("Route 29".to_string(), BTreeMap::new());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("map_block_overrides map has invalid token 'Route 29'".to_string())
+        );
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                hidden_object_identifiers: BTreeSet::from(["YOUNGSTER JOEY".to_string()]),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides[Route29].hidden_object_identifiers has invalid token 'YOUNGSTER JOEY'"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                objects: BTreeMap::from([(
+                    "LYRA".to_string(),
+                    OverworldObjectMemory {
+                        x: 1,
+                        y: 1,
+                        facing: None,
+                    },
+                )]),
+                hidden_object_identifiers: BTreeSet::from(["LYRA".to_string()]),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides[Route29] object LYRA cannot be both overridden and hidden"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                following: Some(OverworldFollowMemory {
+                    leader_object_id: "PLAYER".to_string(),
+                    follower_object_id: "PLAYER".to_string(),
+                }),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides[Route29].following leader and follower cannot both be PLAYER"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                hidden_object_identifiers: BTreeSet::from(["PLAYER".to_string()]),
+                following: Some(OverworldFollowMemory {
+                    leader_object_id: "PLAYER".to_string(),
+                    follower_object_id: "LYRA".to_string(),
+                }),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides[Route29].following leader PLAYER cannot be hidden"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                hidden_object_identifiers: BTreeSet::from(["LYRA".to_string()]),
+                following: Some(OverworldFollowMemory {
+                    leader_object_id: "PLAYER".to_string(),
+                    follower_object_id: "LYRA".to_string(),
+                }),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides[Route29].following follower LYRA cannot be hidden"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.battle_tower.challenge_state = 5;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_tower.challenge_state 5 is outside Crystal range 0..4".to_string())
+        );
+
+        state = GameState::default();
+        state.battle_tower.save_file_flags = 0x04;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_tower.save_file_flags 0x04 contains unknown bits 0x04".to_string())
+        );
+
+        state = GameState::default();
+        state.battle_tower.record_reset_counter = 3;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_tower.record_reset_counter 3 is outside Crystal range 0..2".to_string())
+        );
+
+        state = GameState::default();
+        state.battle_tower.reward_item = "RARE CANDY".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_tower.reward_item has invalid token 'RARE CANDY'".to_string())
+        );
+
+        state = GameState::default();
+        state.battle_tower.last_rule_failure = Some("StaleFailureText".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_tower.last_rule_failure StaleFailureText is not a saved Battle Tower rule failure"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state
+            .battle_tower
+            .mobile_flags
+            .insert("function999999".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_tower.mobile_flags function999999 is not a saved Battle Tower mobile flag"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.battle_tower.last_rule_failure = Some("YouCantTakeAnEggText".to_string());
+        state
+            .battle_tower
+            .mobile_flags
+            .insert("function103780".to_string());
+        assert_eq!(state.validate_saved_state(), Ok(()));
+
+        state = GameState::default();
+        state.battle_tower.selected_party_indexes = vec![0, PARTY_SIZE];
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(format!(
+                "battle_tower.selected_party_indexes contains {PARTY_SIZE}, outside party range 0..{PARTY_SIZE}"
+            ))
+        );
+
+        state = GameState::default();
+        state.battle_tower.selected_party_indexes = vec![1, 1];
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_tower.selected_party_indexes contains duplicate party index 1".to_string())
+        );
+
+        state = GameState::default();
+        state.battle_tower.record_streaks = vec![7];
+        state.battle_tower.record_outcomes = vec![true, false];
+        state.battle_tower.record_days = vec![4];
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_tower record vectors have inconsistent lengths: streaks 1, outcomes 2, days 1"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state
+            .bug_contest
+            .selected_contestant_flags
+            .push("EVENT BUG_CONTESTANT".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "bug_contest.selected_contestant_flags invalid flag name EVENT BUG_CONTESTANT"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.bug_contest.timer_seconds_remaining = 60;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("bug_contest.timer_seconds_remaining 60 is outside clock range 0..59".to_string())
+        );
+
+        state = GameState::default();
+        state.bug_contest.caught_species = Some("SCYTHER".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "bug_contest.caught_species SCYTHER cannot be saved without caught_mon".to_string()
+            )
+        );
+
+        state = GameState::default();
+        let mut species = crate::models::PokemonSpecies::new_for_tests(
+            "SCYTHER",
+            crate::models::BaseStats::new(70, 110, 80, 55, 80, 105),
+        );
+        species.int_id = 123;
+        state.bug_contest.caught_mon = Some(Pokemon::new_for_tests(
+            species,
+            14,
+            crate::models::Dv::default(),
+        ));
+        state.bug_contest.caught_species = Some("PINSIR".to_string());
+        state.bug_contest.caught_level = Some(14);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "bug_contest.caught_species PINSIR does not match caught_mon species SCYTHER"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.man.initial_level = 5;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.man.initial_level 5 cannot be saved without a Pokemon".to_string())
+        );
+
+        state = GameState::default();
+        state.day_care.lady.steps = 1;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.lady.steps 1 cannot be saved without a Pokemon".to_string())
+        );
+
+        state = GameState::default();
+        state.day_care.man.active = true;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.man.active cannot be saved without a Pokemon".to_string())
+        );
+
+        state = GameState::default();
+        let mut day_care_species = crate::models::PokemonSpecies::new_for_tests(
+            "DITTO",
+            crate::models::BaseStats::new(48, 48, 48, 48, 48, 48),
+        );
+        day_care_species.int_id = 132;
+        state.day_care.man.pokemon = Some(Pokemon::new_for_tests(
+            day_care_species,
+            5,
+            crate::models::Dv::default(),
+        ));
+        state.day_care.man.initial_level = 5;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.man.active must be true when a Pokemon is deposited".to_string())
+        );
+
+        state = GameState::default();
+        state.day_care.egg_present = true;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.egg_present cannot be saved without both residents active".to_string())
+        );
+
+        state = GameState::default();
+        state.day_care.compatibility_score = 70;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "day_care.compatibility_score 70 cannot be saved without both residents active"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.steps_until_next_egg = 255;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "day_care.steps_until_next_egg 255 cannot be saved without both residents active"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.steps_since_last_egg = 1;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "day_care.steps_since_last_egg 1 cannot be saved without both residents active"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.last_interaction = Some(DayCareInteractionState {
+            caretaker: "elder".to_string(),
+            action: "inspect".to_string(),
+            success: false,
+            pokemon: None,
+            level: None,
+            reason: Some("empty".to_string()),
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "day_care.last_interaction.caretaker elder is not a saved Day Care caretaker"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.last_interaction = Some(DayCareInteractionState {
+            caretaker: "man".to_string(),
+            action: "deposit".to_string(),
+            success: true,
+            pokemon: Some("DITTO".to_string()),
+            level: None,
+            reason: None,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.last_interaction.action deposit requires pokemon and level".to_string())
+        );
+
+        state = GameState::default();
+        state.day_care.last_interaction = Some(DayCareInteractionState {
+            caretaker: "lady".to_string(),
+            action: "collect_egg".to_string(),
+            success: true,
+            pokemon: None,
+            level: None,
+            reason: None,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "day_care.last_interaction.action collect_egg requires caretaker man, got lady"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.day_care.last_interaction = Some(DayCareInteractionState {
+            caretaker: "man".to_string(),
+            action: "withdraw".to_string(),
+            success: false,
+            pokemon: Some("DITTO".to_string()),
+            level: Some(5),
+            reason: Some("party_full".to_string()),
+        });
+        assert_eq!(state.validate_saved_state(), Ok(()));
+
+        state = GameState::default();
+        state.mystery_gift.stored_item = Some("GOLD BERRY".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mystery_gift.stored_item has invalid token 'GOLD BERRY'".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.mode = Some("MOBILE MODE".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.mode has invalid token 'MOBILE MODE'".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.adapter_status = "LOGGED IN".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.adapter_status has invalid token 'LOGGED IN'".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.login_password = "EIGHTEEN-CHARS!!!!!".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "mobile_link.login_password length 18 exceeds Crystal mobile password limit 17"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.mobile_link.terminated = true;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.terminated cannot be saved before a mobile handshake".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.mode = Some("init".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.mode init cannot be saved before a mobile handshake".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.adapter_status = "ready".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "mobile_link.adapter_status ready cannot be saved before a mobile handshake"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
+            streak: 7,
+            outcome: "WIN STREAK".to_string(),
+            day: 1,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.leaderboard[0].outcome has invalid token 'WIN STREAK'".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
+            streak: 7,
+            outcome: "WIN".to_string(),
+            day: 7,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.leaderboard[0].day 7 is outside weekday range 0..6".to_string())
+        );
+
+        state = GameState::default();
+        state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
+            streak: 7,
+            outcome: "WIN".to_string(),
+            day: 1,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.leaderboard has 1 records before a mobile handshake".to_string())
+        );
+
+        state = GameState::default();
+        state.magikarp_record.current_inches = 12;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("magikarp_record.current_inches 12 is outside inches range 0..11".to_string())
+        );
+
+        state = GameState::default();
+        state.magikarp_record.best_inches = 12;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("magikarp_record.best_inches 12 is outside inches range 0..11".to_string())
+        );
+
+        state = GameState::default();
+        state.buenas_password.generation_day = 7;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("buenas_password.generation_day 7 is outside weekday range 0..6".to_string())
+        );
+
+        state = GameState::default();
+        state.buenas_password.option_index = 1;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "buenas_password.option_index 1 cannot be saved before a password is generated"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.buenas_password.category_index = 1;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "buenas_password.category_index 1 cannot be saved before a password is generated"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.bag.items.insert("POTION".to_string(), 100);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("invalid saved bag: items.POTION quantity 100 exceeds stack limit 99".to_string())
+        );
+
+        state = GameState::default();
+        let mut stored_species = crate::models::PokemonSpecies::new_for_tests(
+            "CHIKORITA",
+            crate::models::BaseStats::new(45, 49, 65, 45, 49, 65),
+        );
+        stored_species.int_id = 152;
+        let mut stored_pokemon = Pokemon::new_for_tests(
+            stored_species,
+            5,
+            crate::models::Dv::from_non_hp(1, 2, 3, 4),
+        );
+        stored_pokemon.level = 0;
+        state.storage.party.pokemon[0] = Some(stored_pokemon);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved storage: party slot 0: pokemon.level 0 is outside range 1..100"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.storage.party.pokemon[1] = Some(pokemon.clone());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("invalid saved storage: party slot 1 is filled after empty slot 0".to_string())
+        );
+
+        state = GameState::default();
+        state.party.pokemon[0] = Some(PartyPokemonRef {
+            species: "CHIKORITA".to_string(),
+            level: 6,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("saved party projection does not match authoritative storage".to_string())
+        );
+
+        state = GameState {
+            current_pc_box: MAX_PC_BOXES,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(format!(
+                "current_pc_box {MAX_PC_BOXES} is outside PC box range 0..{MAX_PC_BOXES}"
+            ))
+        );
+
+        state = GameState::default();
+        state.roaming_pokemon.push(RoamingPokemonState {
+            species: "RAIK OU".to_string(),
+            level: 40,
+            map_group: 1,
+            map_number: 1,
+            hp: 1,
+            dvs: 0,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("roaming_pokemon[0].species has invalid token 'RAIK OU'".to_string())
+        );
+
+        state = GameState::default();
+        state.roaming_pokemon.push(RoamingPokemonState {
+            species: "RAIKOU".to_string(),
+            level: 0,
+            map_group: 1,
+            map_number: 1,
+            hp: 1,
+            dvs: 0,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("roaming_pokemon[0].level must be nonzero".to_string())
+        );
+
+        state = GameState::default();
+        state.roaming_pokemon.push(RoamingPokemonState {
+            species: "RAIKOU".to_string(),
+            level: 40,
+            map_group: 1,
+            map_number: 0,
+            hp: 1,
+            dvs: 0,
+        });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("roaming_pokemon[0].map_number must be nonzero".to_string())
+        );
+
+        state = GameState {
+            overworld: OverworldMemory::Active {
+                map_name: "Route 29".to_string(),
+                tile: TilePosition::new(1, 2),
+                facing: Direction::Down,
+                mode: MovementMode::Normal,
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("overworld.active.map_name has invalid token 'Route 29'".to_string())
+        );
+
+        let mut species = crate::models::PokemonSpecies::new_for_tests(
+            "CHIKORITA",
+            crate::models::BaseStats::new(45, 49, 49, 45, 65, 65),
+        );
+        species.int_id = 152;
+        let pokemon = Pokemon::new_for_tests(species, 6, crate::models::Dv::default());
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_active_party_index: Some(PARTY_SIZE),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(format!(
+                "battle_active_party_index {PARTY_SIZE} is outside party range 0..{PARTY_SIZE}"
+            ))
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_active_party_index: Some(0),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_active_party_index 0 points to empty party slot".to_string())
+        );
+
+        state = GameState {
+            battle_active_party_index: Some(0),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_active_party_index cannot be saved without an active battle".to_string())
+        );
+
+        state = GameState {
+            battle_active_enemy_party_index: Some(0),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_active_enemy_party_index cannot be saved without an active battle"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle_rewarded_enemy_party_indices: BTreeSet::from([0]),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_rewarded_enemy_party_indices cannot be saved without an active battle"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle_escape_attempts: 1,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_escape_attempts cannot be saved without an active battle".to_string())
+        );
+
+        state = GameState {
+            battle_player_stat_drop_guard_turns: 1,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_player_stat_drop_guard_turns cannot be saved without an active battle"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_active_enemy_party_index must be saved for an active battle".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_active_enemy_party_index: Some(1),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_active_enemy_party_index 1 is outside enemy party range 0..1".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_rewarded_enemy_party_indices: BTreeSet::from([1]),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_rewarded_enemy_party_indices contains 1, outside enemy party range 0..1"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_active_enemy_party_index: Some(0),
+            battle_rewarded_enemy_party_indices: BTreeSet::from([0]),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_rewarded_enemy_party_indices can only be saved for an active trainer battle"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: Vec::new(),
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.wild.enemy_party must not be empty".to_string())
+        );
+
+        let mut damaged_enemy = pokemon.clone();
+        damaged_enemy.hp -= 1;
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: damaged_enemy,
+                enemy_party: vec![pokemon.clone()],
+            },
+            battle_active_enemy_party_index: Some(0),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle_active_enemy_party_index 0 does not match battle enemy_pokemon".to_string()
+            )
+        );
+
+        state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE NORMAL".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.wild.battle_type has invalid token 'BATTLETYPE NORMAL'".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::StaticWild {
+                battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                species: "RED GYARADOS".to_string(),
+                level: 30,
+                source_script: "LakeOfRageRedGyarados".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.static_wild.species has invalid token 'RED GYARADOS'".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::StaticWild {
+                battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                species: "CHIKORITA".to_string(),
+                level: 0,
+                source_script: "LakeOfRageRedGyarados".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.static_wild.level must be nonzero".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::StaticWild {
+                battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                species: "CYNDAQUIL".to_string(),
+                level: 6,
+                source_script: "LakeOfRageRedGyarados".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "battle.static_wild.species CYNDAQUIL does not match enemy_pokemon species CHIKORITA"
+                    .to_string()
+            )
+        );
+
+        state = GameState {
+            battle: BattleMemory::StaticWild {
+                battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                species: "CHIKORITA".to_string(),
+                level: 7,
+                source_script: "LakeOfRageRedGyarados".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon.clone()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.static_wild.level 7 does not match enemy_pokemon level 6".to_string())
+        );
+
+        state = GameState {
+            battle: BattleMemory::Trainer {
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
+                trainer_class: "FALKNER".to_string(),
+                trainer_id: "FALKNER1".to_string(),
+                trainer_name: "Falkner".to_string(),
+                event_flag: "EVENT BEAT_FALKNER".to_string(),
+                seen_text: "FalknerSeenText".to_string(),
+                win_text: "FalknerWinText".to_string(),
+                loss_text: "FalknerLossText".to_string(),
+                callback: "FalknerCallback".to_string(),
+                source_script: "VioletGymFalkner".to_string(),
+                enemy_pokemon: pokemon.clone(),
+                enemy_party: vec![pokemon],
+                reward: 900,
+                encounter_music: "MUSIC_HIKER_ENCOUNTER".to_string(),
+                ai_move_flags: 0,
+                ai_item_switch_flags: 0,
+                ai_layers: vec!["AI_BASIC".to_string()],
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle.trainer.event_flag invalid flag name EVENT BEAT_FALKNER".to_string())
+        );
+    }
+
+    #[test]
+    fn saved_script_runtime_validates_control_continuation_labels() {
+        let mut runtime = ScriptRuntimeMemory {
+            next_script: Some(" .Done@Script".to_string()),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("next_script has invalid script label ' .Done@Script'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory {
+            blackout_mod: Some("BLACKOUT MOD".to_string()),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("blackout_mod has invalid token 'BLACKOUT MOD'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory {
+            battle_tower_text: Some("BATTLE TOWER INTRO".to_string()),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("battle_tower_text has invalid token 'BATTLE TOWER INTRO'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.next_script = Some(".Done@Script".to_string());
+        runtime
+            .deferred_scripts
+            .push(".Deferred @Script".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("deferred_scripts[0] has invalid script label '.Deferred @Script'".to_string())
+        );
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .control_events
+            .push(ScriptControlRuntimeEvent {
+                kind: ScriptControlRuntimeKind::Jump,
+                target_script: Some(".Done@Script".to_string()),
+                source_script: "Source Script".to_string(),
+                command_index: 7,
+            });
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved script runtime: control_events[0].source_script has invalid script label 'Source Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.control_events.push(ScriptControlRuntimeEvent {
+            kind: ScriptControlRuntimeKind::Continue,
+            target_script: Some(".Done@Script".to_string()),
+            source_script: "SourceScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("control_events[0].target_script is not valid for Continue".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.control_events.push(ScriptControlRuntimeEvent {
+            kind: ScriptControlRuntimeKind::Jump,
+            target_script: None,
+            source_script: "SourceScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("control_events[0].target_script is required for Jump".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.call_stack.push(ScriptReturnFrame {
+            source_script: "SourceScript".to_string(),
+            next_command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("call_stack[0].next_command_index cannot be 0".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.script_ended = Some(ScriptEndState {
+            callback: true,
+            just_battled_guard: true,
+            source_script: "SourceScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("script_ended cannot be both callback and just_battled_guard".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.script_ended = Some(ScriptEndState {
+            callback: false,
+            just_battled_guard: false,
+            source_script: "Source Script".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("script_ended.source_script has invalid script label 'Source Script'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.effects.push(ScriptRuntimeEffect {
+            command: "macroeffect".to_string(),
+            args: Vec::new(),
+            source_script: "EffectScript".to_string(),
+            command_index: 3,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("effects[0].command macroeffect is not a saved runtime command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.effects.push(ScriptRuntimeEffect {
+            command: "special".to_string(),
+            args: Vec::new(),
+            source_script: "EffectScript".to_string(),
+            command_index: 3,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("effects[0].args has 0 entries, expected 1 for special".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .variables
+            .insert("VAR BAD".to_string(), "TRUE".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("variables[VAR BAD] has invalid token 'VAR BAD'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .memory
+            .insert("w MooMooBerries".to_string(), "TRUE".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("memory[w MooMooBerries] has invalid token 'w MooMooBerries'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .named_buffers
+            .insert("STRING BUFFER 1".to_string(), "Runtime text.".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("named_buffers[STRING BUFFER 1] has invalid token 'STRING BUFFER 1'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.variable_sprites.insert(
+            "SPRITE WEIRD TREE".to_string(),
+            "SPRITE_SUDOWOODO".to_string(),
+        );
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "variable_sprites[SPRITE WEIRD TREE] has invalid token 'SPRITE WEIRD TREE'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.variable_sprites.insert(
+            "SPRITE_WEIRD_TREE".to_string(),
+            "SPRITE SUDOWOODO".to_string(),
+        );
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "variable_sprites[SPRITE_WEIRD_TREE].replacement has invalid token 'SPRITE SUDOWOODO'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.phone_numbers.insert("PHONE MOM".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("phone_numbers[PHONE MOM] has invalid token 'PHONE MOM'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .special_phone_calls
+            .push("SPECIALCALL MASTERBALL".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("special_phone_calls[0] has invalid token 'SPECIALCALL MASTERBALL'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.completed_trades.push("NPC TRADE KYLE".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("completed_trades[0] has invalid token 'NPC TRADE KYLE'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.catch_tutorials.push("RED GYARADOS".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("catch_tutorials[0] has invalid token 'RED GYARADOS'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .checked_mail_targets
+            .push("Checked Mail Script".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "checked_mail_targets[0] has invalid script label 'Checked Mail Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .given_mail_targets
+            .push("Given Mail Script".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err("given_mail_targets[0] has invalid script label 'Given Mail Script'".to_string())
+        );
+
+        let mut runtime = ScriptRuntimeMemory {
+            current_music: Some("MUSIC ROUTE 29".to_string()),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("current_music has invalid token 'MUSIC ROUTE 29'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "warp".to_string(),
+            kind: ScriptMapRuntimeKind::Warp,
+            target_map: Some("Route 29".to_string()),
+            tile: Some(TilePosition::new(1, 2)),
+            facing: Some(Direction::Down),
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].target_map has invalid token 'Route 29'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "warp".to_string(),
+            kind: ScriptMapRuntimeKind::Warp,
+            target_map: None,
+            tile: Some(TilePosition::new(1, 2)),
+            facing: Some(Direction::Down),
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].target_map is required for Warp".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "warp".to_string(),
+            kind: ScriptMapRuntimeKind::Warp,
+            target_map: Some("Route29".to_string()),
+            tile: Some(TilePosition { x: 1, y: 2 }),
+            facing: Some(Direction::Right),
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].command warp must be warpfacing for Warp".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "warp".to_string(),
+            kind: ScriptMapRuntimeKind::Warp,
+            target_map: Some("Route29".to_string()),
+            tile: Some(TilePosition::new(1, 2)),
+            facing: Some(Direction::Down),
+            map_setup: Some("MAPSETUP_WARP".to_string()),
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].map_setup is not valid for Warp".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "refreshmap".to_string(),
+            kind: ScriptMapRuntimeKind::LoadMap,
+            target_map: None,
+            tile: None,
+            facing: None,
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].command refreshmap is not a saved map load command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "newloadmap".to_string(),
+            kind: ScriptMapRuntimeKind::LoadMap,
+            target_map: None,
+            tile: None,
+            facing: None,
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0].map_setup is required for newloadmap".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(ScriptMapRuntimeEvent {
+            command: "refreshmap".to_string(),
+            kind: ScriptMapRuntimeKind::RefreshMap,
+            target_map: Some("Route29".to_string()),
+            tile: None,
+            facing: None,
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("map_events[0] RefreshMap cannot carry warp payload".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_map_load = Some(ScriptMapLoadRequest {
+            command: "refreshmap".to_string(),
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_map_load.command refreshmap is not a saved map load command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_map_refresh = Some(ScriptMapRefreshRequest {
+            command: "reloadmap".to_string(),
+            map_setup: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_map_refresh.command reloadmap is not a saved map refresh command"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.shop_events.push(ScriptShopRuntimeEvent {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: vec!["PO TION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("shop_events[0].inventory[0] has invalid token 'PO TION'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.shop_events.push(ScriptShopRuntimeEvent {
+            mart_type: "MARTTYPE_CUSTOM".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: Vec::new(),
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("shop_events[0].mart_type MARTTYPE_CUSTOM is not a saved mart type".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_shop = Some(ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "0".to_string(),
+            inventory: Vec::new(),
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_shop.mart_id 0 requires a zero-inventory mart type, got MARTTYPE_STANDARD"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.item_use_events.push(ItemUseRuntimeEvent {
+            item_id: "POTION\n".to_string(),
+            context: "field".to_string(),
+            consumed: true,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("item_use_events[0].item_id has invalid token 'POTION\n'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.item_use_events.push(ItemUseRuntimeEvent {
+            item_id: "POTION".to_string(),
+            context: "menu".to_string(),
+            consumed: true,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("item_use_events[0].context menu is not a saved item-use context".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
+            target: "w ScriptVar".to_string(),
+            value: "7".to_string(),
+            source_script: "VarScript".to_string(),
+            command_index: 3,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("variable_writes[0].target has invalid token 'w ScriptVar'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
+            target: "VAR_BLUECARDBALANCE".to_string(),
+            value: "7".to_string(),
+            source_script: "VarScript".to_string(),
+            command_index: 3,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "variable_writes[0].target VAR_BLUECARDBALANCE is missing from variables"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .variables
+            .insert("VAR_BLUECARDBALANCE".to_string(), "8".to_string());
+        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
+            target: "VAR_BLUECARDBALANCE".to_string(),
+            value: "7".to_string(),
+            source_script: "VarScript".to_string(),
+            command_index: 3,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "variable_writes[0].value 7 does not match variables[VAR_BLUECARDBALANCE] 8"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
+            command: "db".to_string(),
+            args: vec!["$00".to_string()],
+            source_script: "AsmScript".to_string(),
+            command_index: 4,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("asm_directives[0].command db is not a saved asm directive".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
+            command: "dw".to_string(),
+            args: vec![".MenuData".to_string(), ".OtherMenuData".to_string()],
+            source_script: "AsmScript".to_string(),
+            command_index: 4,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("asm_directives[0].args has 2 entries, expected 1 for dw".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
+            command: "ld".to_string(),
+            args: vec!["a".to_string(), " [rWBK]".to_string()],
+            source_script: "AsmScript".to_string(),
+            command_index: 4,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("asm_directives[0].args[1] has invalid arg ' [rWBK]'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .numeric_buffer_writes
+            .push(ScriptRuntimeNumericBufferWrite {
+                target_buffer: "STRING BUFFER 3".to_string(),
+                value: "12".to_string(),
+                width: 3,
+                source_script: "BufferScript".to_string(),
+                command_index: 4,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "numeric_buffer_writes[0].target_buffer has invalid token 'STRING BUFFER 3'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .numeric_buffer_writes
+            .push(ScriptRuntimeNumericBufferWrite {
+                target_buffer: "STRING_BUFFER_3".to_string(),
+                value: "00012".to_string(),
+                width: 3,
+                source_script: "BufferScript".to_string(),
+                command_index: 4,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err("numeric_buffer_writes[0].value 00012 is not canonical".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .numeric_buffer_writes
+            .push(ScriptRuntimeNumericBufferWrite {
+                target_buffer: "STRING_BUFFER_3".to_string(),
+                value: "12".to_string(),
+                width: 4,
+                source_script: "BufferScript".to_string(),
+                command_index: 4,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err("numeric_buffer_writes[0].width 4 must be 3".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .stone_table_entries
+            .push(ScriptRuntimeStoneTableEntry {
+                warp: 1,
+                object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
+                script: ".Stone Script".to_string(),
+                source_script: "StoneScript".to_string(),
+                command_index: 5,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "stone_table_entries[0].script has invalid script label '.Stone Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            command: "callasm".to_string(),
+            target: "Queued Target".to_string(),
+            bank: Some("BANK1".to_string()),
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("command_queue[0].target has invalid token 'Queued Target'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            command: "cmdqueue".to_string(),
+            target: "QueuedTarget".to_string(),
+            bank: None,
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("command_queue[0].bank is required for cmdqueue".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            command: "writecmdqueue".to_string(),
+            target: "QueuedTarget".to_string(),
+            bank: Some("BANK1".to_string()),
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("command_queue[0].bank is not valid for writecmdqueue".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            command: "macroqueue".to_string(),
+            target: "QueuedTarget".to_string(),
+            bank: None,
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("command_queue[0].command macroqueue is not a saved queued command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_delays.push(ScriptRuntimeDelay {
+            command: "delay".to_string(),
+            frames: 16,
+            source_script: "DelayScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_delays[0].command delay is not a saved delay command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
+            parameter: 32,
+            shake_frames: 32,
+            sleep_frames: 32,
+            source_script: "Earthquake Script".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_earthquakes[0].source_script has invalid script label 'Earthquake Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
+            parameter: 84,
+            shake_frames: 83,
+            sleep_frames: 84 & 0x3f,
+            source_script: "EarthquakeScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_earthquakes[0].shake_frames 83 must equal parameter 84".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
+            parameter: 84,
+            shake_frames: 84,
+            sleep_frames: 84,
+            source_script: "EarthquakeScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_earthquakes[0].sleep_frames 84 must equal parameter & 0x3f (20)"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "play music".to_string(),
+            kind: ScriptAudioRuntimeKind::Music,
+            audio_id: Some("MUSIC_ROUTE_29".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].command has invalid token 'play music'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "playmusic".to_string(),
+            kind: ScriptAudioRuntimeKind::Music,
+            audio_id: None,
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].audio_id is required for Music".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "playsound".to_string(),
+            kind: ScriptAudioRuntimeKind::Music,
+            audio_id: Some("SFX_TACKLE".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].command playsound is not valid for Music".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "playsound".to_string(),
+            kind: ScriptAudioRuntimeKind::SoundEffect,
+            audio_id: Some("SFX_TACKLE".to_string()),
+            fade_frames: Some(8),
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].fade_frames is only valid for FadeMusic".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "musicfadeout".to_string(),
+            kind: ScriptAudioRuntimeKind::FadeMusic,
+            audio_id: Some("MUSIC_ROUTE_29".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].fade_frames is required for FadeMusic".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "playmusic".to_string(),
+            kind: ScriptAudioRuntimeKind::FadeMusic,
+            audio_id: Some("MUSIC_ROUTE_29".to_string()),
+            fade_frames: Some(8),
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].command playmusic is not valid for FadeMusic".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "waitsfx".to_string(),
+            kind: ScriptAudioRuntimeKind::WaitForSoundEffect,
+            audio_id: Some("SFX_TACKLE".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("audio_events[0].audio_id is not valid for WaitForSoundEffect".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory {
+            pending_screen_fade: Some(ScriptScreenFade {
+                color: ScriptFadeColor::White,
+                direction: ScriptFadeDirection::Out,
+                frames: 8,
+                source_script: "FadeOutToWhite".to_string(),
+                command_index: 1,
+            }),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_screen_fade.command_index 1 must be 0".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory {
+            pending_screen_fade: Some(ScriptScreenFade {
+                color: ScriptFadeColor::White,
+                direction: ScriptFadeDirection::Out,
+                frames: 4,
+                source_script: "FadeOutToWhite".to_string(),
+                command_index: 0,
+            }),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_screen_fade.frames 4 must be 8".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special_fade".to_string(),
+            kind: ScriptGraphicsRuntimeKind::BattleTowerFade,
+            color: None,
+            direction: None,
+            frames: None,
+            source_script: "Graphics Script".to_string(),
+            command_index: 9,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "graphics_events[0].source_script has invalid script label 'Graphics Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special_fade".to_string(),
+            kind: ScriptGraphicsRuntimeKind::BattleTowerFade,
+            color: None,
+            direction: None,
+            frames: None,
+            source_script: "BattleTowerFade".to_string(),
+            command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("graphics_events[0].command special_fade must be special".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::BattleTowerFade,
+            color: None,
+            direction: None,
+            frames: None,
+            source_script: "BattleTowerFade".to_string(),
+            command_index: 9,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("graphics_events[0].command_index 9 must be 0".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::ScreenFade,
+            color: None,
+            direction: Some(ScriptFadeDirection::Out),
+            frames: Some(8),
+            source_script: "FadeOutToWhite".to_string(),
+            command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("graphics_events[0].color is required for ScreenFade".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::ScreenFade,
+            color: Some(ScriptFadeColor::White),
+            direction: Some(ScriptFadeDirection::Out),
+            frames: Some(4),
+            source_script: "FadeOutToWhite".to_string(),
+            command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("graphics_events[0].frames 4 must be 8 for ScreenFade".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.graphics_events.push(ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::ClearTilemap,
+            color: Some(ScriptFadeColor::White),
+            direction: None,
+            frames: None,
+            source_script: "ClearTilemap".to_string(),
+            command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("graphics_events[0] fade payload is only valid for ScreenFade".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "display money".to_string(),
+            kind: ScriptMoneyRuntimeKind::PlaceMoneyTopRight,
+            money: 3000,
+            coins: None,
+            source_script: "MoneyScript".to_string(),
+            command_index: 10,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].command has invalid token 'display money'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "displaymoney".to_string(),
+            kind: ScriptMoneyRuntimeKind::PlaceMoneyTopRight,
+            money: 3000,
+            coins: None,
+            source_script: "PlaceMoneyTopRight".to_string(),
+            command_index: 0,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].command displaymoney must be special".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptMoneyRuntimeKind::PlaceMoneyTopRight,
+            money: 3000,
+            coins: None,
+            source_script: "PlaceMoneyTopRight".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].command_index 2 must be 0".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptMoneyRuntimeKind::PlaceMoneyTopRight,
+            money: 3000,
+            coins: Some(7),
+            source_script: "MoneyScript".to_string(),
+            command_index: 10,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].coins is not valid for PlaceMoneyTopRight".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptMoneyRuntimeKind::DisplayMoneyAndCoinBalance,
+            money: 3000,
+            coins: None,
+            source_script: "MoneyScript".to_string(),
+            command_index: 10,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].coins is required for DisplayMoneyAndCoinBalance".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.money_events.push(ScriptMoneyRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptMoneyRuntimeKind::DisplayCoinCaseBalance,
+            money: 3000,
+            coins: Some(7),
+            source_script: "MoneyScript".to_string(),
+            command_index: 10,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("money_events[0].money must be 0 for DisplayCoinCaseBalance".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_map_load = Some(ScriptMapLoadRequest {
+            command: "reload map".to_string(),
+            map_setup: Some("MAPSETUP_WARP".to_string()),
+            source_script: "MapLoadScript".to_string(),
+            command_index: 11,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_map_load.command has invalid token 'reload map'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "writetext".to_string(),
+            kind: ScriptTextRuntimeKind::Write,
+            text_label: None,
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].text_label is required for Write".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "opentext".to_string(),
+            kind: ScriptTextRuntimeKind::Write,
+            text_label: Some("GreetingText".to_string()),
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].command opentext is not valid for Write".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "jumptext".to_string(),
+            kind: ScriptTextRuntimeKind::Write,
+            text_label: Some("GreetingText".to_string()),
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].closes_text must be true for jumptext".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "jumptextfaceplayer".to_string(),
+            kind: ScriptTextRuntimeKind::Write,
+            text_label: Some("GreetingText".to_string()),
+            face_player: false,
+            closes_text: true,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].face_player must be true for jumptextfaceplayer".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "opentext".to_string(),
+            kind: ScriptTextRuntimeKind::Open,
+            text_label: Some("GreetingText".to_string()),
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].text_label is not valid for Open".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "waitbutton".to_string(),
+            kind: ScriptTextRuntimeKind::Open,
+            text_label: None,
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].command waitbutton is not valid for Open".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "yesorno".to_string(),
+            kind: ScriptTextRuntimeKind::YesNo,
+            text_label: None,
+            face_player: true,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].face_player is not valid for YesNo".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "waitbutton".to_string(),
+            kind: ScriptTextRuntimeKind::WaitButton,
+            text_label: None,
+            face_player: false,
+            closes_text: true,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].closes_text is not valid for WaitButton".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(ScriptTextRuntimeEvent {
+            command: "yesorno".to_string(),
+            kind: ScriptTextRuntimeKind::WaitButton,
+            text_label: None,
+            face_player: false,
+            closes_text: false,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("text_events[0].command yesorno is not valid for WaitButton".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_text_wait = Some(ScriptTextWait {
+            command: "wait button".to_string(),
+            source_script: "TextWaitScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_text_wait.command has invalid token 'wait button'".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_window_open = true;
+        runtime.pending_text_wait = Some(ScriptTextWait {
+            command: "opentext".to_string(),
+            source_script: "TextWaitScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_text_wait.command opentext is not a saved text wait command".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_yes_no = Some(ScriptYesNoPrompt {
+            source_script: "Yes No Script".to_string(),
+            command_index: 13,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_yes_no.source_script has invalid script label 'Yes No Script'".to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_text_label = Some("GreetingText".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_text_label GreetingText cannot be saved without an open text window"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_text_wait = Some(ScriptTextWait {
+            command: "waitbutton".to_string(),
+            source_script: "TextWaitScript".to_string(),
+            command_index: 12,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_text_wait cannot be saved without an open text window".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_yes_no = Some(ScriptYesNoPrompt {
+            source_script: "YesNoScript".to_string(),
+            command_index: 13,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_yes_no cannot be saved without an open text window".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_window_open = true;
+        runtime.pending_text_wait = Some(ScriptTextWait {
+            command: "waitbutton".to_string(),
+            source_script: "TextWaitScript".to_string(),
+            command_index: 12,
+        });
+        runtime.pending_yes_no = Some(ScriptYesNoPrompt {
+            source_script: "YesNoScript".to_string(),
+            command_index: 13,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_text_wait and pending_yes_no cannot both be saved".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.menu_coords = Some([-1, 0, 5, 5]);
+        assert_eq!(
+            runtime.validate(),
+            Err("menu_coords [-1, 0, 5, 5] cannot contain negative coordinates".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.menu_coords = Some([5, 0, 4, 5]);
+        assert_eq!(
+            runtime.validate(),
+            Err("menu_coords right 4 cannot be less than left 5".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.menu_coords = Some([0, 6, 4, 5]);
+        assert_eq!(
+            runtime.validate(),
+            Err("menu_coords bottom 5 cannot be less than top 6".to_string())
+        );
+    }
+
+    #[test]
     fn party_state_projects_full_authoritative_storage() {
         let mut state = GameState::default();
         let mut species = crate::models::PokemonSpecies::new_for_tests(
@@ -1413,8 +6044,24 @@ mod tests {
     fn frame_advancement_is_explicit() {
         let mut state = GameState::default();
         assert_eq!(state.frame(), Frame(0));
-        assert_eq!(state.advance_frame(), Frame(1));
+        assert_eq!(state.try_advance_frame().expect("advance frame"), Frame(1));
         assert_eq!(state.frame_counter, 1);
+        assert_eq!(state.advance_frame(), Frame(2));
+        assert_eq!(state.frame_counter, 2);
+    }
+
+    #[test]
+    fn frame_advancement_rejects_counter_overflow_without_wrapping() {
+        let mut state = GameState {
+            frame_counter: u64::MAX,
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            state.try_advance_frame(),
+            Err(GameStateFrameError::FrameCursorOverflow { frame: u64::MAX })
+        );
+        assert_eq!(state.frame_counter, u64::MAX);
     }
 
     #[test]
@@ -1505,6 +6152,52 @@ mod tests {
     }
 
     #[test]
+    fn saved_scene_memory_validates_exact_tokens_and_index_pairs() {
+        let mut memory = SceneMemory::default();
+        memory.current_map_name = "Elms Lab".to_string();
+        assert_eq!(
+            memory.validate(),
+            Err(SceneError::InvalidMapName {
+                map_name: "Elms Lab".to_string(),
+            })
+        );
+
+        let mut memory = SceneMemory::default();
+        memory
+            .map_scenes
+            .insert("ElmsLab".to_string(), "SCENE_ELMSLAB_NOOP".to_string());
+        assert_eq!(
+            memory.validate(),
+            Err(SceneError::MissingSceneIndex {
+                map_name: "ElmsLab".to_string(),
+            })
+        );
+
+        let mut memory = SceneMemory::default();
+        memory.map_scene_indices.insert("ElmsLab".to_string(), 1);
+        assert_eq!(
+            memory.validate(),
+            Err(SceneError::UnexpectedSceneIndex {
+                map_name: "ElmsLab".to_string(),
+            })
+        );
+
+        let mut state = GameState::default();
+        state
+            .scenes
+            .map_scenes
+            .insert("ElmsLab".to_string(), "SCENE ELMSLAB NOOP".to_string());
+        state
+            .scenes
+            .map_scene_indices
+            .insert("ElmsLab".to_string(), 1);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("invalid saved scene memory: invalid scene name SCENE ELMSLAB NOOP".to_string())
+        );
+    }
+
+    #[test]
     fn event_flags_are_exact_strings_without_case_coercion() {
         let mut flags = EventFlagMemory::default();
         flags
@@ -1551,6 +6244,53 @@ mod tests {
         assert_eq!(
             flags.is_script_flag_set(""),
             Err(EventFlagError::EmptyFlagName)
+        );
+    }
+
+    #[test]
+    fn flag_names_reject_non_token_content_without_trimming() {
+        let mut flags = EventFlagMemory::default();
+        assert_eq!(
+            flags.set_event_flag(" EVENT_ROUTE_29_POTION", true),
+            Err(EventFlagError::InvalidFlagName {
+                flag_name: " EVENT_ROUTE_29_POTION".to_string(),
+            })
+        );
+        assert_eq!(
+            flags.set_script_flag("ENGINE_ZEPHYR BADGE", true),
+            Err(EventFlagError::InvalidFlagName {
+                flag_name: "ENGINE_ZEPHYR BADGE".to_string(),
+            })
+        );
+        assert_eq!(
+            flags.is_script_flag_set("EVENT_ROUTE_29_POTION\n"),
+            Err(EventFlagError::InvalidFlagName {
+                flag_name: "EVENT_ROUTE_29_POTION\n".to_string(),
+            })
+        );
+        assert!(flags.event_flags.is_empty());
+        assert!(flags.engine_flags.is_empty());
+    }
+
+    #[test]
+    fn saved_flag_maps_validate_exact_keys_after_deserialize() {
+        let mut flags = EventFlagMemory::default();
+        flags.event_flags.insert("EVENT_BAD FLAG".to_string(), true);
+        assert_eq!(
+            flags.validate(),
+            Err(EventFlagError::InvalidFlagName {
+                flag_name: "EVENT_BAD FLAG".to_string(),
+            })
+        );
+
+        let mut state = GameState::default();
+        state
+            .flags
+            .engine_flags
+            .insert("ENGINE_ZEPHYRBADGE\n".to_string(), true);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("invalid saved event flags: invalid flag name ENGINE_ZEPHYRBADGE\n".to_string())
         );
     }
 }

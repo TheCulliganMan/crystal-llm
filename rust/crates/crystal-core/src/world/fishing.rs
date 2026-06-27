@@ -82,6 +82,10 @@ pub enum FishingCatalogIssue {
     DuplicateRodItemId {
         item_id: String,
     },
+    InvalidRodItemRod {
+        item_id: String,
+        rod: String,
+    },
     UnknownRodItemRod {
         item_id: String,
         rod: String,
@@ -99,6 +103,10 @@ pub enum FishingCatalogIssue {
     },
     InvalidFishingGroupId {
         group_id: String,
+    },
+    InvalidFishingRod {
+        group_id: String,
+        rod: String,
     },
     UnknownFishingRod {
         group_id: String,
@@ -212,7 +220,12 @@ pub fn fishing_catalog_issues(
                 item_id: rule.item_id.clone(),
             });
         }
-        if !is_known_fishing_rod(&rule.rod) {
+        if !is_exact_nonempty_fishing_token(&rule.rod) {
+            issues.push(FishingCatalogIssue::InvalidRodItemRod {
+                item_id: rule.item_id.clone(),
+                rod: rule.rod.clone(),
+            });
+        } else if !is_known_fishing_rod(&rule.rod) {
             issues.push(FishingCatalogIssue::UnknownRodItemRod {
                 item_id: rule.item_id.clone(),
                 rod: rule.rod.clone(),
@@ -248,7 +261,12 @@ pub fn fishing_catalog_issues(
             });
         }
         for (rod, table) in &group.rod_tables {
-            if !is_known_fishing_rod(rod) {
+            if !is_exact_nonempty_fishing_token(rod) {
+                issues.push(FishingCatalogIssue::InvalidFishingRod {
+                    group_id: group_id.clone(),
+                    rod: rod.clone(),
+                });
+            } else if !is_known_fishing_rod(rod) {
                 issues.push(FishingCatalogIssue::UnknownFishingRod {
                     group_id: group_id.clone(),
                     rod: rod.clone(),
@@ -367,7 +385,7 @@ pub fn fishing_catalog_issues(
                 daily_flag_bit: rule.daily_flag_bit,
             });
         }
-        if rule.base_group.trim().is_empty() || rule.base_group.trim() != rule.base_group {
+        if !is_exact_nonempty_fishing_token(&rule.base_group) {
             issues.push(FishingCatalogIssue::InvalidSwarmBaseGroup { index });
         } else if !catalog.groups.contains_key(&rule.base_group) {
             issues.push(FishingCatalogIssue::UnknownSwarmBaseGroup {
@@ -375,7 +393,7 @@ pub fn fishing_catalog_issues(
                 base_group: rule.base_group.clone(),
             });
         }
-        if rule.swarm_group.trim().is_empty() || rule.swarm_group.trim() != rule.swarm_group {
+        if !is_exact_nonempty_fishing_token(&rule.swarm_group) {
             issues.push(FishingCatalogIssue::InvalidSwarmGroup { index });
         } else if !catalog.groups.contains_key(&rule.swarm_group) {
             issues.push(FishingCatalogIssue::UnknownSwarmGroup {
@@ -392,7 +410,11 @@ pub fn fishing_catalog_issues(
 }
 
 fn is_exact_nonempty_fishing_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,8 +442,12 @@ pub struct FishingSession {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FishingError {
+    #[error("invalid fishing rod '{rod}'")]
+    InvalidRod { rod: String },
     #[error("unknown fishing rod '{rod}'")]
     UnknownRod { rod: String },
+    #[error("invalid fishing group '{group}'")]
+    InvalidGroup { group: String },
     #[error("fishing group {group} is not defined")]
     UnknownGroup { group: String },
     #[error("fishing group '{group}' is missing the {rod} encounter table")]
@@ -430,6 +456,12 @@ pub enum FishingError {
     MissingTimeGroup { time_group: usize },
     #[error("fishing slot in {group}/{rod} resolved without a species")]
     MissingSlotSpecies { group: String, rod: String },
+    #[error("fishing slot in {group}/{rod} resolved invalid species '{species}'")]
+    InvalidSpecies {
+        group: String,
+        rod: String,
+        species: String,
+    },
     #[error("fishing slot roll {slot_roll} did not resolve within {group}/{rod}")]
     UnresolvedSlot {
         group: String,
@@ -438,6 +470,8 @@ pub enum FishingError {
     },
     #[error("item id '{item_id}' is not a fishing rod item")]
     UnknownRodItemId { item_id: String },
+    #[error("item id '{item_id}' is not an exact fishing rod item id")]
+    InvalidRodItemId { item_id: String },
 }
 
 pub fn percent_to_byte(percent: u8) -> u8 {
@@ -508,6 +542,9 @@ pub fn roll_fishing_encounter(
             bite_roll: 0,
         });
     };
+    if !is_exact_nonempty_fishing_token(&group_name) {
+        return Err(FishingError::InvalidGroup { group: group_name });
+    }
     let fishing_group =
         catalog
             .groups
@@ -543,6 +580,13 @@ pub fn roll_fishing_encounter(
                     });
                 }
             };
+            if !is_exact_nonempty_fishing_token(&species) {
+                return Err(FishingError::InvalidSpecies {
+                    group: group_name,
+                    rod: rod.to_string(),
+                    species,
+                });
+            }
             return Ok(FishingOutcome {
                 bite: true,
                 encounter: Some(WildEncounter { level, species }),
@@ -598,6 +642,11 @@ pub fn fishing_rod_for_item_id<'a>(
     catalog: &'a FishingCatalog,
     item_id: &str,
 ) -> Result<&'a str, FishingError> {
+    if !is_exact_nonempty_fishing_token(item_id) {
+        return Err(FishingError::InvalidRodItemId {
+            item_id: item_id.to_string(),
+        });
+    }
     let rule = catalog
         .rod_items
         .iter()
@@ -612,10 +661,9 @@ pub fn fishing_rod_for_item_id<'a>(
 pub fn fishing_bite(
     state: &mut GameState,
     session: &mut FishingSession,
-    current_frame: Option<u64>,
+    current_frame: u64,
 ) -> Option<bool> {
-    let frame = current_frame.unwrap_or(state.frame_counter);
-    let elapsed = frame.saturating_sub(session.start_frame);
+    let elapsed = current_frame.saturating_sub(session.start_frame);
     let bite_frame = session.cast_frames + session.bite_delay_frames;
     if elapsed < bite_frame {
         return None;
@@ -664,6 +712,11 @@ pub fn is_known_fishing_rod(rod: &str) -> bool {
 }
 
 pub fn validate_rod(rod: &str) -> Result<(), FishingError> {
+    if !is_exact_nonempty_fishing_token(rod) {
+        return Err(FishingError::InvalidRod {
+            rod: rod.to_string(),
+        });
+    }
     rod_index(rod).map(|_| ())
 }
 
@@ -746,6 +799,12 @@ mod tests {
                 rod: "old_rod".to_string(),
             })
         );
+        assert_eq!(
+            validate_rod("OLD ROD"),
+            Err(FishingError::InvalidRod {
+                rod: "OLD ROD".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -764,6 +823,20 @@ mod tests {
             ),
             Err(FishingError::UnknownGroup {
                 group: "fishgroup_lake".to_string(),
+            })
+        );
+        assert_eq!(
+            roll_fishing_encounter(
+                &state,
+                &catalog,
+                Some("FISHGROUP LAKE"),
+                ROD_GOOD,
+                TimeOfDay::Day,
+                0,
+                0,
+            ),
+            Err(FishingError::InvalidGroup {
+                group: "FISHGROUP LAKE".to_string(),
             })
         );
         assert_eq!(
@@ -944,6 +1017,15 @@ mod tests {
                     },
                 ),
                 (
+                    "BAD GROUP".to_string(),
+                    FishingGroup {
+                        bite_threshold: threshold(50, true),
+                        rod_tables: [(ROD_OLD.to_string(), RodTable { slots: Vec::new() })]
+                            .into_iter()
+                            .collect(),
+                    },
+                ),
+                (
                     "FISHGROUP_BAD".to_string(),
                     FishingGroup {
                         bite_threshold: threshold(50, true),
@@ -959,7 +1041,7 @@ mod tests {
                                     },
                                     FishingSlot {
                                         threshold: 10,
-                                        species: Some("MAGIKARP".to_string()),
+                                        species: Some("MAGI KARP".to_string()),
                                         level: 0,
                                         time_group: None,
                                     },
@@ -982,23 +1064,37 @@ mod tests {
             time_groups: vec![TimeFishEntry {
                 day_species: " MAGIKARP".to_string(),
                 day_level: 10,
-                night_species: "STARYU".to_string(),
+                night_species: "STAR YU".to_string(),
                 night_level: 10,
             }],
-            swarm_rules: Vec::new(),
+            swarm_rules: vec![FishingSwarmRule {
+                daily_flag_bit: 1,
+                swarm: 1,
+                base_group: "FISHGROUP BAD".to_string(),
+                swarm_group: "FISHGROUP SWARM".to_string(),
+            }],
             rod_items: vec![
                 FishingRodItemRule {
                     item_id: " OLD_ROD".to_string(),
                     rod: ROD_OLD.to_string(),
                 },
                 FishingRodItemRule {
+                    item_id: "OLD ROD".to_string(),
+                    rod: ROD_OLD.to_string(),
+                },
+                FishingRodItemRule {
                     item_id: "MISSING_ROD".to_string(),
                     rod: ROD_OLD.to_string(),
+                },
+                FishingRodItemRule {
+                    item_id: "MISSING_ROD_2".to_string(),
+                    rod: "OLD ROD".to_string(),
                 },
             ],
         };
         let referenced_groups = vec![
             ("LAKE".to_string(), " FISHGROUP_BAD".to_string()),
+            ("COVE".to_string(), "FISHGROUP BAD".to_string()),
             ("POND".to_string(), "FISHGROUP_MISSING".to_string()),
         ];
         let item_ids = BTreeSet::from(["OLD_ROD".to_string()]);
@@ -1010,12 +1106,26 @@ mod tests {
                 FishingCatalogIssue::InvalidRodItemId {
                     item_id: " OLD_ROD".to_string(),
                 },
+                FishingCatalogIssue::InvalidRodItemId {
+                    item_id: "OLD ROD".to_string(),
+                },
                 FishingCatalogIssue::UnknownRodItemId {
                     item_id: "MISSING_ROD".to_string(),
+                },
+                FishingCatalogIssue::InvalidRodItemRod {
+                    item_id: "MISSING_ROD_2".to_string(),
+                    rod: "OLD ROD".to_string(),
+                },
+                FishingCatalogIssue::UnknownRodItemId {
+                    item_id: "MISSING_ROD_2".to_string(),
                 },
                 FishingCatalogIssue::InvalidMapFishingGroup {
                     map_name: "LAKE".to_string(),
                     group: " FISHGROUP_BAD".to_string(),
+                },
+                FishingCatalogIssue::InvalidMapFishingGroup {
+                    map_name: "COVE".to_string(),
+                    group: "FISHGROUP BAD".to_string(),
                 },
                 FishingCatalogIssue::UnknownMapFishingGroup {
                     map_name: "POND".to_string(),
@@ -1028,7 +1138,14 @@ mod tests {
                     group_id: " BAD".to_string(),
                     rod: ROD_OLD.to_string(),
                 },
-                FishingCatalogIssue::UnknownFishingRod {
+                FishingCatalogIssue::InvalidFishingGroupId {
+                    group_id: "BAD GROUP".to_string(),
+                },
+                FishingCatalogIssue::EmptyFishingRodTable {
+                    group_id: "BAD GROUP".to_string(),
+                    rod: ROD_OLD.to_string(),
+                },
+                FishingCatalogIssue::InvalidFishingRod {
                     group_id: "FISHGROUP_BAD".to_string(),
                     rod: " OLD_ROD".to_string(),
                 },
@@ -1047,6 +1164,10 @@ mod tests {
                     rod: " OLD_ROD".to_string(),
                     slot_index: 1,
                     level: 0,
+                },
+                FishingCatalogIssue::InvalidFishingSpecies {
+                    group_id: "FISHGROUP_BAD".to_string(),
+                    species: "MAGI KARP".to_string(),
                 },
                 FishingCatalogIssue::UnorderedFishingSlotThreshold {
                     group_id: "FISHGROUP_BAD".to_string(),
@@ -1069,10 +1190,12 @@ mod tests {
                     index: 0,
                     species: " MAGIKARP".to_string(),
                 },
-                FishingCatalogIssue::UnknownFishingTimeGroupSpecies {
+                FishingCatalogIssue::InvalidFishingTimeGroupSpecies {
                     index: 0,
-                    species: "STARYU".to_string(),
+                    species: "STAR YU".to_string(),
                 },
+                FishingCatalogIssue::InvalidSwarmBaseGroup { index: 0 },
+                FishingCatalogIssue::InvalidSwarmGroup { index: 0 },
             ],
         );
     }
@@ -1119,6 +1242,37 @@ mod tests {
             Some(WildEncounter {
                 species: "CORSOLA".to_string(),
                 level: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn fishing_rejects_malformed_runtime_slot_species() {
+        let mut catalog = catalog();
+        catalog
+            .groups
+            .get_mut("FISHGROUP_LAKE")
+            .expect("group")
+            .rod_tables
+            .get_mut(ROD_GOOD)
+            .expect("rod")
+            .slots[0]
+            .species = Some("MAGI KARP".to_string());
+
+        assert_eq!(
+            roll_fishing_encounter(
+                &GameState::default(),
+                &catalog,
+                Some("FISHGROUP_LAKE"),
+                ROD_GOOD,
+                TimeOfDay::Day,
+                0,
+                0,
+            ),
+            Err(FishingError::InvalidSpecies {
+                group: "FISHGROUP_LAKE".to_string(),
+                rod: ROD_GOOD.to_string(),
+                species: "MAGI KARP".to_string(),
             })
         );
     }
@@ -1176,6 +1330,29 @@ mod tests {
     }
 
     #[test]
+    fn fishing_rejects_malformed_runtime_time_group_species() {
+        let mut catalog = catalog();
+        catalog.time_groups[0].night_species = "STAR YU".to_string();
+
+        assert_eq!(
+            roll_fishing_encounter(
+                &GameState::default(),
+                &catalog,
+                Some("FISHGROUP_LAKE"),
+                ROD_GOOD,
+                TimeOfDay::Night,
+                0,
+                231,
+            ),
+            Err(FishingError::InvalidSpecies {
+                group: "FISHGROUP_LAKE".to_string(),
+                rod: ROD_GOOD.to_string(),
+                species: "STAR YU".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn swarm_flags_remap_exact_base_groups() {
         let mut state = GameState::default();
         state.fishing.daily_flags1 = 1 << 2;
@@ -1211,8 +1388,8 @@ mod tests {
 
         assert_eq!(state.fishing.rod_state, FishingRodState::Waiting);
         assert_eq!(state.fishing.rod_index, Some(1));
-        assert_eq!(fishing_bite(&mut state, &mut session, Some(46)), None);
-        assert_eq!(fishing_bite(&mut state, &mut session, Some(47)), Some(true));
+        assert_eq!(fishing_bite(&mut state, &mut session, 46), None);
+        assert_eq!(fishing_bite(&mut state, &mut session, 47), Some(true));
         assert_eq!(state.fishing.rod_state, FishingRodState::Bite);
         assert_eq!(state.fishing.result, 1);
 
@@ -1234,6 +1411,13 @@ mod tests {
                 .expect_err("canonical item id is not inferred"),
             FishingError::UnknownRodItemId {
                 item_id: "GOOD_ROD".to_string(),
+            }
+        );
+        assert_eq!(
+            fishing_rod_for_item_id(&catalog, "GOOD ROD")
+                .expect_err("malformed rod item id is invalid"),
+            FishingError::InvalidRodItemId {
+                item_id: "GOOD ROD".to_string(),
             }
         );
     }

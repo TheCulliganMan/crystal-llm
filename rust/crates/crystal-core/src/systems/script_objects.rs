@@ -138,12 +138,23 @@ pub enum ScriptMovementStepIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptObjectCommandIssue {
+    InvalidCommand {
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
     MissingObjectId {
         source_script: String,
         command_index: usize,
         command: String,
     },
     UnknownObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        object_id: String,
+    },
+    InvalidObjectId {
         source_script: String,
         command_index: usize,
         command: String,
@@ -180,12 +191,24 @@ pub enum ScriptObjectCommandIssue {
         command: String,
         object_id: String,
     },
+    InvalidTargetObjectId {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        object_id: String,
+    },
     MissingMovement {
         source_script: String,
         command_index: usize,
         command: String,
     },
     UnknownMovement {
+        source_script: String,
+        command_index: usize,
+        command: String,
+        movement: String,
+    },
+    InvalidMovement {
         source_script: String,
         command_index: usize,
         command: String,
@@ -272,13 +295,23 @@ pub fn script_object_command_issues(
     movements: &BTreeSet<(String, Option<String>)>,
 ) -> Vec<ScriptObjectCommandIssue> {
     let mut issues = Vec::new();
-    if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
+    if !is_exact_script_object_command_token(&command.command) {
+        issues.push(ScriptObjectCommandIssue::InvalidCommand {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            command: command.command.clone(),
+        });
+    } else if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command.command.as_str()) {
     } else if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command.command.as_str()) {
         let Some(object_id) = command.object_id.as_deref() else {
             issues.push(missing_object_id(command));
             return issues;
         };
         if object_id == "LAST_TALKED" || object_id == "PLAYER" {
+            return issues;
+        }
+        if !is_exact_script_object_token(object_id) {
+            issues.push(invalid_object_id(command, object_id));
             return issues;
         }
         let Some(event_flag) = object_event_flags.get(object_id) else {
@@ -324,6 +357,15 @@ pub fn script_object_command_issues(
             });
             return issues;
         };
+        if !is_exact_script_object_token(movement) {
+            issues.push(ScriptObjectCommandIssue::InvalidMovement {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                command: command.command.clone(),
+                movement: movement.to_string(),
+            });
+            return issues;
+        }
         let movement_source = script_label_parent(&command.source_script);
         if !movements.contains(&(movement.to_string(), None))
             && !movements.contains(&(movement.to_string(), Some(movement_source.to_string())))
@@ -366,6 +408,10 @@ fn collect_required_object_id_issue(
     if (allow_player && object_id == "PLAYER") || object_id == "LAST_TALKED" {
         return;
     }
+    if !is_exact_script_object_token(object_id) {
+        issues.push(invalid_object_id(command, object_id));
+        return;
+    }
     if !object_event_flags.contains_key(object_id) {
         issues.push(unknown_object_id(command, object_id));
     }
@@ -386,6 +432,15 @@ fn collect_required_target_object_id_issue(
         return;
     };
     if (allow_player && object_id == "PLAYER") || object_id == "LAST_TALKED" {
+        return;
+    }
+    if !is_exact_script_object_token(object_id) {
+        issues.push(ScriptObjectCommandIssue::InvalidTargetObjectId {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+            command: command.command.clone(),
+            object_id: object_id.to_string(),
+        });
         return;
     }
     if !object_event_flags.contains_key(object_id) {
@@ -433,6 +488,29 @@ fn unknown_object_id(command: &ScriptObjectCommand, object_id: &str) -> ScriptOb
         command: command.command.clone(),
         object_id: object_id.to_string(),
     }
+}
+
+fn invalid_object_id(command: &ScriptObjectCommand, object_id: &str) -> ScriptObjectCommandIssue {
+    ScriptObjectCommandIssue::InvalidObjectId {
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+        command: command.command.clone(),
+        object_id: object_id.to_string(),
+    }
+}
+
+fn is_exact_script_object_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_script_object_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
@@ -1843,6 +1921,22 @@ mod tests {
             })
         );
 
+        face.target_object_id = Some("START PLAYER".to_string());
+        assert!(
+            script_object_command_issues(
+                &face,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            )
+            .contains(&ScriptObjectCommandIssue::InvalidTargetObjectId {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "faceobject".to_string(),
+                object_id: "START PLAYER".to_string(),
+            })
+        );
+
         let mut local_movement = command("applymovement", "NPC");
         local_movement.source_script = ".branch@SceneScript".to_string();
         local_movement.movement = Some("LocalWalk".to_string());
@@ -1873,6 +1967,38 @@ mod tests {
             }]
         );
 
+        missing_movement.movement = Some("Missing Walk".to_string());
+        assert_eq!(
+            script_object_command_issues(
+                &missing_movement,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidMovement {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "applymovement".to_string(),
+                movement: "Missing Walk".to_string(),
+            }]
+        );
+
+        let malformed_object = command("disappear", "START RIVAL");
+        assert_eq!(
+            script_object_command_issues(
+                &malformed_object,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidObjectId {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "disappear".to_string(),
+                object_id: "START RIVAL".to_string(),
+            }]
+        );
+
         let unknown = command("spinobject", "NPC");
         assert_eq!(
             script_object_command_issues(
@@ -1885,6 +2011,21 @@ mod tests {
                 source_script: "Script".to_string(),
                 command_index: 3,
                 command: "spinobject".to_string(),
+            }]
+        );
+
+        let malformed_command = command("MoveObject", "NPC");
+        assert_eq!(
+            script_object_command_issues(
+                &malformed_command,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidCommand {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "MoveObject".to_string(),
             }]
         );
     }

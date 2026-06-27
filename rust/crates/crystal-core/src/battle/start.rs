@@ -191,8 +191,12 @@ impl From<&TrainerBattleStart> for BattleMemory {
 pub enum TrainerBattleError {
     #[error("trainer request is missing exact trainer_id")]
     MissingTrainerId,
+    #[error("trainer request has invalid trainer_id '{trainer_id}'")]
+    InvalidTrainerId { trainer_id: String },
     #[error("trainer request is missing exact trainer_class")]
     MissingTrainerClass,
+    #[error("trainer request has invalid trainer_class '{trainer_class}'")]
+    InvalidTrainerClass { trainer_class: String },
     #[error("unknown trainer '{trainer_id}'")]
     UnknownTrainer { trainer_id: String },
     #[error("trainer '{trainer_id}' class mismatch: request '{requested}', pack '{actual}'")]
@@ -205,6 +209,12 @@ pub enum TrainerBattleError {
     EmptyParty { trainer_id: String },
     #[error("trainer '{trainer_id}' party slot {slot} is missing species")]
     MissingPartySpecies { trainer_id: String, slot: usize },
+    #[error("trainer '{trainer_id}' party slot {slot} has invalid species '{species}'")]
+    InvalidPartySpecies {
+        trainer_id: String,
+        slot: usize,
+        species: String,
+    },
     #[error("trainer '{trainer_id}' party slot {slot} references unknown species '{species}'")]
     UnknownPartySpecies {
         trainer_id: String,
@@ -242,6 +252,8 @@ pub enum TrainerBattleError {
 pub enum StaticWildBattleError {
     #[error("static wild battle request is missing exact species id")]
     MissingSpecies,
+    #[error("static wild battle request has invalid species id '{species}'")]
+    InvalidSpecies { species: String },
     #[error("unknown static wild species '{species}'")]
     UnknownSpecies { species: String },
     #[error("static wild battle level cannot be zero for species '{species}'")]
@@ -309,6 +321,11 @@ pub fn static_wild_battle_start(
     if request.species.is_empty() {
         return Err(StaticWildBattleError::MissingSpecies);
     }
+    validate_battle_start_token(&request.species).map_err(|_| {
+        StaticWildBattleError::InvalidSpecies {
+            species: request.species.clone(),
+        }
+    })?;
     if request.level == 0 {
         return Err(StaticWildBattleError::ZeroLevel {
             species: request.species,
@@ -365,9 +382,19 @@ pub fn trainer_battle_start(
     if request.trainer_id.is_empty() {
         return Err(TrainerBattleError::MissingTrainerId);
     }
+    validate_battle_start_token(&request.trainer_id).map_err(|_| {
+        TrainerBattleError::InvalidTrainerId {
+            trainer_id: request.trainer_id.clone(),
+        }
+    })?;
     if request.trainer_class.is_empty() {
         return Err(TrainerBattleError::MissingTrainerClass);
     }
+    validate_battle_start_token(&request.trainer_class).map_err(|_| {
+        TrainerBattleError::InvalidTrainerClass {
+            trainer_class: request.trainer_class.clone(),
+        }
+    })?;
     if !request.event_flag.is_empty() && state.flags.is_event_flag_set(&request.event_flag)? {
         return Ok(TrainerBattleStartStatus::AlreadyDefeated {
             event_flag: request.event_flag,
@@ -469,6 +496,13 @@ fn materialize_trainer_pokemon(
             slot,
         });
     }
+    validate_battle_start_token(&party_mon.species).map_err(|_| {
+        TrainerBattleError::InvalidPartySpecies {
+            trainer_id: trainer.trainer_id.clone(),
+            slot,
+            species: party_mon.species.clone(),
+        }
+    })?;
     let species_data =
         species
             .get(&party_mon.species)
@@ -492,6 +526,19 @@ fn materialize_trainer_pokemon(
     pokemon.original_trainer_name = trainer.name.clone();
     pokemon.original_trainer_id = 0;
     Ok(pokemon)
+}
+
+fn validate_battle_start_token(value: &str) -> Result<(), ()> {
+    if !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 pub fn complete_trainer_battle(
@@ -861,6 +908,27 @@ mod tests {
     }
 
     #[test]
+    fn static_wild_battle_start_rejects_malformed_species_before_unknown_lookup() {
+        let mut rng = Random::new(1);
+        let error = static_wild_battle_start(
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            StaticWildBattleRequest::new("PID GEY", 30),
+            &mut rng,
+        )
+        .expect_err("malformed species ids are invalid pack input");
+
+        assert_eq!(
+            error,
+            StaticWildBattleError::InvalidSpecies {
+                species: "PID GEY".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn trainer_battle_start_rejects_class_aliases() {
         let mut catalog = TrainerCatalog::default();
         catalog.insert(trainer()).expect("trainer inserts");
@@ -882,6 +950,75 @@ mod tests {
                 trainer_id: "FALKNER1".to_string(),
                 requested: "falkner".to_string(),
                 actual: "FALKNER".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn trainer_battle_start_rejects_malformed_identity_before_defeated_lookup() {
+        let mut catalog = TrainerCatalog::default();
+        catalog.insert(trainer()).expect("trainer inserts");
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_BEAT_FALKNER", true)
+            .expect("flag sets");
+
+        let error = trainer_battle_start(
+            &state,
+            &catalog,
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            TrainerBattleRequest::new("FALK NER", "FALKNER1", "EVENT_BEAT_FALKNER"),
+        )
+        .expect_err("malformed class must not be hidden by defeated event");
+        assert_eq!(
+            error,
+            TrainerBattleError::InvalidTrainerClass {
+                trainer_class: "FALK NER".to_string(),
+            }
+        );
+
+        let error = trainer_battle_start(
+            &state,
+            &catalog,
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            TrainerBattleRequest::new("FALKNER", "FALK NER1", "EVENT_BEAT_FALKNER"),
+        )
+        .expect_err("malformed trainer id must not be hidden by defeated event");
+        assert_eq!(
+            error,
+            TrainerBattleError::InvalidTrainerId {
+                trainer_id: "FALK NER1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn trainer_party_materialization_rejects_malformed_species_before_unknown_lookup() {
+        let mut trainer = trainer();
+        trainer.party[0].species = "PID GEY".to_string();
+
+        let error = materialize_trainer_party(
+            &trainer,
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+        )
+        .expect_err("malformed trainer party species are invalid pack input");
+
+        assert_eq!(
+            error,
+            TrainerBattleError::InvalidPartySpecies {
+                trainer_id: "FALKNER1".to_string(),
+                slot: 0,
+                species: "PID GEY".to_string(),
             }
         );
     }

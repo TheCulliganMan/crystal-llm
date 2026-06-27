@@ -80,6 +80,7 @@ impl PcBox {
     }
 
     pub fn validate_metadata(&self) -> Result<(), String> {
+        validate_pc_box_name(&self.name)?;
         let filled = self.filled_slots();
         if self.count != filled {
             return Err(format!(
@@ -87,9 +88,18 @@ impl PcBox {
                 self.count, filled
             ));
         }
+        if self.slot_species[MAX_BOX_MONS] != 0 {
+            return Err(format!(
+                "slot_species terminator {} must be 0",
+                self.slot_species[MAX_BOX_MONS]
+            ));
+        }
         for index in 0..MAX_BOX_MONS {
             match &self.pokemon[index] {
                 Some(pokemon) => {
+                    pokemon
+                        .validate_saved_state()
+                        .map_err(|error| format!("slot {index}: {error}"))?;
                     if self.nicknames[index] != pokemon.nickname {
                         return Err(format!("slot {index} nickname metadata mismatch"));
                     }
@@ -122,6 +132,13 @@ impl PcBox {
     }
 }
 
+fn validate_pc_box_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        return Err(format!("box name has invalid text '{name}'"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokemonStorage {
@@ -139,6 +156,22 @@ impl Default for PokemonStorage {
 }
 
 impl PokemonStorage {
+    pub fn validate_metadata(&self) -> Result<(), String> {
+        self.party.validate_saved_state()?;
+        if self.pc_boxes.len() > MAX_PC_BOXES {
+            return Err(format!(
+                "PC storage has {} boxes, maximum is {MAX_PC_BOXES}",
+                self.pc_boxes.len()
+            ));
+        }
+        for (index, pc_box) in self.pc_boxes.iter().enumerate() {
+            pc_box
+                .validate_metadata()
+                .map_err(|error| format!("pc_boxes[{index}] {error}"))?;
+        }
+        Ok(())
+    }
+
     pub fn has_capture_space(&self) -> bool {
         self.party.has_space()
             || self.pc_boxes.len() < MAX_PC_BOXES
@@ -217,6 +250,37 @@ mod tests {
         assert_eq!(pc_box.slot_species[0], 152);
         assert_eq!(pc_box.slot_species[MAX_BOX_MONS], 0);
         pc_box.validate_metadata().expect("valid box metadata");
+    }
+
+    #[test]
+    fn storage_metadata_validates_all_saved_pc_boxes() {
+        let mut storage = PokemonStorage::default();
+        let mut pc_box = PcBox::new(0);
+        pc_box.count = 1;
+        storage.pc_boxes.push(pc_box);
+
+        assert_eq!(
+            storage.validate_metadata(),
+            Err("pc_boxes[0] box count 1 must match filled pokemon slots 0".to_string())
+        );
+
+        let mut storage = PokemonStorage::default();
+        let mut pc_box = PcBox::new(0);
+        pc_box.slot_species[MAX_BOX_MONS] = 0xff;
+        storage.pc_boxes.push(pc_box);
+        assert_eq!(
+            storage.validate_metadata(),
+            Err("pc_boxes[0] slot_species terminator 255 must be 0".to_string())
+        );
+
+        let mut storage = PokemonStorage::default();
+        let mut pc_box = PcBox::new(0);
+        pc_box.name = " BOX 01".to_string();
+        storage.pc_boxes.push(pc_box);
+        assert_eq!(
+            storage.validate_metadata(),
+            Err("pc_boxes[0] box name has invalid text ' BOX 01'".to_string())
+        );
     }
 
     #[test]

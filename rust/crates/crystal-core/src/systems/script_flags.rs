@@ -35,6 +35,7 @@ pub struct ScriptFlagCheckOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScriptFlagError {
+    InvalidCommand { command: String },
     UnknownCommand { command: String },
     Flag { error: EventFlagError },
 }
@@ -42,6 +43,7 @@ pub enum ScriptFlagError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptFlagCommandIssue {
+    InvalidCommand,
     UnknownCommand,
     EmptyFlagId,
     InvalidFlagId,
@@ -64,21 +66,42 @@ pub fn is_known_script_flag_command(command: &str) -> bool {
 
 pub fn script_flag_command_issues(command: &ScriptFlagCommand) -> Vec<ScriptFlagCommandIssue> {
     let mut issues = Vec::new();
-    if !is_known_script_flag_command(&command.command) {
+    if !is_exact_script_flag_command_token(&command.command) {
+        issues.push(ScriptFlagCommandIssue::InvalidCommand);
+    } else if !is_known_script_flag_command(&command.command) {
         issues.push(ScriptFlagCommandIssue::UnknownCommand);
     }
     if command.flag_id.is_empty() {
         issues.push(ScriptFlagCommandIssue::EmptyFlagId);
-    } else if command.flag_id.trim() != command.flag_id {
+    } else if !is_exact_script_flag_token(&command.flag_id) {
         issues.push(ScriptFlagCommandIssue::InvalidFlagId);
     }
     issues
+}
+
+fn is_exact_script_flag_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn is_exact_script_flag_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn apply_script_flag_mutation(
     state: &mut GameState,
     command: ScriptFlagCommand,
 ) -> Result<ScriptFlagMutationOutcome, ScriptFlagError> {
+    if !is_exact_script_flag_command_token(&command.command) {
+        return Err(ScriptFlagError::InvalidCommand {
+            command: command.command,
+        });
+    }
     let value = match command.command.as_str() {
         "setevent" | "setflag" => true,
         "clearevent" | "clearflag" => false,
@@ -108,6 +131,11 @@ pub fn check_script_flag(
     state: &GameState,
     command: ScriptFlagCommand,
 ) -> Result<ScriptFlagCheckOutcome, ScriptFlagError> {
+    if !is_exact_script_flag_command_token(&command.command) {
+        return Err(ScriptFlagError::InvalidCommand {
+            command: command.command,
+        });
+    }
     match command.command.as_str() {
         "checkevent" | "checkflag" => {}
         other => {
@@ -169,12 +197,24 @@ mod tests {
         assert_eq!(
             script_flag_command_issues(&command("SetEvent", "")),
             vec![
-                ScriptFlagCommandIssue::UnknownCommand,
+                ScriptFlagCommandIssue::InvalidCommand,
                 ScriptFlagCommandIssue::EmptyFlagId,
             ]
         );
         assert_eq!(
+            script_flag_command_issues(&command("set event", "EVENT_ROUTE_29_POTION")),
+            vec![ScriptFlagCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_flag_command_issues(&command("toggleevent", "EVENT_ROUTE_29_POTION")),
+            vec![ScriptFlagCommandIssue::UnknownCommand]
+        );
+        assert_eq!(
             script_flag_command_issues(&command("setevent", " EVENT_ROUTE_29_POTION")),
+            vec![ScriptFlagCommandIssue::InvalidFlagId]
+        );
+        assert_eq!(
+            script_flag_command_issues(&command("setevent", "EVENT ROUTE_29_POTION")),
             vec![ScriptFlagCommandIssue::InvalidFlagId]
         );
         assert_eq!(
@@ -241,6 +281,12 @@ mod tests {
     #[test]
     fn rejects_empty_flags_and_unknown_commands() {
         let mut state = GameState::default();
+        assert_eq!(
+            apply_script_flag_mutation(&mut state, command("set event", "EVENT_ROUTE_29_POTION")),
+            Err(ScriptFlagError::InvalidCommand {
+                command: "set event".to_string()
+            })
+        );
         assert_eq!(
             apply_script_flag_mutation(&mut state, command("setevent", "")),
             Err(ScriptFlagError::Flag {

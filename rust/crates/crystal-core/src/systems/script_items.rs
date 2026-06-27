@@ -98,7 +98,7 @@ pub fn script_item_grant_issues(
     if grant.quantity == 0 {
         issues.push(ScriptItemGrantIssue::InvalidQuantity);
     }
-    if grant.item_id.trim().is_empty() || grant.item_id.trim() != grant.item_id {
+    if !is_exact_script_item_token(&grant.item_id) {
         issues.push(ScriptItemGrantIssue::InvalidItem {
             item_id: grant.item_id.clone(),
         });
@@ -116,7 +116,7 @@ pub fn script_item_access_issues(
     access: &ScriptItemAccess,
     item_catalog: &BTreeMap<String, Item>,
 ) -> Vec<ScriptItemAccessIssue> {
-    if access.item_id.trim().is_empty() || access.item_id.trim() != access.item_id {
+    if !is_exact_script_item_token(&access.item_id) {
         vec![ScriptItemAccessIssue::InvalidItem {
             item_id: access.item_id.clone(),
         }]
@@ -127,6 +127,14 @@ pub fn script_item_access_issues(
             item_id: access.item_id.clone(),
         }]
     }
+}
+
+fn is_exact_script_item_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn grant_script_item(
@@ -354,9 +362,21 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_item_grant_issues(&grant("PO TION", 1), &items),
+            [ScriptItemGrantIssue::InvalidItem {
+                item_id: "PO TION".to_string()
+            }]
+        );
+        assert_eq!(
             script_item_grant_issues(&grant(" ITEM_FROM_MEM", 1), &items),
             [ScriptItemGrantIssue::InvalidItem {
                 item_id: " ITEM_FROM_MEM".to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_grant_issues(&grant("ITEM FROM_MEM", 1), &items),
+            [ScriptItemGrantIssue::InvalidItem {
+                item_id: "ITEM FROM_MEM".to_string()
             }]
         );
     }
@@ -382,6 +402,12 @@ mod tests {
             script_item_access_issues(&access(" PASS"), &items),
             [ScriptItemAccessIssue::InvalidItem {
                 item_id: " PASS".to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_access_issues(&access("PA SS"), &items),
+            [ScriptItemAccessIssue::InvalidItem {
+                item_id: "PA SS".to_string()
             }]
         );
     }

@@ -133,7 +133,11 @@ pub fn runtime_map_metadata_issues(
 }
 
 fn is_exact_nonempty_metadata_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 impl OverworldMapData {
@@ -254,11 +258,11 @@ mod tests {
                 },
             ),
             (
-                " ROUTE_30".to_string(),
+                "ROUTE 30".to_string(),
                 RuntimeMapMetadata {
-                    constant: " ROUTE_30".to_string(),
-                    name: " Route30".to_string(),
-                    group_name: "GROUP_ROUTE_30".to_string(),
+                    constant: "ROUTE 30".to_string(),
+                    name: "Route 30".to_string(),
+                    group_name: "GROUP ROUTE_30".to_string(),
                     group_id: 1,
                     map_id: 3,
                     width: 10,
@@ -291,14 +295,14 @@ mod tests {
         assert_eq!(
             runtime_map_metadata_issues(&metadata, &map_names),
             vec![
-                RuntimeMapMetadataIssue::InvalidMetadata {
-                    key: " ROUTE_30".to_string(),
-                },
                 RuntimeMapMetadataIssue::NameMismatch {
                     key: "NEW_BARK_TOWN".to_string(),
                     constant: "NEW_BARK_TOWN".to_string(),
                     metadata_name: "WrongName".to_string(),
                     map_name: "NewBarkTown".to_string(),
+                },
+                RuntimeMapMetadataIssue::InvalidMetadata {
+                    key: "ROUTE 30".to_string(),
                 },
                 RuntimeMapMetadataIssue::InvalidMetadata {
                     key: "ROUTE_29".to_string(),

@@ -12,8 +12,12 @@ pub type SpeciesLearnsets = BTreeMap<String, Vec<LearnsetEntry>>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LearnsetError {
+    #[error("invalid learnset species id '{species_id}'")]
+    InvalidSpecies { species_id: String },
     #[error("missing level-up learnset for species '{species_id}'")]
     MissingSpecies { species_id: String },
+    #[error("invalid level-up move id '{move_id}' for species '{species_id}'")]
+    InvalidMove { species_id: String, move_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,13 +104,20 @@ pub fn learnset_catalog_issues(
 }
 
 fn is_exact_nonempty_learnset_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn level_up_moves_for_species<'a>(
     learnsets: &'a SpeciesLearnsets,
     species_id: &str,
 ) -> Result<&'a [LearnsetEntry], LearnsetError> {
+    validate_learnset_runtime_token(species_id).map_err(|_| LearnsetError::InvalidSpecies {
+        species_id: species_id.to_string(),
+    })?;
     learnsets
         .get(species_id)
         .map(Vec::as_slice)
@@ -121,6 +132,9 @@ pub fn default_moves_for_level(
     level: u8,
     max_moves: usize,
 ) -> Result<Vec<String>, LearnsetError> {
+    validate_learnset_runtime_token(species_id).map_err(|_| LearnsetError::InvalidSpecies {
+        species_id: species_id.to_string(),
+    })?;
     if level == 0 || max_moves == 0 {
         return Ok(Vec::new());
     }
@@ -131,6 +145,10 @@ pub fn default_moves_for_level(
         if *learn_level > level {
             continue;
         }
+        validate_learnset_runtime_token(move_name).map_err(|_| LearnsetError::InvalidMove {
+            species_id: species_id.to_string(),
+            move_id: move_name.clone(),
+        })?;
         if let Some(index) = slots.iter().position(|known| known == move_name) {
             slots.remove(index);
         }
@@ -140,6 +158,14 @@ pub fn default_moves_for_level(
         }
     }
     Ok(slots)
+}
+
+fn validate_learnset_runtime_token(value: &str) -> Result<(), ()> {
+    if is_exact_nonempty_learnset_token(value) {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(test)]
@@ -159,9 +185,10 @@ mod tests {
     fn learnset_catalog_issues_validate_exact_modpack_ids_without_coercion() {
         let mut chikorita = species("CHIKORITA");
         chikorita.item1 = Some(" BERRY".to_string());
-        chikorita.item2 = Some("MIRACLE_SEED".to_string());
+        chikorita.item2 = Some("MIRACLE SEED".to_string());
         chikorita.tmhm_learnset = vec![
             " HEADBUTT".to_string(),
+            "HEAD BUTT".to_string(),
             "headbutt".to_string(),
             "CUT".to_string(),
         ];
@@ -185,8 +212,13 @@ mod tests {
                 " BAYLEEF".to_string(),
                 vec![
                     LearnsetEntry(1, "TACKLE ".to_string()),
+                    LearnsetEntry(1, "RAZOR LEAF".to_string()),
                     LearnsetEntry(1, "tackle".to_string()),
                 ],
+            ),
+            (
+                "BAY LEEF".to_string(),
+                vec![LearnsetEntry(1, "TACKLE".to_string())],
             ),
             (
                 "bayleef".to_string(),
@@ -210,9 +242,17 @@ mod tests {
                     species_id: "CHIKORITA".to_string(),
                     item_id: " BERRY".to_string(),
                 },
+                LearnsetCatalogIssue::InvalidSpeciesHeldItem {
+                    species_id: "CHIKORITA".to_string(),
+                    item_id: "MIRACLE SEED".to_string(),
+                },
                 LearnsetCatalogIssue::InvalidTmHmMove {
                     species_id: "CHIKORITA".to_string(),
                     move_id: " HEADBUTT".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidTmHmMove {
+                    species_id: "CHIKORITA".to_string(),
+                    move_id: "HEAD BUTT".to_string(),
                 },
                 LearnsetCatalogIssue::UnknownTmHmMove {
                     species_id: "CHIKORITA".to_string(),
@@ -225,9 +265,16 @@ mod tests {
                     species_id: " BAYLEEF".to_string(),
                     move_id: "TACKLE ".to_string(),
                 },
+                LearnsetCatalogIssue::InvalidLevelMove {
+                    species_id: " BAYLEEF".to_string(),
+                    move_id: "RAZOR LEAF".to_string(),
+                },
                 LearnsetCatalogIssue::UnknownLevelMove {
                     species_id: " BAYLEEF".to_string(),
                     move_id: "tackle".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidLearnsetSpecies {
+                    species_id: "BAY LEEF".to_string(),
                 },
                 LearnsetCatalogIssue::UnknownLevelMove {
                     species_id: "CHIKORITA".to_string(),
@@ -267,6 +314,45 @@ mod tests {
                 species_id: "testmon".to_string(),
             })
         );
+        assert_eq!(
+            default_moves_for_level(&learnsets, "TEST MON", 15, 4),
+            Err(LearnsetError::InvalidSpecies {
+                species_id: "TEST MON".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn default_moves_reject_malformed_runtime_move_ids() {
+        let learnsets: SpeciesLearnsets = [(
+            "TESTMON".to_string(),
+            vec![
+                LearnsetEntry(1, "TACKLE".to_string()),
+                LearnsetEntry(4, "VINE WHIP".to_string()),
+            ],
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            default_moves_for_level(&learnsets, "TESTMON", 5, 4),
+            Err(LearnsetError::InvalidMove {
+                species_id: "TESTMON".to_string(),
+                move_id: "VINE WHIP".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn level_up_moves_reject_malformed_species_before_missing_lookup() {
+        let learnsets = SpeciesLearnsets::new();
+
+        assert_eq!(
+            level_up_moves_for_species(&learnsets, "TEST MON"),
+            Err(LearnsetError::InvalidSpecies {
+                species_id: "TEST MON".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -281,6 +367,12 @@ mod tests {
             default_moves_for_level(&learnsets, "ANY", 5, 0)
                 .expect("zero capacity does not require move data")
                 .is_empty()
+        );
+        assert_eq!(
+            default_moves_for_level(&learnsets, "AN Y", 0, 4),
+            Err(LearnsetError::InvalidSpecies {
+                species_id: "AN Y".to_string(),
+            })
         );
     }
 }

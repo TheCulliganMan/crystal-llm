@@ -32,6 +32,9 @@ pub enum ScriptedBattleEffectsError {
     InvalidEventFlag {
         event_flag: String,
     },
+    InvalidDisappearObject {
+        object_identifier: String,
+    },
     UnknownDisappearObject {
         object_identifier: String,
     },
@@ -71,6 +74,7 @@ pub fn apply_scripted_battle_effects(
 
     let mut disappeared_objects = Vec::new();
     for object_identifier in &effects.disappear_object_ids {
+        validate_disappear_object_identifier(object_identifier)?;
         let object = objects
             .iter()
             .find(|object| object.object_identifier.as_ref() == Some(object_identifier))
@@ -106,9 +110,20 @@ pub fn apply_scripted_battle_effects_to_session(
 }
 
 fn validate_effect_flag(event_flag: &str) -> Result<(), ScriptedBattleEffectsError> {
-    if event_flag.is_empty() || event_flag == "0" || event_flag == "-1" {
+    if event_flag == "0" || event_flag == "-1" || !is_exact_scripted_battle_token(event_flag) {
         return Err(ScriptedBattleEffectsError::InvalidEventFlag {
             event_flag: event_flag.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_disappear_object_identifier(
+    object_identifier: &str,
+) -> Result<(), ScriptedBattleEffectsError> {
+    if !is_exact_scripted_battle_token(object_identifier) {
+        return Err(ScriptedBattleEffectsError::InvalidDisappearObject {
+            object_identifier: object_identifier.to_string(),
         });
     }
     Ok(())
@@ -118,13 +133,21 @@ fn validate_disappear_flag(
     object_identifier: &str,
     event_flag: &str,
 ) -> Result<(), ScriptedBattleEffectsError> {
-    if event_flag.is_empty() || event_flag == "0" || event_flag == "-1" {
+    if event_flag == "0" || event_flag == "-1" || !is_exact_scripted_battle_token(event_flag) {
         return Err(ScriptedBattleEffectsError::ObjectCannotDisappear {
             object_identifier: object_identifier.to_string(),
             event_flag: event_flag.to_string(),
         });
     }
     Ok(())
+}
+
+fn is_exact_scripted_battle_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -225,6 +248,67 @@ mod tests {
             error,
             ScriptedBattleEffectsError::UnknownDisappearObject {
                 object_identifier: "vermilioncity_big_snorlax".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn scripted_battle_effects_reject_malformed_flags_and_object_ids() {
+        let mut state = GameState::default();
+        let malformed_flag = ScriptedBattleEffects {
+            event_flags: vec![" EVENT_FOUGHT_SNORLAX".to_string()],
+            script_flags: Vec::new(),
+            disappear_object_ids: Vec::new(),
+        };
+        let error = apply_scripted_battle_effects(&mut state, &[], &malformed_flag)
+            .expect_err("padded event flags are invalid pack data");
+        assert_eq!(
+            error,
+            ScriptedBattleEffectsError::InvalidEventFlag {
+                event_flag: " EVENT_FOUGHT_SNORLAX".to_string(),
+            }
+        );
+
+        let malformed_object = ScriptedBattleEffects {
+            event_flags: Vec::new(),
+            script_flags: Vec::new(),
+            disappear_object_ids: vec!["VERMILIONCITY BIG SNORLAX".to_string()],
+        };
+        let error = apply_scripted_battle_effects(
+            &mut state,
+            &[object(
+                "VERMILIONCITY_BIG_SNORLAX",
+                "EVENT_VERMILION_CITY_SNORLAX",
+            )],
+            &malformed_object,
+        )
+        .expect_err("space-separated object ids are invalid pack data");
+        assert_eq!(
+            error,
+            ScriptedBattleEffectsError::InvalidDisappearObject {
+                object_identifier: "VERMILIONCITY BIG SNORLAX".to_string(),
+            }
+        );
+
+        let malformed_object_flag = ScriptedBattleEffects {
+            event_flags: Vec::new(),
+            script_flags: Vec::new(),
+            disappear_object_ids: vec!["VERMILIONCITY_BIG_SNORLAX".to_string()],
+        };
+        let error = apply_scripted_battle_effects(
+            &mut state,
+            &[object(
+                "VERMILIONCITY_BIG_SNORLAX",
+                "EVENT VERMILION CITY SNORLAX",
+            )],
+            &malformed_object_flag,
+        )
+        .expect_err("object event flags must be exact pack tokens");
+        assert_eq!(
+            error,
+            ScriptedBattleEffectsError::ObjectCannotDisappear {
+                object_identifier: "VERMILIONCITY_BIG_SNORLAX".to_string(),
+                event_flag: "EVENT VERMILION CITY SNORLAX".to_string(),
             }
         );
     }

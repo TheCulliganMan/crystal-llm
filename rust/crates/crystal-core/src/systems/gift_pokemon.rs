@@ -54,7 +54,9 @@ pub struct GiftPokemonOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GiftPokemonError {
+    InvalidSpeciesId { species_id: String },
     UnknownSpecies { species_id: String },
+    InvalidHeldItemId { item_id: String },
     UnknownHeldItem { item_id: String },
     InvalidLevel { level: u8 },
     StorageFull { species_id: String },
@@ -63,7 +65,9 @@ pub enum GiftPokemonError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GiftPokemonScriptIssue {
+    InvalidSpeciesId { species_id: String },
     UnknownSpecies { species_id: String },
+    InvalidHeldItemId { item_id: String },
     UnknownHeldItem { item_id: String },
     EmptyLabel { field: &'static str },
     InvalidLabel { field: &'static str, label: String },
@@ -77,17 +81,25 @@ pub fn gift_pokemon_script_issues(
     script_labels: &BTreeSet<String>,
 ) -> Vec<GiftPokemonScriptIssue> {
     let mut issues = Vec::new();
-    if !species.contains_key(&gift.species_id) {
+    if !is_exact_gift_token(&gift.species_id) {
+        issues.push(GiftPokemonScriptIssue::InvalidSpeciesId {
+            species_id: gift.species_id.clone(),
+        });
+    } else if !species.contains_key(&gift.species_id) {
         issues.push(GiftPokemonScriptIssue::UnknownSpecies {
             species_id: gift.species_id.clone(),
         });
     }
-    if let Some(item_id) = gift.held_item_id.as_deref()
-        && !items.contains_key(item_id)
-    {
-        issues.push(GiftPokemonScriptIssue::UnknownHeldItem {
-            item_id: item_id.to_string(),
-        });
+    if let Some(item_id) = gift.held_item_id.as_deref() {
+        if !is_exact_gift_token(item_id) {
+            issues.push(GiftPokemonScriptIssue::InvalidHeldItemId {
+                item_id: item_id.to_string(),
+            });
+        } else if !items.contains_key(item_id) {
+            issues.push(GiftPokemonScriptIssue::UnknownHeldItem {
+                item_id: item_id.to_string(),
+            });
+        }
     }
     push_label_issue(
         "nickname",
@@ -115,7 +127,7 @@ fn push_label_issue(
     };
     if label.is_empty() {
         issues.push(GiftPokemonScriptIssue::EmptyLabel { field });
-    } else if label.trim() != label {
+    } else if !is_exact_gift_token(label) {
         issues.push(GiftPokemonScriptIssue::InvalidLabel {
             field,
             label: label.to_string(),
@@ -126,6 +138,14 @@ fn push_label_issue(
             label: label.to_string(),
         });
     }
+}
+
+fn is_exact_gift_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn give_gift_pokemon(
@@ -142,18 +162,28 @@ pub fn give_gift_pokemon(
             level: request.level,
         });
     }
+    if !is_exact_gift_token(&request.species_id) {
+        return Err(GiftPokemonError::InvalidSpeciesId {
+            species_id: request.species_id.clone(),
+        });
+    }
     let species_data =
         species
             .get(&request.species_id)
             .ok_or_else(|| GiftPokemonError::UnknownSpecies {
                 species_id: request.species_id.clone(),
             })?;
-    if let Some(item_id) = request.held_item_id.as_deref()
-        && !items.contains_key(item_id)
-    {
-        return Err(GiftPokemonError::UnknownHeldItem {
-            item_id: item_id.to_string(),
-        });
+    if let Some(item_id) = request.held_item_id.as_deref() {
+        if !is_exact_gift_token(item_id) {
+            return Err(GiftPokemonError::InvalidHeldItemId {
+                item_id: item_id.to_string(),
+            });
+        }
+        if !items.contains_key(item_id) {
+            return Err(GiftPokemonError::UnknownHeldItem {
+                item_id: item_id.to_string(),
+            });
+        }
     }
 
     let mut pokemon = create_pokemon_from_known_dvs(
@@ -302,11 +332,11 @@ mod tests {
         let items = BTreeMap::from([("BERRY".to_string(), item("BERRY"))]);
         let labels = ["GiftNicknameText".to_string()].into_iter().collect();
         let gift = GiftPokemonScript {
-            species_id: "cyndaquil".to_string(),
+            species_id: "CYNDA QUIL".to_string(),
             level_token: "5".to_string(),
             level: 5,
-            held_item_id: Some("berry".to_string()),
-            nickname_label: Some("giftnicknametext".to_string()),
+            held_item_id: Some("BERRY JUICE".to_string()),
+            nickname_label: Some("Gift NicknameText".to_string()),
             ot_label: Some(" GiftOtText".to_string()),
             source_script: "GiftScript".to_string(),
             command_index: 4,
@@ -316,15 +346,15 @@ mod tests {
         assert_eq!(
             gift_pokemon_script_issues(&gift, &species_map, &items, &labels),
             vec![
-                GiftPokemonScriptIssue::UnknownSpecies {
-                    species_id: "cyndaquil".to_string(),
+                GiftPokemonScriptIssue::InvalidSpeciesId {
+                    species_id: "CYNDA QUIL".to_string(),
                 },
-                GiftPokemonScriptIssue::UnknownHeldItem {
-                    item_id: "berry".to_string(),
+                GiftPokemonScriptIssue::InvalidHeldItemId {
+                    item_id: "BERRY JUICE".to_string(),
                 },
-                GiftPokemonScriptIssue::UnknownLabel {
+                GiftPokemonScriptIssue::InvalidLabel {
                     field: "nickname",
-                    label: "giftnicknametext".to_string(),
+                    label: "Gift NicknameText".to_string(),
                 },
                 GiftPokemonScriptIssue::InvalidLabel {
                     field: "original trainer",
@@ -396,6 +426,46 @@ mod tests {
                 item_id: "berry".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn rejects_malformed_gift_request_ids_before_unknown_lookup() {
+        let mut storage = PokemonStorage::default();
+        let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
+        let items = BTreeMap::from([("BERRY".to_string(), item("BERRY"))]);
+
+        assert_eq!(
+            give_gift_pokemon(
+                &mut storage,
+                &species_map,
+                &learnsets("CYNDAQUIL"),
+                &BTreeMap::new(),
+                &growth_rates(),
+                &items,
+                request("CYNDA QUIL", 5),
+            ),
+            Err(GiftPokemonError::InvalidSpeciesId {
+                species_id: "CYNDA QUIL".to_string(),
+            })
+        );
+
+        let mut bad_item = request("CYNDAQUIL", 5);
+        bad_item.held_item_id = Some("BERRY JUICE".to_string());
+        assert_eq!(
+            give_gift_pokemon(
+                &mut storage,
+                &species_map,
+                &learnsets("CYNDAQUIL"),
+                &BTreeMap::new(),
+                &growth_rates(),
+                &items,
+                bad_item,
+            ),
+            Err(GiftPokemonError::InvalidHeldItemId {
+                item_id: "BERRY JUICE".to_string(),
+            })
+        );
+        assert_eq!(storage.party.filled_slots(), 0);
     }
 
     #[test]

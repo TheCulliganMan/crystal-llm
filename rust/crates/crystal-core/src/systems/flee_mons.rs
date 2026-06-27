@@ -42,7 +42,11 @@ pub fn flee_mon_catalog_issues(
 }
 
 fn is_exact_nonempty_flee_mon_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -55,6 +59,7 @@ mod tests {
             always: vec![
                 "RAIKOU".to_string(),
                 " raikou".to_string(),
+                "RAI KOU".to_string(),
                 "raikou".to_string(),
             ],
             often: vec!["ENTEI".to_string()],
@@ -69,6 +74,9 @@ mod tests {
             vec![
                 FleeMonCatalogIssue::InvalidSpeciesId {
                     species_id: " raikou".to_string(),
+                },
+                FleeMonCatalogIssue::InvalidSpeciesId {
+                    species_id: "RAI KOU".to_string(),
                 },
                 FleeMonCatalogIssue::UnknownSpecies {
                     species_id: "raikou".to_string(),

@@ -78,6 +78,8 @@ pub enum ScriptControlCommandError {
     UnsetAccumulator { command: String },
     #[error("script accumulator value '{value}' is not an exact TRUE/FALSE token")]
     UnknownBoolean { value: String },
+    #[error("numeric script token '{token}' is not exact pack syntax")]
+    InvalidNumericToken { token: String },
     #[error("cannot resolve numeric script token '{token}'")]
     UnknownNumericToken { token: String },
 }
@@ -253,7 +255,7 @@ pub fn validate_script_control_command(
     if command.command.is_empty() {
         return Err(ScriptControlCommandError::EmptyCommand);
     }
-    if command.command.trim() != command.command {
+    if !is_exact_nonempty_token(&command.command) {
         return Err(ScriptControlCommandError::PaddedCommand {
             command: command.command.clone(),
         });
@@ -391,7 +393,7 @@ fn require_target(command: &ScriptControlCommand) -> Result<&str, ScriptControlC
             command: command.command.clone(),
         });
     }
-    if target.trim() != target {
+    if !is_exact_nonempty_token(target) {
         return Err(ScriptControlCommandError::InvalidTarget {
             command: command.command.clone(),
             target: target.to_string(),
@@ -434,13 +436,23 @@ fn parse_numeric_token(
     let parts: Vec<&str> = token.split_whitespace().collect();
     match parts.as_slice() {
         [single] => parse_numeric_atom(single, constants),
-        [left, "-", right] => {
-            Ok(parse_numeric_atom(left, constants)? - parse_numeric_atom(right, constants)?)
+        [left, op @ ("-" | "+"), right] => {
+            if format!("{left} {op} {right}") != token {
+                return Err(ScriptControlCommandError::InvalidNumericToken {
+                    token: token.to_string(),
+                });
+            }
+            match *op {
+                "-" => Ok(
+                    parse_numeric_atom(left, constants)? - parse_numeric_atom(right, constants)?
+                ),
+                "+" => Ok(
+                    parse_numeric_atom(left, constants)? + parse_numeric_atom(right, constants)?
+                ),
+                _ => unreachable!(),
+            }
         }
-        [left, "+", right] => {
-            Ok(parse_numeric_atom(left, constants)? + parse_numeric_atom(right, constants)?)
-        }
-        _ => Err(ScriptControlCommandError::UnknownNumericToken {
+        _ => Err(ScriptControlCommandError::InvalidNumericToken {
             token: token.to_string(),
         }),
     }
@@ -454,21 +466,47 @@ fn parse_numeric_atom(
         return Ok(*value);
     }
     if let Some(hex) = token.strip_prefix('$') {
+        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ScriptControlCommandError::InvalidNumericToken {
+                token: token.to_string(),
+            });
+        }
         return i32::from_str_radix(hex, 16).map_err(|_| {
             ScriptControlCommandError::UnknownNumericToken {
                 token: token.to_string(),
             }
         });
     }
-    token
-        .parse::<i32>()
-        .map_err(|_| ScriptControlCommandError::UnknownNumericToken {
-            token: token.to_string(),
-        })
+    token.parse::<i32>().map_err(|_| {
+        if is_exact_numeric_symbol(token) {
+            ScriptControlCommandError::UnknownNumericToken {
+                token: token.to_string(),
+            }
+        } else {
+            ScriptControlCommandError::InvalidNumericToken {
+                token: token.to_string(),
+            }
+        }
+    })
+}
+
+fn is_exact_numeric_symbol(value: &str) -> bool {
+    let Some(first) = value.bytes().next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn is_exact_nonempty_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
 #[cfg(test)]
@@ -553,6 +591,51 @@ mod tests {
                 command_index: 6,
             }
         );
+    }
+
+    #[test]
+    fn rejects_malformed_numeric_tokens_before_unknown_constants() {
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("8".to_string());
+        let constants = BTreeMap::from([("NUM_JOHTO_BADGES".to_string(), 8)]);
+
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("ifgreater", Some("NUM_JOHTO_BADGES  -  1"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token })
+                if token == "NUM_JOHTO_BADGES  -  1"
+        ));
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("ifgreater", Some("$GG"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token }) if token == "$GG"
+        ));
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("ifgreater", Some("MISSING_CONSTANT"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::UnknownNumericToken { token })
+                if token == "MISSING_CONSTANT"
+        ));
+
+        state.script_runtime.script_value = Some("NUM JOHTO BADGES".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("ifgreater", Some("1"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token })
+                if token == "NUM JOHTO BADGES"
+        ));
     }
 
     #[test]
@@ -651,6 +734,14 @@ mod tests {
             ),
             Err(ScriptControlCommandError::PaddedCommand { .. })
         ));
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("if true", None, Some(".Done")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::PaddedCommand { .. })
+        ));
 
         assert!(matches!(
             resolve_script_control_command(
@@ -660,9 +751,23 @@ mod tests {
             ),
             Err(ScriptControlCommandError::InvalidTarget { .. })
         ));
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                command("iftrue", None, Some(".Do ne")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::InvalidTarget { .. })
+        ));
 
         let mut command = command("iftrue", None, Some(".Done"));
         command.resolved_target_script = Some(" .Done@Script".to_string());
+        assert!(matches!(
+            resolve_script_control_command(&state, command, &BTreeMap::new()),
+            Err(ScriptControlCommandError::InvalidResolvedTarget { .. })
+        ));
+        let mut command = command("iftrue", None, Some(".Done"));
+        command.resolved_target_script = Some(".Done @Script".to_string());
         assert!(matches!(
             resolve_script_control_command(&state, command, &BTreeMap::new()),
             Err(ScriptControlCommandError::InvalidResolvedTarget { .. })

@@ -59,6 +59,8 @@ pub enum EncounterError {
         surface: EncounterSurface,
         time: TimeOfDay,
     },
+    #[error("wild encounter table for map '{map_name}' selected invalid species '{species}'")]
+    InvalidEncounterSpecies { map_name: String, species: String },
     #[error("encounter roll {roll} did not resolve for {surface:?} with {slot_count} slots")]
     UnresolvedSlot {
         surface: EncounterSurface,
@@ -83,6 +85,14 @@ pub enum EncounterError {
         map_name: String,
         kind: FieldEncounterKind,
         bucket: &'static str,
+    },
+    #[error(
+        "{kind:?} field encounter table for map '{map_name}' selected invalid species '{species}'"
+    )]
+    InvalidFieldEncounterSpecies {
+        map_name: String,
+        kind: FieldEncounterKind,
+        species: String,
     },
 }
 
@@ -308,6 +318,7 @@ impl EncounterMusicModifiers {
 pub enum EncounterMusicModifierIssue {
     MissingTable,
     MissingMusicId { music_id: String },
+    InvalidMusicId { music_id: String },
     UnknownMusicId { music_id: String },
     DuplicateMusicId { music_id: String },
     InvalidRatio { music_id: String },
@@ -327,16 +338,24 @@ pub fn encounter_music_modifier_issues(
     let mut issues = Vec::new();
     let mut seen = BTreeSet::new();
     for modifier in &modifiers.modifiers {
+        let mut exact_music_id = false;
         if modifier.music_id.is_empty() {
             issues.push(EncounterMusicModifierIssue::MissingMusicId {
+                music_id: modifier.music_id.clone(),
+            });
+        } else if !is_exact_nonempty_encounter_token(&modifier.music_id) {
+            issues.push(EncounterMusicModifierIssue::InvalidMusicId {
                 music_id: modifier.music_id.clone(),
             });
         } else if !music_ids.contains(&modifier.music_id) {
             issues.push(EncounterMusicModifierIssue::UnknownMusicId {
                 music_id: modifier.music_id.clone(),
             });
+            exact_music_id = true;
+        } else {
+            exact_music_id = true;
         }
-        if !seen.insert(modifier.music_id.as_str()) {
+        if exact_music_id && !seen.insert(modifier.music_id.as_str()) {
             issues.push(EncounterMusicModifierIssue::DuplicateMusicId {
                 music_id: modifier.music_id.clone(),
             });
@@ -613,7 +632,11 @@ fn wild_encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
 }
 
 fn is_exact_nonempty_encounter_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn field_encounter_species(data: &FieldEncounterData) -> BTreeSet<String> {
@@ -931,6 +954,12 @@ pub fn select_wild_encounter(
     }
     let slot = choose_slot_from_percent(slot_tables, surface, table.len(), slot_percent_roll)?;
     let encounter = table[slot].clone();
+    if !is_exact_nonempty_encounter_token(&encounter.species) {
+        return Err(EncounterError::InvalidEncounterSpecies {
+            map_name: data.map_name.clone(),
+            species: encounter.species,
+        });
+    }
     let level = apply_grass_level_variance(encounter.level, surface, level_roll_byte);
     Ok(Some(ResolvedWildEncounter {
         encounter,
@@ -1095,6 +1124,13 @@ fn choose_weighted_field_entry(
             continue;
         }
         if remaining < entry.weight {
+            if !is_exact_nonempty_encounter_token(&entry.species) {
+                return Err(EncounterError::InvalidFieldEncounterSpecies {
+                    map_name: data.map_name.clone(),
+                    kind,
+                    species: entry.species.clone(),
+                });
+            }
             return Ok(ResolvedWildEncounter {
                 encounter: WildEncounter {
                     level: entry.level,
@@ -1324,6 +1360,16 @@ mod tests {
                     denominator: 1,
                 },
                 EncounterMusicModifier {
+                    music_id: "MUSIC POKEMON MARCH".to_string(),
+                    numerator: 1,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
+                    music_id: "MUSIC POKEMON MARCH".to_string(),
+                    numerator: 1,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
                     music_id: "music_pokemon_march".to_string(),
                     numerator: 1,
                     denominator: 0,
@@ -1340,6 +1386,12 @@ mod tests {
         assert_eq!(
             encounter_music_modifier_issues(&modifiers, &music_ids, true),
             vec![
+                EncounterMusicModifierIssue::InvalidMusicId {
+                    music_id: "MUSIC POKEMON MARCH".to_string(),
+                },
+                EncounterMusicModifierIssue::InvalidMusicId {
+                    music_id: "MUSIC POKEMON MARCH".to_string(),
+                },
                 EncounterMusicModifierIssue::UnknownMusicId {
                     music_id: "music_pokemon_march".to_string(),
                 },
@@ -1370,6 +1422,7 @@ mod tests {
                 ("day".to_string(), 10),
                 ("night".to_string(), 10),
                 (" night".to_string(), 5),
+                ("late night".to_string(), 5),
                 ("dusk".to_string(), 5),
             ]
             .into_iter()
@@ -1380,6 +1433,15 @@ mod tests {
         route.water.as_mut().expect("water").night.clear();
         route.grass.as_mut().expect("grass").morning[0].species = " PIDGEY".to_string();
         route.grass.as_mut().expect("grass").morning[1].species = "pidgey".to_string();
+        route
+            .water
+            .as_mut()
+            .expect("water")
+            .morning
+            .push(WildEncounter {
+                level: 10,
+                species: "MISSING NO".to_string(),
+            });
         let mut missing_table = sample_data();
         missing_table.map_name = "ROUTE_30".to_string();
         missing_table.grass = None;
@@ -1429,6 +1491,10 @@ mod tests {
                     map_name: "route_29".to_string(),
                     species_id: "MAGIKARP".to_string(),
                 },
+                WildEncounterCatalogIssue::InvalidSpecies {
+                    map_name: "route_29".to_string(),
+                    species_id: "MISSING NO".to_string(),
+                },
                 WildEncounterCatalogIssue::UnknownSpecies {
                     map_name: "route_29".to_string(),
                     species_id: "pidgey".to_string(),
@@ -1440,6 +1506,10 @@ mod tests {
                 WildEncounterCatalogIssue::UnknownGrassRateTime {
                     map_name: "route_29".to_string(),
                     time_key: "dusk".to_string(),
+                },
+                WildEncounterCatalogIssue::InvalidGrassRateTime {
+                    map_name: "route_29".to_string(),
+                    time_key: "late night".to_string(),
                 },
                 WildEncounterCatalogIssue::EmptyGrassSlots {
                     map_name: "route_29".to_string(),
@@ -1465,7 +1535,8 @@ mod tests {
     fn field_encounter_catalog_issues_validate_exact_ids_and_weights() {
         let mut data = field_data();
         data.headbutt.as_mut().expect("headbutt").common[0].species = " PIDGEY".to_string();
-        data.rock_smash.as_mut().expect("rock smash").common[0].species = "pidgey".to_string();
+        data.rock_smash.as_mut().expect("rock smash").common[0].species = "PINE CO".to_string();
+        data.rock_smash.as_mut().expect("rock smash").common[1].species = "pidgey".to_string();
         data.headbutt.as_mut().expect("headbutt").common[0].weight = 0;
         data.headbutt.as_mut().expect("headbutt").rare.clear();
         let invalid_map = FieldEncounterData {
@@ -1497,9 +1568,9 @@ mod tests {
                     map_name: "route_29".to_string(),
                     species_id: " PIDGEY".to_string(),
                 },
-                FieldEncounterCatalogIssue::UnknownSpecies {
+                FieldEncounterCatalogIssue::InvalidSpecies {
                     map_name: "route_29".to_string(),
-                    species_id: "SHUCKLE".to_string(),
+                    species_id: "PINE CO".to_string(),
                 },
                 FieldEncounterCatalogIssue::UnknownSpecies {
                     map_name: "route_29".to_string(),
@@ -1676,6 +1747,27 @@ mod tests {
     }
 
     #[test]
+    fn wild_encounter_rejects_malformed_runtime_species() {
+        let mut data = sample_data();
+        data.grass.as_mut().expect("grass").morning[0].species = "PID GEY".to_string();
+
+        assert_eq!(
+            select_wild_encounter(
+                &data,
+                &slot_tables(),
+                EncounterSurface::Grass,
+                TimeOfDay::Morning,
+                30,
+                0,
+            ),
+            Err(EncounterError::InvalidEncounterSpecies {
+                map_name: "ROUTE_29".to_string(),
+                species: "PID GEY".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn sweet_scent_selects_from_exact_surface_table_without_rate_roll() {
         let data = sample_data();
         let roll = select_sweet_scent_encounter(
@@ -1739,6 +1831,21 @@ mod tests {
             select_headbutt_encounter(&data, 0, 2, 0, 8, 54).expect("missed headbutt roll");
         assert_eq!(missed.resolved, None);
         assert_eq!(missed.entry_roll, None);
+    }
+
+    #[test]
+    fn field_encounter_rejects_malformed_runtime_species() {
+        let mut data = field_data();
+        data.headbutt.as_mut().expect("headbutt").rare[0].species = "PIN ECO".to_string();
+
+        assert_eq!(
+            select_headbutt_encounter(&data, 0, 2, 0, 2, 54),
+            Err(EncounterError::InvalidFieldEncounterSpecies {
+                map_name: "Route29".to_string(),
+                kind: FieldEncounterKind::Headbutt,
+                species: "PIN ECO".to_string(),
+            })
+        );
     }
 
     #[test]

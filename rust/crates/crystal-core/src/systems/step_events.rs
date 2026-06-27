@@ -45,12 +45,12 @@ pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssu
     if rules.poison_step_interval == 0 {
         issues.push(StepEventRulesIssue::MissingPoisonStepInterval);
     }
-    if rules.poison_status.trim().is_empty() || rules.poison_status.trim() != rules.poison_status {
+    if !is_exact_step_event_token(&rules.poison_status) {
         issues.push(StepEventRulesIssue::InvalidPoisonStatus {
             poison_status: rules.poison_status.clone(),
         });
     }
-    if rules.egg_nickname.trim().is_empty() || rules.egg_nickname.trim() != rules.egg_nickname {
+    if !is_exact_step_event_token(&rules.egg_nickname) {
         issues.push(StepEventRulesIssue::InvalidEggNickname {
             egg_nickname: rules.egg_nickname.clone(),
         });
@@ -62,6 +62,14 @@ pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssu
         });
     }
     issues
+}
+
+fn is_exact_step_event_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,8 +278,8 @@ mod tests {
             poison_step_interval: 0,
             egg_step_trigger: 0x80,
             hatched_egg_happiness: 0x78,
-            poison_status: " POISON".to_string(),
-            egg_nickname: String::new(),
+            poison_status: "BAD POISON".to_string(),
+            egg_nickname: " EGG".to_string(),
             happiness_step_counter_mask: 1,
             happiness_step_counter_target: 2,
         };
@@ -280,10 +288,10 @@ mod tests {
             vec![
                 StepEventRulesIssue::MissingPoisonStepInterval,
                 StepEventRulesIssue::InvalidPoisonStatus {
-                    poison_status: " POISON".to_string(),
+                    poison_status: "BAD POISON".to_string(),
                 },
                 StepEventRulesIssue::InvalidEggNickname {
-                    egg_nickname: String::new(),
+                    egg_nickname: " EGG".to_string(),
                 },
                 StepEventRulesIssue::HappinessTargetOutsideMask { target: 2, mask: 1 },
             ],

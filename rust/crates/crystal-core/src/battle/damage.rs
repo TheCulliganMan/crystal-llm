@@ -139,7 +139,7 @@ pub fn weather_modifier_issues(
         .map(|move_data| move_data.effect.as_str())
         .collect();
     for entry in &modifiers.type_modifiers {
-        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
+        if !is_exact_battle_damage_token(&entry.weather) {
             issues.push(WeatherModifierIssue::InvalidWeather {
                 table: WeatherModifierTableKind::TypeModifiers,
                 weather: entry.weather.clone(),
@@ -152,13 +152,13 @@ pub fn weather_modifier_issues(
         );
     }
     for entry in &modifiers.move_effect_modifiers {
-        if entry.weather.trim().is_empty() || entry.weather.trim() != entry.weather {
+        if !is_exact_battle_damage_token(&entry.weather) {
             issues.push(WeatherModifierIssue::InvalidWeather {
                 table: WeatherModifierTableKind::MoveEffectModifiers,
                 weather: entry.weather.clone(),
             });
         }
-        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
+        if !is_exact_battle_damage_token(&entry.move_effect) {
             issues.push(WeatherModifierIssue::InvalidMoveEffect {
                 move_effect: entry.move_effect.clone(),
             });
@@ -223,6 +223,14 @@ pub enum TypeEffectivenessTableIssue {
     InvalidMultiplierDenominator {
         table: TypeEffectivenessTableKind,
     },
+    InvalidAttacker {
+        table: TypeEffectivenessTableKind,
+        attacker: PokemonType,
+    },
+    InvalidDefender {
+        table: TypeEffectivenessTableKind,
+        defender: PokemonType,
+    },
     UnknownAttacker {
         table: TypeEffectivenessTableKind,
         attacker: PokemonType,
@@ -273,7 +281,9 @@ pub fn type_effectiveness_table_issues(
             &declared_types,
             &mut issues,
         );
-        if !matchup_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
+        if type_effectiveness_entry_has_exact_pair(entry)
+            && !matchup_pairs.insert((entry.attacker.as_str(), entry.defender.as_str()))
+        {
             issues.push(TypeEffectivenessTableIssue::DuplicateMatchup {
                 table: TypeEffectivenessTableKind::Matchups,
                 attacker: entry.attacker.clone(),
@@ -300,7 +310,9 @@ pub fn type_effectiveness_table_issues(
             &declared_types,
             &mut issues,
         );
-        if !foresight_pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
+        if type_effectiveness_entry_has_exact_pair(entry)
+            && !foresight_pairs.insert((entry.attacker.as_str(), entry.defender.as_str()))
+        {
             issues.push(TypeEffectivenessTableIssue::DuplicateMatchup {
                 table: TypeEffectivenessTableKind::ForesightMatchups,
                 attacker: entry.attacker.clone(),
@@ -324,18 +336,33 @@ fn push_type_effectiveness_entry_issues(
     if declared_types.is_empty() {
         return;
     }
-    if !declared_types.contains(entry.attacker.as_str()) {
+    if !is_exact_battle_damage_token(entry.attacker.as_str()) {
+        issues.push(TypeEffectivenessTableIssue::InvalidAttacker {
+            table,
+            attacker: entry.attacker.clone(),
+        });
+    } else if !declared_types.contains(entry.attacker.as_str()) {
         issues.push(TypeEffectivenessTableIssue::UnknownAttacker {
             table,
             attacker: entry.attacker.clone(),
         });
     }
-    if !declared_types.contains(entry.defender.as_str()) {
+    if !is_exact_battle_damage_token(entry.defender.as_str()) {
+        issues.push(TypeEffectivenessTableIssue::InvalidDefender {
+            table,
+            defender: entry.defender.clone(),
+        });
+    } else if !declared_types.contains(entry.defender.as_str()) {
         issues.push(TypeEffectivenessTableIssue::UnknownDefender {
             table,
             defender: entry.defender.clone(),
         });
     }
+}
+
+fn type_effectiveness_entry_has_exact_pair(entry: &TypeEffectivenessEntry) -> bool {
+    is_exact_battle_damage_token(entry.attacker.as_str())
+        && is_exact_battle_damage_token(entry.defender.as_str())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,12 +432,20 @@ fn push_type_category_token_issue(
     type_id: &str,
     issues: &mut Vec<TypeCategoryIssue>,
 ) {
-    if type_id.trim().is_empty() || type_id.trim() != type_id {
+    if !is_exact_battle_damage_token(type_id) {
         issues.push(TypeCategoryIssue::InvalidToken {
             table,
             type_id: type_id.to_string(),
         });
     }
+}
+
+fn is_exact_battle_damage_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,12 +492,24 @@ pub enum DamageCalculationError {
         weather: Weather,
         move_type: PokemonType,
     },
+    InvalidWeatherModifierType {
+        move_type: PokemonType,
+    },
     MissingTypeEffectivenessTable,
+    InvalidTypeEffectivenessAttacker {
+        attacker: PokemonType,
+    },
+    InvalidTypeEffectivenessDefender {
+        defender: PokemonType,
+    },
     MissingTypeEffectiveness {
         attacker: PokemonType,
         defender: PokemonType,
     },
     MissingTypeCategoryTable,
+    InvalidTypeCategory {
+        move_type: PokemonType,
+    },
     MissingTypeCategory {
         move_type: PokemonType,
     },
@@ -476,6 +523,11 @@ pub fn is_physical_type(
         return Err(DamageCalculationError::MissingTypeCategoryTable);
     }
     let move_type = move_type.as_ref();
+    if !is_exact_battle_damage_token(move_type) {
+        return Err(DamageCalculationError::InvalidTypeCategory {
+            move_type: move_type.to_string(),
+        });
+    }
     if categories.physical.iter().any(|entry| entry == move_type) {
         return Ok(true);
     }
@@ -497,6 +549,16 @@ pub fn type_effectiveness(
     }
     let move_type = move_type.as_ref();
     let defender_type = defender_type.as_ref();
+    if !is_exact_battle_damage_token(move_type) {
+        return Err(DamageCalculationError::InvalidTypeEffectivenessAttacker {
+            attacker: move_type.to_string(),
+        });
+    }
+    if !is_exact_battle_damage_token(defender_type) {
+        return Err(DamageCalculationError::InvalidTypeEffectivenessDefender {
+            defender: defender_type.to_string(),
+        });
+    }
     table
         .matchups
         .iter()
@@ -663,6 +725,11 @@ pub fn apply_weather_type_modifier(
         return Ok(damage);
     };
     let move_type = move_type.as_ref();
+    if !is_exact_battle_damage_token(move_type) {
+        return Err(DamageCalculationError::InvalidWeatherModifierType {
+            move_type: move_type.to_string(),
+        });
+    }
     let Some(entry) = weather_modifiers
         .type_modifiers
         .iter()
@@ -816,22 +883,36 @@ mod tests {
         solarbeam.effect = "SOLARBEAM".to_string();
         moves.insert(solarbeam.name.clone(), solarbeam);
         let modifiers = WeatherModifiers {
-            type_modifiers: vec![WeatherTypeModifier {
-                weather: " WEATHER_RAIN".to_string(),
-                move_type: pokemon_type("WATER"),
-                multiplier: TypeMultiplier {
-                    numerator: 1,
-                    denominator: 0,
+            type_modifiers: vec![
+                WeatherTypeModifier {
+                    weather: " WEATHER_RAIN".to_string(),
+                    move_type: pokemon_type("WATER"),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 0,
+                    },
                 },
-            }],
-            move_effect_modifiers: vec![WeatherMoveEffectModifier {
-                weather: String::new(),
-                move_effect: " SOLARBEAM".to_string(),
-                multiplier: TypeMultiplier {
-                    numerator: 1,
-                    denominator: 0,
+                WeatherTypeModifier {
+                    weather: "WEATHER RAIN".to_string(),
+                    move_type: pokemon_type("WATER"),
+                    multiplier: TypeMultiplier::one(),
                 },
-            }],
+            ],
+            move_effect_modifiers: vec![
+                WeatherMoveEffectModifier {
+                    weather: String::new(),
+                    move_effect: " SOLARBEAM".to_string(),
+                    multiplier: TypeMultiplier {
+                        numerator: 1,
+                        denominator: 0,
+                    },
+                },
+                WeatherMoveEffectModifier {
+                    weather: "WEATHER SUN".to_string(),
+                    move_effect: "SOLAR BEAM".to_string(),
+                    multiplier: TypeMultiplier::one(),
+                },
+            ],
         };
         let unknown_effect_modifiers = WeatherModifiers {
             type_modifiers: vec![WeatherTypeModifier {
@@ -857,6 +938,10 @@ mod tests {
                     table: WeatherModifierTableKind::TypeModifiers,
                 },
                 WeatherModifierIssue::InvalidWeather {
+                    table: WeatherModifierTableKind::TypeModifiers,
+                    weather: "WEATHER RAIN".to_string(),
+                },
+                WeatherModifierIssue::InvalidWeather {
                     table: WeatherModifierTableKind::MoveEffectModifiers,
                     weather: String::new(),
                 },
@@ -865,6 +950,13 @@ mod tests {
                 },
                 WeatherModifierIssue::InvalidMultiplierDenominator {
                     table: WeatherModifierTableKind::MoveEffectModifiers,
+                },
+                WeatherModifierIssue::InvalidWeather {
+                    table: WeatherModifierTableKind::MoveEffectModifiers,
+                    weather: "WEATHER SUN".to_string(),
+                },
+                WeatherModifierIssue::InvalidMoveEffect {
+                    move_effect: "SOLAR BEAM".to_string(),
                 },
             ]
         );
@@ -986,8 +1078,14 @@ mod tests {
                 "NORMAL".to_string(),
                 "fire".to_string(),
                 " FIGHTING".to_string(),
+                "FIGHT ING".to_string(),
             ],
-            special: vec!["FIRE".to_string(), String::new(), "NORMAL".to_string()],
+            special: vec![
+                "FIRE".to_string(),
+                String::new(),
+                "WATER TYPE".to_string(),
+                "NORMAL".to_string(),
+            ],
         };
 
         assert_eq!(
@@ -998,8 +1096,16 @@ mod tests {
                     type_id: " FIGHTING".to_string(),
                 },
                 TypeCategoryIssue::InvalidToken {
+                    table: TypeCategoryTableKind::Physical,
+                    type_id: "FIGHT ING".to_string(),
+                },
+                TypeCategoryIssue::InvalidToken {
                     table: TypeCategoryTableKind::Special,
                     type_id: String::new(),
+                },
+                TypeCategoryIssue::InvalidToken {
+                    table: TypeCategoryTableKind::Special,
+                    type_id: "WATER TYPE".to_string(),
                 },
                 TypeCategoryIssue::Overlap {
                     type_id: "NORMAL".to_string(),
@@ -1043,6 +1149,21 @@ mod tests {
                     multiplier: TypeMultiplier::one(),
                 },
                 TypeEffectivenessEntry {
+                    attacker: pokemon_type("WA TER"),
+                    defender: pokemon_type("FIRE"),
+                    multiplier: TypeMultiplier::one(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("FIRE"),
+                    defender: pokemon_type("WA TER"),
+                    multiplier: TypeMultiplier::one(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("FIRE"),
+                    defender: pokemon_type("WA TER"),
+                    multiplier: TypeMultiplier::one(),
+                },
+                TypeEffectivenessEntry {
                     attacker: pokemon_type("FIRE"),
                     defender: pokemon_type("WATER"),
                     multiplier: TypeMultiplier::one(),
@@ -1062,6 +1183,16 @@ mod tests {
                     defender: pokemon_type("WATER"),
                     multiplier: TypeMultiplier::one(),
                 },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("NO RMAL"),
+                    defender: pokemon_type("NORMAL"),
+                    multiplier: TypeMultiplier::one(),
+                },
+                TypeEffectivenessEntry {
+                    attacker: pokemon_type("NORMAL"),
+                    defender: pokemon_type("WA TER"),
+                    multiplier: TypeMultiplier::one(),
+                },
             ],
         };
 
@@ -1079,6 +1210,18 @@ mod tests {
                 TypeEffectivenessTableIssue::UnknownAttacker {
                     table: TypeEffectivenessTableKind::Matchups,
                     attacker: pokemon_type("WATER"),
+                },
+                TypeEffectivenessTableIssue::InvalidAttacker {
+                    table: TypeEffectivenessTableKind::Matchups,
+                    attacker: pokemon_type("WA TER"),
+                },
+                TypeEffectivenessTableIssue::InvalidDefender {
+                    table: TypeEffectivenessTableKind::Matchups,
+                    defender: pokemon_type("WA TER"),
+                },
+                TypeEffectivenessTableIssue::InvalidDefender {
+                    table: TypeEffectivenessTableKind::Matchups,
+                    defender: pokemon_type("WA TER"),
                 },
                 TypeEffectivenessTableIssue::UnknownDefender {
                     table: TypeEffectivenessTableKind::Matchups,
@@ -1111,6 +1254,14 @@ mod tests {
                     table: TypeEffectivenessTableKind::ForesightMatchups,
                     attacker: pokemon_type("NORMAL"),
                     defender: pokemon_type("WATER"),
+                },
+                TypeEffectivenessTableIssue::InvalidAttacker {
+                    table: TypeEffectivenessTableKind::ForesightMatchups,
+                    attacker: pokemon_type("NO RMAL"),
+                },
+                TypeEffectivenessTableIssue::InvalidDefender {
+                    table: TypeEffectivenessTableKind::ForesightMatchups,
+                    defender: pokemon_type("WA TER"),
                 },
             ],
         );
@@ -1235,11 +1386,64 @@ mod tests {
     }
 
     #[test]
+    fn type_effectiveness_rejects_malformed_runtime_types() {
+        assert_eq!(
+            type_effectiveness(
+                &type_effectiveness_table(),
+                pokemon_type(" FIRE"),
+                pokemon_type("GRASS")
+            )
+            .expect_err("malformed attacker must not become missing effectiveness"),
+            DamageCalculationError::InvalidTypeEffectivenessAttacker {
+                attacker: pokemon_type(" FIRE"),
+            }
+        );
+        assert_eq!(
+            type_effectiveness(
+                &type_effectiveness_table(),
+                pokemon_type("FIRE"),
+                pokemon_type("GRA SS")
+            )
+            .expect_err("malformed defender must not become missing effectiveness"),
+            DamageCalculationError::InvalidTypeEffectivenessDefender {
+                defender: pokemon_type("GRA SS"),
+            }
+        );
+    }
+
+    #[test]
     fn physical_type_split_matches_gen_two() {
         assert!(is_physical_type(&type_categories(), pokemon_type("GHOST")).expect("known type"));
         assert!(is_physical_type(&type_categories(), pokemon_type("STEEL")).expect("known type"));
         assert!(!is_physical_type(&type_categories(), pokemon_type("FIRE")).expect("known type"));
         assert!(!is_physical_type(&type_categories(), pokemon_type("DARK")).expect("known type"));
+    }
+
+    #[test]
+    fn physical_type_rejects_malformed_runtime_type() {
+        assert_eq!(
+            is_physical_type(&type_categories(), pokemon_type("FI RE"))
+                .expect_err("malformed type must not become missing category"),
+            DamageCalculationError::InvalidTypeCategory {
+                move_type: pokemon_type("FI RE"),
+            }
+        );
+    }
+
+    #[test]
+    fn weather_modifier_rejects_malformed_runtime_type() {
+        assert_eq!(
+            apply_weather_type_modifier(
+                40,
+                Weather::Rain,
+                pokemon_type("WA TER"),
+                &weather_modifiers(),
+            )
+            .expect_err("malformed type must not become missing weather modifier"),
+            DamageCalculationError::InvalidWeatherModifierType {
+                move_type: pokemon_type("WA TER"),
+            }
+        );
     }
 
     #[test]

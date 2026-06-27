@@ -140,6 +140,8 @@ pub enum ScriptTextAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum ScriptTextCommandError {
+    #[error("script text command '{command}' is not exact pack syntax")]
+    InvalidCommand { command: String },
     #[error("unknown script text command '{command}'")]
     UnknownCommand { command: String },
     #[error("script text command '{command}' is missing a text label")]
@@ -180,13 +182,13 @@ pub fn script_text_command_issues(
         }
     } else if SCRIPT_TEXT_LABEL_COMMANDS.contains(&command.command.as_str()) {
         match command.text_label.as_deref() {
-            Some(text_label) if text_labels.contains(text_label) => {}
             Some(text_label) if !is_exact_nonempty_label(text_label) => {
                 issues.push(ScriptTextCommandError::InvalidTextLabel {
                     command: command.command.clone(),
                     text_label: text_label.to_string(),
                 });
             }
+            Some(text_label) if text_labels.contains(text_label) => {}
             Some(text_label) => issues.push(ScriptTextCommandError::UnknownTextLabel {
                 command: command.command.clone(),
                 text_label: text_label.to_string(),
@@ -195,6 +197,10 @@ pub fn script_text_command_issues(
                 command: command.command.clone(),
             }),
         }
+    } else if !is_exact_script_text_command_token(&command.command) {
+        issues.push(ScriptTextCommandError::InvalidCommand {
+            command: command.command.clone(),
+        });
     } else {
         issues.push(ScriptTextCommandError::UnknownCommand {
             command: command.command.clone(),
@@ -316,6 +322,11 @@ pub fn resolve_script_text_command(
     command: ScriptTextCommand,
     text_labels: &BTreeSet<String>,
 ) -> Result<ScriptTextAction, ScriptTextCommandError> {
+    if !is_exact_script_text_command_token(&command.command) {
+        return Err(ScriptTextCommandError::InvalidCommand {
+            command: command.command,
+        });
+    }
     match command.command.as_str() {
         "opentext" => {
             reject_text_label(&command)?;
@@ -529,7 +540,17 @@ fn reject_text_label(command: &ScriptTextCommand) -> Result<(), ScriptTextComman
 }
 
 fn is_exact_nonempty_label(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+}
+
+fn is_exact_script_text_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -605,9 +626,39 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_text_command_issues(&command("writetext", Some("Greeting Text")), &labels()),
+            vec![ScriptTextCommandError::InvalidTextLabel {
+                command: "writetext".to_string(),
+                text_label: "Greeting Text".to_string(),
+            }]
+        );
+        let labels_with_invalid = BTreeSet::from(["Greeting Text".to_string()]);
+        assert_eq!(
+            script_text_command_issues(
+                &command("writetext", Some("Greeting Text")),
+                &labels_with_invalid,
+            ),
+            vec![ScriptTextCommandError::InvalidTextLabel {
+                command: "writetext".to_string(),
+                text_label: "Greeting Text".to_string(),
+            }]
+        );
+        assert_eq!(
             script_text_command_issues(&command("text", Some("GreetingText")), &labels()),
             vec![ScriptTextCommandError::UnknownCommand {
                 command: "text".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("JumpText", Some("GreetingText")), &labels()),
+            vec![ScriptTextCommandError::InvalidCommand {
+                command: "JumpText".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("jump text", Some("GreetingText")), &labels()),
+            vec![ScriptTextCommandError::InvalidCommand {
+                command: "jump text".to_string(),
             }]
         );
     }
@@ -658,9 +709,25 @@ mod tests {
             Err(ScriptTextCommandError::InvalidTextLabel { .. })
         ));
         assert!(matches!(
+            resolve_script_text_command(command("writetext", Some("Greeting Text")), &labels()),
+            Err(ScriptTextCommandError::InvalidTextLabel { .. })
+        ));
+        assert!(matches!(
             resolve_script_text_command(command("waitbutton", Some("GreetingText")), &labels()),
             Err(ScriptTextCommandError::UnexpectedTextLabel { .. })
         ));
+        assert_eq!(
+            resolve_script_text_command(command("JumpText", Some("GreetingText")), &labels()),
+            Err(ScriptTextCommandError::InvalidCommand {
+                command: "JumpText".to_string(),
+            })
+        );
+        assert_eq!(
+            resolve_script_text_command(command("text", Some("GreetingText")), &labels()),
+            Err(ScriptTextCommandError::UnknownCommand {
+                command: "text".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -800,7 +867,7 @@ mod tests {
     #[test]
     fn script_text_body_issues_validate_exact_label_and_command_arity() {
         let body = ScriptTextBody {
-            label: " OtherText".to_string(),
+            label: "Other Text".to_string(),
             commands: vec![
                 ScriptTextBodyCommand {
                     command: "text".to_string(),
@@ -819,11 +886,11 @@ mod tests {
             script_text_body_issues("GreetingText", &body),
             vec![
                 ScriptTextBodyIssue::InvalidLabel {
-                    label: " OtherText".to_string(),
+                    label: "Other Text".to_string(),
                 },
                 ScriptTextBodyIssue::LabelMismatch {
                     key: "GreetingText".to_string(),
-                    label: " OtherText".to_string(),
+                    label: "Other Text".to_string(),
                 },
                 ScriptTextBodyIssue::MalformedCommand {
                     command_index: 0,
@@ -859,7 +926,7 @@ mod tests {
     #[test]
     fn script_menu_definition_issues_validate_exact_label_and_command_arity() {
         let menu = ScriptMenuDefinition {
-            label: " OtherMenu".to_string(),
+            label: "Other Menu".to_string(),
             commands: vec![
                 ScriptMenuCommand {
                     command: "db".to_string(),
@@ -878,11 +945,11 @@ mod tests {
             script_menu_definition_issues("ChoiceMenu", &menu),
             vec![
                 ScriptMenuDefinitionIssue::InvalidLabel {
-                    label: " OtherMenu".to_string(),
+                    label: "Other Menu".to_string(),
                 },
                 ScriptMenuDefinitionIssue::LabelMismatch {
                     key: "ChoiceMenu".to_string(),
-                    label: " OtherMenu".to_string(),
+                    label: "Other Menu".to_string(),
                 },
                 ScriptMenuDefinitionIssue::MalformedCommand {
                     command_index: 0,

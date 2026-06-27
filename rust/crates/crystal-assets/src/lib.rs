@@ -4,160 +4,158 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use crystal_core::battle::capture::{
-    capture_rules_issues, capture_wobble_probability_issues, CaptureBallRuleIssue,
-    CaptureRulesIssue, CaptureWobbleProbability, CaptureWobbleProbabilityIssue,
+    CaptureBallRuleIssue, CaptureRulesIssue, CaptureWobbleProbability,
+    CaptureWobbleProbabilityIssue, capture_rules_issues, capture_wobble_probability_issues,
 };
 use crystal_core::battle::damage::{
-    type_category_issues, type_effectiveness_table_issues, weather_modifier_issues, TypeCategories,
-    TypeCategoryIssue, TypeEffectivenessTable, TypeEffectivenessTableIssue,
-    TypeEffectivenessTableKind, WeatherModifierIssue, WeatherModifiers,
+    TypeCategories, TypeCategoryIssue, TypeEffectivenessTable, TypeEffectivenessTableIssue,
+    TypeEffectivenessTableKind, WeatherModifierIssue, WeatherModifiers, type_category_issues,
+    type_effectiveness_table_issues, weather_modifier_issues,
 };
 use crystal_core::battle::start::{
-    static_wild_battle_start, trainer_battle_start, wild_battle_start_from_encounter,
     StaticWildBattleRequest, StaticWildBattleStart, TrainerBattleRequest, TrainerBattleStartStatus,
-    WildBattleStart,
+    WildBattleStart, static_wild_battle_start, trainer_battle_start,
+    wild_battle_start_from_encounter,
 };
 use crystal_core::battle::stats::{
-    battle_stat_multiplier_table_issues, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
+    BattleStatMultiplierTableIssue, BattleStatMultiplierTables, battle_stat_multiplier_table_issues,
 };
 use crystal_core::battle::turn::{
-    move_priority_table_issues, MovePriorityTable, MovePriorityTableIssue,
+    MovePriorityTable, MovePriorityTableIssue, move_priority_table_issues,
 };
 use crystal_core::map::{
-    map_event_section_command_arg_counts, map_event_section_command_issues,
-    map_script_section_command_arg_counts, map_script_section_command_issues, BackgroundEvent,
-    CoordEvent, MapAttributes, MapConnection, MapEventSectionCommand, MapEventSectionCommandIssue,
-    MapEvents, MapScene, MapSceneTable, MapScriptSectionCommand, MapScriptSectionCommandIssue,
-    ObjectEvent, WarpEvent,
+    BackgroundEvent, CoordEvent, MapAttributes, MapConnection, MapEventSectionCommand,
+    MapEventSectionCommandIssue, MapEvents, MapScene, MapSceneTable, MapScriptSectionCommand,
+    MapScriptSectionCommandIssue, ObjectEvent, WarpEvent, map_event_section_command_arg_counts,
+    map_event_section_command_issues, map_script_section_command_arg_counts,
+    map_script_section_command_issues,
 };
 #[cfg(test)]
 use crystal_core::models::FrontpicAnimCommand;
 pub use crystal_core::models::RuntimePokedexEntry;
 use crystal_core::models::{
+    BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommandIssue,
+    FrontpicAnimProgram, ITEM_POCKET_BALL, Item, MenuIconCatalogIssue, Move, MoveNameCatalogIssue,
+    MovePayloadIssue, PcStringCatalogIssue, PokedexEntryCatalogIssue, PokegearLandmarkIssue,
+    PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies, RuntimeBundleIssue,
+    SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
     battle_animation_catalog_issues, create_pokemon_from_known_dvs, frontpic_anim_catalog_issues,
     menu_icon_catalog_issues, move_name_catalog_issues, move_payload_issues,
     pc_string_catalog_issues, pokedex_entry_catalog_issues, pokegear_landmark_issues,
     pokegear_town_map_palette_issues, runtime_bundle_issues, sprite_palette_default_issues,
-    trainer_catalog_issues, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue,
-    FrontpicAnimCommandIssue, FrontpicAnimProgram, Item, MenuIconCatalogIssue, Move,
-    MoveNameCatalogIssue, MovePayloadIssue, PcStringCatalogIssue, PokedexEntryCatalogIssue,
-    PokegearLandmarkIssue, PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies,
-    RuntimeBundleIssue, SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
-    ITEM_POCKET_BALL,
+    trainer_catalog_issues,
 };
 pub use crystal_core::models::{PokegearLandmark, PokegearLandmarksPayload};
+use crystal_core::multiplayer::fnv1a32_bytes;
 use crystal_core::random::Random;
+use crystal_core::save::SaveModpackIdentity;
 use crystal_core::systems::battle_escape::{
-    battle_escape_rules_issues, BattleEscapeRules, BattleEscapeRulesIssue,
+    BattleEscapeRules, BattleEscapeRulesIssue, battle_escape_rules_issues,
 };
 use crystal_core::systems::battle_items::{
-    item_payload_issues, item_reference_issues, ItemPayloadIssue, ItemReferenceIssue,
+    ItemPayloadIssue, ItemReferenceIssue, item_payload_issues, item_reference_issues,
 };
 use crystal_core::systems::battle_rewards::{
-    battle_reward_rules_issues, BattleRewardRules, BattleRewardRulesIssue,
+    BattleRewardRules, BattleRewardRulesIssue, battle_reward_rules_issues,
 };
 use crystal_core::systems::economy::{
-    script_economy_command_issues, CurrencyCatalog, ScriptEconomyCommand,
-    ScriptEconomyCommandIssue, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
-    SCRIPT_MONEY_CHECK_COMMANDS, SCRIPT_MONEY_MUTATION_COMMANDS,
+    CurrencyCatalog, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
+    SCRIPT_MONEY_CHECK_COMMANDS, SCRIPT_MONEY_MUTATION_COMMANDS, ScriptEconomyCommand,
+    ScriptEconomyCommandIssue, script_economy_command_issues,
 };
 use crystal_core::systems::evolution::{
-    evolution_table_issues, EvolutionEntry, EvolutionTable, EvolutionTableIssue,
+    EvolutionEntry, EvolutionTable, EvolutionTableIssue, evolution_table_issues,
 };
+use crystal_core::systems::experience::{GrowthRateCatalogIssue, growth_rate_catalog_issues};
 use crystal_core::systems::field_items::{
-    fruit_tree_catalog_issues, script_field_pickup_issues, FruitTreeCatalog, FruitTreeCatalogIssue,
-    ScriptFieldPickup, ScriptFieldPickupIssue, SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS,
-    SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS,
-    SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
-};
-use crystal_core::systems::field_moves::{
-    field_move_catalog_issues, FieldMoveCatalog, FieldMoveCatalogIssue,
+    FruitTreeCatalog, FruitTreeCatalogIssue, SCRIPT_FIELD_FRUIT_TREE_PICKUP_COMMANDS,
+    SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
+    SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS, ScriptFieldPickup, ScriptFieldPickupIssue,
+    fruit_tree_catalog_issues, script_field_pickup_issues,
 };
 #[cfg(test)]
 use crystal_core::systems::field_moves::{FieldItemRule, FieldMoveRule};
+use crystal_core::systems::field_moves::{
+    FieldMoveCatalog, FieldMoveCatalogIssue, field_move_catalog_issues,
+};
 pub use crystal_core::systems::flee_mons::FleeMonTables;
-use crystal_core::systems::flee_mons::{flee_mon_catalog_issues, FleeMonCatalogIssue};
+use crystal_core::systems::flee_mons::{FleeMonCatalogIssue, flee_mon_catalog_issues};
 use crystal_core::systems::gift_pokemon::{
-    gift_pokemon_script_issues, GiftPokemonScript, GiftPokemonScriptIssue, NO_ITEM,
+    GiftPokemonScript, GiftPokemonScriptIssue, NO_ITEM, gift_pokemon_script_issues,
 };
 use crystal_core::systems::learnsets::{
-    learnset_catalog_issues, LearnsetCatalogIssue, LearnsetEntry, SpeciesLearnsets,
+    LearnsetCatalogIssue, LearnsetEntry, SpeciesLearnsets, learnset_catalog_issues,
 };
 use crystal_core::systems::phone::{
-    phone_contact_catalog_issues, script_phone_command_issues, PhoneContactCatalog,
-    PhoneContactCatalogIssue, ScriptPhoneCommand, ScriptPhoneCommandIssue, ScriptPhoneError,
-    SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_REGISTRATION_COMMANDS,
+    PhoneContactCatalog, PhoneContactCatalogIssue, SCRIPT_PHONE_CHECK_COMMANDS,
+    SCRIPT_PHONE_REGISTRATION_COMMANDS, ScriptPhoneCommand, ScriptPhoneCommandIssue,
+    ScriptPhoneError, phone_contact_catalog_issues, script_phone_command_issues,
 };
 use crystal_core::systems::runtime_pack::{
-    runtime_pack_presence_issues, RuntimePackPresenceIssue, RuntimePackSections,
+    RuntimePackPresenceIssue, RuntimePackSections, runtime_pack_presence_issues,
 };
 use crystal_core::systems::script_audio::{
-    script_audio_command_issues, ScriptAudioCommand, ScriptAudioCommandIssue,
+    ScriptAudioCommand, ScriptAudioCommandIssue, script_audio_command_issues,
 };
 use crystal_core::systems::script_blocks::{
-    script_block_change_issues, ScriptBlockChange, ScriptBlockChangeIssue,
+    ScriptBlockChange, ScriptBlockChangeIssue, script_block_change_issues,
 };
 use crystal_core::systems::script_control::{
-    script_control_command_issues, ScriptControlCommand, ScriptControlCommandIssue,
+    ScriptControlCommand, ScriptControlCommandIssue, script_control_command_issues,
 };
 use crystal_core::systems::script_flags::{
-    is_known_script_flag_command, script_flag_command_issues, ScriptFlagCommand,
-    ScriptFlagCommandIssue,
+    ScriptFlagCommand, ScriptFlagCommandIssue, is_known_script_flag_command,
+    script_flag_command_issues,
 };
 use crystal_core::systems::script_items::{
-    script_item_access_issues, script_item_grant_issues, ScriptItemAccess, ScriptItemAccessIssue,
-    ScriptItemGrant, ScriptItemGrantIssue,
+    ScriptItemAccess, ScriptItemAccessIssue, ScriptItemGrant, ScriptItemGrantIssue,
+    script_item_access_issues, script_item_grant_issues,
 };
 use crystal_core::systems::script_objects::{
-    is_hideable_object_event_flag, is_known_script_movement_command, script_movement_step_issues,
-    script_object_command_issues, ScriptMovement, ScriptMovementStep, ScriptMovementStepIssue,
-    ScriptObjectCommand, ScriptObjectCommandIssue, SCRIPT_MOVEMENT_DIRECTION_COMMANDS,
-    SCRIPT_MOVEMENT_NO_ARG_COMMANDS, SCRIPT_OBJECT_COORDINATE_COMMANDS,
-    SCRIPT_OBJECT_DIRECTION_COMMANDS, SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS,
-    SCRIPT_OBJECT_EMOTE_COMMANDS, SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS,
-    SCRIPT_OBJECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS,
-    SCRIPT_OBJECT_TARGET_COMMANDS, SCRIPT_OBJECT_VISIBILITY_COMMANDS,
-};
-use crystal_core::systems::script_runtime::{
-    initialize_events_issues, script_runtime_command_arg_counts, script_runtime_command_issues,
-    story_event_script_constant_issues, InitializeEventsIssue, ScriptRuntimeCommand,
-    ScriptRuntimeCommandError, ScriptRuntimeCommandIssue, ScriptRuntimeReferenceCatalog,
-    StoryEventScriptConstantIssue,
+    SCRIPT_MOVEMENT_DIRECTION_COMMANDS, SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
+    SCRIPT_OBJECT_COORDINATE_COMMANDS, SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS,
+    SCRIPT_OBJECT_DIRECTION_COMMANDS, SCRIPT_OBJECT_EMOTE_COMMANDS,
+    SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS, SCRIPT_OBJECT_MOVEMENT_COMMANDS,
+    SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS, SCRIPT_OBJECT_TARGET_COMMANDS,
+    SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement, ScriptMovementStep, ScriptMovementStepIssue,
+    ScriptObjectCommand, ScriptObjectCommandIssue, is_hideable_object_event_flag,
+    is_known_script_movement_command, script_movement_step_issues, script_object_command_issues,
 };
 pub use crystal_core::systems::script_runtime::{
     InitializeEventsConfig, StoryEventScriptConstants,
 };
+use crystal_core::systems::script_runtime::{
+    InitializeEventsIssue, ScriptRuntimeCommand, ScriptRuntimeCommandError,
+    ScriptRuntimeCommandIssue, ScriptRuntimeReferenceCatalog, StoryEventScriptConstantIssue,
+    initialize_events_issues, script_runtime_command_arg_counts, script_runtime_command_issues,
+    story_event_script_constant_issues,
+};
 use crystal_core::systems::script_scenes::{
-    script_scene_command_issues, ScriptSceneCommand, ScriptSceneCommandIssue,
     SCRIPT_SCENE_CHECK_COMMANDS, SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS,
-    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS,
+    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS, ScriptSceneCommand, ScriptSceneCommandIssue,
+    script_scene_command_issues,
 };
 use crystal_core::systems::script_text::{
+    AsmTextCatalogIssue, SCRIPT_TEXT_LABEL_COMMANDS, SCRIPT_TEXT_NO_LABEL_COMMANDS,
+    ScriptMenuCommand, ScriptMenuDefinition, ScriptMenuDefinitionIssue, ScriptTextBody,
+    ScriptTextBodyCommand, ScriptTextBodyIssue, ScriptTextCommand, ScriptTextCommandError,
     asm_text_catalog_issues, menu_definition_command_arg_counts, script_menu_definition_issues,
     script_text_body_issues, script_text_command_issues, text_body_command_arg_counts,
-    AsmTextCatalogIssue, ScriptMenuCommand, ScriptMenuDefinition, ScriptMenuDefinitionIssue,
-    ScriptTextBody, ScriptTextBodyCommand, ScriptTextBodyIssue, ScriptTextCommand,
-    ScriptTextCommandError, SCRIPT_TEXT_LABEL_COMMANDS, SCRIPT_TEXT_NO_LABEL_COMMANDS,
 };
 use crystal_core::systems::script_variables::{
-    script_variable_command_issues, ScriptVariableCommand, ScriptVariableCommandIssue,
+    ScriptVariableCommand, ScriptVariableCommandIssue, script_variable_command_issues,
 };
 use crystal_core::systems::script_warps::{
-    script_map_command_issues, ScriptMapCommand, ScriptMapCommandError,
     SCRIPT_MAP_FACING_WARP_COMMANDS, SCRIPT_MAP_NEW_LOAD_COMMANDS, SCRIPT_MAP_NO_PAYLOAD_COMMANDS,
-    SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS,
+    SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS, ScriptMapCommand,
+    ScriptMapCommandError, script_map_command_issues,
 };
 use crystal_core::systems::shop::{
-    mart_catalog_issues, script_shop_command_issues, MartCatalog, MartCatalogIssue,
-    ScriptShopCommand, ScriptShopCommandIssue, ShopError, SCRIPT_SHOP_COMMANDS,
+    MartCatalog, MartCatalogIssue, SCRIPT_SHOP_COMMANDS, ScriptShopCommand, ScriptShopCommandIssue,
+    ShopError, mart_catalog_issues, script_shop_command_issues,
 };
 pub use crystal_core::systems::special_routines::RuntimeSpawnPointRef as RuntimeSpawnPoint;
 use crystal_core::systems::special_routines::{
-    battle_tower_rules_issues, buena_password_category_issues, buena_prize_definition_issues,
-    bug_contest_config_issues, dratini_move_set_issues, happiness_data_issues,
-    kurt_apricorn_recipe_issues, magikarp_length_table_issues, oak_rating_table_issues,
-    odd_egg_definition_issues, roaming_pokemon_definition_issues,
-    runtime_spawn_point_catalog_issues, shuckie_gift_issues, special_routine_catalog_issues,
     BattleTowerRules, BattleTowerRulesIssue, BuenaPasswordCategoryDefinition,
     BuenaPasswordCategoryIssue, BuenaPrizeDefinition, BuenaPrizeDefinitionIssue, BugContestConfig,
     BugContestConfigIssue, DratiniMoveSetDefinition, DratiniMoveSetIssue, HappinessData,
@@ -165,29 +163,34 @@ use crystal_core::systems::special_routines::{
     MagikarpLengthTableIssue, OakRatingEntry, OakRatingTableIssue, OddEggDefinition,
     OddEggDefinitionIssue, RoamingPokemonDefinition, RoamingPokemonDefinitionIssue,
     RuntimeSpawnPointCatalogIssue, ShuckieGiftDefinition, ShuckieGiftIssue,
-    SpecialRoutineCatalogIssue,
+    SpecialRoutineCatalogIssue, battle_tower_rules_issues, buena_password_category_issues,
+    buena_prize_definition_issues, bug_contest_config_issues, dratini_move_set_issues,
+    happiness_data_issues, kurt_apricorn_recipe_issues, magikarp_length_table_issues,
+    oak_rating_table_issues, odd_egg_definition_issues, roaming_pokemon_definition_issues,
+    runtime_spawn_point_catalog_issues, shuckie_gift_issues, special_routine_catalog_issues,
 };
 use crystal_core::systems::step_events::{
-    step_event_rules_issues, StepEventRules, StepEventRulesIssue,
+    StepEventRules, StepEventRulesIssue, step_event_rules_issues,
 };
 use crystal_core::world::collision::{
-    can_enter_tile, is_permission_passable, permissions, sample_collision, MetatileCollision,
-    PlayerTraversalState, TilesetCollision,
+    MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile,
+    is_permission_passable, permissions, sample_collision,
 };
 use crystal_core::world::encounters::{
-    encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
-    wild_encounter_catalog_issues, EncounterMusicModifierIssue, EncounterMusicModifiers,
-    EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
-    FieldEncounterData, WildEncounterCatalogIssue, WildEncounterData,
+    EncounterMusicModifierIssue, EncounterMusicModifiers, EncounterSlotTableIssue,
+    EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue, FieldEncounterData,
+    WildEncounterCatalogIssue, WildEncounterData, encounter_music_modifier_issues,
+    encounter_slot_table_issues, field_encounter_catalog_issues, wild_encounter_catalog_issues,
 };
-use crystal_core::world::fishing::{fishing_catalog_issues, FishingCatalog, FishingCatalogIssue};
+use crystal_core::world::fishing::{FishingCatalog, FishingCatalogIssue, fishing_catalog_issues};
 pub use crystal_core::world::map::RuntimeMapMetadata;
 use crystal_core::world::map::{
-    runtime_map_metadata_issues, Direction, OverworldMapData, RuntimeMapMetadataIssue, TilePosition,
+    Direction, OverworldMapData, RuntimeMapMetadataIssue, TilePosition, runtime_map_metadata_issues,
 };
 use crystal_core::world::session::{
-    object_event_initial_facing, warp_tile_position, ConnectionDestination, ConnectionTransition,
-    ConnectionTrigger, WarpDestination, WarpTransition, WarpTrigger, WildEncounterRoll,
+    ConnectionDestination, ConnectionTransition, ConnectionTrigger, WarpDestination,
+    WarpTransition, WarpTrigger, WildEncounterRoll, object_event_initial_facing,
+    warp_tile_position,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -237,18 +240,18 @@ pub mod modpack {
     };
     pub use crystal_core::world::fishing::FishingCatalog;
 
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub use super::write_compiled_game_pack_for_tests;
     pub use super::{
-        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
-        CompiledContentPack, CompiledGamePack, CompiledModpack, ContentPack, ContentPackCategory,
-        ContentPackFiles, ContentPackIndex, GameDataSet, LoadedCompiledGamePack, MapAccessRule,
-        MapModule, ModpackAudioAsset, ModpackAudioKind, ModpackAudioSource, ModpackCompileOptions,
+        COMPILED_GAME_PACK_EXTENSION, COMPILED_GAME_PACK_FORMAT_VERSION, CompiledContentPack,
+        CompiledGamePack, CompiledModpack, ContentPack, ContentPackCategory, ContentPackFiles,
+        ContentPackIndex, GameDataSet, LoadedCompiledGamePack, MapAccessRule, MapModule,
+        ModpackAudioAsset, ModpackAudioKind, ModpackAudioSource, ModpackCompileOptions,
         ModpackCompileReport, ModpackCompiler, ModpackManifest, ModpackMetadata, ModpackPayload,
         PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart, ProgressionGrants,
         ProgressionRequirements, ProgressionRule, VerificationError, VerificationSeverity,
-        COMPILED_GAME_PACK_EXTENSION, COMPILED_GAME_PACK_FORMAT_VERSION,
+        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
     };
-    #[cfg(any(test, feature = "test-fixtures"))]
-    pub use super::write_compiled_game_pack_for_tests;
     pub use crystal_core::models::{Trainer, TrainerCatalog};
     pub use crystal_core::systems::special_routines::{
         BattleTowerRules, BuenaPasswordCategoryDefinition, BuenaPrizeDefinition, BugContestConfig,
@@ -261,7 +264,11 @@ pub mod modpack {
 
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
 pub const COMPILED_GAME_PACK_EXTENSION: &str = "crystalpack";
-pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 1;
+pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 2;
+const COMPILED_GAME_PACK_VERSION_OFFSET: usize = COMPILED_GAME_PACK_MAGIC.len();
+const COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET: usize = COMPILED_GAME_PACK_VERSION_OFFSET + 2;
+const COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET: usize = COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 4;
+const COMPILED_GAME_PACK_HEADER_LEN: usize = COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -345,10 +352,7 @@ impl AssetRoot {
     }
 
     #[cfg(test)]
-    fn load_compiled_game_pack(
-        &self,
-        relative_path: impl AsRef<Path>,
-    ) -> Result<CompiledGamePack> {
+    fn load_compiled_game_pack(&self, relative_path: impl AsRef<Path>) -> Result<CompiledGamePack> {
         read_compiled_game_pack(resolve_compiled_game_pack_data_path(
             self,
             relative_path.as_ref(),
@@ -1329,59 +1333,6 @@ impl ModpackAudioAsset {
         Ok(asset)
     }
 
-    pub fn from_content_pack_path(path: impl Into<String>) -> Result<Self> {
-        let path = path.into();
-        let asset_path = Path::new(&path);
-        let stem = asset_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|stem| !stem.trim().is_empty())
-            .with_context(|| format!("audio file path '{path}' must have a file stem"))?;
-        let parent = asset_path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .with_context(|| {
-                format!("audio file path '{path}' must live under music, sfx, or cries")
-            })?;
-        match parent {
-            "music" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::Music),
-            "sfx" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::SoundEffect),
-            "cries" => Self::from_content_pack_path_parts(stem.to_string(), path, ModpackAudioKind::Cry),
-            _ => anyhow::bail!("audio file path '{path}' must live under music, sfx, or cries"),
-        }
-    }
-
-    fn from_content_pack_path_parts(
-        id: String,
-        path: String,
-        kind: ModpackAudioKind,
-    ) -> Result<Self> {
-        let extension = Path::new(&path)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .with_context(|| format!("audio file path '{path}' must have a file extension"))?;
-        let source = match extension {
-            "mid" => ModpackAudioSource::Midi,
-            "pcm" => ModpackAudioSource::Pcm,
-            _ => anyhow::bail!(
-                "audio asset '{}' has unsupported extension '{}'; expected .mid or explicit .pcm metadata",
-                id,
-                extension
-            ),
-        };
-        let asset = Self {
-            id,
-            path,
-            kind,
-            source,
-            sample_rate_hz: None,
-            channels: None,
-        };
-        asset.validate()?;
-        Ok(asset)
-    }
-
     pub fn validate(&self) -> Result<()> {
         if self.id.trim().is_empty() {
             anyhow::bail!("audio asset id is required");
@@ -1402,6 +1353,8 @@ impl ModpackAudioAsset {
             );
         }
         let path = Path::new(&self.path);
+        validate_modpack_audio_asset_path(&self.id, path)?;
+        validate_modpack_audio_asset_directory(&self.id, self.kind, path)?;
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -1454,6 +1407,48 @@ impl ModpackAudioAsset {
             }
         }
     }
+}
+
+fn validate_modpack_audio_asset_path(id: &str, path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        anyhow::bail!("audio asset '{id}' path must be relative to assets/data");
+    }
+    let path_text = path.to_string_lossy();
+    if path_text.starts_with("assets/data/") {
+        anyhow::bail!("audio asset '{id}' path must not include the assets/data prefix");
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!("audio asset '{id}' path must not traverse parent directories");
+    }
+    Ok(())
+}
+
+fn validate_modpack_audio_asset_directory(
+    id: &str,
+    kind: ModpackAudioKind,
+    path: &Path,
+) -> Result<()> {
+    let expected_directory = match kind {
+        ModpackAudioKind::Music => "music",
+        ModpackAudioKind::SoundEffect => "sfx",
+        ModpackAudioKind::Cry => "cries",
+    };
+    let actual_directory = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("audio asset '{id}' path must live under {expected_directory}")
+        })?;
+    if actual_directory != expected_directory {
+        anyhow::bail!(
+            "audio asset '{id}' path must live under {expected_directory}, found {actual_directory}"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1662,6 +1657,10 @@ impl CompiledGamePack {
         &self.report
     }
 
+    pub fn runtime_modpack_id(&self) -> Result<String> {
+        compiled_game_pack_runtime_modpack_id(&self.report)
+    }
+
     pub fn into_parts(self) -> (u16, GameDataSet, ModpackCompileReport) {
         (self.format_version, self.data, self.report)
     }
@@ -1685,6 +1684,14 @@ impl LoadedCompiledGamePack {
 
     pub fn pack(&self) -> &CompiledGamePack {
         &self.pack
+    }
+
+    pub fn save_modpack_identity(&self) -> Result<SaveModpackIdentity> {
+        SaveModpackIdentity::from_compiled_pack_bytes(
+            self.pack.runtime_modpack_id()?,
+            self.bytes.as_slice(),
+        )
+        .map_err(anyhow::Error::from)
     }
 
     pub fn into_parts(self) -> (PathBuf, Vec<u8>, CompiledGamePack) {
@@ -2040,10 +2047,42 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         }
     }
     diagnostics.extend(
+        growth_rate_catalog_issues(&data.growth_rates)
+            .into_iter()
+            .map(growth_rate_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
         learnset_catalog_issues(&data.pokemon, &data.learnsets, &item_ids, &move_ids)
             .into_iter()
             .map(learnset_catalog_issue_diagnostic),
     );
+}
+
+fn growth_rate_catalog_issue_diagnostic(issue: GrowthRateCatalogIssue) -> VerificationError {
+    match issue {
+        GrowthRateCatalogIssue::InvalidCatalogId { growth_rate } => VerificationError::error(
+            "invalid_growth_rate_id",
+            &growth_rate,
+            format!(
+                "growth-rate catalog ids must be exact non-empty tokens, found {growth_rate:?}"
+            ),
+        ),
+        GrowthRateCatalogIssue::MismatchedCurveId {
+            growth_rate,
+            declared_id,
+        } => VerificationError::error(
+            "growth_rate_id_mismatch",
+            &growth_rate,
+            format!(
+                "growth-rate catalog key '{growth_rate}' does not match curve id '{declared_id}'"
+            ),
+        ),
+        GrowthRateCatalogIssue::ZeroDenominator { growth_rate } => VerificationError::error(
+            "invalid_growth_rate_denominator",
+            &growth_rate,
+            "growth-rate curves must declare a nonzero denominator",
+        ),
+    }
 }
 
 fn move_payload_issue_diagnostic(move_id: &str, issue: MovePayloadIssue) -> VerificationError {
@@ -2152,7 +2191,15 @@ fn learnset_catalog_issue_diagnostic(issue: LearnsetCatalogIssue) -> Verificatio
 fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
     for (item_id, item) in &data.items {
+        let payload_issues = item_payload_issues(item);
+        let has_invalid_capture_ball_id = payload_issues.iter().any(|issue| {
+            matches!(
+                issue,
+                ItemPayloadIssue::MissingScriptName | ItemPayloadIssue::InvalidScriptName { .. }
+            )
+        });
         if item.pocket == ITEM_POCKET_BALL
+            && !has_invalid_capture_ball_id
             && !data
                 .capture_rules
                 .ball_rules
@@ -2171,7 +2218,7 @@ fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
                 ),
             ));
         }
-        for issue in item_payload_issues(item) {
+        for issue in payload_issues {
             diagnostics.push(item_payload_issue_diagnostic(item_id, item, issue));
         }
         for issue in item_reference_issues(item, &move_ids) {
@@ -2782,12 +2829,21 @@ fn verify_audio_assets(
     data: &GameDataSet,
     diagnostics: &mut Vec<VerificationError>,
 ) {
+    let mut seen_audio_ids = BTreeSet::new();
     for audio_asset in &data.audio {
         if let Err(error) = audio_asset.validate() {
             diagnostics.push(VerificationError::error(
                 "invalid_audio_asset",
                 &audio_asset.id,
                 error.to_string(),
+            ));
+            continue;
+        }
+        if !seen_audio_ids.insert(audio_asset.id.clone()) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_audio_asset",
+                &audio_asset.id,
+                "audio asset ids must be unique across music, sound effects, and cries",
             ));
             continue;
         }
@@ -2843,7 +2899,13 @@ fn verify_map_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>
         let Some(music_id) = module.attributes.music.as_deref() else {
             continue;
         };
-        if !music.contains(music_id) {
+        if !is_exact_audio_reference_token(music_id) {
+            diagnostics.push(VerificationError::error(
+                "invalid_map_music_id",
+                map_name,
+                format!("map music id must be an exact pack token, found {music_id:?}"),
+            ));
+        } else if !music.contains(music_id) {
             diagnostics.push(VerificationError::error(
                 "unknown_map_music_id",
                 map_name,
@@ -2851,6 +2913,14 @@ fn verify_map_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>
             ));
         }
     }
+}
+
+fn is_exact_audio_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn verify_trainers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
@@ -2909,7 +2979,7 @@ fn verify_trainer_battle_request(
     diagnostics: &mut Vec<VerificationError>,
 ) {
     let subject = battle_request_subject(map_name, source_script, command_index);
-    if request.trainer_id.is_empty() || request.trainer_id.trim() != request.trainer_id {
+    if !is_exact_scripted_battle_reference_token(&request.trainer_id) {
         diagnostics.push(VerificationError::error(
             "invalid_scripted_trainer_id",
             &subject,
@@ -2920,7 +2990,7 @@ fn verify_trainer_battle_request(
         ));
         return;
     }
-    if request.trainer_class.is_empty() || request.trainer_class.trim() != request.trainer_class {
+    if !is_exact_scripted_battle_reference_token(&request.trainer_class) {
         diagnostics.push(VerificationError::error(
             "invalid_scripted_trainer_class",
             &subject,
@@ -2963,7 +3033,7 @@ fn verify_static_wild_battle_request(
     diagnostics: &mut Vec<VerificationError>,
 ) {
     let subject = battle_request_subject(map_name, source_script, Some(command_index));
-    if request.species.is_empty() || request.species.trim() != request.species {
+    if !is_exact_scripted_battle_reference_token(&request.species) {
         diagnostics.push(VerificationError::error(
             "invalid_scripted_wild_species",
             &subject,
@@ -2992,6 +3062,14 @@ fn verify_static_wild_battle_request(
             ),
         ));
     }
+}
+
+fn is_exact_scripted_battle_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn battle_request_subject(
@@ -3122,6 +3200,15 @@ fn verify_trainer_encounter_music(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 trainer_id,
                 "trainer is missing explicit encounter music",
             ));
+        } else if !is_exact_audio_reference_token(&trainer.encounter_music) {
+            diagnostics.push(VerificationError::error(
+                "invalid_trainer_encounter_music",
+                trainer_id,
+                format!(
+                    "trainer encounter music id must be an exact pack token, found {:?}",
+                    trainer.encounter_music
+                ),
+            ));
         } else if !music.contains(&trainer.encounter_music) {
             diagnostics.push(VerificationError::error(
                 "unknown_trainer_encounter_music",
@@ -3166,15 +3253,30 @@ fn capture_rules_issue_diagnostic(issue: CaptureRulesIssue) -> VerificationError
             "capture_rules:ball_rules",
             "capture ball rules must be declared when BALL pocket items exist",
         ),
+        CaptureRulesIssue::InvalidFastBallSpecies { species } => VerificationError::error(
+            "invalid_fast_ball_species",
+            &species,
+            format!("Fast Ball species id must be exact and nonempty, found {species:?}"),
+        ),
         CaptureRulesIssue::UnknownFastBallSpecies { species } => VerificationError::error(
             "unknown_fast_ball_species",
             &species,
             "Fast Ball rule references a species that is not loaded",
         ),
+        CaptureRulesIssue::InvalidHeavyBallSpecies { species } => VerificationError::error(
+            "invalid_heavy_ball_species",
+            &species,
+            format!("Heavy Ball species id must be exact and nonempty, found {species:?}"),
+        ),
         CaptureRulesIssue::UnknownHeavyBallSpecies { species } => VerificationError::error(
             "unknown_heavy_ball_species",
             &species,
             "Heavy Ball rule references a species that is not loaded",
+        ),
+        CaptureRulesIssue::InvalidBallRuleItem { ball_id } => VerificationError::error(
+            "invalid_capture_ball_rule_item",
+            format!("capture_rules:ball_rules:{ball_id}"),
+            format!("capture ball rule item id must be exact and nonempty, found {ball_id:?}"),
         ),
         CaptureRulesIssue::UnknownBallRuleItem { ball_id } => VerificationError::error(
             "unknown_capture_ball_rule_item",
@@ -3287,6 +3389,11 @@ fn mart_catalog_issue_diagnostic(issue: MartCatalogIssue) -> VerificationError {
             &mart_id,
             format!("mart id must be exact and untrimmed, found {mart_id:?}"),
         ),
+        MartCatalogIssue::InvalidItem { mart_id, item_id } => VerificationError::error(
+            "invalid_mart_item",
+            mart_id,
+            format!("mart item id must be exact and untrimmed, found {item_id:?}"),
+        ),
         MartCatalogIssue::UnknownItem { mart_id, item_id } => VerificationError::error(
             "unknown_mart_item",
             mart_id,
@@ -3322,6 +3429,14 @@ fn fruit_tree_catalog_issue_diagnostic(issue: FruitTreeCatalogIssue) -> Verifica
             "unknown_fruit_tree_item",
             format!("fruit_trees:{fruit_tree_id}"),
             format!("fruit tree references missing item '{item_id}'"),
+        ),
+        FruitTreeCatalogIssue::InvalidItem {
+            fruit_tree_id,
+            item_id,
+        } => VerificationError::error(
+            "invalid_fruit_tree_item",
+            format!("fruit_trees:{fruit_tree_id}"),
+            format!("fruit tree item id must be exact and untrimmed, found {item_id:?}"),
         ),
     }
 }
@@ -3647,6 +3762,14 @@ fn verify_script_source_reference(
         Some(command_index) => format!("{map_name}:{category}:{source_script}:{command_index}"),
         None => format!("{map_name}:{category}:{source_script}"),
     };
+    if !is_exact_script_label_reference_token(source_script) {
+        diagnostics.push(VerificationError::error(
+            "invalid_command_source_script",
+            subject,
+            format!("{category} source script label must be exact, found {source_script:?}"),
+        ));
+        return;
+    }
     diagnostics.push(VerificationError::error(
         "unknown_command_source_script",
         subject,
@@ -3762,10 +3885,20 @@ fn gift_pokemon_script_issue_diagnostic(
     issue: GiftPokemonScriptIssue,
 ) -> VerificationError {
     match issue {
+        GiftPokemonScriptIssue::InvalidSpeciesId { species_id } => VerificationError::error(
+            "invalid_gift_pokemon_species",
+            subject,
+            format!("gift species id must be an exact pack token, found {species_id:?}"),
+        ),
         GiftPokemonScriptIssue::UnknownSpecies { species_id } => VerificationError::error(
             "unknown_gift_pokemon_species",
             subject,
             format!("gift references missing species '{species_id}'"),
+        ),
+        GiftPokemonScriptIssue::InvalidHeldItemId { item_id } => VerificationError::error(
+            "invalid_gift_pokemon_item",
+            subject,
+            format!("gift held item id must be an exact pack token, found {item_id:?}"),
         ),
         GiftPokemonScriptIssue::UnknownHeldItem { item_id } => VerificationError::error(
             "unknown_gift_pokemon_item",
@@ -3812,6 +3945,14 @@ fn script_flag_command_issue_diagnostic(
     issue: ScriptFlagCommandIssue,
 ) -> VerificationError {
     match issue {
+        ScriptFlagCommandIssue::InvalidCommand => VerificationError::error(
+            "invalid_script_flag_command",
+            subject,
+            format!(
+                "script flag command must be an exact lowercase pack token, found {:?}",
+                command.command
+            ),
+        ),
         ScriptFlagCommandIssue::UnknownCommand => VerificationError::error(
             "unknown_script_flag_command",
             subject,
@@ -3859,7 +4000,7 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 if command
                     .scene_id
                     .as_deref()
-                    .is_some_and(|scene_id| scene_id.trim() == scene_id && !scene_id.is_empty())
+                    .is_some_and(is_exact_script_scene_reference_token)
                 {
                     verify_scene_token(
                         diagnostics,
@@ -3875,7 +4016,7 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 let Some(map_id) = command.map_id.as_deref() else {
                     continue;
                 };
-                if map_id.trim().is_empty() || map_id.trim() != map_id {
+                if !is_exact_script_scene_reference_token(map_id) {
                     continue;
                 }
                 let Some((target_map_name, target_module)) = scene_table_for_map_id(data, map_id)
@@ -3890,7 +4031,7 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 if command
                     .scene_id
                     .as_deref()
-                    .is_some_and(|scene_id| scene_id.trim() == scene_id && !scene_id.is_empty())
+                    .is_some_and(is_exact_script_scene_reference_token)
                 {
                     verify_scene_token(
                         diagnostics,
@@ -3915,7 +4056,13 @@ fn verify_scene_table_script_references(
         let Some(script_name) = scene.script_name.as_deref() else {
             continue;
         };
-        if !module.scripts.contains_key(script_name) {
+        if !is_exact_script_label_reference_token(script_name) {
+            diagnostics.push(VerificationError::error(
+                "invalid_scene_script",
+                format!("{map_name}:{}", scene.scene_id),
+                format!("scene script label must be exact, found {script_name:?}"),
+            ));
+        } else if !module.scripts.contains_key(script_name) {
             diagnostics.push(VerificationError::error(
                 "unknown_scene_script",
                 format!("{map_name}:{}", scene.scene_id),
@@ -3925,12 +4072,28 @@ fn verify_scene_table_script_references(
     }
 }
 
+fn is_exact_script_scene_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn script_scene_command_issue_diagnostic(
     subject: &str,
     command: &ScriptSceneCommand,
     issue: ScriptSceneCommandIssue,
 ) -> VerificationError {
     match issue {
+        ScriptSceneCommandIssue::InvalidCommand => VerificationError::error(
+            "invalid_script_scene_command",
+            subject,
+            format!(
+                "scene command must be an exact lowercase pack token, found {:?}",
+                command.command
+            ),
+        ),
         ScriptSceneCommandIssue::UnknownCommand => VerificationError::error(
             "unknown_script_scene_command",
             subject,
@@ -4000,12 +4163,30 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                 &cry_by_species,
             ) {
                 match issue {
+                    ScriptAudioCommandIssue::InvalidCommand => {
+                        diagnostics.push(VerificationError::error(
+                            "invalid_script_audio_command",
+                            &subject,
+                            format!(
+                                "audio command must be an exact lowercase pack token, found {:?}",
+                                command.command
+                            ),
+                        ));
+                    }
                     ScriptAudioCommandIssue::MissingMusicId => {
                         diagnostics.push(VerificationError::error(
                             "missing_script_music_id",
                             &subject,
                             "audio command is missing a music id",
                         ))
+                    }
+                    ScriptAudioCommandIssue::InvalidMusicId => {
+                        let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
+                        diagnostics.push(VerificationError::error(
+                            "invalid_script_music_id",
+                            &subject,
+                            format!("music id must be an exact pack token, found {audio_id}"),
+                        ));
                     }
                     ScriptAudioCommandIssue::UnknownMusicId => {
                         let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
@@ -4022,6 +4203,16 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                             "playsound command is missing a sound effect id",
                         ))
                     }
+                    ScriptAudioCommandIssue::InvalidSoundEffectId => {
+                        let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
+                        diagnostics.push(VerificationError::error(
+                            "invalid_script_sfx_id",
+                            &subject,
+                            format!(
+                                "sound effect id must be an exact pack token, found {audio_id}"
+                            ),
+                        ));
+                    }
                     ScriptAudioCommandIssue::UnknownSoundEffectId => {
                         let audio_id = optional_id_for_diagnostic(command.audio_id.as_deref());
                         diagnostics.push(VerificationError::error(
@@ -4035,6 +4226,16 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                             "missing_script_cry_id",
                             &subject,
                             "cry command is missing a species id",
+                        ));
+                    }
+                    ScriptAudioCommandIssue::InvalidCrySpecies => {
+                        let species_id = optional_id_for_diagnostic(command.audio_id.as_deref());
+                        diagnostics.push(VerificationError::error(
+                            "invalid_script_cry_species",
+                            &subject,
+                            format!(
+                                "cry species id must be an exact pack token, found {species_id}"
+                            ),
                         ));
                     }
                     ScriptAudioCommandIssue::UnknownCrySpecies => {
@@ -4052,6 +4253,24 @@ fn verify_script_audio_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                             &subject,
                             format!(
                                 "cry command references species {species_id} without cry metadata"
+                            ),
+                        ));
+                    }
+                    ScriptAudioCommandIssue::InvalidCryAsset => {
+                        let species_id = optional_id_for_diagnostic(command.audio_id.as_deref());
+                        let cry_id = command
+                            .audio_id
+                            .as_deref()
+                            .and_then(|species_id| cry_by_species.get(species_id))
+                            .map_or_else(
+                                || "<missing>".to_string(),
+                                |cry_id| format!("{cry_id:?}"),
+                            );
+                        diagnostics.push(VerificationError::error(
+                            "invalid_script_cry_audio",
+                            &subject,
+                            format!(
+                                "cry audio id must be an exact pack token, found {cry_id} for species {species_id}"
                             ),
                         ));
                     }
@@ -4158,11 +4377,55 @@ fn script_block_change_issue_diagnostic(
 
 fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        let mut object_identifiers = BTreeSet::new();
         for object in &module.objects {
-            if object.script != "-1"
-                && object.script != "ObjectEvent"
-                && !module.scripts.contains_key(&object.script)
-            {
+            if let Some(object_id) = &object.object_identifier {
+                let subject = format!("{map_name}:{object_id}");
+                if !is_exact_object_event_reference_token(object_id) {
+                    diagnostics.push(VerificationError::error(
+                        "invalid_object_identifier",
+                        &subject,
+                        format!(
+                            "object identifier must be an exact pack token, found {object_id:?}"
+                        ),
+                    ));
+                } else if !object_identifiers.insert(object_id.clone()) {
+                    diagnostics.push(VerificationError::error(
+                        "duplicate_object_identifier",
+                        &subject,
+                        format!("object identifier '{object_id}' is duplicated in map {map_name}"),
+                    ));
+                }
+            }
+            if object.script != "-1" && object.script != "ObjectEvent" {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                if !is_exact_object_event_reference_token(&object.script) {
+                    diagnostics.push(VerificationError::error(
+                        "invalid_object_event_script",
+                        &subject,
+                        format!(
+                            "object event script must be an exact pack token, found {:?}",
+                            object.script
+                        ),
+                    ));
+                } else if !module.scripts.contains_key(&object.script) {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_object_event_script",
+                        &subject,
+                        format!(
+                            "object event references missing exact script '{}'",
+                            object.script
+                        ),
+                    ));
+                }
+            }
+            if !is_exact_object_event_reference_token(&object.spritemovedata) {
                 let subject = format!(
                     "{map_name}:{}",
                     object
@@ -4171,15 +4434,14 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                         .unwrap_or("<unidentified>")
                 );
                 diagnostics.push(VerificationError::error(
-                    "unknown_object_event_script",
+                    "invalid_object_movement_data",
                     &subject,
                     format!(
-                        "object event references missing exact script '{}'",
-                        object.script
+                        "object event spritemovedata must be an exact pack token, found {:?}",
+                        object.spritemovedata
                     ),
                 ));
-            }
-            if object_event_initial_facing(&object.spritemovedata).is_none() {
+            } else if object_event_initial_facing(&object.spritemovedata).is_none() {
                 let subject = format!(
                     "{map_name}:{}",
                     object
@@ -4233,11 +4495,30 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
     }
 }
 
+fn is_exact_object_event_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn script_object_command_issue_diagnostic(
     map_name: &str,
     issue: ScriptObjectCommandIssue,
 ) -> VerificationError {
     match issue {
+        ScriptObjectCommandIssue::InvalidCommand {
+            source_script,
+            command_index,
+            command,
+        } => VerificationError::error(
+            "invalid_script_object_command",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!(
+                "script object command must be an exact lowercase pack token, found {command:?}"
+            ),
+        ),
         ScriptObjectCommandIssue::MissingObjectId {
             source_script,
             command_index,
@@ -4256,6 +4537,16 @@ fn script_object_command_issue_diagnostic(
             "unknown_script_object_id",
             format!("{map_name}:{source_script}:{command_index}"),
             format!("{command} references missing object id '{object_id}'"),
+        ),
+        ScriptObjectCommandIssue::InvalidObjectId {
+            source_script,
+            command_index,
+            command,
+            object_id,
+        } => VerificationError::error(
+            "invalid_script_object_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} object id must be an exact pack token, found {object_id:?}"),
         ),
         ScriptObjectCommandIssue::UnhideableObject {
             source_script,
@@ -4314,6 +4605,16 @@ fn script_object_command_issue_diagnostic(
             format!("{map_name}:{source_script}:{command_index}"),
             format!("{command} references missing target object id '{object_id}'"),
         ),
+        ScriptObjectCommandIssue::InvalidTargetObjectId {
+            source_script,
+            command_index,
+            command,
+            object_id,
+        } => VerificationError::error(
+            "invalid_script_target_object_id",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} target object id must be an exact pack token, found {object_id:?}"),
+        ),
         ScriptObjectCommandIssue::MissingMovement {
             source_script,
             command_index,
@@ -4332,6 +4633,16 @@ fn script_object_command_issue_diagnostic(
             "unknown_script_movement",
             format!("{map_name}:{source_script}:{command_index}"),
             format!("{command} references missing movement '{movement}'"),
+        ),
+        ScriptObjectCommandIssue::InvalidMovement {
+            source_script,
+            command_index,
+            command,
+            movement,
+        } => VerificationError::error(
+            "invalid_script_movement",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("{command} movement label must be an exact pack token, found {movement:?}"),
         ),
         ScriptObjectCommandIssue::MissingEmote {
             source_script,
@@ -4420,6 +4731,14 @@ fn script_map_command_issue_diagnostic(
     issue: ScriptMapCommandError,
 ) -> VerificationError {
     match issue {
+        ScriptMapCommandError::InvalidCommand { .. } => VerificationError::error(
+            "invalid_script_map_command",
+            subject,
+            format!(
+                "script map command must be an exact lowercase pack token, found {:?}",
+                command.command
+            ),
+        ),
         ScriptMapCommandError::UnknownCommand { .. } => VerificationError::error(
             "unknown_script_map_command",
             subject,
@@ -4554,6 +4873,14 @@ fn script_text_command_issue_diagnostic(
     issue: ScriptTextCommandError,
 ) -> VerificationError {
     match issue {
+        ScriptTextCommandError::InvalidCommand { .. } => VerificationError::error(
+            "invalid_script_text_command",
+            subject,
+            format!(
+                "script text command must be an exact lowercase pack token, found {:?}",
+                command.command
+            ),
+        ),
         ScriptTextCommandError::UnknownCommand { .. } => VerificationError::error(
             "unknown_script_text_command",
             subject,
@@ -4793,7 +5120,19 @@ fn verify_map_event_script_references(
     diagnostics: &mut Vec<VerificationError>,
 ) {
     for event in &module.events.coord_events {
-        if !module.scripts.contains_key(&event.script_name) {
+        if !is_exact_script_label_reference_token(&event.script_name) {
+            diagnostics.push(VerificationError::error(
+                "invalid_coord_event_script",
+                format!(
+                    "{map_name}:{}:{}:{},{}",
+                    event.scene_id, event.script_name, event.x, event.y
+                ),
+                format!(
+                    "coord event script label must be exact, found {:?}",
+                    event.script_name
+                ),
+            ));
+        } else if !module.scripts.contains_key(&event.script_name) {
             diagnostics.push(VerificationError::error(
                 "unknown_coord_event_script",
                 format!(
@@ -4808,10 +5147,25 @@ fn verify_map_event_script_references(
         }
     }
     for event in &module.events.bg_events {
-        if !module.scripts.contains_key(&event.script) {
+        if !is_exact_script_label_reference_token(&event.script) {
+            diagnostics.push(VerificationError::error(
+                "invalid_bg_event_script",
+                format!(
+                    "{map_name}:{}:{}:{},{}",
+                    event.event_type, event.script, event.x, event.y
+                ),
+                format!(
+                    "{} background event script label must be exact, found {:?}",
+                    event.event_type, event.script
+                ),
+            ));
+        } else if !module.scripts.contains_key(&event.script) {
             diagnostics.push(VerificationError::error(
                 "unknown_bg_event_script",
-                format!("{map_name}:{}:{}:{},{}", event.event_type, event.script, event.x, event.y),
+                format!(
+                    "{map_name}:{}:{}:{},{}",
+                    event.event_type, event.script, event.x, event.y
+                ),
                 format!(
                     "{} background event references missing exact script '{}'",
                     event.event_type, event.script
@@ -4819,6 +5173,14 @@ fn verify_map_event_script_references(
             ));
         }
     }
+}
+
+fn is_exact_script_label_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
 fn verify_hidden_item_bg_events(
@@ -4864,11 +5226,27 @@ fn script_field_pickup_issue_diagnostic(
     issue: ScriptFieldPickupIssue,
 ) -> VerificationError {
     match issue {
+        ScriptFieldPickupIssue::InvalidCommand => VerificationError::error(
+            "invalid_script_field_pickup_command",
+            subject,
+            format!(
+                "field pickup command must be an exact lowercase pack token, found {:?}",
+                pickup.command
+            ),
+        ),
         ScriptFieldPickupIssue::MissingItem => VerificationError::error(
             "script_field_pickup_missing_item",
             subject,
             format!("{} pickup is missing item_id", pickup.command),
         ),
+        ScriptFieldPickupIssue::InvalidItem => {
+            let item_id = optional_id_for_diagnostic(pickup.item_id.as_deref());
+            VerificationError::error(
+                "invalid_script_field_pickup_item",
+                subject,
+                format!("{} pickup has invalid item id {item_id}", pickup.command),
+            )
+        }
         ScriptFieldPickupIssue::UnknownItem => {
             let item_id = optional_id_for_diagnostic(pickup.item_id.as_deref());
             VerificationError::error(
@@ -4975,6 +5353,26 @@ fn phone_contact_catalog_issue_diagnostic(issue: PhoneContactCatalogIssue) -> Ve
                 "phone contact key '{contact_id}' does not match record contactId '{record_contact_id}'"
             ),
         ),
+        PhoneContactCatalogIssue::InvalidTrainerClass {
+            contact_id,
+            trainer_class,
+        } => VerificationError::error(
+            "invalid_phone_contact_trainer_class",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact trainerClass must be an exact pack token, found {trainer_class:?}"
+            ),
+        ),
+        PhoneContactCatalogIssue::InvalidTrainerLabel {
+            contact_id,
+            trainer_label,
+        } => VerificationError::error(
+            "invalid_phone_contact_trainer_label",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact trainerLabel must be an exact pack token, found {trainer_label:?}"
+            ),
+        ),
         PhoneContactCatalogIssue::EmptyPrimaryLabel { contact_id } => VerificationError::error(
             "empty_phone_contact_primary_label",
             format!("phone_contacts:{contact_id}"),
@@ -5001,6 +5399,16 @@ fn phone_contact_catalog_issue_diagnostic(issue: PhoneContactCatalogIssue) -> Ve
             format!("phone_contacts:{contact_id}"),
             "phone contact mapConstant must be nonempty when present",
         ),
+        PhoneContactCatalogIssue::InvalidMapConstant {
+            contact_id,
+            map_constant,
+        } => VerificationError::error(
+            "invalid_phone_contact_map",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact mapConstant must be an exact pack token, found {map_constant:?}"
+            ),
+        ),
         PhoneContactCatalogIssue::UnknownMapConstant {
             contact_id,
             map_constant,
@@ -5009,11 +5417,40 @@ fn phone_contact_catalog_issue_diagnostic(issue: PhoneContactCatalogIssue) -> Ve
             format!("phone_contacts:{contact_id}"),
             format!("phone contact references missing map constant '{map_constant}'"),
         ),
+        PhoneContactCatalogIssue::InvalidCalleeScript {
+            contact_id,
+            callee_script,
+        } => VerificationError::error(
+            "invalid_phone_contact_callee_script",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact calleeScript must be an exact pack token, found {callee_script:?}"
+            ),
+        ),
+        PhoneContactCatalogIssue::InvalidCallerScript {
+            contact_id,
+            caller_script,
+        } => VerificationError::error(
+            "invalid_phone_contact_caller_script",
+            format!("phone_contacts:{contact_id}"),
+            format!(
+                "phone contact callerScript must be an exact pack token, found {caller_script:?}"
+            ),
+        ),
         PhoneContactCatalogIssue::UnknownPermanentContact { contact_id } => {
             VerificationError::error(
                 "unknown_permanent_phone_contact",
                 &contact_id,
                 format!("permanent phone number references unknown contact '{contact_id}'"),
+            )
+        }
+        PhoneContactCatalogIssue::InvalidPermanentContact { contact_id } => {
+            VerificationError::error(
+                "invalid_permanent_phone_contact",
+                &contact_id,
+                format!(
+                    "permanent phone number id must be an exact pack token, found {contact_id:?}"
+                ),
             )
         }
     }
@@ -5130,7 +5567,15 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
                 species_id,
                 "Pokemon cry metadata requires non-empty exact keys and non-empty cry ids",
             ));
-        } else if species_id.parse::<u16>().is_err() && !data.pokemon.contains_key(species_id) {
+        } else if !is_exact_audio_reference_token(species_id) {
+            diagnostics.push(VerificationError::error(
+                "invalid_pokemon_cry_species",
+                species_id,
+                format!(
+                    "Pokemon cry metadata species id must be an exact pack token, found {species_id:?}"
+                ),
+            ));
+        } else if !data.pokemon.contains_key(species_id) {
             diagnostics.push(VerificationError::error(
                 "unknown_pokemon_cry_species",
                 species_id,
@@ -5147,7 +5592,16 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             ));
             continue;
         };
-        if !cry_audio.contains(&cry.cry) {
+        if !is_exact_audio_reference_token(&cry.cry) {
+            diagnostics.push(VerificationError::error(
+                "invalid_species_cry_audio",
+                species_id,
+                format!(
+                    "Pokemon species cry audio id must be an exact pack token, found {:?}",
+                    cry.cry
+                ),
+            ));
+        } else if !cry_audio.contains(&cry.cry) {
             diagnostics.push(VerificationError::error(
                 "unknown_species_cry_audio",
                 species_id,
@@ -5189,6 +5643,18 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
 }
 
 fn runtime_pack_sections(data: &GameDataSet) -> RuntimePackSections {
+    let has_music_audio = data
+        .audio
+        .iter()
+        .any(|asset| asset.kind == ModpackAudioKind::Music);
+    let has_sound_effects = data
+        .audio
+        .iter()
+        .any(|asset| asset.kind == ModpackAudioKind::SoundEffect);
+    let has_cry_audio = data
+        .audio
+        .iter()
+        .any(|asset| asset.kind == ModpackAudioKind::Cry);
     RuntimePackSections {
         has_pokemon: !data.pokemon.is_empty(),
         has_moves: !data.moves.is_empty(),
@@ -5202,6 +5668,9 @@ fn runtime_pack_sections(data: &GameDataSet) -> RuntimePackSections {
         has_items: !data.items.is_empty(),
         has_trainers: !data.trainers.is_empty(),
         has_audio: !data.audio.is_empty(),
+        has_music_audio,
+        has_sound_effects,
+        has_cry_audio,
         has_pokemon_cries: !data.pokemon_cries.is_empty(),
         has_tilesets: !data.tilesets.is_empty(),
         has_scripts: has_runtime_script_data(data),
@@ -5474,6 +5943,21 @@ fn runtime_pack_presence_issue_diagnostic(issue: RuntimePackPresenceIssue) -> Ve
             "missing_runtime_audio",
             "audio",
             "runtime pack must include audio asset data",
+        ),
+        RuntimePackPresenceIssue::MissingMusicAudio => VerificationError::error(
+            "missing_runtime_music_audio",
+            "audio",
+            "runtime pack must include music audio assets",
+        ),
+        RuntimePackPresenceIssue::MissingSoundEffects => VerificationError::error(
+            "missing_runtime_sound_effects",
+            "audio",
+            "runtime pack must include sound effect audio assets",
+        ),
+        RuntimePackPresenceIssue::MissingCryAudio => VerificationError::error(
+            "missing_runtime_cry_audio",
+            "audio",
+            "runtime pack must include cry audio assets",
         ),
         RuntimePackPresenceIssue::MissingPokemonCries => VerificationError::error(
             "missing_runtime_pokemon_cries",
@@ -5894,6 +6378,16 @@ fn script_shop_command_issue_diagnostic(
             subject,
             format!("pokemart uses unknown mart type '{mart_type}'"),
         ),
+        ShopError::InvalidCommand { command } => VerificationError::error(
+            "invalid_script_shop_command",
+            subject,
+            format!("script shop command must be an exact lowercase pack token, found {command:?}"),
+        ),
+        ShopError::UnknownCommand { command } => VerificationError::error(
+            "unknown_script_shop_command",
+            subject,
+            format!("script shop command '{command}' is not supported"),
+        ),
         ShopError::InvalidMartType { mart_type } => VerificationError::error(
             "invalid_script_shop_mart_type",
             subject,
@@ -5934,6 +6428,11 @@ fn script_phone_command_issue_diagnostic(
 ) -> VerificationError {
     let subject = format!("{map_name}:{}:{}", issue.source_script, issue.command_index);
     match issue.error {
+        ScriptPhoneError::InvalidCommand { command } => VerificationError::error(
+            "invalid_script_phone_command",
+            subject,
+            format!("phone command must be an exact lowercase pack token, found {command:?}"),
+        ),
         ScriptPhoneError::UnknownCommand { command } => VerificationError::error(
             "unknown_script_phone_command",
             subject,
@@ -5948,10 +6447,10 @@ fn script_phone_command_issue_diagnostic(
             format!("phone command '{command}' references unknown contact '{contact_id}'"),
         ),
         ScriptPhoneError::EmptyContact { command } => VerificationError::error(
-            "unknown_script_phone_contact",
+            "invalid_script_phone_contact",
             subject,
             format!(
-                "phone command '{command}' references unknown contact '{}'",
+                "phone command '{command}' contact id must be an exact non-empty pack token, found {:?}",
                 issue.contact_id
             ),
         ),
@@ -5989,6 +6488,11 @@ fn happiness_data_issue_diagnostic(issue: HappinessDataIssue) -> VerificationErr
             format!("happiness_data:changes:{change_code}"),
             "happiness change entries require exact nonempty code labels",
         ),
+        HappinessDataIssue::InvalidChangeCode { code, change_code } => VerificationError::error(
+            "invalid_happiness_change_code",
+            format!("happiness_data:changes:{change_code}"),
+            format!("happiness change code '{code}' must be an exact pack token"),
+        ),
         HappinessDataIssue::DuplicateChangeCode { code, change_code } => VerificationError::error(
             "duplicate_happiness_change_code",
             format!("happiness_data:changes:{change_code}"),
@@ -6008,6 +6512,11 @@ fn happiness_data_issue_diagnostic(issue: HappinessDataIssue) -> VerificationErr
             "empty_happiness_service_routine",
             format!("happiness_data:services:{routine}"),
             "happiness service routine ids must be exact nonempty labels",
+        ),
+        HappinessDataIssue::InvalidServiceRoutine { routine } => VerificationError::error(
+            "invalid_happiness_service_routine",
+            format!("happiness_data:services:{routine}"),
+            format!("happiness service routine '{routine}' must be an exact pack token"),
         ),
         HappinessDataIssue::DuplicateService { routine } => VerificationError::error(
             "duplicate_happiness_service",
@@ -6113,6 +6622,11 @@ fn encounter_music_modifier_issue_diagnostic(
             "missing_encounter_music_modifier_id",
             format!("encounter_music_modifiers:{music_id}"),
             "encounter music modifier is missing music_id",
+        ),
+        EncounterMusicModifierIssue::InvalidMusicId { music_id } => VerificationError::error(
+            "invalid_encounter_music_modifier_id",
+            format!("encounter_music_modifiers:{music_id}"),
+            format!("encounter music modifier id must be an exact pack token, found {music_id:?}"),
         ),
         EncounterMusicModifierIssue::UnknownMusicId { music_id } => VerificationError::error(
             "unknown_encounter_music_modifier_id",
@@ -6250,6 +6764,22 @@ fn type_effectiveness_table_issue_diagnostic(
                 "type multiplier denominator must be nonzero",
             )
         }
+        TypeEffectivenessTableIssue::InvalidAttacker { table, attacker } => {
+            let (code, prefix) = type_effectiveness_invalid_parts(table, true);
+            VerificationError::error(
+                code,
+                table.subject(),
+                format!("{prefix} attacker {attacker:?} must be an exact pack token"),
+            )
+        }
+        TypeEffectivenessTableIssue::InvalidDefender { table, defender } => {
+            let (code, prefix) = type_effectiveness_invalid_parts(table, false);
+            VerificationError::error(
+                code,
+                table.subject(),
+                format!("{prefix} defender {defender:?} must be an exact pack token"),
+            )
+        }
         TypeEffectivenessTableIssue::UnknownAttacker { table, attacker } => {
             let (code, prefix) = type_effectiveness_unknown_parts(table, true);
             VerificationError::error(
@@ -6293,6 +6823,28 @@ fn type_effectiveness_table_issue_diagnostic(
                 ),
             )
         }
+    }
+}
+
+fn type_effectiveness_invalid_parts(
+    table: TypeEffectivenessTableKind,
+    attacker: bool,
+) -> (&'static str, &'static str) {
+    match (table, attacker) {
+        (TypeEffectivenessTableKind::Matchups, true) => {
+            ("invalid_type_effectiveness_attacker", "type effectiveness")
+        }
+        (TypeEffectivenessTableKind::Matchups, false) => {
+            ("invalid_type_effectiveness_defender", "type effectiveness")
+        }
+        (TypeEffectivenessTableKind::ForesightMatchups, true) => (
+            "invalid_foresight_type_effectiveness_attacker",
+            "Foresight type effectiveness",
+        ),
+        (TypeEffectivenessTableKind::ForesightMatchups, false) => (
+            "invalid_foresight_type_effectiveness_defender",
+            "Foresight type effectiveness",
+        ),
     }
 }
 
@@ -6436,6 +6988,11 @@ fn special_routine_catalog_issue_diagnostic(
             "special_routines",
             "special routine ids must be nonempty exact labels",
         ),
+        SpecialRoutineCatalogIssue::InvalidRoutine { routine } => VerificationError::error(
+            "invalid_special_routine",
+            format!("special_routines:{routine}"),
+            format!("special routine id '{routine}' must be an exact pack token"),
+        ),
         SpecialRoutineCatalogIssue::UnknownRoutine { routine } => VerificationError::error(
             "unknown_declared_special_routine",
             format!("special_routines:{routine}"),
@@ -6448,11 +7005,27 @@ fn roaming_pokemon_definition_issue_diagnostic(
     issue: RoamingPokemonDefinitionIssue,
 ) -> VerificationError {
     match issue {
+        RoamingPokemonDefinitionIssue::DuplicateSpecies { index, species } => {
+            VerificationError::error(
+                "duplicate_roaming_pokemon_species",
+                format!("roaming_pokemon:{index}"),
+                format!("roaming Pokemon species '{species}' is duplicated"),
+            )
+        }
         RoamingPokemonDefinitionIssue::EmptySpecies { index } => VerificationError::error(
             "empty_roaming_pokemon_species",
             format!("roaming_pokemon:{index}"),
             "roaming Pokemon species id must be an exact nonempty id",
         ),
+        RoamingPokemonDefinitionIssue::InvalidSpecies { index, species } => {
+            VerificationError::error(
+                "invalid_roaming_pokemon_species",
+                format!("roaming_pokemon:{index}"),
+                format!(
+                    "roaming Pokemon species id must be an exact pack token, found {species:?}"
+                ),
+            )
+        }
         RoamingPokemonDefinitionIssue::UnknownSpecies { index, species } => {
             VerificationError::error(
                 "unknown_roaming_pokemon_species",
@@ -6470,6 +7043,11 @@ fn roaming_pokemon_definition_issue_diagnostic(
 
 fn buena_prize_definition_issue_diagnostic(issue: BuenaPrizeDefinitionIssue) -> VerificationError {
     match issue {
+        BuenaPrizeDefinitionIssue::DuplicateItem { index, item_id } => VerificationError::error(
+            "duplicate_buena_prize_item",
+            format!("buena_prizes:{index}"),
+            format!("Buena prize item '{item_id}' is duplicated"),
+        ),
         BuenaPrizeDefinitionIssue::EmptyItem { index } => VerificationError::error(
             "empty_buena_prize_item",
             format!("buena_prizes:{index}"),
@@ -6497,6 +7075,11 @@ fn buena_password_category_issue_diagnostic(
     issue: BuenaPasswordCategoryIssue,
 ) -> VerificationError {
     match issue {
+        BuenaPasswordCategoryIssue::DuplicateId { index, id } => VerificationError::error(
+            "duplicate_buena_password_category_id",
+            format!("buena_password_categories:{index}"),
+            format!("Buena password category id '{id}' is duplicated"),
+        ),
         BuenaPasswordCategoryIssue::EmptyId { index } => VerificationError::error(
             "empty_buena_password_category_id",
             format!("buena_password_categories:{index}"),
@@ -6506,6 +7089,17 @@ fn buena_password_category_issue_diagnostic(
             "invalid_buena_password_category_id",
             format!("buena_password_categories:{index}"),
             format!("Buena password category id '{id}' must be an exact nonempty id"),
+        ),
+        BuenaPasswordCategoryIssue::InvalidCategoryType {
+            index,
+            id,
+            category_type,
+        } => VerificationError::error(
+            "invalid_buena_password_category_type",
+            format!("buena_password_categories:{index}"),
+            format!(
+                "Buena password category '{id}' type must be an exact pack token, found {category_type:?}"
+            ),
         ),
         BuenaPasswordCategoryIssue::UnknownCategoryType {
             index,
@@ -6575,6 +7169,11 @@ fn buena_password_category_issue_diagnostic(
 
 fn kurt_apricorn_recipe_issue_diagnostic(issue: KurtApricornRecipeIssue) -> VerificationError {
     match issue {
+        KurtApricornRecipeIssue::DuplicateApricorn { index, apricorn } => VerificationError::error(
+            "duplicate_kurt_apricorn_recipe_apricorn",
+            format!("kurt_apricorn_recipes:{index}"),
+            format!("Kurt apricorn recipe apricorn '{apricorn}' is duplicated"),
+        ),
         KurtApricornRecipeIssue::EmptyApricorn { index } => VerificationError::error(
             "empty_kurt_apricorn_recipe_apricorn",
             format!("kurt_apricorn_recipes:{index}"),
@@ -6615,6 +7214,11 @@ fn shuckie_gift_issue_diagnostic(issue: ShuckieGiftIssue) -> VerificationError {
             "shuckie_gift",
             "Shuckie gift species id must be an exact nonempty id",
         ),
+        ShuckieGiftIssue::InvalidSpecies { species } => VerificationError::error(
+            "invalid_shuckie_gift_species",
+            "shuckie_gift",
+            format!("Shuckie gift species id '{species}' must be an exact pack token"),
+        ),
         ShuckieGiftIssue::UnknownSpecies { species } => VerificationError::error(
             "unknown_shuckie_gift_species",
             "shuckie_gift",
@@ -6630,6 +7234,11 @@ fn shuckie_gift_issue_diagnostic(issue: ShuckieGiftIssue) -> VerificationError {
             "shuckie_gift",
             "Shuckie gift held item id must be an exact nonempty id",
         ),
+        ShuckieGiftIssue::InvalidHeldItem { held_item } => VerificationError::error(
+            "invalid_shuckie_gift_item",
+            "shuckie_gift",
+            format!("Shuckie gift held item id '{held_item}' must be an exact pack token"),
+        ),
         ShuckieGiftIssue::UnknownHeldItem { held_item } => VerificationError::error(
             "unknown_shuckie_gift_item",
             "shuckie_gift",
@@ -6644,6 +7253,11 @@ fn shuckie_gift_issue_diagnostic(issue: ShuckieGiftIssue) -> VerificationError {
             "empty_shuckie_gift_engine_flag",
             "shuckie_gift",
             "Shuckie gift engine flag must be an exact nonempty id",
+        ),
+        ShuckieGiftIssue::InvalidEngineFlag { engine_flag } => VerificationError::error(
+            "invalid_shuckie_gift_engine_flag",
+            "shuckie_gift",
+            format!("Shuckie gift engine flag '{engine_flag}' must be an exact pack token"),
         ),
         ShuckieGiftIssue::UnknownEngineFlag { engine_flag } => VerificationError::error(
             "unknown_shuckie_gift_engine_flag",
@@ -7001,6 +7615,11 @@ fn odd_egg_definition_issue_diagnostic(issue: OddEggDefinitionIssue) -> Verifica
 
 fn dratini_move_set_issue_diagnostic(issue: DratiniMoveSetIssue) -> VerificationError {
     match issue {
+        DratiniMoveSetIssue::DuplicateMode { index, mode } => VerificationError::error(
+            "duplicate_dratini_move_set_mode",
+            format!("dratini_move_sets:{index}"),
+            format!("Dratini move set mode {mode} is duplicated"),
+        ),
         DratiniMoveSetIssue::EmptyMoveSet { index } => VerificationError::error(
             "empty_dratini_move_set",
             format!("dratini_move_sets:{index}"),
@@ -7009,7 +7628,7 @@ fn dratini_move_set_issue_diagnostic(issue: DratiniMoveSetIssue) -> Verification
         DratiniMoveSetIssue::InvalidMove {
             index, move_index, ..
         } => VerificationError::error(
-            "empty_dratini_move",
+            "invalid_dratini_move",
             format!("dratini_move_sets:{index}:move:{move_index}"),
             "Dratini move id must be an exact nonempty id",
         ),
@@ -7053,7 +7672,7 @@ fn bug_contest_config_issue_diagnostic(issue: BugContestConfigIssue) -> Verifica
             ),
         ),
         BugContestConfigIssue::InvalidContestantFlag { index, .. } => VerificationError::error(
-            "empty_bug_contest_contestant_flag",
+            "invalid_bug_contest_contestant_flag",
             format!("bug_contest_config:contestant_flags:{index}"),
             "Bug-Catching Contest contestant flag must be an exact nonempty id",
         ),
@@ -7166,11 +7785,32 @@ fn script_runtime_command_issue_diagnostic(
                 format!("special references unknown routine '{special_id}'"),
             )
         }
+        ScriptRuntimeCommandIssue::InvalidSpecialRoutine { special_id } => {
+            VerificationError::error(
+                "invalid_script_special_routine",
+                subject,
+                format!("special routine id must be an exact pack token, found {special_id:?}"),
+            )
+        }
         ScriptRuntimeCommandIssue::UnknownTrainer { trainer_id } => VerificationError::error(
             "unknown_script_trainer_name",
             subject,
             format!("gettrainername references unknown trainer '{trainer_id}'"),
         ),
+        ScriptRuntimeCommandIssue::InvalidTrainer { trainer_id } => VerificationError::error(
+            "invalid_script_trainer_name",
+            subject,
+            format!("gettrainername trainer id must be an exact pack token, found {trainer_id:?}"),
+        ),
+        ScriptRuntimeCommandIssue::InvalidTrainerClass { trainer_class } => {
+            VerificationError::error(
+                "invalid_script_trainer_class",
+                subject,
+                format!(
+                    "gettrainername trainer class must be an exact pack token, found {trainer_class:?}"
+                ),
+            )
+        }
         ScriptRuntimeCommandIssue::TrainerClassMismatch {
             trainer_id,
             expected_class,
@@ -7188,6 +7828,11 @@ fn script_runtime_command_issue_diagnostic(
             subject,
             format!("getitemname references unknown item '{item_id}'"),
         ),
+        ScriptRuntimeCommandIssue::InvalidItem { item_id } => VerificationError::error(
+            "invalid_script_item_name",
+            subject,
+            format!("getitemname item id must be an exact pack token, found {item_id:?}"),
+        ),
         ScriptRuntimeCommandIssue::UnknownSpecies { species_id } => {
             let code = if command.command == "getmonname" {
                 "unknown_script_mon_name"
@@ -7204,20 +7849,51 @@ fn script_runtime_command_issue_diagnostic(
             };
             VerificationError::error(code, subject, message)
         }
+        ScriptRuntimeCommandIssue::InvalidSpecies { species_id } => {
+            let code = if command.command == "getmonname" {
+                "invalid_script_mon_name"
+            } else {
+                "invalid_script_species_runtime_command"
+            };
+            let message = if command.command == "getmonname" {
+                format!("getmonname species id must be an exact pack token, found {species_id:?}")
+            } else {
+                format!(
+                    "{} species id must be an exact pack token, found {:?}",
+                    command.command, species_id
+                )
+            };
+            VerificationError::error(code, subject, message)
+        }
         ScriptRuntimeCommandIssue::UnknownPhoneContact { contact_id } => VerificationError::error(
             "unknown_script_addcellnum_contact",
             subject,
             format!("addcellnum references unknown contact '{contact_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::InvalidPhoneContact { contact_id } => VerificationError::error(
+            "invalid_script_addcellnum_contact",
+            subject,
+            format!("addcellnum contact id must be an exact pack token, found {contact_id:?}"),
         ),
         ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall { call_id } => VerificationError::error(
             "unknown_script_special_phone_call",
             subject,
             format!("specialphonecall references unknown call '{call_id}'"),
         ),
+        ScriptRuntimeCommandIssue::InvalidSpecialPhoneCall { call_id } => VerificationError::error(
+            "invalid_script_special_phone_call",
+            subject,
+            format!("specialphonecall id must be an exact pack token, found {call_id:?}"),
+        ),
         ScriptRuntimeCommandIssue::UnknownNpcTrade { trade_id } => VerificationError::error(
             "unknown_script_npc_trade",
             subject,
             format!("trade references unknown NPC trade '{trade_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::InvalidNpcTrade { trade_id } => VerificationError::error(
+            "invalid_script_npc_trade",
+            subject,
+            format!("trade id must be an exact pack token, found {trade_id:?}"),
         ),
         ScriptRuntimeCommandIssue::UnknownTarget { target_label } => VerificationError::error(
             "unknown_script_runtime_target",
@@ -7225,6 +7901,14 @@ fn script_runtime_command_issue_diagnostic(
             format!(
                 "{} references unknown target '{}'",
                 command.command, target_label
+            ),
+        ),
+        ScriptRuntimeCommandIssue::InvalidTarget { target_label } => VerificationError::error(
+            "invalid_script_runtime_target",
+            subject,
+            format!(
+                "{} target label must be exact, found {target_label:?}",
+                command.command
             ),
         ),
     }
@@ -7614,6 +8298,11 @@ fn fishing_catalog_issue_diagnostic(issue: FishingCatalogIssue) -> VerificationE
             format!("fishing:rod_items:{item_id}"),
             format!("fishing rod item rules repeat item id '{item_id}'"),
         ),
+        FishingCatalogIssue::InvalidRodItemRod { item_id, rod } => VerificationError::error(
+            "invalid_fishing_rod_item_rod",
+            format!("fishing:rod_items:{item_id}"),
+            format!("fishing rod item rule rod id must be exact and nonempty, found {rod:?}"),
+        ),
         FishingCatalogIssue::UnknownRodItemRod { item_id, rod } => VerificationError::error(
             "unknown_fishing_rod_item_rod",
             format!("fishing:rod_items:{item_id}"),
@@ -7642,6 +8331,11 @@ fn fishing_catalog_issue_diagnostic(issue: FishingCatalogIssue) -> VerificationE
             "invalid_fishing_group_id",
             group_id,
             "fishing group id must be exact and nonempty",
+        ),
+        FishingCatalogIssue::InvalidFishingRod { group_id, rod } => VerificationError::error(
+            "invalid_fishing_rod",
+            group_id,
+            format!("fishing group rod id must be exact and nonempty, found {rod:?}"),
         ),
         FishingCatalogIssue::UnknownFishingRod { group_id, rod } => VerificationError::error(
             "unknown_fishing_rod",
@@ -8232,6 +8926,28 @@ fn verify_maps(
             );
         }
         for connection in &module.attributes.connections {
+            if !is_exact_map_connection_direction(&connection.direction) {
+                diagnostics.push(VerificationError::error(
+                    "invalid_connection_direction",
+                    map_name,
+                    format!(
+                        "connection direction must be one of north, south, west, east; found {:?}",
+                        connection.direction
+                    ),
+                ));
+                continue;
+            }
+            if !is_exact_map_reference_token(&connection.target_map) {
+                diagnostics.push(VerificationError::error(
+                    "invalid_connection_target",
+                    map_name,
+                    format!(
+                        "connection target map id must be exact, found {:?}",
+                        connection.target_map
+                    ),
+                ));
+                continue;
+            }
             if !map_names.contains(&connection.target_map) {
                 diagnostics.push(VerificationError::error(
                     "unknown_connection_target",
@@ -8313,6 +9029,39 @@ fn verify_maps(
             });
         }
         for warp in &module.events.warps {
+            if !is_exact_map_reference_token(&warp.target_map) {
+                diagnostics.push(VerificationError::error(
+                    "invalid_warp_target_map",
+                    map_name,
+                    format!(
+                        "warp {} target map field must be exact, found {:?}",
+                        warp.index, warp.target_map
+                    ),
+                ));
+                continue;
+            }
+            if warp.target_map != warp.target_map_constant {
+                diagnostics.push(VerificationError::error(
+                    "warp_target_map_mismatch",
+                    map_name,
+                    format!(
+                        "warp {} target_map {:?} does not match target_map_constant {:?}",
+                        warp.index, warp.target_map, warp.target_map_constant
+                    ),
+                ));
+                continue;
+            }
+            if !is_exact_map_reference_token(&warp.target_map_constant) {
+                diagnostics.push(VerificationError::error(
+                    "invalid_warp_target",
+                    map_name,
+                    format!(
+                        "warp {} target map constant must be exact, found {:?}",
+                        warp.index, warp.target_map_constant
+                    ),
+                ));
+                continue;
+            }
             let Some(target_map) = constants.get(&warp.target_map_constant) else {
                 diagnostics.push(VerificationError::error(
                     "unknown_warp_target",
@@ -8401,6 +9150,18 @@ fn transition_diagnostic(
     } else {
         VerificationError::warning(code, map_name, message)
     }
+}
+
+fn is_exact_map_reference_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_map_connection_direction(value: &str) -> bool {
+    matches!(value, "north" | "south" | "west" | "east")
 }
 
 fn map_validation_diagnostic(
@@ -9122,22 +9883,10 @@ impl GameDataSet {
 
             for category in CONTENT_PACK_CATEGORIES {
                 for entry in pack.files.entries(*category) {
-                    let path = resolve_content_pack_data_path(asset_root, &pack.id, entry)?;
                     if *category == ContentPackCategory::Audio {
-                        let audio_asset = ModpackAudioAsset::from_content_pack_path(entry)
-                            .with_context(|| {
-                                format!("apply content pack {} audio file {}", pack.id, entry)
-                            })?;
-                        if !path.exists() {
-                            anyhow::bail!(
-                                "content pack {} audio file {} is missing",
-                                pack.id,
-                                entry
-                            );
-                        }
-                        self.audio.push(audio_asset);
-                        continue;
+                        validate_content_pack_audio_metadata_entry(&pack.id, entry)?;
                     }
+                    let path = resolve_content_pack_data_path(asset_root, &pack.id, entry)?;
                     let payload: Value = read_json_file(&path).with_context(|| {
                         format!(
                             "load content pack {} category {} file {}",
@@ -9169,26 +9918,26 @@ impl GameDataSet {
         match category {
             ContentPackCategory::Pokemon => {
                 for species in parse_one_or_many::<PokemonSpecies>(payload)? {
-                    self.pokemon.insert(species.id.clone(), species);
+                    insert_pokemon_species(&mut self.pokemon, species)?;
                 }
             }
             ContentPackCategory::Moves => {
                 for move_data in parse_one_or_many::<Move>(payload)? {
                     validate_manifest_move(&move_data)?;
-                    self.moves.insert(move_data.name.clone(), move_data);
+                    insert_move_data(&mut self.moves, move_data)?;
                 }
             }
             ContentPackCategory::GrowthRates => {
                 for curve in parse_one_or_many::<crystal_core::systems::experience::GrowthRateCurve>(
                     payload,
                 )? {
-                    self.growth_rates.insert(curve.id.clone(), curve);
+                    insert_growth_rate_curve(&mut self.growth_rates, curve)?;
                 }
             }
             ContentPackCategory::Items => {
                 for item in parse_one_or_many::<Item>(payload)? {
                     validate_manifest_item(&item)?;
-                    self.items.insert(item_key(&item)?, item);
+                    insert_item(&mut self.items, item)?;
                 }
             }
             ContentPackCategory::Marts => {
@@ -9199,21 +9948,25 @@ impl GameDataSet {
             }
             ContentPackCategory::WildEncounters => {
                 for data in parse_one_or_many::<WildEncounterData>(payload)? {
-                    self.wild_encounters.insert(data.map_name.clone(), data);
+                    insert_wild_encounter_data(&mut self.wild_encounters, data)?;
                 }
             }
             ContentPackCategory::FieldEncounters => {
                 for data in parse_one_or_many::<FieldEncounterData>(payload)? {
-                    self.field_encounters.insert(data.map_name.clone(), data);
+                    insert_field_encounter_data(&mut self.field_encounters, data)?;
                 }
             }
             ContentPackCategory::RuntimeSpawnPoints => {
-                self.runtime_spawn_points
-                    .extend(parse_object_map::<RuntimeSpawnPoint>(payload)?);
+                merge_runtime_spawn_points(
+                    &mut self.runtime_spawn_points,
+                    parse_object_map::<RuntimeSpawnPoint>(payload)?,
+                )?;
             }
             ContentPackCategory::RuntimeMapMetadata => {
-                self.runtime_map_metadata
-                    .extend(parse_object_map::<RuntimeMapMetadata>(payload)?);
+                merge_runtime_map_metadata(
+                    &mut self.runtime_map_metadata,
+                    parse_object_map::<RuntimeMapMetadata>(payload)?,
+                )?;
             }
             ContentPackCategory::FleeMons => {
                 self.flee_mons =
@@ -9329,19 +10082,21 @@ impl GameDataSet {
                     serde_json::from_value(payload).context("parse field moves payload")?;
             }
             ContentPackCategory::MapAttributes => {
-                for (map_name, attributes) in parse_object_map::<MapAttributes>(payload)? {
-                    self.map_attributes.insert(map_name, attributes);
-                }
+                merge_exact_keyed_map(
+                    &mut self.map_attributes,
+                    parse_object_map::<MapAttributes>(payload)?,
+                    "map attributes for map",
+                )?;
             }
             ContentPackCategory::MapBlocks => {
-                for (label, encoded) in parse_object_map::<String>(payload)? {
-                    self.map_blocks.insert(label, encoded);
-                }
+                merge_exact_keyed_map(
+                    &mut self.map_blocks,
+                    parse_object_map::<String>(payload)?,
+                    "map block data for label",
+                )?;
             }
             ContentPackCategory::Learnsets => {
-                for (species, learnset) in parse_learnsets(payload)? {
-                    self.learnsets.insert(species, learnset);
-                }
+                merge_learnsets(&mut self.learnsets, parse_learnsets(payload)?)?;
             }
             ContentPackCategory::LevelUpMoves => {
                 merge_species_value_payload(&mut self.level_up_moves, payload, "moves")?;
@@ -9365,10 +10120,10 @@ impl GameDataSet {
                 merge_pokegear_landmarks_payload(&mut self.pokegear_landmarks, payload)?;
             }
             ContentPackCategory::PcStrings => {
-                self.pc_strings.extend(parse_object_map::<String>(payload)?);
+                merge_pc_strings(&mut self.pc_strings, parse_object_map::<String>(payload)?)?;
             }
             ContentPackCategory::MenuIcons => {
-                self.menu_icons.extend(parse_object_map::<String>(payload)?);
+                merge_menu_icons(&mut self.menu_icons, parse_object_map::<String>(payload)?)?;
             }
             ContentPackCategory::Trainers => {
                 for trainer in parse_one_or_many::<Trainer>(payload)? {
@@ -9376,16 +10131,19 @@ impl GameDataSet {
                 }
             }
             ContentPackCategory::Pokedex => {
-                push_flattened(&mut self.pokedex, payload);
+                merge_pokedex_payload(&mut self.pokedex, payload)?;
             }
             ContentPackCategory::PokedexEntries => {
                 for entry in parse_one_or_many::<RuntimePokedexEntry>(payload)? {
-                    self.pokedex_entries.insert(entry.species.clone(), entry);
+                    insert_pokedex_entry(&mut self.pokedex_entries, entry)?;
                 }
             }
             ContentPackCategory::PokemonFrontpicAnim => {
-                self.pokemon_frontpic_anim
-                    .extend(parse_object_map::<FrontpicAnimProgram>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.pokemon_frontpic_anim,
+                    parse_object_map::<FrontpicAnimProgram>(payload)?,
+                    "frontpic animation program for species",
+                )?;
             }
             ContentPackCategory::InitializeEvents => {
                 self.initialize_events =
@@ -9396,40 +10154,69 @@ impl GameDataSet {
                     .context("parse story event script constants payload")?;
             }
             ContentPackCategory::StoryEvents => {
-                push_flattened(&mut self.story_events, payload);
+                merge_raw_object_payload(
+                    &mut self.story_events,
+                    payload,
+                    "story event payload",
+                    "story event payload key",
+                )?;
             }
             ContentPackCategory::PhoneScripts => {
-                push_flattened(&mut self.phone_scripts, payload);
+                merge_raw_object_payload(
+                    &mut self.phone_scripts,
+                    payload,
+                    "phone script payload",
+                    "phone script payload key",
+                )?;
             }
             ContentPackCategory::PhoneContacts => {
                 merge_phone_contact_payload(&mut self.phone_contacts, payload)?;
             }
             ContentPackCategory::PermanentPhoneNumbers => {
-                self.permanent_phone_numbers
-                    .extend(serde_json::from_value::<Vec<String>>(payload)?);
+                merge_exact_string_vec(
+                    &mut self.permanent_phone_numbers,
+                    serde_json::from_value::<Vec<String>>(payload)?,
+                    "permanent phone number",
+                )?;
             }
             ContentPackCategory::SpecialPhoneCalls => {
-                self.special_phone_calls
-                    .extend(serde_json::from_value::<Vec<String>>(payload)?);
+                merge_exact_string_set(
+                    &mut self.special_phone_calls,
+                    serde_json::from_value::<Vec<String>>(payload)?,
+                    "special phone call",
+                )?;
             }
             ContentPackCategory::NpcTrades => {
-                self.npc_trades
-                    .extend(serde_json::from_value::<Vec<String>>(payload)?);
+                merge_exact_string_set(
+                    &mut self.npc_trades,
+                    serde_json::from_value::<Vec<String>>(payload)?,
+                    "NPC trade",
+                )?;
             }
             ContentPackCategory::SpecialRoutines => {
-                self.special_routines
-                    .extend(serde_json::from_value::<Vec<String>>(payload)?);
+                merge_exact_string_set(
+                    &mut self.special_routines,
+                    serde_json::from_value::<Vec<String>>(payload)?,
+                    "special routine",
+                )?;
             }
             ContentPackCategory::AsmText => {
-                self.asm_text.extend(parse_object_map::<String>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.asm_text,
+                    parse_object_map::<String>(payload)?,
+                    "ASM text label",
+                )?;
             }
             ContentPackCategory::MoveNames => {
                 self.move_names
                     .extend(serde_json::from_value::<Vec<String>>(payload)?);
             }
             ContentPackCategory::BattleAnimations => {
-                self.battle_animations
-                    .extend(parse_object_map::<Vec<String>>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.battle_animations,
+                    parse_object_map::<Vec<String>>(payload)?,
+                    "battle animation",
+                )?;
             }
             ContentPackCategory::BattleAnimationTable => {
                 self.battle_animation_table
@@ -9444,21 +10231,29 @@ impl GameDataSet {
                     serde_json::to_string(&payload).context("encode sprite animation bundle")?;
             }
             ContentPackCategory::SpritePaletteDefaults => {
-                self.sprite_palette_defaults
-                    .extend(parse_object_map::<i64>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.sprite_palette_defaults,
+                    parse_object_map::<i64>(payload)?,
+                    "sprite palette default",
+                )?;
             }
             ContentPackCategory::PokegearTownMapPaletteMap => {
-                self.pokegear_town_map_palette_map
-                    .extend(parse_object_map::<Vec<String>>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.pokegear_town_map_palette_map,
+                    parse_object_map::<Vec<String>>(payload)?,
+                    "Pokegear town map palette entry",
+                )?;
             }
             ContentPackCategory::PokemonCries => {
-                self.pokemon_cries
-                    .extend(parse_object_map::<PokemonCryMetadata>(payload)?);
+                merge_exact_keyed_map(
+                    &mut self.pokemon_cries,
+                    parse_object_map::<PokemonCryMetadata>(payload)?,
+                    "Pokemon cry metadata for species",
+                )?;
             }
             ContentPackCategory::Audio => {
                 for audio_asset in parse_one_or_many::<ModpackAudioAsset>(payload)? {
-                    audio_asset.validate()?;
-                    self.audio.push(audio_asset);
+                    insert_audio_asset(&mut self.audio, audio_asset)?;
                 }
             }
             ContentPackCategory::Tilesets => {
@@ -9475,58 +10270,56 @@ impl GameDataSet {
 
     pub(crate) fn apply_modpack(&mut self, manifest: &ModpackManifest) -> Result<()> {
         for species in &manifest.payload.pokemon {
-            self.pokemon.insert(species.id.clone(), species.clone());
+            insert_pokemon_species(&mut self.pokemon, species.clone())?;
         }
         for move_data in &manifest.payload.moves {
             validate_manifest_move(move_data)?;
-            self.moves.insert(move_data.name.clone(), move_data.clone());
+            insert_move_data(&mut self.moves, move_data.clone())?;
         }
-        merge_evolution_table(&mut self.evolutions, &manifest.payload.evolutions);
-        merge_mart_catalog(&mut self.marts, &manifest.payload.marts);
+        merge_evolution_table(&mut self.evolutions, &manifest.payload.evolutions)?;
+        merge_mart_catalog(&mut self.marts, &manifest.payload.marts)?;
         merge_currency_constants(
             &mut self.currency_constants,
             &manifest.payload.currency_constants,
-        );
+        )?;
         self.battle_reward_rules = manifest.payload.battle_reward_rules.clone();
         self.step_event_rules = manifest.payload.step_event_rules.clone();
         for map in &manifest.payload.maps {
-            self.maps.insert(map.id.clone(), map.clone());
+            insert_map_module(&mut self.maps, map.clone())?;
         }
         let move_ids: BTreeSet<String> = self.moves.keys().cloned().collect();
         for item in &manifest.payload.items {
             validate_manifest_item(item)?;
             validate_manifest_item_references(item, &move_ids)?;
-            self.items.insert(item_key(item)?, item.clone());
+            insert_item(&mut self.items, item.clone())?;
         }
         for wild_encounter_data in &manifest.payload.wild_encounters {
-            self.wild_encounters.insert(
-                wild_encounter_data.map_name.clone(),
-                wild_encounter_data.clone(),
-            );
+            insert_wild_encounter_data(&mut self.wild_encounters, wild_encounter_data.clone())?;
         }
         for field_encounter_data in &manifest.payload.field_encounters {
-            self.field_encounters.insert(
-                field_encounter_data.map_name.clone(),
-                field_encounter_data.clone(),
-            );
+            insert_field_encounter_data(&mut self.field_encounters, field_encounter_data.clone())?;
         }
         self.fishing = manifest.payload.fishing.clone();
-        merge_fruit_tree_catalog(&mut self.fruit_trees, &manifest.payload.fruit_trees);
+        merge_fruit_tree_catalog(&mut self.fruit_trees, &manifest.payload.fruit_trees)?;
         self.field_moves = manifest.payload.field_moves.clone();
-        self.runtime_spawn_points.extend(
+        merge_runtime_spawn_points(
+            &mut self.runtime_spawn_points,
             manifest
                 .payload
                 .runtime_spawn_points
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
-        self.runtime_map_metadata.extend(
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )?;
+        merge_runtime_map_metadata(
+            &mut self.runtime_map_metadata,
             manifest
                 .payload
                 .runtime_map_metadata
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )?;
         self.flee_mons = manifest.payload.flee_mons.clone();
         self.roaming_pokemon = manifest.payload.roaming_pokemon.clone();
         self.buena_password_categories = manifest.payload.buena_password_categories.clone();
@@ -9550,129 +10343,129 @@ impl GameDataSet {
         self.type_categories = manifest.payload.type_categories.clone();
         self.type_effectiveness = manifest.payload.type_effectiveness.clone();
         self.weather_modifiers = manifest.payload.weather_modifiers.clone();
-        self.pc_strings.extend(
+        merge_pc_strings(
+            &mut self.pc_strings,
             manifest
                 .payload
                 .pc_strings
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
-        self.menu_icons.extend(
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )?;
+        merge_menu_icons(
+            &mut self.menu_icons,
             manifest
                 .payload
                 .menu_icons
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )?;
         for entry in &manifest.payload.pokedex_entries {
-            self.pokedex_entries
-                .insert(entry.species.clone(), entry.clone());
+            insert_pokedex_entry(&mut self.pokedex_entries, entry.clone())?;
         }
-        self.pokemon_frontpic_anim.extend(
+        merge_exact_keyed_map(
+            &mut self.pokemon_frontpic_anim,
             manifest
                 .payload
                 .pokemon_frontpic_anim
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "frontpic animation program for species",
+        )?;
         self.initialize_events = manifest.payload.initialize_events.clone();
         self.story_event_script_constants = manifest.payload.story_event_script_constants.clone();
-        self.asm_text.extend(
+        merge_exact_keyed_map(
+            &mut self.asm_text,
             manifest
                 .payload
                 .asm_text
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "ASM text label",
+        )?;
         self.move_names = manifest.payload.move_names.clone();
-        self.battle_animations.extend(
+        merge_exact_keyed_map(
+            &mut self.battle_animations,
             manifest
                 .payload
                 .battle_animations
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "battle animation",
+        )?;
         self.battle_animation_table = manifest.payload.battle_animation_table.clone();
         self.battle_anim_bundle = manifest.payload.battle_anim_bundle.clone();
         self.sprite_anim_bundle = manifest.payload.sprite_anim_bundle.clone();
-        self.sprite_palette_defaults.extend(
+        merge_exact_keyed_map(
+            &mut self.sprite_palette_defaults,
             manifest
                 .payload
                 .sprite_palette_defaults
                 .iter()
-                .map(|(key, value)| (key.clone(), *value)),
-        );
-        self.pokegear_town_map_palette_map.extend(
+                .map(|(key, value)| (key.clone(), *value))
+                .collect(),
+            "sprite palette default",
+        )?;
+        merge_exact_keyed_map(
+            &mut self.pokegear_town_map_palette_map,
             manifest
                 .payload
                 .pokegear_town_map_palette_map
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "Pokegear town map palette entry",
+        )?;
         merge_pokegear_landmarks(
             &mut self.pokegear_landmarks,
             &manifest.payload.pokegear_landmarks,
-        );
-        self.pokemon_cries.extend(
+        )?;
+        merge_exact_keyed_map(
+            &mut self.pokemon_cries,
             manifest
                 .payload
                 .pokemon_cries
                 .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "Pokemon cry metadata for species",
+        )?;
         for trainer in manifest.payload.trainers.trainers.values() {
             self.trainers.insert(trainer.clone())?;
         }
-        merge_phone_contact_catalog(&mut self.phone_contacts, &manifest.payload.phone_contacts);
-        self.permanent_phone_numbers
-            .extend(manifest.payload.permanent_phone_numbers.iter().cloned());
-        self.special_phone_calls
-            .extend(manifest.payload.special_phone_calls.iter().cloned());
-        self.npc_trades
-            .extend(manifest.payload.npc_trades.iter().cloned());
-        self.special_routines
-            .extend(manifest.payload.special_routines.iter().cloned());
-        self.audio.extend(manifest.payload.audio.iter().cloned());
-        self.capture_rules.fast_ball_species.extend(
+        merge_phone_contact_catalog(&mut self.phone_contacts, &manifest.payload.phone_contacts)?;
+        merge_exact_string_vec(
+            &mut self.permanent_phone_numbers,
+            manifest.payload.permanent_phone_numbers.clone(),
+            "permanent phone number",
+        )?;
+        merge_exact_string_set(
+            &mut self.special_phone_calls,
             manifest
                 .payload
-                .capture_rules
-                .fast_ball_species
+                .special_phone_calls
                 .iter()
-                .cloned(),
-        );
-        self.capture_rules.heavy_ball_modifiers.extend(
-            manifest
-                .payload
-                .capture_rules
-                .heavy_ball_modifiers
-                .iter()
-                .map(|(species, modifier)| (species.clone(), *modifier)),
-        );
-        self.capture_rules.ball_rules.extend(
-            manifest
-                .payload
-                .capture_rules
-                .ball_rules
-                .iter()
-                .map(|(ball, rule)| (ball.clone(), rule.clone())),
-        );
-        self.capture_rules.guaranteed_capture_balls.extend(
-            manifest
-                .payload
-                .capture_rules
-                .guaranteed_capture_balls
-                .iter()
-                .cloned(),
-        );
-        self.capture_rules.status_bonus.extend(
-            manifest
-                .payload
-                .capture_rules
-                .status_bonus
-                .iter()
-                .map(|(status, bonus)| (status.clone(), *bonus)),
-        );
+                .cloned()
+                .collect(),
+            "special phone call",
+        )?;
+        merge_exact_string_set(
+            &mut self.npc_trades,
+            manifest.payload.npc_trades.iter().cloned().collect(),
+            "NPC trade",
+        )?;
+        merge_exact_string_set(
+            &mut self.special_routines,
+            manifest.payload.special_routines.iter().cloned().collect(),
+            "special routine",
+        )?;
+        for audio_asset in &manifest.payload.audio {
+            insert_audio_asset(&mut self.audio, audio_asset.clone())?;
+        }
         self.tilesets
             .extend(manifest.payload.tilesets.iter().cloned());
         merge_playability_rules(&mut self.playability, &manifest.payload.playability);
@@ -9822,8 +10615,7 @@ impl GameDataSet {
             .with_context(|| format!("missing map scripts label {map_scripts_label}"))?;
         let scripts =
             runtime_module_script_subset(&self.map_scripts, [map_scripts_label, map_events_label]);
-        let mut scenes = parse_map_scene_table(map_name, map_scripts)?;
-        add_referenced_numeric_scene_ids(&mut scenes, self, map_name, &attributes, &scripts);
+        let scenes = parse_map_scene_table(map_name, map_scripts)?;
         let map_script_section_commands =
             parse_map_script_section_commands(map_name, map_scripts_label, map_scripts)?;
         let map_event_section_commands =
@@ -9900,6 +10692,23 @@ impl GameDataSet {
     }
 
     pub fn resolve_warp_transition(&self, trigger: &WarpTrigger) -> Result<WarpTransition> {
+        if !is_exact_map_reference_token(&trigger.warp.target_map) {
+            anyhow::bail!(
+                "warp {} on {} has invalid target_map field {:?}",
+                trigger.warp.index,
+                trigger.map_name,
+                trigger.warp.target_map
+            );
+        }
+        if trigger.warp.target_map != trigger.warp.target_map_constant {
+            anyhow::bail!(
+                "warp {} on {} target_map {:?} does not match target_map_constant {:?}",
+                trigger.warp.index,
+                trigger.map_name,
+                trigger.warp.target_map,
+                trigger.warp.target_map_constant
+            );
+        }
         let destination_map = self
             .map_name_for_constant(&trigger.warp.target_map_constant)
             .with_context(|| {
@@ -9908,9 +10717,26 @@ impl GameDataSet {
                     trigger.warp.target_map_constant, trigger.warp.index, trigger.map_name
                 )
             })?;
-        let destination_module = self
-            .map_module(&destination_map)
-            .with_context(|| format!("load destination map module {destination_map}"))?;
+        let destination_attributes =
+            self.map_attributes.get(&destination_map).with_context(|| {
+                format!(
+                    "warp target '{}' missing attributes (referenced by {})",
+                    destination_map, trigger.map_name
+                )
+            })?;
+        let destination_events_label = destination_attributes
+            .map_events_label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .with_context(|| {
+                format!("missing map_events_label for warp target {destination_map}")
+            })?;
+        let destination_events_payload = self
+            .map_scripts
+            .get(destination_events_label)
+            .with_context(|| format!("missing map events label {destination_events_label}"))?;
+        let destination_events = parse_map_events(&destination_map, destination_events_payload)
+            .with_context(|| format!("parse warp target events for {destination_map}"))?;
         if trigger.warp.target_warp_id < 1 {
             anyhow::bail!(
                 "warp {} on {} has dynamic target warp id {}",
@@ -9929,8 +10755,7 @@ impl GameDataSet {
                     trigger.warp.index, trigger.map_name
                 )
             })? as usize;
-        let destination_warp = destination_module
-            .events
+        let destination_warp = destination_events
             .warps
             .get(destination_index)
             .cloned()
@@ -9939,7 +10764,7 @@ impl GameDataSet {
                     "warp id {} referenced by {} exceeds available warps ({}) on {}",
                     trigger.warp.target_warp_id,
                     trigger.map_name,
-                    destination_module.events.warps.len(),
+                    destination_events.warps.len(),
                     destination_map
                 )
             })?;
@@ -10037,8 +10862,17 @@ fn write_compiled_game_pack(path: impl AsRef<Path>, pack: &CompiledGamePack) -> 
     let mut encoded = Vec::new();
     ciborium::into_writer(pack, &mut encoded)
         .with_context(|| format!("encode compiled game pack {}", path.display()))?;
-    let mut bytes = Vec::with_capacity(COMPILED_GAME_PACK_MAGIC.len() + encoded.len());
+    if encoded.len() > u32::MAX as usize {
+        anyhow::bail!(
+            "compiled game pack {} exceeds binary payload length field",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(COMPILED_GAME_PACK_HEADER_LEN + encoded.len());
     bytes.extend_from_slice(COMPILED_GAME_PACK_MAGIC);
+    bytes.extend_from_slice(&COMPILED_GAME_PACK_FORMAT_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&fnv1a32_bytes(&encoded).to_be_bytes());
     bytes.extend_from_slice(&encoded);
     if let Some(parent) = path
         .parent()
@@ -10092,6 +10926,9 @@ pub fn read_loaded_verified_compiled_game_pack(
 
 pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<()> {
     validate_compiled_report_manifest_identity(&pack.report)?;
+    validate_compiled_report_data_counts(&pack.report, &pack.data)?;
+    validate_compiled_report_map_references(&pack.report, &pack.data)?;
+    validate_compiled_report_progression_outputs(&pack.report, &pack.data)?;
 
     let mut diagnostics = pack
         .report
@@ -10100,11 +10937,7 @@ pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<
         .filter(|diagnostic| diagnostic.severity == VerificationSeverity::Error)
         .cloned()
         .collect::<Vec<_>>();
-    diagnostics.extend(
-        runtime_pack_presence_issues(runtime_pack_sections(&pack.data))
-            .into_iter()
-            .map(runtime_pack_presence_issue_diagnostic),
-    );
+    verify_runtime_pack_data(&pack.data, &mut diagnostics);
     if diagnostics.is_empty() {
         return Ok(());
     }
@@ -10124,6 +10957,181 @@ pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<
 }
 
 fn validate_compiled_report_manifest_identity(report: &ModpackCompileReport) -> Result<()> {
+    compiled_game_pack_runtime_modpack_id(report)?;
+    Ok(())
+}
+
+fn validate_compiled_report_data_counts(
+    report: &ModpackCompileReport,
+    data: &GameDataSet,
+) -> Result<()> {
+    validate_compiled_report_data_count("maps", report.maps, all_map_names(data).len())?;
+    validate_compiled_report_data_count("pokemon", report.pokemon, data.pokemon.len())?;
+    validate_compiled_report_data_count("moves", report.moves, data.moves.len())?;
+    validate_compiled_report_data_count("items", report.items, data.items.len())?;
+    Ok(())
+}
+
+fn validate_compiled_report_data_count(field: &str, reported: usize, actual: usize) -> Result<()> {
+    if reported != actual {
+        anyhow::bail!(
+            "compiled game pack report {field} count {reported} does not match embedded data count {actual}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_compiled_report_map_references(
+    report: &ModpackCompileReport,
+    data: &GameDataSet,
+) -> Result<()> {
+    let map_names = all_map_names(data);
+    validate_compiled_report_map_list("reachable_maps", &report.reachable_maps, &map_names)?;
+    validate_compiled_report_map_list("solvable_maps", &report.solvable_maps, &map_names)?;
+    let reachable_maps: BTreeSet<&str> = report.reachable_maps.iter().map(String::as_str).collect();
+    let granted_maps = declared_progression_maps(&data.playability);
+    for map in &report.solvable_maps {
+        if !reachable_maps.contains(map.as_str()) && !granted_maps.contains(map.as_str()) {
+            anyhow::bail!(
+                "compiled game pack report solvable_maps references map '{map}' that is neither reachable nor declared by embedded playability rules"
+            );
+        }
+    }
+    for edge in &report.graph_edges {
+        validate_compiled_report_map_reference("graph_edges.from", &edge.from, &map_names)?;
+        validate_compiled_report_map_reference("graph_edges.to", &edge.to, &map_names)?;
+        validate_compiled_report_graph_edge_kind(&edge.kind)?;
+    }
+    Ok(())
+}
+
+fn validate_compiled_report_map_list(
+    field: &str,
+    maps: &[String],
+    map_names: &BTreeSet<String>,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for map in maps {
+        if !seen.insert(map) {
+            anyhow::bail!("compiled game pack report {field} includes duplicate map '{map}'");
+        }
+        validate_compiled_report_map_reference(field, map, map_names)?;
+    }
+    Ok(())
+}
+
+fn validate_compiled_report_map_reference(
+    field: &str,
+    map: &str,
+    map_names: &BTreeSet<String>,
+) -> Result<()> {
+    if !map_names.contains(map) {
+        anyhow::bail!(
+            "compiled game pack report {field} references map '{map}' that is not embedded in pack data"
+        );
+    }
+    Ok(())
+}
+
+fn validate_compiled_report_graph_edge_kind(kind: &str) -> Result<()> {
+    if kind.is_empty()
+        || kind.trim() != kind
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        anyhow::bail!("compiled game pack report graph_edges.kind '{kind}' must be an exact token");
+    }
+    Ok(())
+}
+
+fn validate_compiled_report_progression_outputs(
+    report: &ModpackCompileReport,
+    data: &GameDataSet,
+) -> Result<()> {
+    validate_compiled_report_token_list("solvable_events", &report.solvable_events)?;
+    validate_compiled_report_token_list("solvable_items", &report.solvable_items)?;
+    let declared_events = declared_progression_events(&data.playability);
+    for event in &report.solvable_events {
+        if !declared_events.contains(event.as_str()) {
+            anyhow::bail!(
+                "compiled game pack report solvable_events references event '{event}' that is not declared by embedded playability rules"
+            );
+        }
+    }
+    let declared_items = declared_progression_items(&data.playability);
+    for item in &report.solvable_items {
+        if !data.items.contains_key(item) {
+            anyhow::bail!(
+                "compiled game pack report solvable_items references item '{item}' that is not embedded in pack data"
+            );
+        }
+        if !declared_items.contains(item.as_str()) {
+            anyhow::bail!(
+                "compiled game pack report solvable_items references item '{item}' that is not declared by embedded playability rules"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn declared_progression_maps(rules: &PlayabilityRules) -> BTreeSet<&str> {
+    rules
+        .progression_rules
+        .iter()
+        .flat_map(|rule| rule.grants.maps.iter().map(String::as_str))
+        .collect()
+}
+
+fn declared_progression_events(rules: &PlayabilityRules) -> BTreeSet<&str> {
+    rules
+        .initial_events
+        .iter()
+        .map(String::as_str)
+        .chain(
+            rules
+                .progression_rules
+                .iter()
+                .flat_map(|rule| rule.grants.events.iter().map(String::as_str)),
+        )
+        .collect()
+}
+
+fn declared_progression_items(rules: &PlayabilityRules) -> BTreeSet<&str> {
+    rules
+        .initial_items
+        .iter()
+        .map(String::as_str)
+        .chain(
+            rules
+                .progression_rules
+                .iter()
+                .flat_map(|rule| rule.grants.items.iter().map(String::as_str)),
+        )
+        .collect()
+}
+
+fn validate_compiled_report_token_list(field: &str, values: &[String]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if value.is_empty()
+            || value.trim() != value
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':'))
+        {
+            anyhow::bail!(
+                "compiled game pack report {field} value '{value}' must be an exact token"
+            );
+        }
+        if !seen.insert(value) {
+            anyhow::bail!("compiled game pack report {field} includes duplicate value '{value}'");
+        }
+    }
+    Ok(())
+}
+
+fn compiled_game_pack_runtime_modpack_id(report: &ModpackCompileReport) -> Result<String> {
     if report.manifests.is_empty() {
         anyhow::bail!("compiled game pack report must include at least one manifest id");
     }
@@ -10142,13 +11150,64 @@ fn validate_compiled_report_manifest_identity(report: &ModpackCompileReport) -> 
             );
         }
     }
-    Ok(())
+    let id = report.manifests.join("+");
+    SaveModpackIdentity::validate_id(&id)?;
+    Ok(id)
 }
 
 fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePack> {
-    let payload = bytes
-        .strip_prefix(COMPILED_GAME_PACK_MAGIC)
-        .with_context(|| format!("{} is not a compiled Crystal game pack", path.display()))?;
+    if !bytes.starts_with(COMPILED_GAME_PACK_MAGIC) {
+        anyhow::bail!("{} is not a compiled Crystal game pack", path.display());
+    }
+    if bytes.len() < COMPILED_GAME_PACK_HEADER_LEN {
+        anyhow::bail!(
+            "compiled game pack {} is shorter than the required header",
+            path.display()
+        );
+    }
+    let frame_version = u16::from_be_bytes([
+        bytes[COMPILED_GAME_PACK_VERSION_OFFSET],
+        bytes[COMPILED_GAME_PACK_VERSION_OFFSET + 1],
+    ]);
+    if frame_version != COMPILED_GAME_PACK_FORMAT_VERSION {
+        anyhow::bail!(
+            "compiled game pack {} uses unsupported frame format version {}",
+            path.display(),
+            frame_version
+        );
+    }
+    let declared = u32::from_be_bytes([
+        bytes[COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 1],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 2],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 3],
+    ]) as usize;
+    let actual = bytes.len() - COMPILED_GAME_PACK_HEADER_LEN;
+    if declared != actual {
+        anyhow::bail!(
+            "compiled game pack {} payload length {} does not match actual {}",
+            path.display(),
+            declared,
+            actual
+        );
+    }
+    if declared == 0 {
+        anyhow::bail!("compiled game pack {} payload is empty", path.display());
+    }
+    let expected_hash = u32::from_be_bytes([
+        bytes[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 1],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 2],
+        bytes[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 3],
+    ]);
+    let payload = &bytes[COMPILED_GAME_PACK_HEADER_LEN..];
+    let actual_hash = fnv1a32_bytes(payload);
+    if actual_hash != expected_hash {
+        anyhow::bail!(
+            "compiled game pack {} payload hash {actual_hash:#010x} does not match declared {expected_hash:#010x}",
+            path.display()
+        );
+    }
     let mut cursor = std::io::Cursor::new(payload);
     let pack: CompiledGamePack = ciborium::from_reader(&mut cursor)
         .with_context(|| format!("decode compiled game pack {}", path.display()))?;
@@ -10167,6 +11226,18 @@ fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePa
         );
     }
     Ok(pack)
+}
+
+fn validate_content_pack_audio_metadata_entry(pack_id: &str, entry: &str) -> Result<()> {
+    let extension = Path::new(entry)
+        .extension()
+        .and_then(|extension| extension.to_str());
+    if extension != Some("json") {
+        anyhow::bail!(
+            "content pack {pack_id} audio entry {entry} must point to explicit audio metadata JSON"
+        );
+    }
+    Ok(())
 }
 
 fn resolve_content_pack_data_path(
@@ -10238,83 +11309,6 @@ fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn add_referenced_numeric_scene_ids(
-    scenes: &mut MapSceneTable,
-    data: &GameDataSet,
-    _map_name: &str,
-    attributes: &MapAttributes,
-    scripts: &BTreeMap<String, Value>,
-) {
-    if !scenes.scenes.is_empty() {
-        return;
-    }
-
-    let mut numeric_ids = BTreeSet::new();
-    for payload in scripts.values() {
-        collect_numeric_setscene_tokens(payload, &mut numeric_ids);
-    }
-    if let Some(map_constant) = attributes.map_constant.as_deref() {
-        for payload in data.map_scripts.values() {
-            collect_numeric_setmapscene_tokens(payload, map_constant, &mut numeric_ids);
-        }
-    }
-
-    scenes
-        .scenes
-        .extend(numeric_ids.into_iter().map(|scene_id| MapScene {
-            scene_id: scene_id.to_string(),
-            script_name: None,
-        }));
-}
-
-fn collect_numeric_setscene_tokens(payload: &Value, numeric_ids: &mut BTreeSet<usize>) {
-    let Some(entries) = payload.as_array() else {
-        return;
-    };
-    for entry in entries {
-        let Some("setscene") = entry.get("command").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(scene_id) = entry
-            .get("args")
-            .and_then(Value::as_array)
-            .and_then(|args| args.first())
-            .and_then(Value::as_str)
-            .and_then(|token| token.parse::<usize>().ok())
-        {
-            numeric_ids.insert(scene_id);
-        }
-    }
-}
-
-fn collect_numeric_setmapscene_tokens(
-    payload: &Value,
-    map_constant: &str,
-    numeric_ids: &mut BTreeSet<usize>,
-) {
-    let Some(entries) = payload.as_array() else {
-        return;
-    };
-    for entry in entries {
-        let Some("setmapscene") = entry.get("command").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(args) = entry.get("args").and_then(Value::as_array) else {
-            continue;
-        };
-        if args.first().and_then(Value::as_str) != Some(map_constant) {
-            continue;
-        }
-        if let Some(scene_id) = args
-            .get(1)
-            .and_then(Value::as_str)
-            .and_then(|token| token.parse::<usize>().ok())
-        {
-            numeric_ids.insert(scene_id);
-        }
-    }
-}
-
 fn parse_one_or_many<T>(payload: Value) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
@@ -10365,7 +11359,26 @@ fn merge_learnset_entry(learnsets: &mut SpeciesLearnsets, payload: Value) -> Res
     }
 
     let entry: Entry = serde_json::from_value(payload).context("parse learnset entry")?;
-    learnsets.insert(entry.species, entry.learnset);
+    insert_learnset(learnsets, entry.species, entry.learnset)?;
+    Ok(())
+}
+
+fn merge_learnsets(target: &mut SpeciesLearnsets, source: SpeciesLearnsets) -> Result<()> {
+    for (species, learnset) in source {
+        insert_learnset(target, species, learnset)?;
+    }
+    Ok(())
+}
+
+fn insert_learnset(
+    target: &mut SpeciesLearnsets,
+    species: String,
+    learnset: Vec<LearnsetEntry>,
+) -> Result<()> {
+    if target.contains_key(&species) {
+        anyhow::bail!("duplicate learnset for species '{species}'");
+    }
+    target.insert(species, learnset);
     Ok(())
 }
 
@@ -10399,66 +11412,228 @@ fn merge_evolution_entry(target: &mut EvolutionTable, payload: Value) -> Result<
     }
 
     let entry: Entry = serde_json::from_value(payload).context("parse evolution entry")?;
-    target.0.insert(entry.species, entry.evolutions);
+    insert_evolutions(target, entry.species, entry.evolutions)?;
     Ok(())
 }
 
-fn merge_evolution_table(target: &mut EvolutionTable, source: &EvolutionTable) {
+fn merge_evolution_table(target: &mut EvolutionTable, source: &EvolutionTable) -> Result<()> {
     for (species, entries) in &source.0 {
-        target.0.insert(species.clone(), entries.clone());
+        insert_evolutions(target, species.clone(), entries.clone())?;
     }
+    Ok(())
+}
+
+fn insert_evolutions(
+    target: &mut EvolutionTable,
+    species: String,
+    entries: Vec<EvolutionEntry>,
+) -> Result<()> {
+    if target.0.contains_key(&species) {
+        anyhow::bail!("duplicate evolutions for species '{species}'");
+    }
+    target.0.insert(species, entries);
+    Ok(())
 }
 
 fn merge_mart_payload(target: &mut MartCatalog, payload: Value) -> Result<()> {
     let marts: BTreeMap<String, Vec<String>> =
         serde_json::from_value(payload).context("parse mart catalog payload")?;
-    target.0.extend(marts);
+    for (mart_id, item_ids) in marts {
+        insert_mart_entry(target, mart_id, item_ids)?;
+    }
     Ok(())
 }
 
-fn merge_mart_catalog(target: &mut MartCatalog, source: &MartCatalog) {
+fn merge_mart_catalog(target: &mut MartCatalog, source: &MartCatalog) -> Result<()> {
     for (mart_id, item_ids) in &source.0 {
-        target.0.insert(mart_id.clone(), item_ids.clone());
+        insert_mart_entry(target, mart_id.clone(), item_ids.clone())?;
     }
+    Ok(())
+}
+
+fn insert_mart_entry(
+    target: &mut MartCatalog,
+    mart_id: String,
+    item_ids: Vec<String>,
+) -> Result<()> {
+    if target.0.contains_key(&mart_id) {
+        anyhow::bail!("duplicate mart catalog entry for mart '{mart_id}'");
+    }
+    target.0.insert(mart_id, item_ids);
+    Ok(())
 }
 
 fn merge_fruit_tree_payload(target: &mut FruitTreeCatalog, payload: Value) -> Result<()> {
     let fruit_trees: BTreeMap<String, String> =
         serde_json::from_value(payload).context("parse fruit tree catalog payload")?;
-    target.0.extend(fruit_trees);
+    for (tree_id, item_id) in fruit_trees {
+        insert_fruit_tree_entry(target, tree_id, item_id)?;
+    }
     Ok(())
 }
 
-fn merge_fruit_tree_catalog(target: &mut FruitTreeCatalog, source: &FruitTreeCatalog) {
+fn merge_fruit_tree_catalog(
+    target: &mut FruitTreeCatalog,
+    source: &FruitTreeCatalog,
+) -> Result<()> {
     for (tree_id, item_id) in &source.0 {
-        target.0.insert(tree_id.clone(), item_id.clone());
+        insert_fruit_tree_entry(target, tree_id.clone(), item_id.clone())?;
     }
+    Ok(())
+}
+
+fn insert_fruit_tree_entry(
+    target: &mut FruitTreeCatalog,
+    tree_id: String,
+    item_id: String,
+) -> Result<()> {
+    if target.0.contains_key(&tree_id) {
+        anyhow::bail!("duplicate fruit tree catalog entry for tree '{tree_id}'");
+    }
+    target.0.insert(tree_id, item_id);
+    Ok(())
 }
 
 fn merge_phone_contact_payload(target: &mut PhoneContactCatalog, payload: Value) -> Result<()> {
     let contacts: PhoneContactCatalog =
         serde_json::from_value(payload).context("parse phone contact catalog payload")?;
-    merge_phone_contact_catalog(target, &contacts);
+    merge_phone_contact_catalog(target, &contacts)
+}
+
+fn merge_phone_contact_catalog(
+    target: &mut PhoneContactCatalog,
+    source: &PhoneContactCatalog,
+) -> Result<()> {
+    for (contact_id, record) in &source.0 {
+        insert_phone_contact(target, contact_id.clone(), record.clone())?;
+    }
     Ok(())
 }
 
-fn merge_phone_contact_catalog(target: &mut PhoneContactCatalog, source: &PhoneContactCatalog) {
-    for (contact_id, record) in &source.0 {
-        target.0.insert(contact_id.clone(), record.clone());
+fn insert_phone_contact(
+    target: &mut PhoneContactCatalog,
+    contact_id: String,
+    record: PhoneContactRecord,
+) -> Result<()> {
+    if target.0.contains_key(&contact_id) {
+        anyhow::bail!("duplicate phone contact catalog entry for contact '{contact_id}'");
     }
+    target.0.insert(contact_id, record);
+    Ok(())
+}
+
+fn insert_pokedex_entry(
+    target: &mut BTreeMap<String, RuntimePokedexEntry>,
+    entry: RuntimePokedexEntry,
+) -> Result<()> {
+    let species = entry.species.clone();
+    if target.insert(species.clone(), entry).is_some() {
+        anyhow::bail!("duplicate pokedex entry for species '{species}'");
+    }
+    Ok(())
+}
+
+fn insert_pokemon_species(
+    target: &mut BTreeMap<String, PokemonSpecies>,
+    species: PokemonSpecies,
+) -> Result<()> {
+    let species_id = species.id.clone();
+    if target.contains_key(&species_id) {
+        anyhow::bail!("duplicate Pokemon species '{species_id}'");
+    }
+    target.insert(species_id, species);
+    Ok(())
+}
+
+fn insert_move_data(target: &mut BTreeMap<String, Move>, move_data: Move) -> Result<()> {
+    let move_name = move_data.name.clone();
+    if target.contains_key(&move_name) {
+        anyhow::bail!("duplicate move '{move_name}'");
+    }
+    target.insert(move_name, move_data);
+    Ok(())
+}
+
+fn insert_growth_rate_curve(
+    target: &mut BTreeMap<String, crystal_core::systems::experience::GrowthRateCurve>,
+    curve: crystal_core::systems::experience::GrowthRateCurve,
+) -> Result<()> {
+    let curve_id = curve.id.clone();
+    if target.contains_key(&curve_id) {
+        anyhow::bail!("duplicate growth rate curve '{curve_id}'");
+    }
+    target.insert(curve_id, curve);
+    Ok(())
+}
+
+fn insert_item(target: &mut BTreeMap<String, Item>, item: Item) -> Result<()> {
+    let key = item_key(&item)?;
+    if target.contains_key(&key) {
+        anyhow::bail!("duplicate item '{key}'");
+    }
+    target.insert(key, item);
+    Ok(())
+}
+
+fn insert_map_module(target: &mut BTreeMap<String, MapModule>, map: MapModule) -> Result<()> {
+    let map_id = map.id.clone();
+    if target.contains_key(&map_id) {
+        anyhow::bail!("duplicate map module '{map_id}'");
+    }
+    target.insert(map_id, map);
+    Ok(())
+}
+
+fn insert_wild_encounter_data(
+    target: &mut BTreeMap<String, WildEncounterData>,
+    data: WildEncounterData,
+) -> Result<()> {
+    let map_name = data.map_name.clone();
+    if target.contains_key(&map_name) {
+        anyhow::bail!("duplicate wild encounter data for map '{map_name}'");
+    }
+    target.insert(map_name, data);
+    Ok(())
+}
+
+fn insert_field_encounter_data(
+    target: &mut BTreeMap<String, FieldEncounterData>,
+    data: FieldEncounterData,
+) -> Result<()> {
+    let map_name = data.map_name.clone();
+    if target.contains_key(&map_name) {
+        anyhow::bail!("duplicate field encounter data for map '{map_name}'");
+    }
+    target.insert(map_name, data);
+    Ok(())
 }
 
 fn merge_currency_constants_payload(target: &mut CurrencyCatalog, payload: Value) -> Result<()> {
     let constants: BTreeMap<String, u32> =
         serde_json::from_value(payload).context("parse currency constants payload")?;
-    target.0.extend(constants);
+    for (constant, value) in constants {
+        insert_currency_constant(target, constant, value)?;
+    }
     Ok(())
 }
 
-fn merge_currency_constants(target: &mut CurrencyCatalog, source: &CurrencyCatalog) {
+fn merge_currency_constants(target: &mut CurrencyCatalog, source: &CurrencyCatalog) -> Result<()> {
     for (constant, value) in &source.0 {
-        target.0.insert(constant.clone(), *value);
+        insert_currency_constant(target, constant.clone(), *value)?;
     }
+    Ok(())
+}
+
+fn insert_currency_constant(
+    target: &mut CurrencyCatalog,
+    constant: String,
+    value: u32,
+) -> Result<()> {
+    if target.0.contains_key(&constant) {
+        anyhow::bail!("duplicate currency constant '{constant}'");
+    }
+    target.0.insert(constant, value);
+    Ok(())
 }
 
 fn merge_pokegear_landmarks_payload(
@@ -10467,31 +11642,136 @@ fn merge_pokegear_landmarks_payload(
 ) -> Result<()> {
     let payload: PokegearLandmarksPayload =
         serde_json::from_value(payload).context("parse pokegear landmarks payload")?;
-    merge_pokegear_landmarks(target, &payload);
-    Ok(())
+    merge_pokegear_landmarks(target, &payload)
 }
 
 fn merge_pokegear_landmarks(
     target: &mut PokegearLandmarksPayload,
     payload: &PokegearLandmarksPayload,
-) {
+) -> Result<()> {
     for landmark in &payload.landmarks {
-        if let Some(existing) = target
+        if target
             .landmarks
-            .iter_mut()
+            .iter()
             .find(|existing| existing.constant == landmark.constant)
+            .is_some()
         {
-            *existing = landmark.clone();
-        } else {
-            target.landmarks.push(landmark.clone());
+            anyhow::bail!(
+                "duplicate Pokegear landmark constant '{}'",
+                landmark.constant
+            );
+        }
+        target.landmarks.push(landmark.clone());
+    }
+    for (map, landmark) in &payload.map_to_landmark {
+        if target.map_to_landmark.contains_key(map) {
+            anyhow::bail!("duplicate Pokegear landmark map assignment for map '{map}'");
+        }
+        target.map_to_landmark.insert(map.clone(), landmark.clone());
+    }
+    Ok(())
+}
+
+fn merge_runtime_spawn_points(
+    target: &mut BTreeMap<String, RuntimeSpawnPoint>,
+    source: BTreeMap<String, RuntimeSpawnPoint>,
+) -> Result<()> {
+    for (key, spawn) in source {
+        if target.contains_key(&key) {
+            anyhow::bail!("duplicate runtime spawn point '{key}'");
+        }
+        target.insert(key, spawn);
+    }
+    Ok(())
+}
+
+fn merge_runtime_map_metadata(
+    target: &mut BTreeMap<String, RuntimeMapMetadata>,
+    source: BTreeMap<String, RuntimeMapMetadata>,
+) -> Result<()> {
+    for (key, metadata) in source {
+        if target.contains_key(&key) {
+            anyhow::bail!("duplicate runtime map metadata '{key}'");
+        }
+        target.insert(key, metadata);
+    }
+    Ok(())
+}
+
+fn merge_pc_strings(
+    target: &mut BTreeMap<String, String>,
+    source: BTreeMap<String, String>,
+) -> Result<()> {
+    for (key, value) in source {
+        if target.contains_key(&key) {
+            anyhow::bail!("duplicate PC string '{key}'");
+        }
+        target.insert(key, value);
+    }
+    Ok(())
+}
+
+fn merge_menu_icons(
+    target: &mut BTreeMap<String, String>,
+    source: BTreeMap<String, String>,
+) -> Result<()> {
+    for (key, value) in source {
+        if target.contains_key(&key) {
+            anyhow::bail!("duplicate menu icon entry for species '{key}'");
+        }
+        target.insert(key, value);
+    }
+    Ok(())
+}
+
+fn merge_exact_keyed_map<T>(
+    target: &mut BTreeMap<String, T>,
+    source: BTreeMap<String, T>,
+    description: &str,
+) -> Result<()> {
+    for (key, value) in source {
+        if target.contains_key(&key) {
+            anyhow::bail!("duplicate {description} '{key}'");
+        }
+        target.insert(key, value);
+    }
+    Ok(())
+}
+
+fn merge_exact_string_vec(
+    target: &mut Vec<String>,
+    source: Vec<String>,
+    description: &str,
+) -> Result<()> {
+    for value in source {
+        if target.contains(&value) {
+            anyhow::bail!("duplicate {description} '{value}'");
+        }
+        target.push(value);
+    }
+    Ok(())
+}
+
+fn merge_exact_string_set(
+    target: &mut BTreeSet<String>,
+    source: Vec<String>,
+    description: &str,
+) -> Result<()> {
+    for value in source {
+        if !target.insert(value.clone()) {
+            anyhow::bail!("duplicate {description} '{value}'");
         }
     }
-    target.map_to_landmark.extend(
-        payload
-            .map_to_landmark
-            .iter()
-            .map(|(map, landmark)| (map.clone(), landmark.clone())),
-    );
+    Ok(())
+}
+
+fn insert_audio_asset(target: &mut Vec<ModpackAudioAsset>, asset: ModpackAudioAsset) -> Result<()> {
+    asset.validate()?;
+    if target.iter().any(|existing| existing.id == asset.id) {
+        anyhow::bail!("duplicate audio asset id '{}'", asset.id);
+    }
+    target.push(asset);
+    Ok(())
 }
 
 fn merge_species_value_payload(
@@ -10534,8 +11814,61 @@ fn merge_object_payload(target: &mut BTreeMap<String, Value>, payload: Value) ->
         anyhow::bail!("object payload must be an object or an array of objects");
     };
     for (key, value) in object {
+        if target.contains_key(key) {
+            anyhow::bail!("duplicate object payload key '{key}'");
+        }
         target.insert(key.clone(), value.clone());
     }
+    Ok(())
+}
+
+fn merge_pokedex_payload(target: &mut Vec<Value>, payload: Value) -> Result<()> {
+    if let Some(array) = payload.as_array() {
+        for entry in array {
+            merge_pokedex_payload(target, entry.clone())?;
+        }
+        return Ok(());
+    }
+    let species = payload
+        .as_object()
+        .and_then(|object| object.get("species"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("pokedex entry payload must declare species"))?;
+    if target
+        .iter()
+        .any(|entry| entry.get("species").and_then(Value::as_str) == Some(species))
+    {
+        anyhow::bail!("duplicate pokedex payload for species '{species}'");
+    }
+    target.push(payload);
+    Ok(())
+}
+
+fn merge_raw_object_payload(
+    target: &mut Vec<Value>,
+    payload: Value,
+    payload_description: &str,
+    key_description: &str,
+) -> Result<()> {
+    if let Some(array) = payload.as_array() {
+        for entry in array {
+            merge_raw_object_payload(target, entry.clone(), payload_description, key_description)?;
+        }
+        return Ok(());
+    }
+    let Some(object) = payload.as_object() else {
+        anyhow::bail!("{payload_description} must be an object or an array of objects");
+    };
+    for key in object.keys() {
+        if target.iter().any(|entry| {
+            entry
+                .as_object()
+                .is_some_and(|existing| existing.contains_key(key))
+        }) {
+            anyhow::bail!("duplicate {key_description} '{key}'");
+        }
+    }
+    target.push(payload);
     Ok(())
 }
 
@@ -10923,6 +12256,7 @@ fn parse_script_shop_commands(
                 );
             }
             commands.push(ScriptShopCommand {
+                command: command_name.to_string(),
                 mart_type: args[0].to_string(),
                 mart_id: args[1].to_string(),
                 source_script: script_name.clone(),
@@ -12952,47 +14286,47 @@ mod tests {
     use super::*;
     use crystal_core::map::MapConnection;
     use crystal_core::models::{
-        ability, egg_group, growth_rate, item_pocket, pokemon_type, BaseStats, Item,
+        BaseStats, Item, ability, egg_group, growth_rate, item_pocket, pokemon_type,
     };
     use crystal_core::random::Random;
     use crystal_core::state::GameState;
     use crystal_core::systems::economy::{
-        check_coins, check_money, take_money, AmountComparison, MoneyAccount,
+        AmountComparison, MoneyAccount, check_coins, check_money, take_money,
     };
     use crystal_core::systems::field_items::{
-        pickup_field_item, pickup_script_field_item, FieldItemPickup, FieldItemPickupOutcome,
-        FieldItemSource,
+        FieldItemPickup, FieldItemPickupOutcome, FieldItemSource, pickup_field_item,
+        pickup_script_field_item,
     };
-    use crystal_core::systems::gift_pokemon::{give_gift_pokemon, GiftPokemonRequest};
+    use crystal_core::systems::gift_pokemon::{GiftPokemonRequest, give_gift_pokemon};
     use crystal_core::systems::phone::PhoneContactRecord;
     use crystal_core::systems::script_blocks::apply_script_block_change;
     use crystal_core::systems::script_flags::{apply_script_flag_mutation, check_script_flag};
     use crystal_core::systems::script_items::{
-        check_script_item, grant_script_item, take_script_item, ScriptItemGrantOutcome,
+        ScriptItemGrantOutcome, check_script_item, grant_script_item, take_script_item,
     };
     use crystal_core::systems::script_objects::{
         apply_script_movement, apply_script_object_mutation,
     };
     use crystal_core::systems::script_scenes::apply_script_scene_command;
     use crystal_core::systems::scripted_battles::{
-        apply_scripted_battle_effects_to_session, ScriptedBattleEffects,
+        ScriptedBattleEffects, apply_scripted_battle_effects_to_session,
     };
     use crystal_core::systems::special_routines::{
         BUENA_PASSWORD_CATEGORY_ITEM, BUENA_PASSWORD_CATEGORY_MON, BUENA_PASSWORD_CATEGORY_MOVE,
     };
     use crystal_core::world::collision::{
-        can_enter_tile, permissions, sample_collision, MetatileCollision, PlayerTraversalState,
-        TilesetCollision,
+        MetatileCollision, PlayerTraversalState, TilesetCollision, can_enter_tile, permissions,
+        sample_collision,
     };
     use crystal_core::world::encounters::EncounterMusicModifier;
     use crystal_core::world::encounters::{
-        table_for_surface, EncounterSurface, FieldEncounterData, FieldEncounterEntry,
-        FieldEncounterTable, TimeOfDay, WildEncounter, WildEncounterTable,
+        EncounterSurface, FieldEncounterData, FieldEncounterEntry, FieldEncounterTable, TimeOfDay,
+        WildEncounter, WildEncounterTable, table_for_surface,
     };
     use crystal_core::world::map::{Direction, TilePosition};
     use crystal_core::world::movement::{StepOptions, StepOutcome};
     use crystal_core::world::session::{
-        warp_tile_position, EncounterCheckOptions, OverworldSession,
+        EncounterCheckOptions, OverworldSession, warp_tile_position,
     };
 
     fn test_item(id: &str) -> Item {
@@ -13047,6 +14381,37 @@ mod tests {
             callee_script: None,
             caller_time_mask: 0,
             caller_script: None,
+        }
+    }
+
+    fn test_runtime_spawn_point(identifier: u16, map_name: &str) -> RuntimeSpawnPoint {
+        RuntimeSpawnPoint {
+            identifier,
+            map_constant: "ROUTE_29".to_string(),
+            map_name: map_name.to_string(),
+            group_id: 1,
+            map_id: 1,
+            tile_x: 0,
+            tile_y: 0,
+            group_name: "GROUP_ROUTE_29".to_string(),
+            metatile_x: 0,
+            metatile_y: 0,
+            subtile_x: 0,
+            subtile_y: 0,
+        }
+    }
+
+    fn test_runtime_map_metadata(constant: &str, name: &str) -> RuntimeMapMetadata {
+        RuntimeMapMetadata {
+            constant: constant.to_string(),
+            name: name.to_string(),
+            group_name: "GROUP_ROUTE_29".to_string(),
+            group_id: 1,
+            map_id: 1,
+            width: 10,
+            height: 9,
+            environment: "TOWN".to_string(),
+            phone_service: 1,
         }
     }
 
@@ -13252,21 +14617,25 @@ mod tests {
     fn add_test_trainer(data: &mut GameDataSet, encounter_music: &str) {
         data.trainers.trainers.insert(
             "YOUNGSTER_JOEY".to_string(),
-            Trainer {
-                name: "Joey".to_string(),
-                trainer_id: "YOUNGSTER_JOEY".to_string(),
-                trainer_class: "YOUNGSTER".to_string(),
-                party: Vec::new(),
-                win_quote: "I won!".to_string(),
-                lose_quote: "I lost!".to_string(),
-                items: Vec::new(),
-                base_reward: 4,
-                ai_move_flags: 0,
-                ai_item_switch_flags: 0,
-                encounter_music: encounter_music.to_string(),
-                ai_layers: Vec::new(),
-            },
+            test_trainer("YOUNGSTER_JOEY", encounter_music),
         );
+    }
+
+    fn test_trainer(trainer_id: &str, encounter_music: &str) -> Trainer {
+        Trainer {
+            name: "Joey".to_string(),
+            trainer_id: trainer_id.to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            party: Vec::new(),
+            win_quote: "I won!".to_string(),
+            lose_quote: "I lost!".to_string(),
+            items: Vec::new(),
+            base_reward: 4,
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            encounter_music: encounter_music.to_string(),
+            ai_layers: Vec::new(),
+        }
     }
 
     #[test]
@@ -13331,6 +14700,24 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_invalid_trainer_encounter_music_id_before_lookup() {
+        let mut data = GameDataSet::default();
+        add_test_trainer(&mut data, "MUSIC YOUNGSTER ENCOUNTER");
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_trainer_encounter_music"
+                && diagnostic.subject == "YOUNGSTER_JOEY"
+                && diagnostic.message.contains("MUSIC YOUNGSTER ENCOUNTER")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_scripted_battle_requests_without_runtime_fallbacks() {
         let mut data = GameDataSet::default();
         add_runtime_species_and_move(&mut data);
@@ -13343,26 +14730,41 @@ mod tests {
             sample_rate_hz: None,
             channels: None,
         });
-        let known_species_id = data
-            .pokemon
-            .keys()
-            .next()
-            .expect("runtime species")
-            .clone();
+        let known_species_id = data.pokemon.keys().next().expect("runtime species").clone();
         let mut module = test_map_module("Start", "START_MAP", None);
         module.trainer_scripts.insert(
             "TrainerScript".to_string(),
             TrainerBattleRequest::new("youngster", "YOUNGSTER_JOEY", "EVENT_BEAT_JOEY"),
         );
-        module.scripted_trainer_battles = vec![ScriptedTrainerBattle {
-            source_script: "LoadTrainerScript".to_string(),
-            loadtrainer_command_index: 3,
-            startbattle_command_index: 4,
-            request: TrainerBattleRequest::new("YOUNGSTER", "youngster_joey", ""),
-            reload_map_after_battle: false,
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
-        }];
+        module.scripted_trainer_battles = vec![
+            ScriptedTrainerBattle {
+                source_script: "LoadTrainerScript".to_string(),
+                loadtrainer_command_index: 3,
+                startbattle_command_index: 4,
+                request: TrainerBattleRequest::new("YOUNGSTER", "youngster_joey", ""),
+                reload_map_after_battle: false,
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+            },
+            ScriptedTrainerBattle {
+                source_script: "BadTrainerIdScript".to_string(),
+                loadtrainer_command_index: 9,
+                startbattle_command_index: 10,
+                request: TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER JOEY", ""),
+                reload_map_after_battle: false,
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+            },
+            ScriptedTrainerBattle {
+                source_script: "BadTrainerClassScript".to_string(),
+                loadtrainer_command_index: 11,
+                startbattle_command_index: 12,
+                request: TrainerBattleRequest::new("YOUNG STER", "YOUNGSTER_JOEY", ""),
+                reload_map_after_battle: false,
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+            },
+        ];
         module.scripted_wild_battles = vec![
             ScriptedWildBattle {
                 source_script: "WildCaseScript".to_string(),
@@ -13380,6 +14782,17 @@ mod tests {
                 loadwildmon_command_index: 7,
                 startbattle_command_index: 8,
                 request: StaticWildBattleRequest::new(known_species_id, 0),
+                reload_map_after_battle: false,
+                pre_battle_event_flags: Vec::new(),
+                post_battle_event_flags: Vec::new(),
+                post_battle_script_flags: Vec::new(),
+                disappear_object_ids: Vec::new(),
+            },
+            ScriptedWildBattle {
+                source_script: "WildMalformedScript".to_string(),
+                loadwildmon_command_index: 13,
+                startbattle_command_index: 14,
+                request: StaticWildBattleRequest::new("HO OT", 10),
                 reload_map_after_battle: false,
                 pre_battle_event_flags: Vec::new(),
                 post_battle_event_flags: Vec::new(),
@@ -13413,6 +14826,33 @@ mod tests {
             diagnostic.code == "invalid_scripted_wild_level"
                 && diagnostic.subject == "Start:WildZeroScript:7"
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_scripted_trainer_id"
+                && diagnostic.subject == "Start:BadTrainerIdScript:9"
+                && diagnostic.message.contains("YOUNGSTER JOEY")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_scripted_trainer_class"
+                && diagnostic.subject == "Start:BadTrainerClassScript:11"
+                && diagnostic.message.contains("YOUNG STER")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_scripted_wild_species"
+                && diagnostic.subject == "Start:WildMalformedScript:13"
+                && diagnostic.message.contains("HO OT")
+        }));
+        for subject in [
+            "Start:BadTrainerIdScript:9",
+            "Start:BadTrainerClassScript:11",
+            "Start:WildMalformedScript:13",
+        ] {
+            assert!(!report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.subject == subject
+                    && (diagnostic.code == "unknown_scripted_trainer"
+                        || diagnostic.code == "unknown_scripted_wild_species"
+                        || diagnostic.code == "scripted_trainer_class_mismatch")
+            }));
+        }
     }
 
     #[test]
@@ -13457,6 +14897,38 @@ mod tests {
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_escape_item_rule"
+                && diagnostic.subject == "field_moves:escape_rope"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_escape_rope_rule_without_unknown_fallback() {
+        let mut data = GameDataSet::default();
+        let mut item = test_item("ESCAPE_ROPE");
+        item.effect = "ESCAPE_ROPE".to_string();
+        item.escape_rope_mode = Some("DIG_WARP".to_string());
+        data.items.insert("ESCAPE_ROPE".to_string(), item);
+        data.field_moves.escape_rope = crystal_core::systems::field_moves::FieldEscapeItemRule {
+            item_id: "ESCAPE ROPE".to_string(),
+            escape_rope_mode: "DIG WARP".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_field_escape_item_id"
+                && diagnostic.subject == "field_moves:escape_rope"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_field_escape_item_mode"
+                && diagnostic.subject == "field_moves:escape_rope"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_field_escape_item_rule"
                 && diagnostic.subject == "field_moves:escape_rope"
         }));
@@ -13600,6 +15072,11 @@ mod tests {
                     denominator: 1,
                 },
                 EncounterMusicModifier {
+                    music_id: "MUSIC POKEMON MARCH".to_string(),
+                    numerator: 1,
+                    denominator: 1,
+                },
+                EncounterMusicModifier {
                     music_id: "SFX_TACKLE".to_string(),
                     numerator: 1,
                     denominator: 0,
@@ -13620,6 +15097,10 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_encounter_music_modifier_id"
                 && diagnostic.subject == "encounter_music_modifiers:SFX_TACKLE"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_encounter_music_modifier_id"
+                && diagnostic.subject == "encounter_music_modifiers:MUSIC POKEMON MARCH"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_encounter_music_modifier_ratio"
@@ -13814,7 +15295,9 @@ mod tests {
         module.scripts = BTreeMap::from([("ObjectScript".to_string(), Value::Array(Vec::new()))]);
         let mut object = test_object("START_OBJECT", "EVENT_START_OBJECT", 0, 0);
         object.spritemovedata = "spritemovedata_standing_down".to_string();
-        module.objects = vec![object];
+        let mut malformed = test_object("START_MALFORMED_OBJECT", "EVENT_START_MALFORMED", 1, 0);
+        malformed.spritemovedata = "SPRITEMOVEDATA STANDING_DOWN".to_string();
+        module.objects = vec![object, malformed];
         let mut middle = test_map_module("Middle", "MIDDLE_MAP", None);
         middle.attributes.width = 2;
         middle.blocks = vec![1, 1];
@@ -13833,6 +15316,15 @@ mod tests {
             diagnostic.code == "unknown_object_movement_data"
                 && diagnostic.subject == "Start:START_OBJECT"
                 && diagnostic.message.contains("spritemovedata_standing_down")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_object_movement_data"
+                && diagnostic.subject == "Start:START_MALFORMED_OBJECT"
+                && diagnostic.message.contains("SPRITEMOVEDATA STANDING_DOWN")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_object_movement_data"
+                && diagnostic.subject == "Start:START_MALFORMED_OBJECT"
         }));
     }
 
@@ -13913,9 +15405,9 @@ mod tests {
         json.insert(
             "audio".to_string(),
             serde_json::json!([
-                "mods/new/music/route29.mid",
-                "mods/new/sfx/tackle.mid",
-                "mods/new/cries/nidoran_m.mid"
+                "mods/new/audio/music.json",
+                "mods/new/audio/sfx.json",
+                "mods/new/audio/cries.json"
             ]),
         );
         json.insert(
@@ -13937,9 +15429,9 @@ mod tests {
         assert_eq!(
             files.entries(ContentPackCategory::Audio),
             &[
-                "mods/new/music/route29.mid".to_string(),
-                "mods/new/sfx/tackle.mid".to_string(),
-                "mods/new/cries/nidoran_m.mid".to_string(),
+                "mods/new/audio/music.json".to_string(),
+                "mods/new/audio/sfx.json".to_string(),
+                "mods/new/audio/cries.json".to_string(),
             ]
         );
         assert_eq!(
@@ -14101,6 +15593,120 @@ mod tests {
     }
 
     #[test]
+    fn content_pack_payloads_reject_duplicate_raw_pokedex_species() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Pokedex,
+                serde_json::json!([
+                    {
+                        "species": "CHIKORITA",
+                        "classification": "LEAF",
+                        "height": 0.89,
+                        "weight": 6.35,
+                        "text": "It loves to bask in the sunlight."
+                    },
+                    {
+                        "species": "CHIKORITA",
+                        "classification": "LEAF",
+                        "height": 0.89,
+                        "weight": 6.35,
+                        "text": "Duplicate raw entry must not replace the first."
+                    }
+                ]),
+            )
+            .expect_err("duplicate raw Pokedex entries must not overwrite during payload merge")
+            .to_string();
+
+        assert!(
+            error.contains("duplicate pokedex payload for species 'CHIKORITA'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_raw_pokedex_entries_without_species() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Pokedex,
+                serde_json::json!({
+                    "classification": "LEAF",
+                    "height": 0.89,
+                    "weight": 6.35,
+                    "text": "Missing species must not be accepted."
+                }),
+            )
+            .expect_err("raw Pokedex entries must declare species")
+            .to_string();
+
+        assert!(
+            error.contains("pokedex entry payload must declare species"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_pokedex_entry_species() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokedexEntries,
+                serde_json::json!([
+                    {
+                        "species": "CHIKORITA",
+                        "classification": "LEAF",
+                        "heightDigits": 9,
+                        "weightDigits": 64,
+                        "pages": ["A sweet aroma gently wafts from the leaf on its head."]
+                    },
+                    {
+                        "species": "CHIKORITA",
+                        "classification": "LEAF",
+                        "heightDigits": 9,
+                        "weightDigits": 64,
+                        "pages": ["Duplicate entry must not replace the first."]
+                    }
+                ]),
+            )
+            .expect_err("duplicate Pokedex entries must not overwrite during payload merge")
+            .to_string();
+
+        assert!(
+            error.contains("duplicate pokedex entry for species 'CHIKORITA'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn modpack_payloads_reject_duplicate_pokedex_entry_species() {
+        let entry = RuntimePokedexEntry {
+            species: "CHIKORITA".to_string(),
+            classification: "LEAF".to_string(),
+            height_digits: 9,
+            weight_digits: 64,
+            pages: vec!["A sweet aroma gently wafts from the leaf on its head.".to_string()],
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                pokedex_entries: vec![entry.clone(), entry],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokedex entries must not overwrite during manifest merge")
+            .to_string();
+
+        assert!(
+            error.contains("duplicate pokedex entry for species 'CHIKORITA'"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn compiled_game_pack_round_trips_as_runtime_artifact() {
         let path = temp_test_path("runtime.crystalpack");
         let mut data = GameDataSet::default();
@@ -14125,7 +15731,79 @@ mod tests {
             loaded_artifact.bytes(),
             std::fs::read(&path).expect("read raw pack").as_slice()
         );
+        let raw = loaded_artifact.bytes();
+        assert_eq!(
+            u16::from_be_bytes([
+                raw[COMPILED_GAME_PACK_VERSION_OFFSET],
+                raw[COMPILED_GAME_PACK_VERSION_OFFSET + 1],
+            ]),
+            COMPILED_GAME_PACK_FORMAT_VERSION
+        );
+        let identity = loaded_artifact
+            .save_modpack_identity()
+            .expect("loaded pack has canonical save identity");
+        assert_eq!(identity.id(), "base-game");
+        assert_eq!(
+            identity.hash(),
+            format!("{:08x}", fnv1a32_bytes(raw)).as_str()
+        );
         assert!(loaded.data().pokemon.contains_key("NEW_MON"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn compiled_game_pack_rejects_empty_corrupt_and_legacy_unframed_payloads() {
+        let path = temp_test_path("framed-runtime.crystalpack");
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+        write_compiled_game_pack(&path, &pack).expect("write compiled pack");
+
+        let mut empty = Vec::with_capacity(COMPILED_GAME_PACK_HEADER_LEN);
+        empty.extend_from_slice(COMPILED_GAME_PACK_MAGIC);
+        empty.extend_from_slice(&COMPILED_GAME_PACK_FORMAT_VERSION.to_be_bytes());
+        empty.extend_from_slice(&0_u32.to_be_bytes());
+        empty.extend_from_slice(&fnv1a32_bytes(&[]).to_be_bytes());
+        let empty_error = decode_compiled_game_pack(&empty, &path)
+            .expect_err("empty compiled pack payload is invalid")
+            .to_string();
+        assert!(empty_error.contains("payload is empty"), "{empty_error}");
+
+        let mut corrupt = std::fs::read(&path).expect("read compiled pack");
+        let expected_hash = u32::from_be_bytes([
+            corrupt[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET],
+            corrupt[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 1],
+            corrupt[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 2],
+            corrupt[COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET + 3],
+        ]);
+        let last = corrupt.last_mut().expect("payload byte");
+        *last ^= 0x01;
+        let actual_hash = fnv1a32_bytes(&corrupt[COMPILED_GAME_PACK_HEADER_LEN..]);
+        let corrupt_error = decode_compiled_game_pack(&corrupt, &path)
+            .expect_err("compiled pack payload hash must match")
+            .to_string();
+        assert!(
+            corrupt_error.contains(&format!("{actual_hash:#010x}"))
+                && corrupt_error.contains(&format!("{expected_hash:#010x}")),
+            "{corrupt_error}"
+        );
+
+        let mut legacy_payload = Vec::new();
+        ciborium::into_writer(&pack, &mut legacy_payload).expect("encode legacy pack payload");
+        let mut legacy = COMPILED_GAME_PACK_MAGIC.to_vec();
+        legacy.extend_from_slice(&legacy_payload);
+        let legacy_error = decode_compiled_game_pack(&legacy, &path)
+            .expect_err("legacy unframed compiled packs are invalid")
+            .to_string();
+        assert!(
+            legacy_error.contains("unsupported frame format version"),
+            "{legacy_error}"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -14188,6 +15866,10 @@ mod tests {
                 "must be exact, non-empty, and must not contain '+'",
             ),
             (
+                vec!["bad id".to_string()],
+                "save modpack id must be exact '+'-separated manifest ids",
+            ),
+            (
                 vec!["base-game".to_string(), "base-game".to_string()],
                 "duplicate manifest id 'base-game'",
             ),
@@ -14209,6 +15891,217 @@ mod tests {
                 "manifest identity must be rejected before runtime section checks: {error}"
             );
         }
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_stale_report_counts() {
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                maps: 1,
+                ..ModpackCompileReport::default()
+            },
+        );
+
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified runtime packs must reject stale report counts")
+            .to_string();
+
+        assert!(
+            error.contains("report maps count 1 does not match embedded data count 0"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("missing_runtime_pokemon"),
+            "report/data mismatch must be rejected before runtime section checks: {error}"
+        );
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_stale_report_map_references() {
+        for (report, expected) in [
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    maps: 1,
+                    graph_edges: vec![PlayabilityGraphEdge {
+                        from: "Start".to_string(),
+                        to: "Ghost".to_string(),
+                        kind: "warp".to_string(),
+                    }],
+                    ..ModpackCompileReport::default()
+                },
+                "graph_edges.to references map 'Ghost' that is not embedded in pack data",
+            ),
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    maps: 1,
+                    reachable_maps: vec!["Start".to_string(), "Start".to_string()],
+                    ..ModpackCompileReport::default()
+                },
+                "reachable_maps includes duplicate map 'Start'",
+            ),
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    maps: 1,
+                    graph_edges: vec![PlayabilityGraphEdge {
+                        from: "Start".to_string(),
+                        to: "Start".to_string(),
+                        kind: "warp edge".to_string(),
+                    }],
+                    ..ModpackCompileReport::default()
+                },
+                "graph_edges.kind 'warp edge' must be an exact token",
+            ),
+        ] {
+            let pack = CompiledGamePack::new_unchecked_for_tests(
+                GameDataSet {
+                    maps: [(
+                        "Start".to_string(),
+                        test_map_module("Start", "START_MAP", None),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..GameDataSet::default()
+                },
+                report,
+            );
+
+            let error = verify_compiled_game_pack_for_runtime(&pack)
+                .expect_err("verified runtime packs must reject stale report map references")
+                .to_string();
+
+            assert!(error.contains(expected), "{error}");
+            assert!(
+                !error.contains("missing_runtime_pokemon"),
+                "report map references must be rejected before runtime section checks: {error}"
+            );
+        }
+
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet {
+                maps: [
+                    (
+                        "Start".to_string(),
+                        test_map_module("Start", "START_MAP", None),
+                    ),
+                    (
+                        "Ghost".to_string(),
+                        test_map_module("Ghost", "GHOST_MAP", None),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                ..GameDataSet::default()
+            },
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                maps: 2,
+                reachable_maps: vec!["Start".to_string()],
+                solvable_maps: vec!["Ghost".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified runtime packs must reject stale solved map reports")
+            .to_string();
+        assert!(
+            error.contains(
+                "solvable_maps references map 'Ghost' that is neither reachable nor declared by embedded playability rules"
+            ),
+            "{error}"
+        );
+        assert!(
+            !error.contains("missing_runtime_pokemon"),
+            "stale solved maps must be rejected before runtime section checks: {error}"
+        );
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_rejects_stale_progression_report_outputs() {
+        for (report, expected) in [
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    solvable_events: vec!["EVENT HALL_OF_FAME".to_string()],
+                    ..ModpackCompileReport::default()
+                },
+                "solvable_events value 'EVENT HALL_OF_FAME' must be an exact token",
+            ),
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    solvable_items: vec!["PASS".to_string(), "PASS".to_string()],
+                    ..ModpackCompileReport::default()
+                },
+                "solvable_items includes duplicate value 'PASS'",
+            ),
+            (
+                ModpackCompileReport {
+                    manifests: vec!["base-game".to_string()],
+                    solvable_items: vec!["PASS".to_string()],
+                    ..ModpackCompileReport::default()
+                },
+                "solvable_items references item 'PASS' that is not embedded in pack data",
+            ),
+        ] {
+            let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), report);
+
+            let error = verify_compiled_game_pack_for_runtime(&pack)
+                .expect_err("verified runtime packs must reject stale progression report outputs")
+                .to_string();
+
+            assert!(error.contains(expected), "{error}");
+            assert!(
+                !error.contains("missing_runtime_pokemon"),
+                "progression report outputs must be rejected before runtime section checks: {error}"
+            );
+        }
+
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                solvable_events: vec!["EVENT_HALL_OF_FAME".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified runtime packs must reject undeclared solvable events")
+            .to_string();
+        assert!(
+            error.contains(
+                "solvable_events references event 'EVENT_HALL_OF_FAME' that is not declared by embedded playability rules"
+            ),
+            "{error}"
+        );
+
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet {
+                items: [("PASS".to_string(), test_item("PASS"))]
+                    .into_iter()
+                    .collect(),
+                ..GameDataSet::default()
+            },
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                items: 1,
+                solvable_items: vec!["PASS".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified runtime packs must reject undeclared solvable items")
+            .to_string();
+        assert!(
+            error.contains(
+                "solvable_items references item 'PASS' that is not declared by embedded playability rules"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -14234,6 +16127,33 @@ mod tests {
 
         assert!(error.contains("bad_pack"), "{error}");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verified_compiled_game_pack_revalidates_embedded_runtime_data() {
+        let root = repository_root_for_tests();
+        let mut data = AssetRoot::new(&root)
+            .load_base_game_data()
+            .expect("load base game data");
+        let metadata = data
+            .runtime_map_metadata
+            .values_mut()
+            .next()
+            .expect("base data has runtime map metadata");
+        metadata.group_name.clear();
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            data,
+            ModpackCompileReport {
+                manifests: vec!["base-game".to_string()],
+                ..ModpackCompileReport::default()
+            },
+        );
+
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified runtime packs must validate embedded data, not just reports")
+            .to_string();
+
+        assert!(error.contains("invalid_runtime_map_metadata"), "{error}");
     }
 
     #[test]
@@ -14307,7 +16227,12 @@ mod tests {
     #[test]
     fn runtime_pack_objects_require_declared_npc_catalog() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
-        module.objects = vec![test_object("ROUTE29_YOUNGSTER", "EVENT_ROUTE29_YOUNGSTER", 4, 5)];
+        module.objects = vec![test_object(
+            "ROUTE29_YOUNGSTER",
+            "EVENT_ROUTE29_YOUNGSTER",
+            4,
+            5,
+        )];
         let data = GameDataSet {
             maps: [("Route29".to_string(), module)].into_iter().collect(),
             map_attributes: [(
@@ -14360,7 +16285,10 @@ mod tests {
     #[test]
     fn runtime_compiled_game_pack_rejects_json_extension() {
         let path = temp_test_path("runtime.json");
-        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), ModpackCompileReport::default());
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport::default(),
+        );
 
         let error = write_compiled_game_pack(&path, &pack)
             .expect_err("runtime compiled packs must not be JSON files")
@@ -14386,7 +16314,10 @@ mod tests {
         let data_root = root.join("apps/web/assets/data");
         std::fs::create_dir_all(data_root.join("content-packs")).expect("create data root");
 
-        let pack = CompiledGamePack::new_unchecked_for_tests(GameDataSet::default(), ModpackCompileReport::default());
+        let pack = CompiledGamePack::new_unchecked_for_tests(
+            GameDataSet::default(),
+            ModpackCompileReport::default(),
+        );
         write_compiled_game_pack(data_root.join("content-packs/core.crystalpack"), &pack)
             .expect("write compiled pack");
         let asset_root = AssetRoot::new(&root);
@@ -14460,32 +16391,16 @@ mod tests {
 
     #[test]
     fn music_modpack_assets_must_be_midi_files_not_json_or_asm() {
-        let midi = ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.mid")
+        let midi = ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.mid")
             .expect("valid MIDI music asset");
         assert_eq!(midi.id, "MUSIC_ROUTE_29");
         assert_eq!(midi.kind, ModpackAudioKind::Music);
-        let sfx = ModpackAudioAsset::from_content_pack_path("mods/new/sfx/SFX_TACKLE.mid")
+        let sfx = ModpackAudioAsset::sound_effect("SFX_TACKLE", "mods/new/sfx/SFX_TACKLE.mid")
             .expect("valid MIDI sfx asset");
         assert_eq!(sfx.kind, ModpackAudioKind::SoundEffect);
 
-        let json_error = ModpackAudioAsset::from_content_pack_path("mods/new/audio.json")
-            .expect_err("ambiguous audio JSON is not accepted");
-        assert!(json_error
-            .to_string()
-            .contains("must live under music, sfx, or cries"));
-
-        let root_level_error = ModpackAudioAsset::from_content_pack_path("MUSIC_ROUTE_29.mid")
-            .expect_err("root-level audio is not accepted");
-        assert!(
-            root_level_error
-                .to_string()
-                .contains("must live under music, sfx, or cries"),
-            "{root_level_error}"
-        );
-
-        let lowercase_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/route29.mid")
-                .expect_err("lowercase path-derived music id is not accepted");
+        let lowercase_error = ModpackAudioAsset::music("route29", "mods/new/music/route29.mid")
+            .expect_err("lowercase music id is not accepted");
         assert!(lowercase_error.to_string().contains("must use an exact"));
 
         let padded_id_error =
@@ -14506,38 +16421,86 @@ mod tests {
             "{mismatched_path}"
         );
 
+        let mismatched_directory =
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/sfx/MUSIC_ROUTE_29.mid")
+                .expect_err("music assets must live under the music directory");
+        assert!(
+            mismatched_directory
+                .to_string()
+                .contains("must live under music, found sfx"),
+            "{mismatched_directory}"
+        );
+
+        let absolute_path =
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "/tmp/music/MUSIC_ROUTE_29.mid")
+                .expect_err("audio asset paths must be runtime relative");
+        assert!(
+            absolute_path
+                .to_string()
+                .contains("must be relative to assets/data"),
+            "{absolute_path}"
+        );
+
+        let assets_data_prefix = ModpackAudioAsset::music(
+            "MUSIC_ROUTE_29",
+            "assets/data/content-packs/new/music/MUSIC_ROUTE_29.mid",
+        )
+        .expect_err("audio asset paths must not include resolver aliases");
+        assert!(
+            assets_data_prefix
+                .to_string()
+                .contains("must not include the assets/data prefix"),
+            "{assets_data_prefix}"
+        );
+
+        let traversing_path = ModpackAudioAsset::music(
+            "MUSIC_ROUTE_29",
+            "content-packs/new/music/../music/MUSIC_ROUTE_29.mid",
+        )
+        .expect_err("audio asset paths must not traverse");
+        assert!(
+            traversing_path
+                .to_string()
+                .contains("must not traverse parent directories"),
+            "{traversing_path}"
+        );
+
         let asm_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.asm")
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.asm")
                 .expect_err("music ASM is not accepted");
-        assert!(asm_error.to_string().contains("unsupported extension 'asm'"));
+        assert!(
+            asm_error
+                .to_string()
+                .contains("MIDI audio asset 'MUSIC_ROUTE_29' must use a .mid file")
+        );
 
         let extensionless_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29")
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29")
                 .expect_err("extensionless music is not accepted");
         assert!(
             extensionless_error
                 .to_string()
-                .contains("must have a file extension"),
+                .contains("path must have a file extension"),
             "{extensionless_error}"
         );
 
         let mp3_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.mp3")
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.mp3")
                 .expect_err("MP3 music is not accepted");
-        assert!(mp3_error.to_string().contains("unsupported extension 'mp3'"));
+        assert!(mp3_error.to_string().contains("must use a .mid file"));
 
         let midi_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.midi")
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.midi")
                 .expect_err(".midi music is not accepted");
-        assert!(midi_error.to_string().contains("unsupported extension 'midi'"));
+        assert!(midi_error.to_string().contains("must use a .mid file"));
 
         let uppercase_mid_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/music/MUSIC_ROUTE_29.MID")
+            ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.MID")
                 .expect_err("case-changed MIDI extensions are not accepted");
         assert!(
             uppercase_mid_error
                 .to_string()
-                .contains("unsupported extension 'MID'"),
+                .contains("must use a .mid file"),
             "{uppercase_mid_error}"
         );
 
@@ -14548,23 +16511,17 @@ mod tests {
         assert_eq!(cry.sample_rate_hz, None);
         assert_eq!(cry.channels, None);
 
-        let pcm_cry =
-            ModpackAudioAsset::cry_pcm("CRY_NIDORAN_M", "mods/new/cries/CRY_NIDORAN_M.pcm", 22050, 1)
-                .expect("valid PCM cry asset");
+        let pcm_cry = ModpackAudioAsset::cry_pcm(
+            "CRY_NIDORAN_M",
+            "mods/new/cries/CRY_NIDORAN_M.pcm",
+            22050,
+            1,
+        )
+        .expect("valid PCM cry asset");
         assert_eq!(pcm_cry.kind, ModpackAudioKind::Cry);
         assert_eq!(pcm_cry.source, ModpackAudioSource::Pcm);
         assert_eq!(pcm_cry.sample_rate_hz, Some(22050));
         assert_eq!(pcm_cry.channels, Some(1));
-
-        let shorthand_pcm_error =
-            ModpackAudioAsset::from_content_pack_path("mods/new/cries/CRY_NIDORAN_M.pcm")
-                .expect_err("shorthand PCM path lacks required sample metadata");
-        assert!(
-            shorthand_pcm_error
-                .to_string()
-                .contains("must declare sample_rate_hz"),
-            "{shorthand_pcm_error}"
-        );
 
         let midi_with_pcm_metadata = ModpackAudioAsset {
             id: "MUSIC_ROUTE_29".to_string(),
@@ -14584,11 +16541,11 @@ mod tests {
         );
 
         let singular_cry_dir =
-            ModpackAudioAsset::from_content_pack_path("mods/new/cry/CRY_NIDORAN_M.mid")
+            ModpackAudioAsset::cry("CRY_NIDORAN_M", "mods/new/cry/CRY_NIDORAN_M.mid")
                 .expect_err("singular cry directory is not a modpack audio category")
                 .to_string();
         assert!(
-            singular_cry_dir.contains("must live under music, sfx, or cries"),
+            singular_cry_dir.contains("must live under cries, found cry"),
             "{singular_cry_dir}"
         );
 
@@ -14982,16 +16939,25 @@ mod tests {
     }
 
     #[test]
-    fn modpack_overlay_merges_capture_rules_as_definitive_pack_data() {
-        let mut data = GameDataSet::default();
+    fn modpack_overlay_replaces_capture_rules_as_definitive_pack_data() {
+        let mut data = GameDataSet {
+            capture_rules: CaptureRules {
+                fast_ball_species: ["GRIMER".to_string()].into_iter().collect(),
+                heavy_ball_modifiers: [("ONIX".to_string(), 20)].into_iter().collect(),
+                ball_rules: BTreeMap::new(),
+                guaranteed_capture_balls: ["MASTER_BALL".to_string()].into_iter().collect(),
+                status_bonus: [("SLEEP".to_string(), 10)].into_iter().collect(),
+            },
+            ..GameDataSet::default()
+        };
         let manifest = ModpackManifest {
             payload: ModpackPayload {
                 capture_rules: CaptureRules {
                     fast_ball_species: ["MAGNEMITE".to_string()].into_iter().collect(),
                     heavy_ball_modifiers: [("KADABRA".to_string(), 40)].into_iter().collect(),
                     ball_rules: BTreeMap::new(),
-                    guaranteed_capture_balls: BTreeSet::new(),
-                    status_bonus: BTreeMap::new(),
+                    guaranteed_capture_balls: ["PARK_BALL".to_string()].into_iter().collect(),
+                    status_bonus: [("FREEZE".to_string(), 10)].into_iter().collect(),
                 },
                 ..ModpackPayload::default()
             },
@@ -15005,6 +16971,21 @@ mod tests {
             data.capture_rules.heavy_ball_modifiers.get("KADABRA"),
             Some(&40)
         );
+        assert!(
+            data.capture_rules
+                .guaranteed_capture_balls
+                .contains("PARK_BALL")
+        );
+        assert_eq!(data.capture_rules.status_bonus.get("FREEZE"), Some(&10));
+        assert!(!data.capture_rules.fast_ball_species.contains("GRIMER"));
+        assert!(!data.capture_rules.heavy_ball_modifiers.contains_key("ONIX"));
+        assert!(
+            !data
+                .capture_rules
+                .guaranteed_capture_balls
+                .contains("MASTER_BALL")
+        );
+        assert!(!data.capture_rules.status_bonus.contains_key("SLEEP"));
     }
 
     #[test]
@@ -15607,10 +17588,16 @@ mod tests {
     #[test]
     fn verifier_rejects_pokegear_landmarks_for_unknown_maps_or_constants() {
         let data = GameDataSet {
-            maps: [(
-                "Route29".to_string(),
-                test_map_module("Route29", "ROUTE_29", None),
-            )]
+            maps: [
+                (
+                    "Route29".to_string(),
+                    test_map_module("Route29", "ROUTE_29", None),
+                ),
+                (
+                    "Route31".to_string(),
+                    test_map_module("Route31", "ROUTE_31", None),
+                ),
+            ]
             .into_iter()
             .collect(),
             pokegear_landmarks: PokegearLandmarksPayload {
@@ -15633,12 +17620,22 @@ mod tests {
                         y: 5,
                         region: "johto".to_string(),
                     },
+                    PokegearLandmark {
+                        id: 3,
+                        constant: "ROUTE_30".to_string(),
+                        label: "ROUTE_30".to_string(),
+                        name: "Route 30".to_string(),
+                        x: 4,
+                        y: 5,
+                        region: "johto".to_string(),
+                    },
                 ],
                 map_to_landmark: [
                     ("Route29".to_string(), "LANDMARK_ROUTE_30".to_string()),
                     ("MissingRoute".to_string(), "LANDMARK_ROUTE_29".to_string()),
                     (" Route29".to_string(), "LANDMARK_ROUTE_29".to_string()),
                     ("Route30".to_string(), " LANDMARK_ROUTE_29".to_string()),
+                    ("Route31".to_string(), "ROUTE_30".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -15654,6 +17651,10 @@ mod tests {
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_pokegear_landmark" && diagnostic.subject == " route_30"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_landmark_constant"
+                && diagnostic.subject == "ROUTE_30"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_pokegear_landmark_map" && diagnostic.subject == " Route29"
@@ -15678,6 +17679,15 @@ mod tests {
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_pokegear_landmark_constant"
                 && diagnostic.subject == "Route30"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokegear_landmark_reference"
+                && diagnostic.subject == "Route31"
+                && diagnostic.message.contains("ROUTE_30")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_pokegear_landmark_constant"
+                && diagnostic.subject == "Route31"
         }));
     }
 
@@ -15870,11 +17880,12 @@ mod tests {
             }),
         )
         .expect("single exported evolution entry is canonical");
-        assert!(data
-            .evolutions
-            .entries_for("NEW_MON")
-            .expect("NEW_MON evolutions")
-            .is_empty());
+        assert!(
+            data.evolutions
+                .entries_for("NEW_MON")
+                .expect("NEW_MON evolutions")
+                .is_empty()
+        );
 
         let mut data = GameDataSet::default();
         let error = data
@@ -15888,6 +17899,98 @@ mod tests {
             .to_string();
         assert!(
             error.contains("must use an explicit species/evolutions entry"),
+            "{error}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Learnsets,
+                serde_json::json!([
+                    {
+                        "species": "NEW_MON",
+                        "learnset": []
+                    },
+                    {
+                        "species": "NEW_MON",
+                        "learnset": []
+                    }
+                ]),
+            )
+            .expect_err("duplicate learnsets in one payload must not collapse")
+            .to_string();
+        assert!(
+            error.contains("duplicate learnset for species 'NEW_MON'"),
+            "{error}"
+        );
+
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::Learnsets,
+            serde_json::json!({
+                "species": "NEW_MON",
+                "learnset": []
+            }),
+        )
+        .expect("apply first learnset payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Learnsets,
+                serde_json::json!({
+                    "species": "NEW_MON",
+                    "learnset": []
+                }),
+            )
+            .expect_err("duplicate learnset payload must not overwrite")
+            .to_string();
+        assert!(
+            error.contains("duplicate learnset for species 'NEW_MON'"),
+            "{error}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Evolutions,
+                serde_json::json!([
+                    {
+                        "species": "NEW_MON",
+                        "evolutions": []
+                    },
+                    {
+                        "species": "NEW_MON",
+                        "evolutions": []
+                    }
+                ]),
+            )
+            .expect_err("duplicate evolutions in one payload must not collapse")
+            .to_string();
+        assert!(
+            error.contains("duplicate evolutions for species 'NEW_MON'"),
+            "{error}"
+        );
+
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::Evolutions,
+            serde_json::json!({
+                "species": "NEW_MON",
+                "evolutions": []
+            }),
+        )
+        .expect("apply first evolution payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Evolutions,
+                serde_json::json!({
+                    "species": "NEW_MON",
+                    "evolutions": []
+                }),
+            )
+            .expect_err("duplicate evolution payload must not overwrite")
+            .to_string();
+        assert!(
+            error.contains("duplicate evolutions for species 'NEW_MON'"),
             "{error}"
         );
     }
@@ -15975,10 +18078,364 @@ mod tests {
             error.contains("object payload must be an object or an array of objects"),
             "{error}"
         );
+
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::MapDimensions,
+            serde_json::json!({
+                "Route29": {
+                    "width": 10,
+                    "height": 9
+                }
+            }),
+        )
+        .expect("apply first map dimension payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::MapDimensions,
+                serde_json::json!({
+                    "Route29": {
+                        "width": 11,
+                        "height": 9
+                    }
+                }),
+            )
+            .expect_err("duplicate map-like payload key must not overwrite")
+            .to_string();
+        assert!(
+            error.contains("duplicate object payload key 'Route29'"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn modpack_overlay_replaces_evolutions_by_exact_species_id() {
+    fn map_attribute_and_block_payloads_reject_duplicate_exact_keys() {
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::MapAttributes,
+            serde_json::json!({
+                "Route29": {
+                    "map_constant": "ROUTE_29",
+                    "tileset_name": "johto",
+                    "environment": "TOWN",
+                    "blocks_label": "Route29_Blocks"
+                }
+            }),
+        )
+        .expect("apply first map attributes payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::MapAttributes,
+                serde_json::json!({
+                    "Route29": {
+                        "map_constant": "ROUTE_29",
+                        "tileset_name": "johto",
+                        "environment": "ROUTE",
+                        "blocks_label": "Route29_Blocks"
+                    }
+                }),
+            )
+            .expect_err("duplicate map attributes payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate map attributes for map 'Route29'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::MapBlocks,
+            serde_json::json!({
+                "Route29_Blocks": "AA=="
+            }),
+        )
+        .expect("apply first map blocks payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::MapBlocks,
+                serde_json::json!({
+                    "Route29_Blocks": "AQ=="
+                }),
+            )
+            .expect_err("duplicate map block payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate map block data for label 'Route29_Blocks'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_primary_runtime_ids() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Pokemon,
+                serde_json::to_value(vec![species(), species()]).expect("species json"),
+            )
+            .expect_err("duplicate Pokemon payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokemon species 'NEW_MON'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Moves,
+                serde_json::to_value(vec![test_move("TACKLE"), test_move("TACKLE")])
+                    .expect("move json"),
+            )
+            .expect_err("duplicate move payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate move 'TACKLE'"),
+            "{error:#}"
+        );
+
+        let growth_curve = crystal_core::systems::experience::GrowthRateCurve {
+            id: "GROWTH_MEDIUM_FAST".to_string(),
+            numerator: 1,
+            denominator: 1,
+            quadratic: 0,
+            linear: 0,
+            constant: 0,
+        };
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::GrowthRates,
+                serde_json::to_value(vec![growth_curve.clone(), growth_curve])
+                    .expect("growth curve json"),
+            )
+            .expect_err("duplicate growth rate payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate growth rate curve 'GROWTH_MEDIUM_FAST'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Items,
+                serde_json::to_value(vec![test_item("POTION"), test_item("POTION")])
+                    .expect("item json"),
+            )
+            .expect_err("duplicate item payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate item 'POTION'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Trainers,
+                serde_json::to_value(vec![
+                    test_trainer("YOUNGSTER_JOEY", "MUSIC_HIKER_ENCOUNTER"),
+                    test_trainer("YOUNGSTER_JOEY", "MUSIC_HIKER_ENCOUNTER"),
+                ])
+                .expect("trainer json"),
+            )
+            .expect_err("duplicate trainer payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("trainer id 'YOUNGSTER_JOEY' is duplicated"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_primary_runtime_ids() {
+        let mut data = GameDataSet {
+            pokemon: [(species().id.clone(), species())].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                pokemon: vec![species()],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokemon manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokemon species 'NEW_MON'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            moves: [("TACKLE".to_string(), test_move("TACKLE"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                moves: vec![test_move("TACKLE")],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate move manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate move 'TACKLE'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                items: vec![test_item("POTION")],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate item manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate item 'POTION'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            maps: [(
+                "Route29".to_string(),
+                test_map_module("Route29", "ROUTE_29", None),
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                maps: vec![test_map_module("Route29", "ROUTE_29", None)],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate map manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate map module 'Route29'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        data.trainers
+            .insert(test_trainer("YOUNGSTER_JOEY", "MUSIC_HIKER_ENCOUNTER"))
+            .expect("insert base trainer");
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                trainers: TrainerCatalog {
+                    trainers: [(
+                        "YOUNGSTER_JOEY".to_string(),
+                        test_trainer("YOUNGSTER_JOEY", "MUSIC_HIKER_ENCOUNTER"),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate trainer manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("trainer id 'YOUNGSTER_JOEY' is duplicated"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_exact_string_catalog_entries() {
+        let mut data = GameDataSet {
+            permanent_phone_numbers: vec!["PHONE_ELM".to_string()],
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                permanent_phone_numbers: vec!["PHONE_ELM".to_string()],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate permanent phone manifest must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate permanent phone number 'PHONE_ELM'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            special_phone_calls: ["SPECIALCALL_POKERUS".to_string()].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                special_phone_calls: ["SPECIALCALL_POKERUS".to_string()].into_iter().collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate special phone call manifest must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate special phone call 'SPECIALCALL_POKERUS'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            npc_trades: ["NPC_TRADE_ONIX".to_string()].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                npc_trades: ["NPC_TRADE_ONIX".to_string()].into_iter().collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate NPC trade manifest must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate NPC trade 'NPC_TRADE_ONIX'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet {
+            special_routines: ["Special_FadeOutMusic".to_string()].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                special_routines: ["Special_FadeOutMusic".to_string()].into_iter().collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate special routine manifest must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate special routine 'Special_FadeOutMusic'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_evolutions_by_exact_species_id() {
         let mut data = GameDataSet::default();
         data.evolutions.0.insert(
             "NEW_MON".to_string(),
@@ -15999,14 +18456,13 @@ mod tests {
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest)
-            .expect("apply evolution manifest");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate evolution manifest must not overwrite");
 
-        assert_eq!(
-            data.evolutions
-                .entries_for("NEW_MON")
-                .expect("NEW_MON evolutions"),
-            &[EvolutionEntry::level("NEW_FORM", 30)]
+        assert!(
+            format!("{error:#}").contains("duplicate evolutions for species 'NEW_MON'"),
+            "{error:#}"
         );
     }
 
@@ -16032,6 +18488,124 @@ mod tests {
     }
 
     #[test]
+    fn content_pack_payloads_reject_duplicate_mart_ids() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::Marts,
+            serde_json::json!({
+                "MartNew": ["POTION"]
+            }),
+        )
+        .expect("apply first mart payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Marts,
+                serde_json::json!({
+                    "MartNew": ["POKE_BALL"]
+                }),
+            )
+            .expect_err("duplicate mart payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate mart catalog entry for mart 'MartNew'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_fruit_trees_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::FruitTrees,
+            serde_json::json!({
+                "FruitTreeRoute29": "BERRY"
+            }),
+        )
+        .expect("apply fruit tree payload");
+
+        assert_eq!(
+            data.fruit_trees.0.get("FruitTreeRoute29"),
+            Some(&"BERRY".to_string())
+        );
+        assert!(!data.fruit_trees.0.contains_key("FRUITTREE_ROUTE_29"));
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_fruit_tree_ids() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::FruitTrees,
+            serde_json::json!({
+                "FruitTreeRoute29": "BERRY"
+            }),
+        )
+        .expect("apply first fruit tree payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::FruitTrees,
+                serde_json::json!({
+                    "FruitTreeRoute29": "PSNCUREBERRY"
+                }),
+            )
+            .expect_err("duplicate fruit tree payload must not overwrite");
+
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate fruit tree catalog entry for tree 'FruitTreeRoute29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_phone_contacts_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PhoneContacts,
+            serde_json::json!({
+                "PhoneElm": test_phone_contact("PhoneElm")
+            }),
+        )
+        .expect("apply phone contact payload");
+
+        assert!(data.phone_contacts.0.contains_key("PhoneElm"));
+        assert!(!data.phone_contacts.0.contains_key("PHONE_ELM"));
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_phone_contact_ids() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PhoneContacts,
+            serde_json::json!({
+                "PhoneElm": test_phone_contact("PhoneElm")
+            }),
+        )
+        .expect("apply first phone contact payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PhoneContacts,
+                serde_json::json!({
+                    "PhoneElm": test_phone_contact("PhoneElm")
+                }),
+            )
+            .expect_err("duplicate phone contact payload must not overwrite");
+
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate phone contact catalog entry for contact 'PhoneElm'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn content_pack_payloads_merge_currency_constants_as_exact_pack_data() {
         let mut data = GameDataSet::default();
 
@@ -16046,6 +18620,634 @@ mod tests {
 
         assert_eq!(data.currency_constants.get("ROUTE43GATE_TOLL"), Some(1000));
         assert_eq!(data.currency_constants.get("route43gate_toll"), None);
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_currency_constants() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::CurrencyConstants,
+            serde_json::json!({
+                "ROUTE43GATE_TOLL": 1000
+            }),
+        )
+        .expect("apply first currency constant payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::CurrencyConstants,
+                serde_json::json!({
+                    "ROUTE43GATE_TOLL": 500
+                }),
+            )
+            .expect_err("duplicate currency constant payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate currency constant 'ROUTE43GATE_TOLL'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_pokegear_landmarks_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokegearLandmarks,
+            serde_json::json!({
+                "landmarks": [{
+                    "id": 1,
+                    "constant": "LandmarkRoute29",
+                    "label": "Route29Label",
+                    "name": "Route 29",
+                    "x": 1,
+                    "y": 2,
+                    "region": "JOHTO"
+                }],
+                "map_to_landmark": {
+                    "Route29": "LandmarkRoute29"
+                }
+            }),
+        )
+        .expect("apply Pokegear landmark payload");
+
+        assert_eq!(
+            data.pokegear_landmarks.landmarks[0].constant,
+            "LandmarkRoute29"
+        );
+        assert_eq!(
+            data.pokegear_landmarks.map_to_landmark.get("Route29"),
+            Some(&"LandmarkRoute29".to_string())
+        );
+        assert!(
+            !data
+                .pokegear_landmarks
+                .map_to_landmark
+                .contains_key("ROUTE_29")
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_pokegear_landmark_constants() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokegearLandmarks,
+            serde_json::json!({
+                "landmarks": [{
+                    "id": 1,
+                    "constant": "LandmarkRoute29",
+                    "label": "Route29Label",
+                    "name": "Route 29",
+                    "x": 1,
+                    "y": 2,
+                    "region": "JOHTO"
+                }],
+                "map_to_landmark": {}
+            }),
+        )
+        .expect("apply first Pokegear landmark payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokegearLandmarks,
+                serde_json::json!({
+                    "landmarks": [{
+                        "id": 2,
+                        "constant": "LandmarkRoute29",
+                        "label": "Route29OtherLabel",
+                        "name": "Route 29 Other",
+                        "x": 3,
+                        "y": 4,
+                        "region": "JOHTO"
+                    }],
+                    "map_to_landmark": {}
+                }),
+            )
+            .expect_err("duplicate Pokegear landmark payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate Pokegear landmark constant 'LandmarkRoute29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_pokegear_landmark_map_assignments() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokegearLandmarks,
+            serde_json::json!({
+                "landmarks": [{
+                    "id": 1,
+                    "constant": "LandmarkRoute29",
+                    "label": "Route29Label",
+                    "name": "Route 29",
+                    "x": 1,
+                    "y": 2,
+                    "region": "JOHTO"
+                }],
+                "map_to_landmark": {
+                    "Route29": "LandmarkRoute29"
+                }
+            }),
+        )
+        .expect("apply first Pokegear landmark map assignment");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokegearLandmarks,
+                serde_json::json!({
+                    "landmarks": [{
+                        "id": 2,
+                        "constant": "LandmarkRoute30",
+                        "label": "Route30Label",
+                        "name": "Route 30",
+                        "x": 3,
+                        "y": 4,
+                        "region": "JOHTO"
+                    }],
+                    "map_to_landmark": {
+                        "Route29": "LandmarkRoute30"
+                    }
+                }),
+            )
+            .expect_err("duplicate Pokegear landmark map assignment must not overwrite");
+
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate Pokegear landmark map assignment for map 'Route29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_runtime_spawn_points() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::RuntimeSpawnPoints,
+            serde_json::json!({
+                "2": test_runtime_spawn_point(2, "Route29")
+            }),
+        )
+        .expect("apply first runtime spawn point payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::RuntimeSpawnPoints,
+                serde_json::json!({
+                    "2": test_runtime_spawn_point(2, "Route30")
+                }),
+            )
+            .expect_err("duplicate runtime spawn point payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate runtime spawn point '2'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_runtime_map_metadata() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::RuntimeMapMetadata,
+            serde_json::json!({
+                "ROUTE_29": test_runtime_map_metadata("ROUTE_29", "Route29")
+            }),
+        )
+        .expect("apply first runtime map metadata payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::RuntimeMapMetadata,
+                serde_json::json!({
+                    "ROUTE_29": test_runtime_map_metadata("ROUTE_29", "Route29Other")
+                }),
+            )
+            .expect_err("duplicate runtime map metadata payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate runtime map metadata 'ROUTE_29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_pc_strings_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PcStrings,
+            serde_json::json!({
+                "PCStringChoose": "Choose a Pokemon."
+            }),
+        )
+        .expect("apply PC string payload");
+
+        assert_eq!(
+            data.pc_strings.get("PCStringChoose"),
+            Some(&"Choose a Pokemon.".to_string())
+        );
+        assert!(!data.pc_strings.contains_key("PCSTRINGCHOOSE"));
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_pc_strings() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PcStrings,
+            serde_json::json!({
+                "PCStringChoose": "Choose a Pokemon."
+            }),
+        )
+        .expect("apply first PC string payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PcStrings,
+                serde_json::json!({
+                    "PCStringChoose": "Choose another Pokemon."
+                }),
+            )
+            .expect_err("duplicate PC string payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate PC string 'PCStringChoose'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_merge_menu_icons_as_exact_pack_data() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::MenuIcons,
+            serde_json::json!({
+                "CHIKORITA": "ICON_ODDISH"
+            }),
+        )
+        .expect("apply menu icon payload");
+
+        assert_eq!(
+            data.menu_icons.get("CHIKORITA"),
+            Some(&"ICON_ODDISH".to_string())
+        );
+        assert!(!data.menu_icons.contains_key("chikorita"));
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_menu_icons() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::MenuIcons,
+            serde_json::json!({
+                "CHIKORITA": "ICON_ODDISH"
+            }),
+        )
+        .expect("apply first menu icon payload");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::MenuIcons,
+                serde_json::json!({
+                    "CHIKORITA": "ICON_CHIKORITA"
+                }),
+            )
+            .expect_err("duplicate menu icon payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate menu icon entry for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_exact_object_maps() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokemonFrontpicAnim,
+            serde_json::json!({
+                "CHIKORITA": { "commands": [{ "kind": "endanim" }] }
+            }),
+        )
+        .expect("apply first frontpic animation payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokemonFrontpicAnim,
+                serde_json::json!({
+                    "CHIKORITA": { "commands": [{ "kind": "endanim" }] }
+                }),
+            )
+            .expect_err("duplicate frontpic animation payload must not overwrite");
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate frontpic animation program for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::AsmText,
+            serde_json::json!({
+                "GreetingText": "Hello."
+            }),
+        )
+        .expect("apply first ASM text payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::AsmText,
+                serde_json::json!({
+                    "GreetingText": "Hi."
+                }),
+            )
+            .expect_err("duplicate ASM text payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate ASM text label 'GreetingText'"),
+            "{error:#}"
+        );
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::BattleAnimations,
+            serde_json::json!({
+                "BattleAnim_Pound": ["anim_wait 1"]
+            }),
+        )
+        .expect("apply first battle animation payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::BattleAnimations,
+                serde_json::json!({
+                    "BattleAnim_Pound": ["anim_wait 2"]
+                }),
+            )
+            .expect_err("duplicate battle animation payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate battle animation 'BattleAnim_Pound'"),
+            "{error:#}"
+        );
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::SpritePaletteDefaults,
+            serde_json::json!({
+                "SPRITE_CHRIS": 0
+            }),
+        )
+        .expect("apply first sprite palette default payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::SpritePaletteDefaults,
+                serde_json::json!({
+                    "SPRITE_CHRIS": 1
+                }),
+            )
+            .expect_err("duplicate sprite palette default payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate sprite palette default 'SPRITE_CHRIS'"),
+            "{error:#}"
+        );
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokegearTownMapPaletteMap,
+            serde_json::json!({
+                "town_map": ["SPRITE_CHRIS"]
+            }),
+        )
+        .expect("apply first Pokegear town map palette payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokegearTownMapPaletteMap,
+                serde_json::json!({
+                    "town_map": ["SPRITE_KRIS"]
+                }),
+            )
+            .expect_err("duplicate Pokegear town map palette payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokegear town map palette entry 'town_map'"),
+            "{error:#}"
+        );
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::PokemonCries,
+            serde_json::json!({
+                "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 0, "length": 0 }
+            }),
+        )
+        .expect("apply first Pokemon cry payload");
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PokemonCries,
+                serde_json::json!({
+                    "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 1, "length": 0 }
+                }),
+            )
+            .expect_err("duplicate Pokemon cry payload must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokemon cry metadata for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_audio_asset_ids() {
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Audio,
+                serde_json::json!([
+                    {
+                        "id": "MUSIC_DUPLICATE",
+                        "path": "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                        "kind": "music",
+                        "source": "midi",
+                        "sample_rate_hz": null,
+                        "channels": null
+                    },
+                    {
+                        "id": "MUSIC_DUPLICATE",
+                        "path": "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                        "kind": "music",
+                        "source": "midi",
+                        "sample_rate_hz": null,
+                        "channels": null
+                    }
+                ]),
+            )
+            .expect_err("duplicate audio asset payload must not be accepted");
+
+        assert!(
+            format!("{error:#}").contains("duplicate audio asset id 'MUSIC_DUPLICATE'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_exact_string_catalog_entries() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PermanentPhoneNumbers,
+                serde_json::json!(["PHONE_ELM", "PHONE_ELM"]),
+            )
+            .expect_err("duplicate permanent phone payload must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate permanent phone number 'PHONE_ELM'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::SpecialPhoneCalls,
+                serde_json::json!(["SPECIALCALL_POKERUS", "SPECIALCALL_POKERUS"]),
+            )
+            .expect_err("duplicate special phone call payload must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate special phone call 'SPECIALCALL_POKERUS'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::NpcTrades,
+                serde_json::json!(["NPC_TRADE_ONIX", "NPC_TRADE_ONIX"]),
+            )
+            .expect_err("duplicate NPC trade payload must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate NPC trade 'NPC_TRADE_ONIX'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::SpecialRoutines,
+                serde_json::json!(["Special_FadeOutMusic", "Special_FadeOutMusic"]),
+            )
+            .expect_err("duplicate special routine payload must not be accepted");
+        assert!(
+            format!("{error:#}").contains("duplicate special routine 'Special_FadeOutMusic'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_story_event_payload_keys() {
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::StoryEvents,
+            serde_json::json!({
+                "Route29": {
+                    "Route29_MapScripts": []
+                }
+            }),
+        )
+        .expect("initial story event payload should load");
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::StoryEvents,
+                serde_json::json!({
+                    "Route29": {
+                        "Route29_OtherScript": []
+                    }
+                }),
+            )
+            .expect_err("duplicate story event payload key must not be accepted");
+
+        assert!(
+            format!("{error:#}").contains("duplicate story event payload key 'Route29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_phone_script_payload_keys() {
+        let mut data = GameDataSet::default();
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::PhoneScripts,
+                serde_json::json!([
+                    {
+                        "PhoneScript_Elm": []
+                    },
+                    {
+                        "PhoneScript_Elm": []
+                    }
+                ]),
+            )
+            .expect_err("duplicate phone script payload key must not be accepted");
+
+        assert!(
+            format!("{error:#}").contains("duplicate phone script payload key 'PhoneScript_Elm'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn content_pack_payloads_reject_duplicate_encounter_map_names() {
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::WildEncounters,
+                serde_json::json!([
+                    {
+                        "map_name": "NEW_ROUTE",
+                        "grass_rates": { "day": 20 },
+                        "water_rate": null,
+                        "grass": null,
+                        "water": null
+                    },
+                    {
+                        "map_name": "NEW_ROUTE",
+                        "grass_rates": { "day": 10 },
+                        "water_rate": null,
+                        "grass": null,
+                        "water": null
+                    }
+                ]),
+            )
+            .expect_err("duplicate wild encounter payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate wild encounter data for map 'NEW_ROUTE'"),
+            "{error:#}"
+        );
+
+        let mut data = GameDataSet::default();
+
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::FieldEncounters,
+                serde_json::json!([
+                    {
+                        "map_name": "NEW_ROUTE",
+                        "headbutt": null,
+                        "rock_smash": null
+                    },
+                    {
+                        "map_name": "NEW_ROUTE",
+                        "headbutt": null,
+                        "rock_smash": null
+                    }
+                ]),
+            )
+            .expect_err("duplicate field encounter payload must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate field encounter data for map 'NEW_ROUTE'"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -16849,7 +20051,7 @@ mod tests {
     }
 
     #[test]
-    fn modpack_overlay_replaces_marts_by_exact_id() {
+    fn modpack_overlay_rejects_duplicate_marts_by_exact_id() {
         let mut data = GameDataSet {
             marts: MartCatalog(
                 [("MartNew".to_string(), vec!["POTION".to_string()])]
@@ -16870,11 +20072,409 @@ mod tests {
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest).expect("apply mart manifest");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate mart manifest must not overwrite");
 
-        assert_eq!(
-            data.marts.inventory_ids("MartNew").expect("mart"),
-            &["POKE_BALL".to_string()]
+        assert!(
+            format!("{error:#}").contains("duplicate mart catalog entry for mart 'MartNew'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_fruit_trees_by_exact_id() {
+        let mut data = GameDataSet {
+            fruit_trees: FruitTreeCatalog(
+                [("FruitTreeRoute29".to_string(), "BERRY".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                fruit_trees: FruitTreeCatalog(
+                    [("FruitTreeRoute29".to_string(), "PSNCUREBERRY".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate fruit tree manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate fruit tree catalog entry for tree 'FruitTreeRoute29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_phone_contacts_by_exact_id() {
+        let mut data = GameDataSet {
+            phone_contacts: PhoneContactCatalog(
+                [("PhoneElm".to_string(), test_phone_contact("PhoneElm"))]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                phone_contacts: PhoneContactCatalog(
+                    [("PhoneElm".to_string(), test_phone_contact("PhoneElm"))]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate phone contact manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate phone contact catalog entry for contact 'PhoneElm'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_pokegear_landmarks_by_exact_constant() {
+        let mut data = GameDataSet {
+            pokegear_landmarks: PokegearLandmarksPayload {
+                landmarks: vec![PokegearLandmark {
+                    id: 1,
+                    constant: "LandmarkRoute29".to_string(),
+                    label: "Route29Label".to_string(),
+                    name: "Route 29".to_string(),
+                    x: 1,
+                    y: 2,
+                    region: "JOHTO".to_string(),
+                }],
+                map_to_landmark: BTreeMap::new(),
+            },
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                pokegear_landmarks: PokegearLandmarksPayload {
+                    landmarks: vec![PokegearLandmark {
+                        id: 2,
+                        constant: "LandmarkRoute29".to_string(),
+                        label: "Route29OtherLabel".to_string(),
+                        name: "Route 29 Other".to_string(),
+                        x: 3,
+                        y: 4,
+                        region: "JOHTO".to_string(),
+                    }],
+                    map_to_landmark: BTreeMap::new(),
+                },
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokegear landmark manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate Pokegear landmark constant 'LandmarkRoute29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_runtime_spawn_points_by_exact_key() {
+        let mut data = GameDataSet {
+            runtime_spawn_points: [("2".to_string(), test_runtime_spawn_point(2, "Route29"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                runtime_spawn_points: [("2".to_string(), test_runtime_spawn_point(2, "Route30"))]
+                    .into_iter()
+                    .collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate runtime spawn point manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate runtime spawn point '2'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_runtime_map_metadata_by_exact_key() {
+        let mut data = GameDataSet {
+            runtime_map_metadata: [(
+                "ROUTE_29".to_string(),
+                test_runtime_map_metadata("ROUTE_29", "Route29"),
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                runtime_map_metadata: [(
+                    "ROUTE_29".to_string(),
+                    test_runtime_map_metadata("ROUTE_29", "Route29Other"),
+                )]
+                .into_iter()
+                .collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate runtime map metadata manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate runtime map metadata 'ROUTE_29'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_pc_strings_by_exact_key() {
+        let mut data = GameDataSet {
+            pc_strings: [(
+                "PCStringChoose".to_string(),
+                "Choose a Pokemon.".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                pc_strings: [(
+                    "PCStringChoose".to_string(),
+                    "Choose another Pokemon.".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate PC string manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate PC string 'PCStringChoose'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_menu_icons_by_exact_species() {
+        let mut data = GameDataSet {
+            menu_icons: [("CHIKORITA".to_string(), "ICON_ODDISH".to_string())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                menu_icons: [("CHIKORITA".to_string(), "ICON_CHIKORITA".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate menu icon manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate menu icon entry for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_exact_object_maps() {
+        let frontpic_program = FrontpicAnimProgram {
+            commands: vec![FrontpicAnimCommand {
+                kind: "endanim".to_string(),
+                ..FrontpicAnimCommand::default()
+            }],
+        };
+        let cry = PokemonCryMetadata {
+            cry: "CRY_CHIKORITA".to_string(),
+            pitch: 0,
+            length: 0,
+        };
+        let mut data = GameDataSet {
+            pokemon_frontpic_anim: [("CHIKORITA".to_string(), frontpic_program.clone())]
+                .into_iter()
+                .collect(),
+            asm_text: [("GreetingText".to_string(), "Hello.".to_string())]
+                .into_iter()
+                .collect(),
+            battle_animations: [(
+                "BattleAnim_Pound".to_string(),
+                vec!["anim_wait 1".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+            sprite_palette_defaults: [("SPRITE_CHRIS".to_string(), 0)].into_iter().collect(),
+            pokegear_town_map_palette_map: [(
+                "town_map".to_string(),
+                vec!["SPRITE_CHRIS".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+            pokemon_cries: [("CHIKORITA".to_string(), cry.clone())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let mut manifest = ModpackManifest {
+            payload: ModpackPayload {
+                pokemon_frontpic_anim: [("CHIKORITA".to_string(), frontpic_program.clone())]
+                    .into_iter()
+                    .collect(),
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate frontpic animation manifest must not overwrite");
+        assert!(
+            format!("{error:#}")
+                .contains("duplicate frontpic animation program for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+
+        manifest.payload.pokemon_frontpic_anim.clear();
+        manifest.payload.asm_text = [("GreetingText".to_string(), "Hi.".to_string())]
+            .into_iter()
+            .collect();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate ASM text manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate ASM text label 'GreetingText'"),
+            "{error:#}"
+        );
+
+        manifest.payload.asm_text.clear();
+        manifest.payload.battle_animations = [(
+            "BattleAnim_Pound".to_string(),
+            vec!["anim_wait 2".to_string()],
+        )]
+        .into_iter()
+        .collect();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate battle animation manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate battle animation 'BattleAnim_Pound'"),
+            "{error:#}"
+        );
+
+        manifest.payload.battle_animations.clear();
+        manifest.payload.sprite_palette_defaults =
+            [("SPRITE_CHRIS".to_string(), 1)].into_iter().collect();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate sprite palette default manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate sprite palette default 'SPRITE_CHRIS'"),
+            "{error:#}"
+        );
+
+        manifest.payload.sprite_palette_defaults.clear();
+        manifest.payload.pokegear_town_map_palette_map =
+            [("town_map".to_string(), vec!["SPRITE_KRIS".to_string()])]
+                .into_iter()
+                .collect();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokegear town map palette manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokegear town map palette entry 'town_map'"),
+            "{error:#}"
+        );
+
+        manifest.payload.pokegear_town_map_palette_map.clear();
+        manifest.payload.pokemon_cries = [(
+            "CHIKORITA".to_string(),
+            PokemonCryMetadata { pitch: 1, ..cry },
+        )]
+        .into_iter()
+        .collect();
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokemon cry manifest must not overwrite");
+        assert!(
+            format!("{error:#}").contains("duplicate Pokemon cry metadata for species 'CHIKORITA'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_audio_asset_ids() {
+        let mut data = GameDataSet {
+            audio: vec![
+                ModpackAudioAsset::music(
+                    "MUSIC_DUPLICATE",
+                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                )
+                .expect("valid base audio asset"),
+            ],
+            ..GameDataSet::default()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                audio: vec![
+                    ModpackAudioAsset::music(
+                        "MUSIC_DUPLICATE",
+                        "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                    )
+                    .expect("valid manifest audio asset"),
+                ],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate audio asset manifest must not be accepted");
+
+        assert!(
+            format!("{error:#}").contains("duplicate audio asset id 'MUSIC_DUPLICATE'"),
+            "{error:#}"
         );
     }
 
@@ -16919,10 +20519,11 @@ mod tests {
                 .map(|metadata| metadata.name.as_str()),
             Some("Route29")
         );
-        assert!(data
-            .initialize_events
-            .event_flags
-            .contains(&"EVENT_RIVAL_CHERRYGROVE_CITY".to_string()));
+        assert!(
+            data.initialize_events
+                .event_flags
+                .contains(&"EVENT_RIVAL_CHERRYGROVE_CITY".to_string())
+        );
         assert_eq!(
             data.story_event_script_constants.global.get("TRUE"),
             Some(&1)
@@ -16946,10 +20547,11 @@ mod tests {
         assert!(battle_anim_bundle.get("objects").is_some());
         assert!(sprite_anim_bundle.get("oam_sets").is_some());
         assert_eq!(data.sprite_palette_defaults.get("SPRITE_CHRIS"), Some(&0));
-        assert!(data
-            .pokegear_town_map_palette_map
-            .get("town_map")
-            .is_some_and(|entries| !entries.is_empty()));
+        assert!(
+            data.pokegear_town_map_palette_map
+                .get("town_map")
+                .is_some_and(|entries| !entries.is_empty())
+        );
         assert_eq!(
             data.pokemon_cries.get("CHIKORITA").map(|cry| (
                 cry.cry.as_str(),
@@ -16997,10 +20599,12 @@ mod tests {
             "{:?}",
             compiled.report().diagnostics
         );
-        assert!(compiled
-            .report()
-            .solvable_events
-            .contains(&"EVENT_HALL_OF_FAME".to_string()));
+        assert!(
+            compiled
+                .report()
+                .solvable_events
+                .contains(&"EVENT_HALL_OF_FAME".to_string())
+        );
     }
 
     #[test]
@@ -17367,14 +20971,18 @@ mod tests {
         );
 
         assert!(report.has_errors());
-        assert!(report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.code == "missing_grass_encounter_table" }));
-        assert!(report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.code == "missing_water_encounter_table" }));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "missing_grass_encounter_table" })
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "missing_water_encounter_table" })
+        );
     }
 
     #[test]
@@ -17452,11 +21060,13 @@ mod tests {
     #[test]
     fn verifier_rejects_missing_midi_asset_files() {
         let data = GameDataSet {
-            audio: vec![ModpackAudioAsset::music(
-                "MUSIC_MISSING_THEME",
-                "content-packs/test/music/MUSIC_MISSING_THEME.mid",
-            )
-            .expect("valid MIDI asset shape")],
+            audio: vec![
+                ModpackAudioAsset::music(
+                    "MUSIC_MISSING_THEME",
+                    "content-packs/test/music/MUSIC_MISSING_THEME.mid",
+                )
+                .expect("valid MIDI asset shape"),
+            ],
             ..GameDataSet::default()
         };
 
@@ -17472,17 +21082,45 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_duplicate_audio_asset_ids_before_catalog_collapse() {
+        let data = GameDataSet {
+            audio: vec![
+                ModpackAudioAsset::music(
+                    "MUSIC_DUPLICATE",
+                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                )
+                .expect("valid music asset shape"),
+                ModpackAudioAsset::music(
+                    "MUSIC_DUPLICATE",
+                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                )
+                .expect("valid duplicate music asset shape"),
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_audio_asset" && diagnostic.subject == "MUSIC_DUPLICATE"
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_invalid_midi_asset_bytes() {
         let root = temp_test_path("invalid-midi-root");
         let midi_path = root.join("apps/web/assets/data/content-packs/test/music/MUSIC_BAD.mid");
         std::fs::create_dir_all(midi_path.parent().expect("midi parent")).expect("create midi dir");
         std::fs::write(&midi_path, b"not midi").expect("write invalid midi");
         let data = GameDataSet {
-            audio: vec![ModpackAudioAsset::music(
-                "MUSIC_BAD",
-                "content-packs/test/music/MUSIC_BAD.mid",
-            )
-            .expect("valid MIDI asset shape")],
+            audio: vec![
+                ModpackAudioAsset::music("MUSIC_BAD", "content-packs/test/music/MUSIC_BAD.mid")
+                    .expect("valid MIDI asset shape"),
+            ],
             ..GameDataSet::default()
         };
 
@@ -17501,13 +21139,15 @@ mod tests {
         std::fs::create_dir_all(pcm_path.parent().expect("pcm parent")).expect("create pcm dir");
         std::fs::write(&pcm_path, &[] as &[u8]).expect("write empty pcm");
         let data = GameDataSet {
-            audio: vec![ModpackAudioAsset::cry_pcm(
-                "CRY_EMPTY",
-                "content-packs/test/cries/CRY_EMPTY.pcm",
-                22050,
-                1,
-            )
-            .expect("valid PCM asset shape")],
+            audio: vec![
+                ModpackAudioAsset::cry_pcm(
+                    "CRY_EMPTY",
+                    "content-packs/test/cries/CRY_EMPTY.pcm",
+                    22050,
+                    1,
+                )
+                .expect("valid PCM asset shape"),
+            ],
             ..GameDataSet::default()
         };
 
@@ -17543,6 +21183,33 @@ mod tests {
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_heavy_ball_species" && diagnostic.subject == "MISSING_HEAVY"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_capture_rule_species_before_lookup() {
+        let data = GameDataSet {
+            capture_rules: CaptureRules {
+                fast_ball_species: [" MISSING_FAST".to_string()].into_iter().collect(),
+                heavy_ball_modifiers: [("HEAVY MON".to_string(), 40)].into_iter().collect(),
+                ball_rules: BTreeMap::new(),
+                guaranteed_capture_balls: BTreeSet::new(),
+                status_bonus: BTreeMap::new(),
+            },
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_fast_ball_species" && diagnostic.subject == " MISSING_FAST"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_heavy_ball_species" && diagnostic.subject == "HEAVY MON"
         }));
     }
 
@@ -17588,6 +21255,7 @@ mod tests {
         );
 
         for code in [
+            "invalid_capture_ball_rule_item",
             "invalid_capture_ball_id",
             "invalid_capture_ball_battle_type",
             "invalid_capture_ball_multiplier",
@@ -17788,6 +21456,34 @@ mod tests {
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_capture_ball_item" && diagnostic.subject == "POKE_BALL"
+        }));
+    }
+
+    #[test]
+    fn verifier_does_not_report_unknown_capture_ball_for_invalid_item_script_id() {
+        let mut bad_ball = test_item("BAD_BALL");
+        bad_ball.pocket = item_pocket("BALL");
+        bad_ball.script_name = " BAD_BALL".to_string();
+        let data = GameDataSet {
+            items: [("BAD_BALL".to_string(), bad_ball)].into_iter().collect(),
+            capture_wobble_probabilities: vec![CaptureWobbleProbability {
+                catch_rate: 255,
+                chance: 255,
+            }],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_script_name" && diagnostic.subject == "BAD_BALL"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_capture_ball_item" && diagnostic.subject == "BAD_BALL"
         }));
     }
 
@@ -18038,6 +21734,8 @@ mod tests {
     fn verifier_rejects_item_property_whitespace_without_requiring_property() {
         let mut bad = test_item("BAD_PROPERTY_ITEM");
         bad.property = " CANT_SELECT".to_string();
+        let mut internal_space = test_item("BAD_INTERNAL_PROPERTY_ITEM");
+        internal_space.property = "CANT SELECT".to_string();
         let mut exact = test_item("EXACT_PROPERTY_ITEM");
         exact.property = "CANT_SELECT".to_string();
         let mut empty = test_item("EMPTY_PROPERTY_ITEM");
@@ -18045,6 +21743,7 @@ mod tests {
         let data = GameDataSet {
             items: [
                 ("BAD_PROPERTY_ITEM".to_string(), bad),
+                ("BAD_INTERNAL_PROPERTY_ITEM".to_string(), internal_space),
                 ("EXACT_PROPERTY_ITEM".to_string(), exact),
                 ("EMPTY_PROPERTY_ITEM".to_string(), empty),
             ]
@@ -18061,6 +21760,10 @@ mod tests {
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_item_property" && diagnostic.subject == "BAD_PROPERTY_ITEM"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_item_property"
+                && diagnostic.subject == "BAD_INTERNAL_PROPERTY_ITEM"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_item_property"
@@ -18283,10 +21986,12 @@ mod tests {
             );
         }
         for subject in ["POKE_DOLL", "REPEL", "ESCAPE_ROPE"] {
-            assert!(!report
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.subject == subject));
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.subject == subject)
+            );
         }
     }
 
@@ -18636,6 +22341,71 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_malformed_growth_rate_catalog_without_runtime_fallback() {
+        let data = GameDataSet {
+            growth_rates: [
+                (
+                    "GROWTH BAD".to_string(),
+                    crystal_core::systems::experience::GrowthRateCurve {
+                        id: "GROWTH BAD".to_string(),
+                        numerator: 1,
+                        denominator: 1,
+                        quadratic: 0,
+                        linear: 0,
+                        constant: 0,
+                    },
+                ),
+                (
+                    "GROWTH_MISMATCH".to_string(),
+                    crystal_core::systems::experience::GrowthRateCurve {
+                        id: "GROWTH_OTHER".to_string(),
+                        numerator: 1,
+                        denominator: 1,
+                        quadratic: 0,
+                        linear: 0,
+                        constant: 0,
+                    },
+                ),
+                (
+                    "GROWTH_ZERO".to_string(),
+                    crystal_core::systems::experience::GrowthRateCurve {
+                        id: "GROWTH_ZERO".to_string(),
+                        numerator: 1,
+                        denominator: 0,
+                        quadratic: 0,
+                        linear: 0,
+                        constant: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for expected in [
+            "invalid_growth_rate_id",
+            "growth_rate_id_mismatch",
+            "invalid_growth_rate_denominator",
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == expected),
+                "missing diagnostic {expected}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_species_held_items_without_case_coercion() {
         let mut known_species = species();
         known_species.tmhm_learnset.clear();
@@ -18820,7 +22590,10 @@ mod tests {
             marts: MartCatalog(
                 [
                     (" MartNew".to_string(), vec!["POTION".to_string()]),
-                    ("MartNew".to_string(), vec!["potion".to_string()]),
+                    (
+                        "MartNew".to_string(),
+                        vec!["RARE CANDY".to_string(), "potion".to_string()],
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -18834,6 +22607,11 @@ mod tests {
             &PlayabilityRules::default(),
         );
 
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_mart_item"
+                && diagnostic.subject == "MartNew"
+                && diagnostic.message.contains("RARE CANDY")
+        }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_mart_item"
                 && diagnostic.subject == "MartNew"
@@ -18849,34 +22627,53 @@ mod tests {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_shop_commands = vec![
             ScriptShopCommand {
+                command: "pokemart".to_string(),
                 mart_type: "MARTTYPE_STANDARD".to_string(),
                 mart_id: "mart_cherrygrove".to_string(),
                 source_script: "ClerkScript".to_string(),
                 command_index: 1,
             },
             ScriptShopCommand {
+                command: "pokemart".to_string(),
                 mart_type: "MARTTYPE_STANDARD".to_string(),
                 mart_id: "0".to_string(),
                 source_script: "ZeroScript".to_string(),
                 command_index: 2,
             },
             ScriptShopCommand {
+                command: "pokemart".to_string(),
                 mart_type: "marttype_standard".to_string(),
                 mart_id: "MART_CHERRYGROVE".to_string(),
                 source_script: "LowerTypeScript".to_string(),
                 command_index: 3,
             },
             ScriptShopCommand {
+                command: "pokemart".to_string(),
                 mart_type: " MARTTYPE_STANDARD".to_string(),
                 mart_id: "MART_CHERRYGROVE".to_string(),
                 source_script: "PaddedTypeScript".to_string(),
                 command_index: 4,
             },
             ScriptShopCommand {
+                command: "pokemart".to_string(),
                 mart_type: "MARTTYPE_STANDARD".to_string(),
                 mart_id: " MART_CHERRYGROVE".to_string(),
                 source_script: "PaddedMartScript".to_string(),
                 command_index: 5,
+            },
+            ScriptShopCommand {
+                command: "PokeMart".to_string(),
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_CHERRYGROVE".to_string(),
+                source_script: "PaddedCommandScript".to_string(),
+                command_index: 6,
+            },
+            ScriptShopCommand {
+                command: "sellmart".to_string(),
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_CHERRYGROVE".to_string(),
+                source_script: "UnknownCommandScript".to_string(),
+                command_index: 7,
             },
         ];
         let data = GameDataSet {
@@ -18922,6 +22719,16 @@ mod tests {
                 && diagnostic.subject == "Start:PaddedMartScript:5"
                 && diagnostic.message.contains(" MART_CHERRYGROVE")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_shop_command"
+                && diagnostic.subject == "Start:PaddedCommandScript:6"
+                && diagnostic.message.contains("PokeMart")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_shop_command"
+                && diagnostic.subject == "Start:UnknownCommandScript:7"
+                && diagnostic.message.contains("sellmart")
+        }));
     }
 
     #[test]
@@ -18935,22 +22742,28 @@ mod tests {
                 command_index: 1,
             },
             ScriptPhoneCommand {
+                command: "deletecellnum".to_string(),
+                contact_id: "PHONE_MOM".to_string(),
+                source_script: "UnknownPhoneScript".to_string(),
+                command_index: 2,
+            },
+            ScriptPhoneCommand {
                 command: "checkcellnum".to_string(),
                 contact_id: "phone_mom".to_string(),
                 source_script: "LowerContactScript".to_string(),
-                command_index: 2,
+                command_index: 3,
             },
             ScriptPhoneCommand {
                 command: "askforphonenumber".to_string(),
                 contact_id: String::new(),
                 source_script: "EmptyContactScript".to_string(),
-                command_index: 3,
+                command_index: 4,
             },
             ScriptPhoneCommand {
                 command: "askforphonenumber".to_string(),
                 contact_id: " PHONE_MOM".to_string(),
                 source_script: "PaddedContactScript".to_string(),
-                command_index: 4,
+                command_index: 5,
             },
         ];
         let data = GameDataSet {
@@ -18970,22 +22783,27 @@ mod tests {
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_script_phone_command"
+            diagnostic.code == "invalid_script_phone_command"
                 && diagnostic.subject == "Start:PhoneScript:1"
                 && diagnostic.message.contains("CheckCellNum")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_phone_command"
+                && diagnostic.subject == "Start:UnknownPhoneScript:2"
+                && diagnostic.message.contains("deletecellnum")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_phone_contact"
-                && diagnostic.subject == "Start:LowerContactScript:2"
+                && diagnostic.subject == "Start:LowerContactScript:3"
                 && diagnostic.message.contains("phone_mom")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_script_phone_contact"
-                && diagnostic.subject == "Start:EmptyContactScript:3"
+            diagnostic.code == "invalid_script_phone_contact"
+                && diagnostic.subject == "Start:EmptyContactScript:4"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_script_phone_contact"
-                && diagnostic.subject == "Start:PaddedContactScript:4"
+                && diagnostic.subject == "Start:PaddedContactScript:5"
                 && diagnostic.message.contains(" PHONE_MOM")
         }));
     }
@@ -19112,6 +22930,15 @@ mod tests {
                 command_index: 0,
             },
             ScriptFieldPickup {
+                command: "itemball".to_string(),
+                item_id: Some("RARE CANDY".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_ROUTE_29_RARE_CANDY".to_string()),
+                fruit_tree_id: None,
+                source_script: "BadItemToken".to_string(),
+                command_index: 0,
+            },
+            ScriptFieldPickup {
                 command: "fruittree".to_string(),
                 item_id: None,
                 quantity: 1,
@@ -19138,6 +22965,15 @@ mod tests {
                 source_script: "UppercasePickup".to_string(),
                 command_index: 0,
             },
+            ScriptFieldPickup {
+                command: "giveitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_ROUTE_29_POTION".to_string()),
+                fruit_tree_id: None,
+                source_script: "UnknownPickup".to_string(),
+                command_index: 0,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -19155,11 +22991,13 @@ mod tests {
 
         for expected in [
             "unknown_script_field_pickup_item",
+            "invalid_script_field_pickup_item",
             "script_field_pickup_invalid_quantity",
             "script_field_pickup_uncollectible_event",
             "script_field_pickup_empty_fruit_tree",
             "script_field_pickup_invalid_fruit_tree",
             "unknown_script_field_fruit_tree",
+            "invalid_script_field_pickup_command",
             "unknown_script_field_pickup_command",
         ] {
             assert!(
@@ -19171,6 +23009,16 @@ mod tests {
                 report.diagnostics
             );
         }
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_field_pickup_command"
+                && diagnostic.subject == "Start:FieldScript:UppercasePickup:0"
+                && diagnostic.message.contains("ITEMBALL")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_field_pickup_command"
+                && diagnostic.subject == "Start:FieldScript:UnknownPickup:0"
+                && diagnostic.message.contains("giveitem")
+        }));
     }
 
     #[test]
@@ -19244,12 +23092,20 @@ mod tests {
                 "args": []
             })]),
         );
-        module.events.coord_events = vec![CoordEvent {
-            x: 2,
-            y: 3,
-            scene_id: "SCENE_START".to_string(),
-            script_name: "knownsignscript".to_string(),
-        }];
+        module.events.coord_events = vec![
+            CoordEvent {
+                x: 2,
+                y: 3,
+                scene_id: "SCENE_START".to_string(),
+                script_name: "knownsignscript".to_string(),
+            },
+            CoordEvent {
+                x: 8,
+                y: 9,
+                scene_id: "SCENE_START".to_string(),
+                script_name: "Known Sign Script".to_string(),
+            },
+        ];
         module.events.bg_events = vec![
             BackgroundEvent {
                 x: 4,
@@ -19262,6 +23118,12 @@ mod tests {
                 y: 7,
                 event_type: "BGEVENT_READ".to_string(),
                 script: "MissingSignScript".to_string(),
+            },
+            BackgroundEvent {
+                x: 10,
+                y: 11,
+                event_type: "BGEVENT_READ".to_string(),
+                script: "Missing Sign Script".to_string(),
             },
         ];
         let data = GameDataSet {
@@ -19282,6 +23144,24 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_bg_event_script"
                 && diagnostic.subject == "Start:BGEVENT_READ:MissingSignScript:6,7"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_coord_event_script"
+                && diagnostic.subject == "Start:SCENE_START:Known Sign Script:8,9"
+                && diagnostic.message.contains("Known Sign Script")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_bg_event_script"
+                && diagnostic.subject == "Start:BGEVENT_READ:Missing Sign Script:10,11"
+                && diagnostic.message.contains("Missing Sign Script")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_coord_event_script"
+                && diagnostic.subject == "Start:SCENE_START:Known Sign Script:8,9"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_bg_event_script"
+                && diagnostic.subject == "Start:BGEVENT_READ:Missing Sign Script:10,11"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_bg_event_script"
@@ -19311,6 +23191,11 @@ mod tests {
                 steps: Vec::new(),
             },
             ScriptMovement {
+                label: "MalformedMovement".to_string(),
+                source_script: Some("Missing Movement Script".to_string()),
+                steps: Vec::new(),
+            },
+            ScriptMovement {
                 label: "SharedMovement".to_string(),
                 source_script: None,
                 steps: Vec::new(),
@@ -19335,6 +23220,15 @@ mod tests {
                 source_script: "MissingPickupScript".to_string(),
                 command_index: 3,
             },
+            ScriptFieldPickup {
+                command: "hiddenitem".to_string(),
+                item_id: Some("POTION".to_string()),
+                quantity: 1,
+                event_flag: Some("EVENT_HIDDEN_POTION".to_string()),
+                fruit_tree_id: None,
+                source_script: "Missing Pickup Script".to_string(),
+                command_index: 4,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -19358,6 +23252,28 @@ mod tests {
             diagnostic.code == "unknown_command_source_script"
                 && diagnostic.subject == "Start:script_field_pickup:MissingPickupScript:3"
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_command_source_script"
+                && diagnostic.subject == "Start:script_movement:Missing Movement Script"
+                && diagnostic.message.contains("Missing Movement Script")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_command_source_script"
+                && diagnostic.subject == "Start:script_field_pickup:Missing Pickup Script:4"
+                && diagnostic.message.contains("Missing Pickup Script")
+        }));
+        for rejected in [
+            "Start:script_movement:Missing Movement Script",
+            "Start:script_field_pickup:Missing Pickup Script:4",
+        ] {
+            assert!(
+                !report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "unknown_command_source_script"
+                        && diagnostic.subject == rejected
+                }),
+                "malformed source script should not cascade to unknown: {rejected}"
+            );
+        }
         for accepted in [
             "Start:script_movement:KnownScript",
             "Start:script_movement:SharedMovement",
@@ -19379,6 +23295,7 @@ mod tests {
             fruit_trees: FruitTreeCatalog(
                 [
                     (" FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string()),
+                    ("FRUITTREE_ROUTE_30".to_string(), "GOLD BERRY".to_string()),
                     ("FRUITTREE_ROUTE_29".to_string(), "berry".to_string()),
                 ]
                 .into_iter()
@@ -19402,6 +23319,11 @@ mod tests {
                 && diagnostic.message.contains("berry")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_fruit_tree_item"
+                && diagnostic.subject == "fruit_trees:FRUITTREE_ROUTE_30"
+                && diagnostic.message.contains("GOLD BERRY")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_fruit_tree_id"
                 && diagnostic.subject == "fruit_trees: FRUITTREE_ROUTE_29"
         }));
@@ -19410,15 +23332,26 @@ mod tests {
     #[test]
     fn verifier_rejects_referenced_fruit_tree_without_catalog() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
-        module.script_field_pickups = vec![ScriptFieldPickup {
-            command: "fruittree".to_string(),
-            item_id: None,
-            quantity: 1,
-            event_flag: None,
-            fruit_tree_id: Some("FRUITTREE_ROUTE_29".to_string()),
-            source_script: "Route29FruitTree".to_string(),
-            command_index: 0,
-        }];
+        module.script_field_pickups = vec![
+            ScriptFieldPickup {
+                command: "fruittree".to_string(),
+                item_id: None,
+                quantity: 1,
+                event_flag: None,
+                fruit_tree_id: Some("FRUITTREE_ROUTE_29".to_string()),
+                source_script: "Route29FruitTree".to_string(),
+                command_index: 0,
+            },
+            ScriptFieldPickup {
+                command: "fruittree".to_string(),
+                item_id: None,
+                quantity: 1,
+                event_flag: None,
+                fruit_tree_id: Some("FRUITTREE ROUTE_29".to_string()),
+                source_script: "Route29BadFruitTree".to_string(),
+                command_index: 1,
+            },
+        ];
         let data = GameDataSet {
             maps: [("Route29".to_string(), module)].into_iter().collect(),
             items: [("BERRY".to_string(), test_item("BERRY"))]
@@ -19438,6 +23371,15 @@ mod tests {
             diagnostic.code == "unknown_script_field_fruit_tree"
                 && diagnostic.subject == "Route29:Route29FruitTree:0"
                 && diagnostic.message.contains("FRUITTREE_ROUTE_29")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_field_pickup_invalid_fruit_tree"
+                && diagnostic.subject == "Route29:Route29BadFruitTree:1"
+                && diagnostic.message.contains("FRUITTREE ROUTE_29")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_field_fruit_tree"
+                && diagnostic.subject == "Route29:Route29BadFruitTree:1"
         }));
     }
 
@@ -19549,17 +23491,30 @@ mod tests {
     #[test]
     fn verifier_rejects_unknown_gift_pokemon_facts_without_case_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.gift_pokemon_scripts = vec![GiftPokemonScript {
-            species_id: "cyndaquil".to_string(),
-            level_token: "5".to_string(),
-            level: 5,
-            held_item_id: Some("berry".to_string()),
-            nickname_label: Some("giftstartername".to_string()),
-            ot_label: Some(" GiftOtText".to_string()),
-            source_script: "StarterScript".to_string(),
-            command_index: 2,
-            egg: false,
-        }];
+        module.gift_pokemon_scripts = vec![
+            GiftPokemonScript {
+                species_id: "cyndaquil".to_string(),
+                level_token: "5".to_string(),
+                level: 5,
+                held_item_id: Some("berry".to_string()),
+                nickname_label: Some("giftstartername".to_string()),
+                ot_label: Some(" GiftOtText".to_string()),
+                source_script: "StarterScript".to_string(),
+                command_index: 2,
+                egg: false,
+            },
+            GiftPokemonScript {
+                species_id: "CYNDA QUIL".to_string(),
+                level_token: "5".to_string(),
+                level: 5,
+                held_item_id: Some("BERRY JUICE".to_string()),
+                nickname_label: None,
+                ot_label: None,
+                source_script: "StarterScript".to_string(),
+                command_index: 3,
+                egg: false,
+            },
+        ];
         module
             .scripts
             .insert("GiftStarterName".to_string(), Value::Array(Vec::new()));
@@ -19598,6 +23553,24 @@ mod tests {
                 && diagnostic.subject == "Start:StarterScript:2"
                 && diagnostic.message.contains(" GiftOtText")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_gift_pokemon_species"
+                && diagnostic.subject == "Start:StarterScript:3"
+                && diagnostic.message.contains("CYNDA QUIL")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_gift_pokemon_item"
+                && diagnostic.subject == "Start:StarterScript:3"
+                && diagnostic.message.contains("BERRY JUICE")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_gift_pokemon_species"
+                && diagnostic.subject == "Start:StarterScript:3"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_gift_pokemon_item"
+                && diagnostic.subject == "Start:StarterScript:3"
+        }));
     }
 
     #[test]
@@ -19609,6 +23582,12 @@ mod tests {
                 flag_id: "EVENT_ROUTE_29_POTION".to_string(),
                 source_script: "RouteScript".to_string(),
                 command_index: 4,
+            },
+            ScriptFlagCommand {
+                command: "toggleevent".to_string(),
+                flag_id: "EVENT_ROUTE_29_POTION".to_string(),
+                source_script: "RouteScript".to_string(),
+                command_index: 7,
             },
             ScriptFlagCommand {
                 command: "setevent".to_string(),
@@ -19635,9 +23614,14 @@ mod tests {
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_script_flag_command"
+            diagnostic.code == "invalid_script_flag_command"
                 && diagnostic.subject == "Start:RouteScript:4"
                 && diagnostic.message.contains("SET_EVENT")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_flag_command"
+                && diagnostic.subject == "Start:RouteScript:7"
+                && diagnostic.message.contains("toggleevent")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "empty_script_flag_id" && diagnostic.subject == "Start:RouteScript:5"
@@ -19682,6 +23666,13 @@ mod tests {
                 command_index: 4,
             },
             ScriptSceneCommand {
+                command: "SetScene".to_string(),
+                map_id: None,
+                scene_id: Some("SCENE_START_OPEN".to_string()),
+                source_script: "SceneScript".to_string(),
+                command_index: 8,
+            },
+            ScriptSceneCommand {
                 command: "setmapscene".to_string(),
                 map_id: Some(" START_MAP".to_string()),
                 scene_id: Some("SCENE_START_OPEN".to_string()),
@@ -19694,6 +23685,13 @@ mod tests {
                 scene_id: Some(" SCENE_START_OPEN".to_string()),
                 source_script: "SceneScript".to_string(),
                 command_index: 6,
+            },
+            ScriptSceneCommand {
+                command: "setmapscene".to_string(),
+                map_id: Some("START MAP".to_string()),
+                scene_id: Some("SCENE START_OPEN".to_string()),
+                source_script: "SceneScript".to_string(),
+                command_index: 7,
             },
         ];
         let data = GameDataSet {
@@ -19733,6 +23731,11 @@ mod tests {
                 && diagnostic.message.contains("resetscene")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_scene_command"
+                && diagnostic.subject == "Start:SceneScript:8"
+                && diagnostic.message.contains("SetScene")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_script_scene_map"
                 && diagnostic.subject == "Start:SceneScript:5"
                 && diagnostic.message.contains(" START_MAP")
@@ -19741,6 +23744,21 @@ mod tests {
             diagnostic.code == "invalid_script_scene_id"
                 && diagnostic.subject == "Start:SceneScript:6"
                 && diagnostic.message.contains(" SCENE_START_OPEN")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_scene_map"
+                && diagnostic.subject == "Start:SceneScript:7"
+                && diagnostic.message.contains("START MAP")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_scene_id"
+                && diagnostic.subject == "Start:SceneScript:7"
+                && diagnostic.message.contains("SCENE START_OPEN")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.subject == "Start:SceneScript:7"
+                && (diagnostic.code == "unknown_script_scene_map"
+                    || diagnostic.code == "unknown_script_scene_id")
         }));
     }
 
@@ -19867,6 +23885,16 @@ mod tests {
                 command_index: 5,
             },
             ScriptMapCommand {
+                command: "Warp".to_string(),
+                target_map: Some("START_MAP".to_string()),
+                x: Some(1),
+                y: Some(2),
+                facing: None,
+                map_setup: None,
+                source_script: "MapScript".to_string(),
+                command_index: 9,
+            },
+            ScriptMapCommand {
                 command: "warp".to_string(),
                 target_map: Some(" START_MAP".to_string()),
                 x: Some(1),
@@ -19918,6 +23946,7 @@ mod tests {
             ("unexpected_script_warp_destination", "Start:MapScript:4"),
             ("missing_script_map_setup", "Start:MapScript:4"),
             ("unknown_script_map_command", "Start:MapScript:5"),
+            ("invalid_script_map_command", "Start:MapScript:9"),
             ("invalid_script_warp_map", "Start:MapScript:6"),
             ("invalid_script_warp_facing", "Start:MapScript:7"),
             ("invalid_script_map_setup", "Start:MapScript:8"),
@@ -19981,6 +24010,18 @@ mod tests {
                 source_script: "GreetingScript".to_string(),
                 command_index: 6,
             },
+            ScriptTextCommand {
+                command: "text".to_string(),
+                text_label: Some("GreetingText".to_string()),
+                source_script: "GreetingScript".to_string(),
+                command_index: 7,
+            },
+            ScriptTextCommand {
+                command: "JumpText".to_string(),
+                text_label: Some("GreetingText".to_string()),
+                source_script: "GreetingScript".to_string(),
+                command_index: 8,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -20015,6 +24056,16 @@ mod tests {
             diagnostic.code == "invalid_script_text_label"
                 && diagnostic.subject == "Start:GreetingScript:6"
                 && diagnostic.message.contains(" GreetingText")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_text_command"
+                && diagnostic.subject == "Start:GreetingScript:7"
+                && diagnostic.message.contains("text")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_text_command"
+                && diagnostic.subject == "Start:GreetingScript:8"
+                && diagnostic.message.contains("JumpText")
         }));
     }
 
@@ -20304,6 +24355,10 @@ mod tests {
                     script_name: Some("MissingSceneScript".to_string()),
                 },
                 MapScene {
+                    scene_id: "SCENE_START_MALFORMED".to_string(),
+                    script_name: Some("Missing Scene Script".to_string()),
+                },
+                MapScene {
                     scene_id: "SCENE_START_CONST_ONLY".to_string(),
                     script_name: None,
                 },
@@ -20329,6 +24384,15 @@ mod tests {
             diagnostic.code == "unknown_scene_script"
                 && diagnostic.subject == "Start:SCENE_START_MISSING"
                 && diagnostic.message.contains("MissingSceneScript")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_scene_script"
+                && diagnostic.subject == "Start:SCENE_START_MALFORMED"
+                && diagnostic.message.contains("Missing Scene Script")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_scene_script"
+                && diagnostic.subject == "Start:SCENE_START_MALFORMED"
         }));
         for accepted in ["Start:SCENE_START_KNOWN", "Start:SCENE_START_CONST_ONLY"] {
             assert!(
@@ -20372,23 +24436,76 @@ mod tests {
                 source_script: "AudioScript".to_string(),
                 command_index: 4,
             },
+            ScriptAudioCommand {
+                command: "playmusic".to_string(),
+                audio_id: Some("MUSIC ROUTE 29".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 5,
+            },
+            ScriptAudioCommand {
+                command: "playsound".to_string(),
+                audio_id: Some("SFX GET BADGE".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 6,
+            },
+            ScriptAudioCommand {
+                command: "cry".to_string(),
+                audio_id: Some("HO OH".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 7,
+            },
+            ScriptAudioCommand {
+                command: "cry".to_string(),
+                audio_id: Some("CELEBI".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 8,
+            },
+            ScriptAudioCommand {
+                command: "PlaySound".to_string(),
+                audio_id: Some("SFX_GET_BADGE".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 9,
+            },
+            ScriptAudioCommand {
+                command: "fadeaudio".to_string(),
+                audio_id: Some("MUSIC_ROUTE_29".to_string()),
+                fade_frames: None,
+                source_script: "AudioScript".to_string(),
+                command_index: 10,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             pokemon: [
                 ("LUGIA".to_string(), species()),
                 ("CHIKORITA".to_string(), species()),
+                ("CELEBI".to_string(), species()),
             ]
             .into_iter()
             .collect(),
-            pokemon_cries: [(
-                "LUGIA".to_string(),
-                PokemonCryMetadata {
-                    cry: "CRY_LUGIA".to_string(),
-                    pitch: 0,
-                    length: 0,
-                },
-            )]
+            pokemon_cries: [
+                (
+                    "LUGIA".to_string(),
+                    PokemonCryMetadata {
+                        cry: "CRY_LUGIA".to_string(),
+                        pitch: 0,
+                        length: 0,
+                    },
+                ),
+                (
+                    "CELEBI".to_string(),
+                    PokemonCryMetadata {
+                        cry: "CRY CELEBI".to_string(),
+                        pitch: 0,
+                        length: 0,
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             audio: vec![
@@ -20437,6 +24554,36 @@ mod tests {
             diagnostic.code == "missing_script_cry_metadata"
                 && diagnostic.subject == "Start:AudioScript:4"
                 && diagnostic.message.contains("CHIKORITA")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_music_id"
+                && diagnostic.subject == "Start:AudioScript:5"
+                && diagnostic.message.contains("MUSIC ROUTE 29")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_sfx_id"
+                && diagnostic.subject == "Start:AudioScript:6"
+                && diagnostic.message.contains("SFX GET BADGE")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_cry_species"
+                && diagnostic.subject == "Start:AudioScript:7"
+                && diagnostic.message.contains("HO OH")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_cry_audio"
+                && diagnostic.subject == "Start:AudioScript:8"
+                && diagnostic.message.contains("CRY CELEBI")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_audio_command"
+                && diagnostic.subject == "Start:AudioScript:9"
+                && diagnostic.message.contains("PlaySound")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_audio_command"
+                && diagnostic.subject == "Start:AudioScript:10"
+                && diagnostic.message.contains("fadeaudio")
         }));
     }
 
@@ -20507,6 +24654,56 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_invalid_species_cry_tokens_before_lookup() {
+        let mut lugia = species();
+        lugia.id = "LUGIA".to_string();
+        lugia.tmhm_learnset.clear();
+        let data = GameDataSet {
+            pokemon: [("LUGIA".to_string(), lugia)].into_iter().collect(),
+            learnsets: [("LUGIA".to_string(), Vec::new())].into_iter().collect(),
+            evolutions: EvolutionTable([("LUGIA".to_string(), Vec::new())].into_iter().collect()),
+            pokemon_cries: [
+                (
+                    "LUGIA".to_string(),
+                    PokemonCryMetadata {
+                        cry: "CRY LUGIA".to_string(),
+                        pitch: 0,
+                        length: 0,
+                    },
+                ),
+                (
+                    "HO OH".to_string(),
+                    PokemonCryMetadata {
+                        cry: "CRY_HO_OH".to_string(),
+                        pitch: 0,
+                        length: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_pokemon_cry_species"
+                && diagnostic.subject == "HO OH"
+                && diagnostic.message.contains("HO OH")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_species_cry_audio"
+                && diagnostic.subject == "LUGIA"
+                && diagnostic.message.contains("CRY LUGIA")
+        }));
+    }
+
+    #[test]
     fn verifier_requires_script_audio_ids_declared_by_pack_not_path_aliases() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_audio_commands = vec![ScriptAudioCommand {
@@ -20551,10 +24748,16 @@ mod tests {
             module.attributes.music = Some("SFX_TACKLE".to_string());
             module
         };
+        let invalid_module = {
+            let mut module = test_map_module("Invalid", "INVALID_MAP", None);
+            module.attributes.music = Some("MUSIC ROUTE 29".to_string());
+            module
+        };
         let data = GameDataSet {
             maps: [
                 ("Start".to_string(), module),
                 ("WrongKind".to_string(), wrong_kind_module),
+                ("Invalid".to_string(), invalid_module),
             ]
             .into_iter()
             .collect(),
@@ -20584,6 +24787,11 @@ mod tests {
             diagnostic.code == "unknown_map_music_id"
                 && diagnostic.subject == "WrongKind"
                 && diagnostic.message.contains("SFX_TACKLE")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_map_music_id"
+                && diagnostic.subject == "Invalid"
+                && diagnostic.message.contains("MUSIC ROUTE 29")
         }));
     }
 
@@ -20653,10 +24861,28 @@ mod tests {
                     map_number: 1,
                 },
                 RoamingPokemonDefinition {
-                    species: "raikou".to_string(),
+                    species: "RAI KOU".to_string(),
                     level: 40,
                     map_group: 1,
                     map_number: 2,
+                },
+                RoamingPokemonDefinition {
+                    species: "raikou".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 3,
+                },
+                RoamingPokemonDefinition {
+                    species: "RAIKOU".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 4,
+                },
+                RoamingPokemonDefinition {
+                    species: "RAIKOU".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 5,
                 },
             ],
             ..GameDataSet::default()
@@ -20677,9 +24903,19 @@ mod tests {
                 && diagnostic.subject == "roaming_pokemon:0"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_roaming_pokemon_species"
+            diagnostic.code == "invalid_roaming_pokemon_species"
                 && diagnostic.subject == "roaming_pokemon:1"
+                && diagnostic.message.contains("RAI KOU")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_roaming_pokemon_species"
+                && diagnostic.subject == "roaming_pokemon:2"
                 && diagnostic.message.contains("raikou")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_roaming_pokemon_species"
+                && diagnostic.subject == "roaming_pokemon:4"
+                && diagnostic.message.contains("RAIKOU")
         }));
     }
 
@@ -20747,6 +24983,14 @@ mod tests {
                     item_id: "ultra_ball".to_string(),
                     cost: 2,
                 },
+                BuenaPrizeDefinition {
+                    item_id: "ULTRA_BALL".to_string(),
+                    cost: 2,
+                },
+                BuenaPrizeDefinition {
+                    item_id: "ULTRA_BALL".to_string(),
+                    cost: 3,
+                },
             ],
             ..GameDataSet::default()
         };
@@ -20772,6 +25016,11 @@ mod tests {
             diagnostic.code == "unknown_buena_prize_item"
                 && diagnostic.subject == "buena_prizes:2"
                 && diagnostic.message.contains("ultra_ball")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_buena_prize_item"
+                && diagnostic.subject == "buena_prizes:4"
+                && diagnostic.message.contains("ULTRA_BALL")
         }));
     }
 
@@ -20808,7 +25057,7 @@ mod tests {
             buena_password_categories: vec![
                 BuenaPasswordCategoryDefinition {
                     id: String::new(),
-                    category_type: "buena_mon".to_string(),
+                    category_type: "buena mon".to_string(),
                     points: 0,
                     options: Vec::new(),
                 },
@@ -20830,6 +25079,18 @@ mod tests {
                     points: 1,
                     options: vec!["THUNDERBOLT ".to_string(), "thunderbolt".to_string()],
                 },
+                BuenaPasswordCategoryDefinition {
+                    id: "UNKNOWN".to_string(),
+                    category_type: "BUENA_UNKNOWN".to_string(),
+                    points: 1,
+                    options: vec!["TEXT".to_string()],
+                },
+                BuenaPasswordCategoryDefinition {
+                    id: "MOVE".to_string(),
+                    category_type: BUENA_PASSWORD_CATEGORY_STRING.to_string(),
+                    points: 1,
+                    options: vec!["TEXT".to_string()],
+                },
             ],
             ..GameDataSet::default()
         };
@@ -20846,7 +25107,7 @@ mod tests {
                 "buena_password_categories:0",
             ),
             (
-                "unknown_buena_password_category_type",
+                "invalid_buena_password_category_type",
                 "buena_password_categories:0",
             ),
             (
@@ -20888,6 +25149,14 @@ mod tests {
             (
                 "unknown_buena_password_move",
                 "buena_password_categories:3:option:1",
+            ),
+            (
+                "unknown_buena_password_category_type",
+                "buena_password_categories:4",
+            ),
+            (
+                "duplicate_buena_password_category_id",
+                "buena_password_categories:5",
             ),
         ] {
             assert!(
@@ -20943,6 +25212,14 @@ mod tests {
                     apricorn: "blu_apricorn".to_string(),
                     ball: "lure_ball".to_string(),
                 },
+                KurtApricornRecipe {
+                    apricorn: "BLU_APRICORN".to_string(),
+                    ball: "LURE_BALL".to_string(),
+                },
+                KurtApricornRecipe {
+                    apricorn: "BLU_APRICORN".to_string(),
+                    ball: "LURE_BALL".to_string(),
+                },
             ],
             ..GameDataSet::default()
         };
@@ -20974,6 +25251,10 @@ mod tests {
             (
                 "unknown_kurt_apricorn_recipe_ball",
                 "kurt_apricorn_recipes:2",
+            ),
+            (
+                "duplicate_kurt_apricorn_recipe_apricorn",
+                "kurt_apricorn_recipes:4",
             ),
         ] {
             assert!(
@@ -21119,6 +25400,115 @@ mod tests {
                 && diagnostic.subject == "special_routines:GiveDratini"
                 && diagnostic.message.contains("Dratini move sets")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_dratini_move_sets_without_unknown_fallback() {
+        let data = GameDataSet {
+            moves: [("SURF".to_string(), test_move("SURF"))]
+                .into_iter()
+                .collect(),
+            dratini_move_sets: vec![
+                DratiniMoveSetDefinition {
+                    mode: 0,
+                    moves: Vec::new(),
+                },
+                DratiniMoveSetDefinition {
+                    mode: 1,
+                    moves: vec![
+                        String::new(),
+                        "EXTREME SPEED".to_string(),
+                        "EXTREMESPEED".to_string(),
+                    ],
+                },
+                DratiniMoveSetDefinition {
+                    mode: 1,
+                    moves: vec!["SURF".to_string()],
+                },
+            ],
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            ("empty_dratini_move_set", "dratini_move_sets:0"),
+            ("invalid_dratini_move", "dratini_move_sets:1:move:0"),
+            ("invalid_dratini_move", "dratini_move_sets:1:move:1"),
+            ("unknown_dratini_move", "dratini_move_sets:1:move:2"),
+            ("duplicate_dratini_move_set_mode", "dratini_move_sets:2"),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_bug_contest_flags_without_unknown_fallback() {
+        let data = GameDataSet {
+            initialize_events: InitializeEventsConfig {
+                event_flags: vec!["EVENT_BUG_CONTESTANT_1".to_string()],
+                ..InitializeEventsConfig::default()
+            },
+            bug_contest_config: Some(BugContestConfig {
+                park_balls: 20,
+                timer_minutes: 20,
+                timer_seconds: 0,
+                selected_contestant_count: 4,
+                contestant_flags: vec![
+                    String::new(),
+                    "EVENT_BUG_CONTESTANT_1".to_string(),
+                    "EVENT_BUG_CONTESTANT_1".to_string(),
+                    "EVENT BUG".to_string(),
+                    "EVENT_MISSING".to_string(),
+                ],
+            }),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for (code, subject) in [
+            (
+                "invalid_bug_contest_contestant_flag",
+                "bug_contest_config:contestant_flags:0",
+            ),
+            (
+                "duplicate_bug_contest_contestant_flag",
+                "bug_contest_config:contestant_flags:2",
+            ),
+            (
+                "invalid_bug_contest_contestant_flag",
+                "bug_contest_config:contestant_flags:3",
+            ),
+            (
+                "unknown_bug_contest_contestant_flag",
+                "bug_contest_config:contestant_flags:4",
+            ),
+        ] {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "missing {code} for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
     }
 
     #[test]
@@ -21389,12 +25779,20 @@ mod tests {
     #[test]
     fn verifier_rejects_unknown_runtime_special_without_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.script_runtime_commands = vec![ScriptRuntimeCommand {
-            command: "special".to_string(),
-            args: vec!["fadeoutmusic".to_string()],
-            source_script: "StartScript".to_string(),
-            command_index: 0,
-        }];
+        module.script_runtime_commands = vec![
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: vec!["fadeoutmusic".to_string()],
+                source_script: "StartScript".to_string(),
+                command_index: 0,
+            },
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: vec!["$FadeOutMusic".to_string()],
+                source_script: "StartScript".to_string(),
+                command_index: 1,
+            },
+        ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             special_routines: BTreeSet::from(["FadeOutMusic".to_string()]),
@@ -21412,6 +25810,15 @@ mod tests {
             diagnostic.code == "unknown_script_special_routine"
                 && diagnostic.subject == "Start:StartScript:0"
                 && diagnostic.message.contains("fadeoutmusic")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_special_routine"
+                && diagnostic.subject == "Start:StartScript:1"
+                && diagnostic.message.contains("$FadeOutMusic")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_special_routine"
+                && diagnostic.subject == "Start:StartScript:1"
         }));
     }
 
@@ -21724,16 +26131,68 @@ mod tests {
                 command_index: 2,
             },
             ScriptRuntimeCommand {
+                command: "checkpoke".to_string(),
+                args: vec!["PIKA+CHU".to_string()],
+                source_script: "SpeciesScript".to_string(),
+                command_index: 5,
+            },
+            ScriptRuntimeCommand {
+                command: "getitemname".to_string(),
+                args: vec!["BUFFER_1".to_string(), "$POTION".to_string()],
+                source_script: "ItemScript".to_string(),
+                command_index: 6,
+            },
+            ScriptRuntimeCommand {
+                command: "getmonname".to_string(),
+                args: vec!["BUFFER_1".to_string(), "$PIKACHU".to_string()],
+                source_script: "MonNameScript".to_string(),
+                command_index: 7,
+            },
+            ScriptRuntimeCommand {
                 command: "trade".to_string(),
                 args: vec!["npc_trade_mike".to_string()],
                 source_script: "TradeScript".to_string(),
                 command_index: 3,
             },
             ScriptRuntimeCommand {
+                command: "addcellnum".to_string(),
+                args: vec!["PHONE ELM".to_string()],
+                source_script: "PhoneScript".to_string(),
+                command_index: 8,
+            },
+            ScriptRuntimeCommand {
+                command: "specialphonecall".to_string(),
+                args: vec!["SPECIAL CALL MASTERBALL".to_string()],
+                source_script: "PhoneScript".to_string(),
+                command_index: 9,
+            },
+            ScriptRuntimeCommand {
+                command: "trade".to_string(),
+                args: vec!["NPC TRADE MIKE".to_string()],
+                source_script: "TradeScript".to_string(),
+                command_index: 10,
+            },
+            ScriptRuntimeCommand {
+                command: "gettrainername".to_string(),
+                args: vec![
+                    "STRING_BUFFER_4".to_string(),
+                    "$YOUNGSTER".to_string(),
+                    "$YOUNGSTER_JOEY".to_string(),
+                ],
+                source_script: "TrainerScript".to_string(),
+                command_index: 11,
+            },
+            ScriptRuntimeCommand {
                 command: "callasm".to_string(),
                 args: vec![".missing".to_string()],
                 source_script: "AsmScript".to_string(),
                 command_index: 4,
+            },
+            ScriptRuntimeCommand {
+                command: "callasm".to_string(),
+                args: vec!["$Missing".to_string()],
+                source_script: "AsmScript".to_string(),
+                command_index: 12,
             },
         ];
         module.scripts = BTreeMap::from([("AsmScript".to_string(), Value::Array(Vec::new()))]);
@@ -21759,6 +26218,8 @@ mod tests {
             pokemon: [("PIKACHU".to_string(), species())].into_iter().collect(),
             ..GameDataSet::default()
         };
+        let mut data = data;
+        add_test_trainer(&mut data, "");
 
         let report = verify_game_data(
             &AssetRoot::new(repository_root_for_tests()),
@@ -21768,10 +26229,19 @@ mod tests {
 
         for expected in [
             "unknown_script_addcellnum_contact",
+            "invalid_script_addcellnum_contact",
             "unknown_script_special_phone_call",
+            "invalid_script_special_phone_call",
             "unknown_script_species_runtime_command",
+            "invalid_script_species_runtime_command",
+            "invalid_script_item_name",
+            "invalid_script_mon_name",
+            "invalid_script_trainer_class",
+            "invalid_script_trainer_name",
             "unknown_script_npc_trade",
+            "invalid_script_npc_trade",
             "unknown_script_runtime_target",
+            "invalid_script_runtime_target",
         ] {
             assert!(
                 report
@@ -21779,6 +26249,22 @@ mod tests {
                     .iter()
                     .any(|diagnostic| diagnostic.code == expected),
                 "missing diagnostic {expected}: {:?}",
+                report.diagnostics
+            );
+        }
+        for (code, subject) in [
+            ("unknown_script_addcellnum_contact", "Start:PhoneScript:8"),
+            ("unknown_script_special_phone_call", "Start:PhoneScript:9"),
+            ("unknown_script_npc_trade", "Start:TradeScript:10"),
+            ("unknown_script_trainer_name", "Start:TrainerScript:11"),
+            ("unknown_script_runtime_target", "Start:AsmScript:12"),
+        ] {
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code && diagnostic.subject == subject),
+                "malformed token should not cascade to {code} at {subject}: {:?}",
                 report.diagnostics
             );
         }
@@ -21825,6 +26311,10 @@ mod tests {
                     "PHONE_EMPTY".to_string(),
                     phone_contact("PHONE_EMPTY", Some("")),
                 ),
+                (
+                    "PHONE_BAD_MAP".to_string(),
+                    phone_contact("PHONE_BAD_MAP", Some("ELMS LAB")),
+                ),
                 ("PHONE_LINES".to_string(), empty_lines),
                 ("PHONE_MISMATCH".to_string(), mismatch),
                 (
@@ -21832,6 +26322,7 @@ mod tests {
                     phone_contact(" PHONE_PADDED", None),
                 ),
             ])),
+            permanent_phone_numbers: vec!["PHONE MOM".to_string(), "phone_mom".to_string()],
             ..GameDataSet::default()
         };
 
@@ -21851,6 +26342,15 @@ mod tests {
                 && diagnostic.subject == "phone_contacts:PHONE_EMPTY"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_phone_contact_map"
+                && diagnostic.subject == "phone_contacts:PHONE_BAD_MAP"
+                && diagnostic.message.contains("ELMS LAB")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_phone_contact_map"
+                && diagnostic.subject == "phone_contacts:PHONE_BAD_MAP"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_phone_contact_lines"
                 && diagnostic.subject == "phone_contacts:PHONE_LINES"
         }));
@@ -21861,6 +26361,20 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_phone_contact_id"
                 && diagnostic.subject == "phone_contacts: PHONE_PADDED"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_permanent_phone_contact"
+                && diagnostic.subject == "PHONE MOM"
+                && diagnostic.message.contains("PHONE MOM")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_permanent_phone_contact"
+                && diagnostic.subject == "phone_mom"
+                && diagnostic.message.contains("phone_mom")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_permanent_phone_contact"
+                && diagnostic.subject == "PHONE MOM"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             (diagnostic.code == "unknown_phone_contact_map"
@@ -21893,6 +26407,19 @@ mod tests {
                 command_index: 4,
             },
             ScriptObjectCommand {
+                command: "disappear".to_string(),
+                object_id: Some("START RIVAL".to_string()),
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: None,
+                emote: None,
+                duration: None,
+                source_script: "MalformedObjectScript".to_string(),
+                command_index: 5,
+            },
+            ScriptObjectCommand {
                 command: "appear".to_string(),
                 object_id: Some("START_ALWAYS_VISIBLE".to_string()),
                 target_object_id: None,
@@ -21919,6 +26446,19 @@ mod tests {
                 command_index: 9,
             },
             ScriptObjectCommand {
+                command: "applymovement".to_string(),
+                object_id: Some("START_RIVAL".to_string()),
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: Some("Missing Movement".to_string()),
+                emote: None,
+                duration: None,
+                source_script: "MalformedMovementScript".to_string(),
+                command_index: 10,
+            },
+            ScriptObjectCommand {
                 command: "follow".to_string(),
                 object_id: Some("START_RIVAL".to_string()),
                 target_object_id: Some("start_player".to_string()),
@@ -21930,6 +26470,45 @@ mod tests {
                 duration: None,
                 source_script: "FollowScript".to_string(),
                 command_index: 11,
+            },
+            ScriptObjectCommand {
+                command: "follow".to_string(),
+                object_id: Some("START_RIVAL".to_string()),
+                target_object_id: Some("START PLAYER".to_string()),
+                x: None,
+                y: None,
+                direction: None,
+                movement: None,
+                emote: None,
+                duration: None,
+                source_script: "MalformedFollowScript".to_string(),
+                command_index: 12,
+            },
+            ScriptObjectCommand {
+                command: "spinobject".to_string(),
+                object_id: Some("START_RIVAL".to_string()),
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: None,
+                emote: None,
+                duration: None,
+                source_script: "UnknownCommandScript".to_string(),
+                command_index: 13,
+            },
+            ScriptObjectCommand {
+                command: "MoveObject".to_string(),
+                object_id: Some("START_RIVAL".to_string()),
+                target_object_id: None,
+                x: Some(1),
+                y: Some(1),
+                direction: None,
+                movement: None,
+                emote: None,
+                duration: None,
+                source_script: "MalformedCommandScript".to_string(),
+                command_index: 14,
             },
         ];
         let data = GameDataSet {
@@ -21954,14 +26533,39 @@ mod tests {
                 && diagnostic.message.contains("START_ALWAYS_VISIBLE")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_object_id"
+                && diagnostic.subject == "Start:MalformedObjectScript:5"
+                && diagnostic.message.contains("START RIVAL")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_movement"
                 && diagnostic.subject == "Start:MovementScript:9"
                 && diagnostic.message.contains("MissingMovement")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_movement"
+                && diagnostic.subject == "Start:MalformedMovementScript:10"
+                && diagnostic.message.contains("Missing Movement")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_object_id"
                 && diagnostic.subject == "Start:FollowScript:11"
                 && diagnostic.message.contains("start_player")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_target_object_id"
+                && diagnostic.subject == "Start:MalformedFollowScript:12"
+                && diagnostic.message.contains("START PLAYER")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_object_command"
+                && diagnostic.subject == "Start:UnknownCommandScript:13"
+                && diagnostic.message.contains("spinobject")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_object_command"
+                && diagnostic.subject == "Start:MalformedCommandScript:14"
+                && diagnostic.message.contains("MoveObject")
         }));
     }
 
@@ -21981,6 +26585,8 @@ mod tests {
         lowercase_object.script = "objectscript".to_string();
         let mut missing_object = test_object("START_MISSING", "EVENT_START_MISSING", 3, 1);
         missing_object.script = "MissingObjectScript".to_string();
+        let mut malformed_object = test_object("START_MALFORMED", "EVENT_START_MALFORMED", 4, 1);
+        malformed_object.script = "Object Script".to_string();
         let mut sentinel_object = test_object("START_SENTINEL", "-1", 4, 1);
         sentinel_object.script = "-1".to_string();
         let mut asm_handler_object = test_object("START_OBJECT_EVENT", "-1", 5, 1);
@@ -21989,6 +26595,7 @@ mod tests {
             exact_object,
             lowercase_object,
             missing_object,
+            malformed_object,
             sentinel_object,
             asm_handler_object,
         ];
@@ -22013,6 +26620,15 @@ mod tests {
                 && diagnostic.subject == "Start:START_MISSING"
                 && diagnostic.message.contains("MissingObjectScript")
         }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_object_event_script"
+                && diagnostic.subject == "Start:START_MALFORMED"
+                && diagnostic.message.contains("Object Script")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_object_event_script"
+                && diagnostic.subject == "Start:START_MALFORMED"
+        }));
         for accepted in [
             "Start:START_EXACT",
             "Start:START_SENTINEL",
@@ -22026,6 +26642,48 @@ mod tests {
                 "accepted object script was rejected: {accepted}"
             );
         }
+    }
+
+    #[test]
+    fn verifier_rejects_duplicate_or_malformed_object_identifiers() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        let duplicate_one = test_object("START_DUPLICATE", "EVENT_START_DUPLICATE_ONE", 1, 1);
+        let duplicate_two = test_object("START_DUPLICATE", "EVENT_START_DUPLICATE_TWO", 2, 1);
+        let mut malformed = test_object("START OBJECT", "EVENT_START_MALFORMED", 3, 1);
+        malformed.script = "ObjectScript".to_string();
+        let mut anonymous = test_object("START_ANON", "EVENT_START_ANON", 4, 1);
+        anonymous.object_identifier = None;
+        module.objects = vec![duplicate_one, duplicate_two, malformed, anonymous];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_object_identifier"
+                && diagnostic.subject == "Start:START_DUPLICATE"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_object_identifier"
+                && diagnostic.subject == "Start:START OBJECT"
+                && diagnostic.message.contains("START OBJECT")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_object_identifier" && diagnostic.subject == "Start:<none>"
+        }));
     }
 
     #[test]
@@ -22437,7 +27095,7 @@ mod tests {
     }
 
     #[test]
-    fn modpack_overlay_replaces_currency_constants_by_exact_id() {
+    fn modpack_overlay_rejects_duplicate_currency_constants_by_exact_id() {
         let mut data = GameDataSet {
             currency_constants: CurrencyCatalog(
                 [("ROUTE43GATE_TOLL".to_string(), 500)]
@@ -22461,11 +27119,15 @@ mod tests {
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest)
-            .expect("apply currency constants");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate currency constant manifest must not overwrite");
 
-        assert_eq!(data.currency_constants.get("ROUTE43GATE_TOLL"), Some(1_000));
-        assert_eq!(data.currency_constants.get("route43gate_toll"), Some(1));
+        assert!(
+            format!("{error:#}").contains("duplicate currency constant 'ROUTE43GATE_TOLL'"),
+            "{error:#}"
+        );
+        assert_eq!(data.currency_constants.get("route43gate_toll"), None);
     }
 
     #[test]
@@ -22566,25 +27228,38 @@ mod tests {
                         "FISHGROUP_LAKE".to_string(),
                         crystal_core::world::fishing::FishingGroup {
                             bite_threshold: 128,
-                            rod_tables: [(
-                                "good_rod".to_string(),
-                                crystal_core::world::fishing::RodTable {
-                                    slots: vec![
-                                        crystal_core::world::fishing::FishingSlot {
+                            rod_tables: [
+                                (
+                                    " GOOD_ROD".to_string(),
+                                    crystal_core::world::fishing::RodTable {
+                                        slots: vec![crystal_core::world::fishing::FishingSlot {
                                             threshold: 255,
-                                            species: Some(" magikarp".to_string()),
+                                            species: Some("MAGIKARP".to_string()),
                                             level: 10,
                                             time_group: None,
-                                        },
-                                        crystal_core::world::fishing::FishingSlot {
-                                            threshold: 255,
-                                            species: None,
-                                            level: 0,
-                                            time_group: Some(0),
-                                        },
-                                    ],
-                                },
-                            )]
+                                        }],
+                                    },
+                                ),
+                                (
+                                    "good_rod".to_string(),
+                                    crystal_core::world::fishing::RodTable {
+                                        slots: vec![
+                                            crystal_core::world::fishing::FishingSlot {
+                                                threshold: 255,
+                                                species: Some(" magikarp".to_string()),
+                                                level: 10,
+                                                time_group: None,
+                                            },
+                                            crystal_core::world::fishing::FishingSlot {
+                                                threshold: 255,
+                                                species: None,
+                                                level: 0,
+                                                time_group: Some(0),
+                                            },
+                                        ],
+                                    },
+                                ),
+                            ]
                             .into_iter()
                             .collect(),
                         },
@@ -22643,12 +27318,20 @@ mod tests {
                     night_species: "staryu".to_string(),
                     night_level: 10,
                 }],
-                swarm_rules: vec![crystal_core::world::fishing::FishingSwarmRule {
-                    daily_flag_bit: 8,
-                    swarm: 1,
-                    base_group: "fishgroup_lake".to_string(),
-                    swarm_group: "FISHGROUP_MISSING".to_string(),
-                }],
+                swarm_rules: vec![
+                    crystal_core::world::fishing::FishingSwarmRule {
+                        daily_flag_bit: 8,
+                        swarm: 1,
+                        base_group: "fishgroup_lake".to_string(),
+                        swarm_group: "FISHGROUP_MISSING".to_string(),
+                    },
+                    crystal_core::world::fishing::FishingSwarmRule {
+                        daily_flag_bit: 0,
+                        swarm: 1,
+                        base_group: "FISHGROUP_MISSING_BASE".to_string(),
+                        swarm_group: " FISHGROUP_BAD_SWARM".to_string(),
+                    },
+                ],
                 rod_items: vec![
                     crystal_core::world::fishing::FishingRodItemRule {
                         item_id: "GOOD_ROD".to_string(),
@@ -22661,6 +27344,10 @@ mod tests {
                     crystal_core::world::fishing::FishingRodItemRule {
                         item_id: " GOOD_ROD".to_string(),
                         rod: crystal_core::world::fishing::ROD_GOOD.to_string(),
+                    },
+                    crystal_core::world::fishing::FishingRodItemRule {
+                        item_id: "MISSING_ROD_2".to_string(),
+                        rod: "GOOD ROD".to_string(),
                     },
                 ],
             },
@@ -22678,6 +27365,7 @@ mod tests {
             "unknown_map_fishing_group",
             "invalid_map_fishing_group",
             "invalid_fishing_group_id",
+            "invalid_fishing_rod",
             "unknown_fishing_rod",
             "empty_fishing_rod_table",
             "invalid_fishing_slot_threshold",
@@ -22690,9 +27378,12 @@ mod tests {
             "invalid_fishing_time_group_species",
             "unknown_fishing_time_group_species",
             "invalid_fishing_swarm_flag_bit",
+            "invalid_fishing_swarm_base_group",
             "unknown_fishing_swarm_base_group",
+            "invalid_fishing_swarm_group",
             "unknown_fishing_swarm_group",
             "duplicate_fishing_rod_item_id",
+            "invalid_fishing_rod_item_rod",
             "unknown_fishing_rod_item_rod",
             "unknown_fishing_rod_item_id",
         ] {
@@ -22748,6 +27439,121 @@ mod tests {
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "missing_fishing_catalog" && diagnostic.subject == "Lake"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_topology_targets_without_unknown_cascade() {
+        let mut start = test_map_module("Start", "START_MAP", Some("MissingTarget"));
+        start.attributes.connections.push(MapConnection {
+            direction: "east".to_string(),
+            target_map: "Missing Target".to_string(),
+            offset: 0,
+        });
+        start.attributes.connections.push(MapConnection {
+            direction: "East".to_string(),
+            target_map: "Start".to_string(),
+            offset: 0,
+        });
+        start.events.warps = vec![
+            WarpEvent {
+                index: 1,
+                x: 0,
+                y: 0,
+                target_map_constant: "MISSING_MAP".to_string(),
+                target_map: "MISSING_MAP".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
+                index: 2,
+                x: 0,
+                y: 0,
+                target_map_constant: "MISSING MAP".to_string(),
+                target_map: "MISSING MAP".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
+                index: 3,
+                x: 0,
+                y: 0,
+                target_map_constant: "START_MAP".to_string(),
+                target_map: "START MAP".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
+                index: 4,
+                x: 0,
+                y: 0,
+                target_map_constant: "START_MAP".to_string(),
+                target_map: "OTHER_MAP".to_string(),
+                target_warp_id: 1,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), start)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_connection_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("MissingTarget")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_connection_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("Missing Target")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_connection_direction"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("East")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_warp_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("MISSING_MAP")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_warp_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("MISSING MAP")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_warp_target_map"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("START MAP")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "warp_target_map_mismatch"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("OTHER_MAP")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_connection_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("Missing Target")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unreachable_connection"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("Start")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_warp_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("MISSING MAP")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_warp_target"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("OTHER_MAP")
         }));
     }
 
@@ -23314,9 +28120,11 @@ mod tests {
             .compile_modpacks(&[manifest], ModpackCompileOptions::default())
             .expect_err("missing dependency should fail compilation");
 
-        assert!(error
-            .to_string()
-            .contains("depends on missing modpack 'missing-base'"));
+        assert!(
+            error
+                .to_string()
+                .contains("depends on missing modpack 'missing-base'")
+        );
     }
 
     #[test]
@@ -23491,10 +28299,12 @@ mod tests {
         assert_eq!(module.events.bg_events.len(), 2);
         assert_eq!(module.events.bg_events[0].event_type, "BGEVENT_READ");
         assert_eq!(module.events.bg_events[0].script, "Route29Sign1");
-        assert!(module
-            .map_event_section_commands
-            .iter()
-            .any(|command| command.command == "def_warp_events" && command.command_index == 1));
+        assert!(
+            module
+                .map_event_section_commands
+                .iter()
+                .any(|command| command.command == "def_warp_events" && command.command_index == 1)
+        );
         assert!(module.map_event_section_commands.iter().any(|command| {
             command.command == "warp_event"
                 && command.args == vec!["27", "1", "ROUTE_29_ROUTE_46_GATE", "3"]
@@ -23809,12 +28619,15 @@ mod tests {
             .iter()
             .find(|battle| battle.source_script == "VermilionSnorlax")
             .expect("Snorlax battle");
-        assert!(session
-            .objects
-            .iter()
-            .find(|object| object.object_identifier.as_deref() == Some("VERMILIONCITY_BIG_SNORLAX"))
-            .map(|object| session.is_object_visible(object))
-            .unwrap_or(false));
+        assert!(
+            session
+                .objects
+                .iter()
+                .find(|object| object.object_identifier.as_deref()
+                    == Some("VERMILIONCITY_BIG_SNORLAX"))
+                .map(|object| session.is_object_visible(object))
+                .unwrap_or(false)
+        );
 
         let mut state = GameState::default();
         let effects = ScriptedBattleEffects {
@@ -24377,10 +29190,11 @@ mod tests {
             .find(|command| command.audio_id.as_deref() == Some("SFX_GET_BADGE"))
             .expect("Mahogany badge sound");
         assert_eq!(badge.command, "playsound");
-        assert!(gym
-            .script_audio_commands
-            .iter()
-            .any(|command| command.command == "waitsfx" && command.audio_id.is_none()));
+        assert!(
+            gym.script_audio_commands
+                .iter()
+                .any(|command| command.command == "waitsfx" && command.audio_id.is_none())
+        );
 
         let lugia = data
             .map_module("WhirlIslandLugiaChamber")
@@ -24537,10 +29351,12 @@ mod tests {
         assert_eq!(clair.commands[0].args, vec!["\"I am sorry.\""]);
         assert_eq!(clair.commands[1].command, "para");
         assert_eq!(clair.commands[1].args, vec!["\"CLAIR, our GYM\""]);
-        assert!(clair
-            .commands
-            .iter()
-            .any(|command| command.command == "done" && command.args.is_empty()));
+        assert!(
+            clair
+                .commands
+                .iter()
+                .any(|command| command.command == "done" && command.args.is_empty())
+        );
 
         let vending = data
             .map_module("CeladonDeptStore6F")
@@ -25139,29 +29955,35 @@ mod tests {
         let blackthorn_gym = data
             .map_module("BlackthornGym2F")
             .expect("assemble Blackthorn Gym 2F");
-        assert!(blackthorn_gym
-            .script_runtime_commands
-            .iter()
-            .any(|command| {
-                command.command == "writecmdqueue"
-                    && command.args == vec![".CommandQueue"]
-                    && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
-            }));
-        assert!(blackthorn_gym
-            .script_runtime_commands
-            .iter()
-            .any(|command| {
-                command.command == "cmdqueue"
-                    && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
-                    && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
-            }));
-        assert!(blackthorn_gym
-            .script_runtime_commands
-            .iter()
-            .any(|command| {
-                command.command == "stonetable"
-                    && command.args == vec!["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
-            }));
+        assert!(
+            blackthorn_gym
+                .script_runtime_commands
+                .iter()
+                .any(|command| {
+                    command.command == "writecmdqueue"
+                        && command.args == vec![".CommandQueue"]
+                        && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
+                })
+        );
+        assert!(
+            blackthorn_gym
+                .script_runtime_commands
+                .iter()
+                .any(|command| {
+                    command.command == "cmdqueue"
+                        && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
+                        && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
+                })
+        );
+        assert!(
+            blackthorn_gym
+                .script_runtime_commands
+                .iter()
+                .any(|command| {
+                    command.command == "stonetable"
+                        && command.args == vec!["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
+                })
+        );
 
         let elevator = data
             .map_module("CeladonDeptStoreElevator")
@@ -25912,9 +30734,126 @@ mod tests {
             .resolve_warp_transition(&trigger)
             .expect_err("missing target map constant");
 
-        assert!(error
-            .to_string()
-            .contains("unknown target map constant 'MISSING_TARGET_MAP'"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown target map constant 'MISSING_TARGET_MAP'")
+        );
+    }
+
+    #[test]
+    fn warp_transition_rejects_mismatched_target_map_field() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+        let trigger = WarpTrigger {
+            map_name: "Route29".to_string(),
+            tile: TilePosition::new(55, 3),
+            warp: WarpEvent {
+                index: 1,
+                x: 27,
+                y: 1,
+                target_map_constant: "ROUTE_29_ROUTE_46_GATE".to_string(),
+                target_map: "ROUTE_29".to_string(),
+                target_warp_id: 1,
+            },
+        };
+
+        let error = data
+            .resolve_warp_transition(&trigger)
+            .expect_err("target_map must match target_map_constant");
+
+        assert!(
+            error.to_string().contains(
+                "target_map \"ROUTE_29\" does not match target_map_constant \"ROUTE_29_ROUTE_46_GATE\""
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn warp_transition_does_not_fallback_to_target_map_module_events() {
+        let mut data = GameDataSet::default();
+        data.maps.insert(
+            "Target".to_string(),
+            test_map_module("Target", "TARGET", None),
+        );
+        let trigger = WarpTrigger {
+            map_name: "Source".to_string(),
+            tile: TilePosition::new(1, 1),
+            warp: WarpEvent {
+                index: 1,
+                x: 1,
+                y: 1,
+                target_map_constant: "TARGET".to_string(),
+                target_map: "TARGET".to_string(),
+                target_warp_id: 1,
+            },
+        };
+
+        let error = data
+            .resolve_warp_transition(&trigger)
+            .expect_err("warp transition requires the map_attributes section");
+
+        assert!(
+            error
+                .to_string()
+                .contains("warp target 'Target' missing attributes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn warp_transition_requires_declared_target_map_events_label() {
+        let mut data = GameDataSet::default();
+        data.map_attributes.insert(
+            "Target".to_string(),
+            MapAttributes {
+                tileset_name: "johto".to_string(),
+                border_block: 5,
+                width: 1,
+                height: 1,
+                connections: Vec::new(),
+                time_of_day: None,
+                phone_service: 0,
+                phone_flag: false,
+                environment: None,
+                location: None,
+                music: None,
+                palette: None,
+                fishing_group: None,
+                map_constant: Some("TARGET".to_string()),
+                map_group_constant: None,
+                blocks_label: None,
+                map_scripts_label: None,
+                map_events_label: None,
+                connection_flags: None,
+            },
+        );
+        let trigger = WarpTrigger {
+            map_name: "Source".to_string(),
+            tile: TilePosition::new(1, 1),
+            warp: WarpEvent {
+                index: 1,
+                x: 1,
+                y: 1,
+                target_map_constant: "TARGET".to_string(),
+                target_map: "TARGET".to_string(),
+                target_warp_id: 1,
+            },
+        };
+
+        let error = data
+            .resolve_warp_transition(&trigger)
+            .expect_err("warp transition requires target events label");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing map_events_label for warp target Target"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -26002,9 +30941,11 @@ mod tests {
             .resolve_connection_transition(&trigger)
             .expect_err("missing connection target");
 
-        assert!(error
-            .to_string()
-            .contains("connection target 'MissingTarget' missing attributes"));
+        assert!(
+            error
+                .to_string()
+                .contains("connection target 'MissingTarget' missing attributes")
+        );
     }
 
     #[test]
@@ -26077,9 +31018,11 @@ mod tests {
             .resolve_connection_transition(&trigger)
             .expect_err("out-of-bounds destination must be rejected");
 
-        assert!(error
-            .to_string()
-            .contains("connection destination tile (1, 99) is outside target map"));
+        assert!(
+            error
+                .to_string()
+                .contains("connection destination tile (1, 99) is outside target map")
+        );
     }
 
     #[test]
@@ -26125,7 +31068,7 @@ mod tests {
     }
 
     #[test]
-    fn modpack_overlay_adds_and_replaces_wild_encounters_by_map_name() {
+    fn modpack_overlay_rejects_duplicate_wild_encounters_by_map_name() {
         let mut data = GameDataSet::default();
         let route = WildEncounterData {
             map_name: "NEW_ROUTE".to_string(),
@@ -26157,18 +31100,44 @@ mod tests {
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest)
-            .expect("manifest should apply with exact exported ids");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate wild encounter manifest must not overwrite");
 
-        let encounters = data
-            .wild_encounters
-            .get("NEW_ROUTE")
-            .expect("wild encounter table");
-        let slots = table_for_surface(encounters, EncounterSurface::Grass, TimeOfDay::Day)
-            .expect("overlay day grass table");
-        assert_eq!(data.wild_encounters.len(), 1);
-        assert_eq!(slots[0].species, "BULBASAUR");
-        assert_eq!(slots[0].level, 5);
+        assert!(
+            format!("{error:#}").contains("duplicate wild encounter data for map 'NEW_ROUTE'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn modpack_overlay_rejects_duplicate_field_encounters_by_map_name() {
+        let mut data = GameDataSet::default();
+        let route = FieldEncounterData {
+            map_name: "NEW_ROUTE".to_string(),
+            headbutt: Some(FieldEncounterTable::default()),
+            rock_smash: None,
+        };
+        let replacement = FieldEncounterData {
+            rock_smash: Some(FieldEncounterTable::default()),
+            ..route.clone()
+        };
+        let manifest = ModpackManifest {
+            payload: ModpackPayload {
+                field_encounters: vec![route, replacement],
+                ..ModpackPayload::default()
+            },
+            ..ModpackManifest::default()
+        };
+
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate field encounter manifest must not overwrite");
+
+        assert!(
+            format!("{error:#}").contains("duplicate field encounter data for map 'NEW_ROUTE'"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -26223,9 +31192,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("missing item ids must not be derived from display names");
 
-        assert!(error
-            .to_string()
-            .contains("item 'Flash Step Charm' is missing explicit script_name"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'Flash Step Charm' is missing explicit script_name")
+        );
     }
 
     #[test]
@@ -26246,9 +31217,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item id must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'Flash Step Charm' has invalid script_name ' MOD_ITEM'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'Flash Step Charm' has invalid script_name ' MOD_ITEM'")
+        );
     }
 
     #[test]
@@ -26268,9 +31241,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item display name must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid name ' Flash Step Charm'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid name ' Flash Step Charm'")
+        );
     }
 
     #[test]
@@ -26290,9 +31265,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item description must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid description ' A charm with exact text.'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid description ' A charm with exact text.'")
+        );
     }
 
     #[test]
@@ -26312,9 +31289,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item pocket must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid pocket ' BATTLE_PASS'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid pocket ' BATTLE_PASS'")
+        );
     }
 
     #[test]
@@ -26334,9 +31313,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item effect must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid effect ' MODDED_FLASH_STEP'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid effect ' MODDED_FLASH_STEP'")
+        );
     }
 
     #[test]
@@ -26356,9 +31337,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item held effect must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid held_effect ' HELD_MODDED'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid held_effect ' HELD_MODDED'")
+        );
     }
 
     #[test]
@@ -26378,9 +31361,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item property must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid property ' CANT_SELECT'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid property ' CANT_SELECT'")
+        );
     }
 
     #[test]
@@ -26400,9 +31385,11 @@ mod tests {
             .apply_modpack(&manifest)
             .expect_err("invalid item menu must not be trimmed");
 
-        assert!(error
-            .to_string()
-            .contains("item 'MOD_ITEM' has invalid field_menu ' ITEMMENU_MODDED'"));
+        assert!(
+            error
+                .to_string()
+                .contains("item 'MOD_ITEM' has invalid field_menu ' ITEMMENU_MODDED'")
+        );
     }
 
     fn explicit_empty_manifest_json() -> Value {
@@ -26504,6 +31491,36 @@ mod tests {
             .expect_err("unknown content pack fields must not be ignored")
             .to_string();
         assert!(error.contains("unknown field `fallback`"), "{error}");
+    }
+
+    #[test]
+    fn content_pack_audio_entries_require_explicit_metadata_json_without_path_inference() {
+        let mut files = ContentPackFiles::default();
+        files
+            .audio
+            .push("content-packs/test/music/MUSIC_ROUTE_29.mid".to_string());
+        let index = ContentPackIndex {
+            version: 1,
+            packs: vec![ContentPack {
+                id: "test".to_string(),
+                enabled: true,
+                priority: 0,
+                path: "content-packs/test".to_string(),
+                compiled: None,
+                files,
+            }],
+        };
+
+        let error = GameDataSet::default()
+            .apply_content_pack_index(&AssetRoot::new(repository_root_for_tests()), &index)
+            .expect_err("audio file paths must not be inferred into metadata");
+
+        assert!(
+            format!("{error:#}").contains(
+                "content pack test audio entry content-packs/test/music/MUSIC_ROUTE_29.mid must point to explicit audio metadata JSON"
+            ),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -26613,8 +31630,11 @@ mod tests {
         let canonical = asset_root
             .resolve_data_path("content-packs/core-modular/music/MUSIC_ROUTE_29.mid")
             .expect("canonical runtime data path");
-        assert!(canonical
-            .ends_with("apps/web/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid"));
+        assert!(
+            canonical.ends_with(
+                "apps/web/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid"
+            )
+        );
     }
 
     #[test]

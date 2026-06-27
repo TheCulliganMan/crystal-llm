@@ -38,6 +38,28 @@ impl Party {
         self.pokemon[slot] = Some(pokemon);
         true
     }
+
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        let mut first_empty_slot = None;
+        for (index, pokemon) in self.pokemon.iter().enumerate() {
+            match pokemon {
+                Some(pokemon) => {
+                    if let Some(empty_index) = first_empty_slot {
+                        return Err(format!(
+                            "party slot {index} is filled after empty slot {empty_index}"
+                        ));
+                    }
+                    pokemon
+                        .validate_saved_state()
+                        .map_err(|error| format!("party slot {index}: {error}"))?;
+                }
+                None => {
+                    first_empty_slot.get_or_insert(index);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +98,17 @@ mod tests {
     #[test]
     fn default_party_has_exact_game_party_capacity() {
         assert_eq!(Party::default().pokemon.len(), PARTY_SIZE);
+    }
+
+    #[test]
+    fn saved_party_rejects_filled_slots_after_empty_slots() {
+        let mut party = Party::default();
+        party.pokemon[1] = Some(pokemon("CHIKORITA"));
+
+        assert_eq!(
+            party.validate_saved_state(),
+            Err("party slot 1 is filled after empty slot 0".to_string())
+        );
     }
 
     #[test]

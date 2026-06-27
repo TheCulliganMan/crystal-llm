@@ -38,6 +38,9 @@ pub struct ItemUseOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ItemUseError {
+    InvalidItemId {
+        item_id: String,
+    },
     UnknownItem {
         item_id: String,
     },
@@ -58,6 +61,7 @@ pub fn use_bag_item(
     item_catalog: &BTreeMap<String, Item>,
     request: ItemUseRequest,
 ) -> Result<ItemUseOutcome, ItemUseError> {
+    validate_item_use_id(&request.item_id)?;
     let item = item_catalog
         .get(&request.item_id)
         .ok_or_else(|| ItemUseError::UnknownItem {
@@ -101,6 +105,20 @@ pub fn use_bag_item(
             consumed: outcome.consumed,
         });
     Ok(outcome)
+}
+
+fn validate_item_use_id(item_id: &str) -> Result<(), ItemUseError> {
+    if item_id.is_empty()
+        || item_id.trim() != item_id
+        || !item_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(ItemUseError::InvalidItemId {
+            item_id: item_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -270,6 +288,56 @@ mod tests {
             }
         );
         assert_eq!(state.bag.quantity(&items["POTION"]), 1);
+    }
+
+    #[test]
+    fn rejects_malformed_item_use_ids_before_unknown_lookup() {
+        let items = catalog(vec![item(
+            "POKE_BALL",
+            item_pocket("BALL"),
+            "ITEMMENU_CLOSE",
+            "ITEMMENU_NOUSE",
+            true,
+        )]);
+        let mut state = GameState::default();
+        state
+            .bag
+            .add_item(&items["POKE_BALL"], 1)
+            .expect("add item");
+
+        let spaced = use_bag_item(
+            &mut state,
+            &items,
+            ItemUseRequest {
+                item_id: "POKE BALL".to_string(),
+                context: ItemUseContext::Field,
+            },
+        )
+        .expect_err("space-separated item ids are invalid pack/runtime input");
+        assert_eq!(
+            spaced,
+            ItemUseError::InvalidItemId {
+                item_id: "POKE BALL".to_string(),
+            }
+        );
+
+        let padded = use_bag_item(
+            &mut state,
+            &items,
+            ItemUseRequest {
+                item_id: "POKE_BALL ".to_string(),
+                context: ItemUseContext::Field,
+            },
+        )
+        .expect_err("padded item ids are invalid pack/runtime input");
+        assert_eq!(
+            padded,
+            ItemUseError::InvalidItemId {
+                item_id: "POKE_BALL ".to_string(),
+            }
+        );
+        assert_eq!(state.bag.quantity(&items["POKE_BALL"]), 1);
+        assert!(state.script_runtime.item_use_events.is_empty());
     }
 
     #[test]

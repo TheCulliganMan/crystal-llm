@@ -57,21 +57,15 @@ impl Bag {
             return Err("quantity must be positive".to_string());
         }
         match definition.pocket.as_str() {
-            ITEM_POCKET_ITEM => Ok(remove_from_inventory(
-                &mut self.items,
-                &definition.script_name,
-                quantity,
-            )),
-            ITEM_POCKET_BALL => Ok(remove_from_inventory(
-                &mut self.balls,
-                &definition.script_name,
-                quantity,
-            )),
-            ITEM_POCKET_KEY_ITEM => Ok(remove_from_inventory(
-                &mut self.key_items,
-                &definition.script_name,
-                quantity,
-            )),
+            ITEM_POCKET_ITEM => {
+                remove_from_inventory(&mut self.items, &definition.script_name, quantity)
+            }
+            ITEM_POCKET_BALL => {
+                remove_from_inventory(&mut self.balls, &definition.script_name, quantity)
+            }
+            ITEM_POCKET_KEY_ITEM => {
+                remove_from_inventory(&mut self.key_items, &definition.script_name, quantity)
+            }
             ITEM_POCKET_TM_HM => self.remove_tmhm(definition),
             other => Err(format!("unsupported item pocket '{other}'")),
         }
@@ -166,12 +160,7 @@ fn add_to_inventory(
     stack_limit: u16,
     capacity: Option<usize>,
 ) -> Result<bool, String> {
-    if item_id.is_empty() {
-        return Err("item id is required".to_string());
-    }
-    if item_id.trim() != item_id {
-        return Err(format!("item id '{item_id}' must be exact and untrimmed"));
-    }
+    validate_item_id(item_id)?;
     let current = inventory.get(item_id).copied().unwrap_or(0);
     if current >= stack_limit {
         return Ok(false);
@@ -196,12 +185,13 @@ fn remove_from_inventory(
     inventory: &mut BTreeMap<String, u16>,
     item_id: &str,
     quantity: u16,
-) -> bool {
+) -> Result<bool, String> {
+    validate_item_id(item_id)?;
     let Some(current) = inventory.get(item_id).copied() else {
-        return false;
+        return Ok(false);
     };
     if current < quantity {
-        return false;
+        return Ok(false);
     }
     let next = current - quantity;
     if next == 0 {
@@ -209,7 +199,7 @@ fn remove_from_inventory(
     } else {
         inventory.insert(item_id.to_string(), next);
     }
-    true
+    Ok(true)
 }
 
 fn validate_inventory(
@@ -233,11 +223,39 @@ fn validate_inventory(
                 "{label} contains item id '{item_id}' that must be exact and untrimmed"
             ));
         }
+        if !is_exact_item_id(item_id) {
+            return Err(format!(
+                "{label} contains item id '{item_id}' that must contain only ASCII letters, numbers, or underscores"
+            ));
+        }
         if *quantity > stack_limit {
             return Err(format!(
                 "{label}.{item_id} quantity {quantity} exceeds stack limit {stack_limit}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn is_exact_item_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn validate_item_id(item_id: &str) -> Result<(), String> {
+    if item_id.is_empty() {
+        return Err("item id is required".to_string());
+    }
+    if item_id.trim() != item_id {
+        return Err(format!("item id '{item_id}' must be exact and untrimmed"));
+    }
+    if !is_exact_item_id(item_id) {
+        return Err(format!(
+            "item id '{item_id}' must contain only ASCII letters, numbers, or underscores"
+        ));
     }
     Ok(())
 }
@@ -325,11 +343,34 @@ mod tests {
         );
         assert_eq!(bag.quantity(&padded_ball), 0);
 
+        let spaced_ball = item("POKE BALL", item_pocket("BALL"));
+        assert_eq!(
+            bag.add_item(&spaced_ball, 1),
+            Err(
+                "item id 'POKE BALL' must contain only ASCII letters, numbers, or underscores"
+                    .to_string()
+            ),
+        );
+        assert_eq!(
+            bag.remove_item(&spaced_ball, 1),
+            Err(
+                "item id 'POKE BALL' must contain only ASCII letters, numbers, or underscores"
+                    .to_string()
+            ),
+        );
+
         bag.balls.insert("POKE_BALL ".to_string(), 1);
         assert_eq!(
             bag.validate(),
+            Err("balls contains item id 'POKE_BALL ' that must be exact and untrimmed".to_string()),
+        );
+
+        bag.balls.clear();
+        bag.balls.insert("POKE BALL".to_string(), 1);
+        assert_eq!(
+            bag.validate(),
             Err(
-                "balls contains item id 'POKE_BALL ' that must be exact and untrimmed"
+                "balls contains item id 'POKE BALL' that must contain only ASCII letters, numbers, or underscores"
                     .to_string()
             ),
         );

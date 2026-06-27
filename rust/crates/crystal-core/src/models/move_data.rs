@@ -32,21 +32,21 @@ pub fn move_payload_issues(move_data: &Move) -> Vec<MovePayloadIssue> {
 
     if move_data.name.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingName);
-    } else if move_data.name.trim() != move_data.name {
+    } else if !is_exact_nonempty_move_token(&move_data.name) {
         issues.push(MovePayloadIssue::InvalidName {
             name: move_data.name.clone(),
         });
     }
     if move_data.move_type.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingType);
-    } else if move_data.move_type.trim() != move_data.move_type {
+    } else if !is_exact_nonempty_move_token(&move_data.move_type) {
         issues.push(MovePayloadIssue::InvalidType {
             move_type: move_data.move_type.clone(),
         });
     }
     if move_data.effect.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingEffect);
-    } else if move_data.effect.trim() != move_data.effect {
+    } else if !is_exact_nonempty_move_token(&move_data.effect) {
         issues.push(MovePayloadIssue::InvalidEffect {
             effect: move_data.effect.clone(),
         });
@@ -88,7 +88,11 @@ pub fn move_name_catalog_issues(
 }
 
 fn is_exact_nonempty_move_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -163,12 +167,12 @@ mod tests {
     #[test]
     fn move_payload_issues_require_exact_pack_owned_ids_without_effect_enums() {
         let move_data = Move {
-            name: " AETHER_PULSE".to_string(),
-            move_type: pokemon_type("AETHER "),
+            name: "AETHER PULSE".to_string(),
+            move_type: pokemon_type("AETHER TYPE"),
             power: 60,
             accuracy: 100,
             pp: 15,
-            effect: " MODDED_EFFECT".to_string(),
+            effect: "MODDED EFFECT".to_string(),
             effect_chance: 0,
             stat: None,
             amount: None,
@@ -178,13 +182,13 @@ mod tests {
             move_payload_issues(&move_data),
             vec![
                 MovePayloadIssue::InvalidName {
-                    name: " AETHER_PULSE".to_string(),
+                    name: "AETHER PULSE".to_string(),
                 },
                 MovePayloadIssue::InvalidType {
-                    move_type: "AETHER ".to_string(),
+                    move_type: "AETHER TYPE".to_string(),
                 },
                 MovePayloadIssue::InvalidEffect {
-                    effect: " MODDED_EFFECT".to_string(),
+                    effect: "MODDED EFFECT".to_string(),
                 },
             ],
         );
@@ -214,7 +218,7 @@ mod tests {
                 &[
                     "POUND".to_string(),
                     String::new(),
-                    "KARATE CHOP ".to_string()
+                    "KARATE CHOP".to_string()
                 ],
                 2,
             ),

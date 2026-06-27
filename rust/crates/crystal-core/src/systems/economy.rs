@@ -13,6 +13,11 @@ pub enum MoneyAccount {
 
 impl MoneyAccount {
     pub fn from_script_id(value: &str) -> Result<Self, EconomyError> {
+        if !is_exact_economy_token(value) {
+            return Err(EconomyError::InvalidMoneyAccount {
+                account: value.to_string(),
+            });
+        }
         match value {
             "YOUR_MONEY" => Ok(Self::YourMoney),
             "MOMS_MONEY" => Ok(Self::MomsMoney),
@@ -109,7 +114,9 @@ pub enum EconomyError {
     MissingCurrencyLimit { constant: String },
     AmountOverflow { expression: String },
     CoinsAmountOutOfRange { amount: u32 },
+    InvalidMoneyAccount { account: String },
     UnknownMoneyAccount { account: String },
+    InvalidEconomyCommand { command: String },
     UnknownEconomyCommand { command: String },
     MissingMoneyAccount { command: String },
     UnexpectedMoneyAccount { command: String },
@@ -118,6 +125,7 @@ pub enum EconomyError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptEconomyCommandIssue {
+    InvalidCommand,
     UnknownCommand,
     MissingMoneyAccount,
     InvalidMoneyAccount,
@@ -145,6 +153,10 @@ pub fn script_economy_command_issues(
     constants: &CurrencyCatalog,
 ) -> Vec<ScriptEconomyCommandIssue> {
     let mut issues = Vec::new();
+    if !is_exact_economy_command_token(&command.command) {
+        issues.push(ScriptEconomyCommandIssue::InvalidCommand);
+        return issues;
+    }
     if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command.command.as_str())
         || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
     {
@@ -152,7 +164,7 @@ pub fn script_economy_command_issues(
             issues.push(ScriptEconomyCommandIssue::MissingMoneyAccount);
             return issues;
         };
-        if account.trim().is_empty() || account.trim() != account {
+        if !is_exact_economy_token(account) {
             issues.push(ScriptEconomyCommandIssue::InvalidMoneyAccount);
         } else if MoneyAccount::from_script_id(account).is_err() {
             issues.push(ScriptEconomyCommandIssue::UnknownMoneyAccount);
@@ -183,11 +195,26 @@ pub fn script_economy_command_issues(
     issues
 }
 
+fn is_exact_economy_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_economy_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
 pub fn apply_script_economy_command(
     state: &mut GameState,
     command: ScriptEconomyCommand,
     constants: &CurrencyCatalog,
 ) -> Result<ScriptEconomyOutcome, EconomyError> {
+    validate_script_economy_command_token(&command.command)?;
     match command.command.as_str() {
         "checkmoney" => {
             let account = require_money_account(&command)?;
@@ -267,6 +294,16 @@ pub fn apply_script_economy_command(
     }
 }
 
+fn validate_script_economy_command_token(command: &str) -> Result<(), EconomyError> {
+    if is_exact_economy_command_token(command) {
+        Ok(())
+    } else {
+        Err(EconomyError::InvalidEconomyCommand {
+            command: command.to_string(),
+        })
+    }
+}
+
 pub fn resolve_amount(
     amount_tokens: &[String],
     constants: &CurrencyCatalog,
@@ -316,6 +353,11 @@ fn resolve_amount_atom(token: &str, constants: &CurrencyCatalog) -> Result<u32, 
             .map_err(|_| EconomyError::InvalidAmountToken {
                 token: token.to_string(),
             });
+    }
+    if !is_exact_economy_token(token) {
+        return Err(EconomyError::InvalidAmountToken {
+            token: token.to_string(),
+        });
     }
     constants
         .get(token)
@@ -515,6 +557,12 @@ mod tests {
                 token: "route43gate_toll".to_string(),
             })
         );
+        assert_eq!(
+            resolve_amount(&tokens(&["ROUTE43GATE-TOLL"]), &constants),
+            Err(EconomyError::InvalidAmountToken {
+                token: "ROUTE43GATE-TOLL".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -665,6 +713,16 @@ mod tests {
         );
         assert_eq!(
             script_economy_command_issues(
+                &economy_command("takemoney", Some("YOUR MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            vec![
+                ScriptEconomyCommandIssue::InvalidMoneyAccount,
+                ScriptEconomyCommandIssue::MissingMoneyCap,
+            ]
+        );
+        assert_eq!(
+            script_economy_command_issues(
                 &economy_command("givecoins", Some("YOUR_MONEY"), &["price"]),
                 &constants,
             ),
@@ -677,6 +735,13 @@ mod tests {
                     },
                 },
             ]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("CheckMoney", Some("YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            vec![ScriptEconomyCommandIssue::InvalidCommand]
         );
         assert_eq!(
             script_economy_command_issues(
@@ -693,6 +758,12 @@ mod tests {
             MoneyAccount::from_script_id("your_money"),
             Err(EconomyError::UnknownMoneyAccount {
                 account: "your_money".to_string(),
+            })
+        );
+        assert_eq!(
+            MoneyAccount::from_script_id("YOUR MONEY"),
+            Err(EconomyError::InvalidMoneyAccount {
+                account: "YOUR MONEY".to_string(),
             })
         );
         assert_eq!(
@@ -820,6 +891,26 @@ mod tests {
             ..GameState::default()
         };
 
+        assert_eq!(
+            apply_script_economy_command(
+                &mut state,
+                economy_command("take money", Some("YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            Err(EconomyError::InvalidEconomyCommand {
+                command: "take money".to_string(),
+            })
+        );
+        assert_eq!(
+            apply_script_economy_command(
+                &mut state,
+                economy_command("takemoney", Some("YOUR MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            Err(EconomyError::InvalidMoneyAccount {
+                account: "YOUR MONEY".to_string(),
+            })
+        );
         assert_eq!(
             apply_script_economy_command(
                 &mut state,

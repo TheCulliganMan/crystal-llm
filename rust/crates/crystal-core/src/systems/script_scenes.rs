@@ -27,11 +27,14 @@ pub struct ScriptSceneOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScriptSceneError {
+    InvalidCommand { command: String },
     UnknownCommand { command: String },
     MissingCurrentMap,
     MissingTargetMap { command: String },
+    InvalidTargetMap { command: String, map_id: String },
     UnexpectedTargetMap { command: String },
     MissingSceneId { command: String },
+    InvalidSceneId { command: String, scene_id: String },
     UnexpectedSceneId { command: String },
     UnknownSceneToken { map_name: String, scene_id: String },
     Scene { error: SceneError },
@@ -40,6 +43,7 @@ pub enum ScriptSceneError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptSceneCommandIssue {
+    InvalidCommand,
     UnknownCommand,
     MissingTargetMap,
     InvalidTargetMap,
@@ -67,7 +71,9 @@ pub fn is_known_script_scene_command(command: &str) -> bool {
 
 pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSceneCommandIssue> {
     let mut issues = Vec::new();
-    if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
+    if !is_exact_script_scene_command_token(&command.command) {
+        issues.push(ScriptSceneCommandIssue::InvalidCommand);
+    } else if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
         if command.map_id.is_some() {
             issues.push(ScriptSceneCommandIssue::UnexpectedTargetMap);
         }
@@ -79,7 +85,7 @@ pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSc
             issues.push(ScriptSceneCommandIssue::UnexpectedTargetMap);
         }
         match command.scene_id.as_deref() {
-            Some(scene_id) if scene_id.trim().is_empty() || scene_id.trim() != scene_id => {
+            Some(scene_id) if !is_exact_script_scene_token(scene_id) => {
                 issues.push(ScriptSceneCommandIssue::InvalidSceneId);
             }
             Some(_) => {}
@@ -87,14 +93,14 @@ pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSc
         }
     } else if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command.command.as_str()) {
         match command.map_id.as_deref() {
-            Some(map_id) if map_id.trim().is_empty() || map_id.trim() != map_id => {
+            Some(map_id) if !is_exact_script_scene_token(map_id) => {
                 issues.push(ScriptSceneCommandIssue::InvalidTargetMap);
             }
             Some(_) => {}
             None => issues.push(ScriptSceneCommandIssue::MissingTargetMap),
         }
         match command.scene_id.as_deref() {
-            Some(scene_id) if scene_id.trim().is_empty() || scene_id.trim() != scene_id => {
+            Some(scene_id) if !is_exact_script_scene_token(scene_id) => {
                 issues.push(ScriptSceneCommandIssue::InvalidSceneId);
             }
             Some(_) => {}
@@ -113,6 +119,11 @@ pub fn apply_script_scene_command(
     table: &MapSceneTable,
     command: ScriptSceneCommand,
 ) -> Result<ScriptSceneOutcome, ScriptSceneError> {
+    if !is_exact_script_scene_command_token(&command.command) {
+        return Err(ScriptSceneError::InvalidCommand {
+            command: command.command,
+        });
+    }
     let status = match command.command.as_str() {
         "checkscene" => {
             reject_target_map(&command)?;
@@ -128,11 +139,7 @@ pub fn apply_script_scene_command(
             state.scenes.set_map_scene(map_name, &scene_id, table)?
         }
         "setmapscene" => {
-            if command.map_id.is_none() {
-                return Err(ScriptSceneError::MissingTargetMap {
-                    command: command.command.clone(),
-                });
-            }
+            require_target_map(&command)?;
             let map_name =
                 resolved_target_map_name.ok_or_else(|| ScriptSceneError::MissingTargetMap {
                     command: command.command.clone(),
@@ -171,12 +178,35 @@ fn require_current_map(current_map_name: &str) -> Result<&str, ScriptSceneError>
 }
 
 fn require_scene_id(command: &ScriptSceneCommand) -> Result<&str, ScriptSceneError> {
-    command
+    let scene_id = command
         .scene_id
         .as_deref()
         .ok_or_else(|| ScriptSceneError::MissingSceneId {
             command: command.command.clone(),
-        })
+        })?;
+    if !is_exact_script_scene_token(scene_id) {
+        return Err(ScriptSceneError::InvalidSceneId {
+            command: command.command.clone(),
+            scene_id: scene_id.to_string(),
+        });
+    }
+    Ok(scene_id)
+}
+
+fn require_target_map(command: &ScriptSceneCommand) -> Result<&str, ScriptSceneError> {
+    let map_id = command
+        .map_id
+        .as_deref()
+        .ok_or_else(|| ScriptSceneError::MissingTargetMap {
+            command: command.command.clone(),
+        })?;
+    if !is_exact_script_scene_token(map_id) {
+        return Err(ScriptSceneError::InvalidTargetMap {
+            command: command.command.clone(),
+            map_id: map_id.to_string(),
+        });
+    }
+    Ok(map_id)
 }
 
 fn reject_scene_id(command: &ScriptSceneCommand) -> Result<(), ScriptSceneError> {
@@ -211,15 +241,24 @@ fn resolve_scene_token(
     {
         return Ok(scene_token.to_string());
     }
-    if let Ok(index) = scene_token.parse::<usize>()
-        && let Some(scene) = table.scenes.get(index)
-    {
-        return Ok(scene.scene_id.clone());
-    }
     Err(ScriptSceneError::UnknownSceneToken {
         map_name: map_name.to_string(),
         scene_id: scene_token.to_string(),
     })
+}
+
+fn is_exact_script_scene_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn is_exact_script_scene_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -301,8 +340,23 @@ mod tests {
             ]
         );
         assert_eq!(
+            script_scene_command_issues(&command(
+                "setmapscene",
+                Some("ROUTE 43"),
+                Some("SCENE ROUTE_43_OPEN"),
+            )),
+            vec![
+                ScriptSceneCommandIssue::InvalidTargetMap,
+                ScriptSceneCommandIssue::InvalidSceneId,
+            ]
+        );
+        assert_eq!(
             script_scene_command_issues(&command("setscene", None, Some(" SCENE_START_OPEN"))),
             vec![ScriptSceneCommandIssue::InvalidSceneId]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command("SetScene", None, Some("SCENE_START_OPEN"))),
+            vec![ScriptSceneCommandIssue::InvalidCommand]
         );
         assert_eq!(
             script_scene_command_issues(&command("resetscene", None, None)),
@@ -341,20 +395,53 @@ mod tests {
     }
 
     #[test]
-    fn setmapscene_resolves_numeric_scene_tokens_against_supplied_table() {
+    fn setmapscene_accepts_declared_numeric_scene_ids_without_index_resolution() {
+        let table = MapSceneTable {
+            scenes: vec![
+                MapScene {
+                    scene_id: "0".to_string(),
+                    script_name: Some("RocketScene".to_string()),
+                },
+                MapScene {
+                    scene_id: "1".to_string(),
+                    script_name: None,
+                },
+            ],
+        };
         let mut state = GameState::default();
         let outcome = apply_script_scene_command(
+            &mut state,
+            "Route43Gate",
+            Some("Route43"),
+            &table,
+            command("setmapscene", Some("ROUTE_43"), Some("1")),
+        )
+        .expect("set target map scene by declared numeric id");
+
+        assert_eq!(outcome.map_name, "Route43");
+        assert_eq!(outcome.scene_id, "1");
+        assert_eq!(state.scenes.map_scenes["Route43"], "1");
+    }
+
+    #[test]
+    fn rejects_undeclared_numeric_scene_tokens_without_index_fallback() {
+        let mut state = GameState::default();
+        let error = apply_script_scene_command(
             &mut state,
             "Route43Gate",
             Some("Route43"),
             &table(),
             command("setmapscene", Some("ROUTE_43"), Some("1")),
         )
-        .expect("set target map scene by numeric token");
+        .expect_err("numeric scene token must be a declared scene id");
 
-        assert_eq!(outcome.map_name, "Route43");
-        assert_eq!(outcome.scene_id, "SCENE_ROUTE43GATE_NOOP");
-        assert_eq!(state.scenes.map_scenes["Route43"], "SCENE_ROUTE43GATE_NOOP");
+        assert_eq!(
+            error,
+            ScriptSceneError::UnknownSceneToken {
+                map_name: "Route43".to_string(),
+                scene_id: "1".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -375,6 +462,54 @@ mod tests {
                 map_name: "Route43Gate".to_string(),
                 scene_id: "scene_route43gate_noop".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_scene_tokens_at_runtime() {
+        let mut state = GameState::default();
+        state
+            .scenes
+            .enter_map("Route43Gate", &table())
+            .expect("enter map");
+
+        assert_eq!(
+            apply_script_scene_command(
+                &mut state,
+                "Route43Gate",
+                None,
+                &table(),
+                command("setscene", None, Some("SCENE ROUTE43GATE_NOOP")),
+            ),
+            Err(ScriptSceneError::InvalidSceneId {
+                command: "setscene".to_string(),
+                scene_id: "SCENE ROUTE43GATE_NOOP".to_string(),
+            })
+        );
+        assert_eq!(
+            apply_script_scene_command(
+                &mut state,
+                "Route43Gate",
+                Some("Route43"),
+                &table(),
+                command("setmapscene", Some("ROUTE 43"), Some("1")),
+            ),
+            Err(ScriptSceneError::InvalidTargetMap {
+                command: "setmapscene".to_string(),
+                map_id: "ROUTE 43".to_string(),
+            })
+        );
+        assert_eq!(
+            apply_script_scene_command(
+                &mut state,
+                "Route43Gate",
+                None,
+                &table(),
+                command("SetScene", None, Some("SCENE_ROUTE43GATE_NOOP")),
+            ),
+            Err(ScriptSceneError::InvalidCommand {
+                command: "SetScene".to_string(),
+            })
         );
     }
 }

@@ -17,6 +17,10 @@ pub struct TmHmLearnOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum TmHmLearnError {
+    #[error("invalid TM/HM item id '{item_id}'")]
+    InvalidItemId { item_id: String },
+    #[error("TM/HM item '{item_id}' has invalid move id '{move_id}'")]
+    InvalidMoveId { item_id: String, move_id: String },
     #[error("item '{item_id}' is not a TM/HM")]
     NotTmHm { item_id: String },
     #[error("TM/HM item '{item_id}' is missing tmhm_index")]
@@ -42,6 +46,7 @@ pub fn teach_tmhm_move(
     replace_slot: Option<usize>,
     consumed: bool,
 ) -> Result<TmHmLearnOutcome, TmHmLearnError> {
+    validate_tmhm_item_id(&item.script_name)?;
     if item.pocket != ITEM_POCKET_TM_HM {
         return Err(TmHmLearnError::NotTmHm {
             item_id: item.script_name.clone(),
@@ -58,6 +63,7 @@ pub fn teach_tmhm_move(
         .ok_or_else(|| TmHmLearnError::MissingTmHmMove {
             item_id: item.script_name.clone(),
         })?;
+    validate_tmhm_move_id(&item.script_name, move_id)?;
     let move_data = moves
         .get(move_id)
         .ok_or_else(|| TmHmLearnError::UnknownMove {
@@ -107,6 +113,33 @@ pub fn teach_tmhm_move(
         replaced_move,
         consumed,
     })
+}
+
+fn validate_tmhm_item_id(item_id: &str) -> Result<(), TmHmLearnError> {
+    if !is_exact_tmhm_token(item_id) {
+        return Err(TmHmLearnError::InvalidItemId {
+            item_id: item_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tmhm_move_id(item_id: &str, move_id: &str) -> Result<(), TmHmLearnError> {
+    if !is_exact_tmhm_token(move_id) {
+        return Err(TmHmLearnError::InvalidMoveId {
+            item_id: item_id.to_string(),
+            move_id: move_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_exact_tmhm_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -281,5 +314,33 @@ mod tests {
                 item_id: "TM_HEADBUTT".to_string()
             }
         );
+    }
+
+    #[test]
+    fn rejects_malformed_tmhm_ids_before_unknown_or_missing_fallbacks() {
+        let mut bad_item_id = item("TM HEADBUTT", 1, "HEADBUTT", true);
+        let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
+        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
+            .expect_err("malformed item ids are invalid pack data");
+        assert_eq!(
+            error,
+            TmHmLearnError::InvalidItemId {
+                item_id: "TM HEADBUTT".to_string()
+            }
+        );
+        assert_eq!(pokemon.moves.len(), 1);
+
+        bad_item_id.script_name = "TM_HEADBUTT".to_string();
+        bad_item_id.tmhm_move = Some("HEAD BUTT".to_string());
+        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
+            .expect_err("malformed move ids are invalid pack data");
+        assert_eq!(
+            error,
+            TmHmLearnError::InvalidMoveId {
+                item_id: "TM_HEADBUTT".to_string(),
+                move_id: "HEAD BUTT".to_string(),
+            }
+        );
+        assert_eq!(pokemon.moves.len(), 1);
     }
 }

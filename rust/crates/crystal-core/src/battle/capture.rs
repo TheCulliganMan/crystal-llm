@@ -42,11 +42,20 @@ pub enum CaptureBallRuleIssue {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureRulesIssue {
     MissingBallRules,
+    InvalidFastBallSpecies {
+        species: String,
+    },
     UnknownFastBallSpecies {
+        species: String,
+    },
+    InvalidHeavyBallSpecies {
         species: String,
     },
     UnknownHeavyBallSpecies {
         species: String,
+    },
+    InvalidBallRuleItem {
+        ball_id: String,
     },
     UnknownBallRuleItem {
         ball_id: String,
@@ -83,6 +92,8 @@ pub struct CaptureWobbleProbability {
 pub enum CaptureError {
     #[error("missing Heavy Ball modifier for species '{0}'")]
     MissingHeavyBallModifier(String),
+    #[error("invalid capture ball '{0}'")]
+    InvalidBall(String),
     #[error("unknown capture ball '{0}'")]
     UnknownBall(String),
     #[error("invalid capture ball rule for '{ball_id}': {message}")]
@@ -163,6 +174,7 @@ pub fn resolve_capture_attempt(
     wobble_probabilities: &[CaptureWobbleProbability],
     rng: &mut Random,
 ) -> Result<CaptureOutcome, CaptureError> {
+    validate_capture_ball_id(&context.ball_id)?;
     if context.trainer_battle {
         return Ok(CaptureOutcome {
             caught: false,
@@ -244,6 +256,7 @@ pub fn throw_ball_from_bag(
 }
 
 pub fn validate_capture_ball_item(rules: &CaptureRules, ball: &Item) -> Result<(), CaptureError> {
+    validate_capture_ball_id(&ball.script_name)?;
     if rules.ball_rules.contains_key(&ball.script_name)
         || rules.guaranteed_capture_balls.contains(&ball.script_name)
     {
@@ -252,15 +265,22 @@ pub fn validate_capture_ball_item(rules: &CaptureRules, ball: &Item) -> Result<(
     Err(CaptureError::UnknownBall(ball.script_name.clone()))
 }
 
+fn validate_capture_ball_id(ball_id: &str) -> Result<(), CaptureError> {
+    if !is_exact_capture_token(ball_id) {
+        return Err(CaptureError::InvalidBall(ball_id.to_string()));
+    }
+    Ok(())
+}
+
 pub fn capture_ball_rule_issues(
     ball_id: &str,
     rule: &CaptureBallRule,
 ) -> Vec<CaptureBallRuleIssue> {
     let mut issues = Vec::new();
-    if ball_id.trim().is_empty() || ball_id.trim() != ball_id {
+    if !is_exact_capture_token(ball_id) {
         issues.push(CaptureBallRuleIssue::InvalidBallId);
     }
-    if rule.battle_type.trim() != rule.battle_type {
+    if !rule.battle_type.is_empty() && !is_exact_capture_token(&rule.battle_type) {
         issues.push(CaptureBallRuleIssue::InvalidBattleType);
     }
     if rule.multiplier_denominator == 0 {
@@ -280,21 +300,33 @@ pub fn capture_rules_issues(
         issues.push(CaptureRulesIssue::MissingBallRules);
     }
     for species in &rules.fast_ball_species {
-        if !species_ids.contains(species) {
+        if !is_exact_capture_token(species) {
+            issues.push(CaptureRulesIssue::InvalidFastBallSpecies {
+                species: species.clone(),
+            });
+        } else if !species_ids.contains(species) {
             issues.push(CaptureRulesIssue::UnknownFastBallSpecies {
                 species: species.clone(),
             });
         }
     }
     for species in rules.heavy_ball_modifiers.keys() {
-        if !species_ids.contains(species) {
+        if !is_exact_capture_token(species) {
+            issues.push(CaptureRulesIssue::InvalidHeavyBallSpecies {
+                species: species.clone(),
+            });
+        } else if !species_ids.contains(species) {
             issues.push(CaptureRulesIssue::UnknownHeavyBallSpecies {
                 species: species.clone(),
             });
         }
     }
     for (ball_id, rule) in &rules.ball_rules {
-        if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
+        if !is_exact_capture_token(ball_id) {
+            issues.push(CaptureRulesIssue::InvalidBallRuleItem {
+                ball_id: ball_id.clone(),
+            });
+        } else if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
             issues.push(CaptureRulesIssue::UnknownBallRuleItem {
                 ball_id: ball_id.clone(),
             });
@@ -307,7 +339,7 @@ pub fn capture_rules_issues(
         }
     }
     for ball_id in &rules.guaranteed_capture_balls {
-        if ball_id.trim().is_empty() || ball_id.trim() != ball_id {
+        if !is_exact_capture_token(ball_id) {
             issues.push(CaptureRulesIssue::InvalidGuaranteedCaptureBall {
                 ball_id: ball_id.clone(),
             });
@@ -318,6 +350,14 @@ pub fn capture_rules_issues(
         }
     }
     issues
+}
+
+fn is_exact_capture_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn validate_capture_ball_rule_shape(
@@ -421,6 +461,7 @@ pub fn apply_ball_multiplier(
     context: &CaptureAttemptContext,
     rules: &CaptureRules,
 ) -> Result<BallCatchRateResult, CaptureError> {
+    validate_capture_ball_id(ball_id)?;
     let mut rate = clamp_catch_rate(enemy.species.catch_rate as i32, 0);
     let mut skip_hp_calc = false;
 
@@ -830,6 +871,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_capture_ball_id_rejects_before_guaranteed_or_rule_lookup() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 100, 5, 10, 20);
+        let mut rules = capture_rules();
+        rules
+            .guaranteed_capture_balls
+            .insert("MASTER BALL".to_string());
+
+        let error = resolve_capture_attempt(
+            &player,
+            &enemy,
+            &CaptureAttemptContext::wild("MASTER BALL"),
+            &rules,
+            &wobble_probabilities(),
+            &mut Random::new(1),
+        )
+        .expect_err("malformed guaranteed ball ids are invalid content");
+
+        assert_eq!(error, CaptureError::InvalidBall("MASTER BALL".to_string()));
+    }
+
+    #[test]
     fn plain_capture_balls_are_explicit_known_ids() {
         let player = pokemon("CHIKORITA", 45, 5, 20, 20);
         let enemy = pokemon("PIDGEY", 100, 5, 10, 20);
@@ -864,6 +927,10 @@ mod tests {
             vec![CaptureBallRuleIssue::InvalidBallId]
         );
         assert_eq!(
+            capture_ball_rule_issues("POKE BALL", &rule),
+            vec![CaptureBallRuleIssue::InvalidBallId]
+        );
+        assert_eq!(
             validate_capture_ball_rule_shape(" POKE_BALL", &rule),
             Err(CaptureError::InvalidBallRule {
                 ball_id: " POKE_BALL".to_string(),
@@ -871,7 +938,7 @@ mod tests {
             })
         );
 
-        rule.battle_type = " BATTLETYPE_FISH".to_string();
+        rule.battle_type = "BATTLETYPE FISH".to_string();
         assert_eq!(
             capture_ball_rule_issues("LURE_BALL", &rule),
             vec![CaptureBallRuleIssue::InvalidBattleType]
@@ -888,9 +955,14 @@ mod tests {
     #[test]
     fn capture_rules_issues_validate_definitive_pack_references() {
         let mut rules = CaptureRules {
-            fast_ball_species: BTreeSet::from(["MAGNEMITE".to_string(), "magnemite".to_string()]),
+            fast_ball_species: BTreeSet::from([
+                "MAGNEMITE".to_string(),
+                "MAGNE MITE".to_string(),
+                "magnemite".to_string(),
+            ]),
             heavy_ball_modifiers: BTreeMap::from([
                 ("SNORLAX".to_string(), 40),
+                ("SNOR LAX".to_string(), 40),
                 ("snorlax".to_string(), 40),
             ]),
             ball_rules: BTreeMap::from([(" POKE_BALL".to_string(), ball_rule(1, 0))]),
@@ -906,13 +978,19 @@ mod tests {
         assert_eq!(
             capture_rules_issues(&rules, &species, &ball_item_ids, true),
             vec![
+                CaptureRulesIssue::InvalidFastBallSpecies {
+                    species: "MAGNE MITE".to_string()
+                },
                 CaptureRulesIssue::UnknownFastBallSpecies {
                     species: "magnemite".to_string()
+                },
+                CaptureRulesIssue::InvalidHeavyBallSpecies {
+                    species: "SNOR LAX".to_string()
                 },
                 CaptureRulesIssue::UnknownHeavyBallSpecies {
                     species: "snorlax".to_string()
                 },
-                CaptureRulesIssue::UnknownBallRuleItem {
+                CaptureRulesIssue::InvalidBallRuleItem {
                     ball_id: " POKE_BALL".to_string(),
                 },
                 CaptureRulesIssue::InvalidBallRule {
@@ -1293,6 +1371,72 @@ mod tests {
             CaptureUseError::Capture(CaptureError::UnknownBall("MOD_BALL".to_string()))
         );
         assert_eq!(bag.quantity(&ball), 1);
+    }
+
+    #[test]
+    fn malformed_capture_ball_rejects_before_consumption() {
+        use crate::models::item_pocket;
+
+        let ball = Item {
+            name: "MOD BALL".to_string(),
+            description: String::new(),
+            effect: "MOD_CAPTURE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
+            price: 200,
+            held_effect: "HELD_NONE".to_string(),
+            parameter: 0,
+            property: String::new(),
+            pocket: item_pocket("BALL"),
+            field_menu: String::new(),
+            field_usable: true,
+            battle_menu: String::new(),
+            battle_usable: true,
+            script_name: "MOD BALL".to_string(),
+            consumable: true,
+            tmhm_index: None,
+            tmhm_move: None,
+        };
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut bag = Bag::default();
+        bag.balls.insert("MOD BALL".to_string(), 1);
+        let mut rng = Random::new(1);
+
+        let error = throw_ball_from_bag(
+            &mut bag,
+            &ball,
+            &player,
+            &enemy,
+            CaptureAttemptContext::wild("IGNORED"),
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect_err("invalid ball rejects before consumption");
+
+        assert_eq!(
+            error,
+            CaptureUseError::Capture(CaptureError::InvalidBall("MOD BALL".to_string()))
+        );
+        assert_eq!(bag.balls["MOD BALL"], 1);
     }
 
     #[test]

@@ -3,17 +3,20 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crystal_core::multiplayer::{
-    validate_link_hello, BattleActionFrame, BattleRngState, LinkByteFrame, LinkClockSyncFrame,
-    LinkHandshakeError, LinkHello, LinkMessage, LinkSessionIdentity, MultiplayerInteractionRequest,
-    MultiplayerInteractionResponse, OverworldPresence, PlayerId, PlayerInputFrame, StateChecksumFrame,
-    TradeConfirmation, TradeOffer,
+    BattleActionFrame, BattleRngState, LinkByteFrame, LinkClockSyncFrame, LinkHandshakeError,
+    LinkHello, LinkMessage, LinkSessionIdentity, MultiplayerInteractionRequest,
+    MultiplayerInteractionResponse, OverworldPresence, PlayerId, PlayerInputFrame,
+    StateChecksumFrame, TradeConfirmation, TradeOffer, fnv1a32_bytes, validate_link_hello,
 };
 use thiserror::Error;
 
 const LINK_FRAME_MAGIC: &[u8; 8] = b"CRYSLINK";
-pub const LINK_FRAME_VERSION: u16 = 1;
+pub const LINK_FRAME_VERSION: u16 = 2;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
-const HEADER_LEN: usize = LINK_FRAME_MAGIC.len() + 2 + 4;
+const VERSION_OFFSET: usize = LINK_FRAME_MAGIC.len();
+const LENGTH_OFFSET: usize = VERSION_OFFSET + 2;
+const PAYLOAD_HASH_OFFSET: usize = LENGTH_OFFSET + 4;
+const HEADER_LEN: usize = PAYLOAD_HASH_OFFSET + 4;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TransportError {
@@ -23,9 +26,7 @@ pub enum TransportError {
     MessageTooLarge,
     #[error("link frame max size {max_frame_bytes} is smaller than the required header")]
     FrameLimitTooSmall { max_frame_bytes: usize },
-    #[error(
-        "link frame max size {max_frame_bytes} exceeds the binary frame payload length field"
-    )]
+    #[error("link frame max size {max_frame_bytes} exceeds the binary frame payload length field")]
     FrameLimitTooLarge { max_frame_bytes: usize },
     #[error("link frame is shorter than the required header")]
     FrameTooShort,
@@ -35,6 +36,10 @@ pub enum TransportError {
     VersionMismatch { expected: u16, actual: u16 },
     #[error("link frame payload length {declared} does not match actual {actual}")]
     LengthMismatch { declared: usize, actual: usize },
+    #[error("link frame payload hash {actual:#010x} does not match declared {expected:#010x}")]
+    PayloadHashMismatch { expected: u32, actual: u32 },
+    #[error("link frame payload must be non-empty")]
+    EmptyPayload,
     #[error("link frame payload is not a valid link message: {message}")]
     InvalidPayload { message: String },
     #[error("link frame message violates protocol invariants: {message}")]
@@ -65,6 +70,13 @@ pub struct MemoryLinkTransport {
 impl MemoryLinkTransport {
     pub fn pair() -> (Self, Self) {
         Self::pair_with_codec(LinkFrameCodec::default())
+    }
+
+    pub fn pair_for_session(session: LinkSessionIdentity) -> Result<(Self, Self), TransportError> {
+        Ok(Self::pair_with_codec(LinkFrameCodec::for_session(
+            DEFAULT_MAX_FRAME_BYTES,
+            session,
+        )?))
     }
 
     pub fn pair_with_codec(codec: LinkFrameCodec) -> (Self, Self) {
@@ -261,6 +273,7 @@ impl LinkFrameCodec {
         frame.extend_from_slice(LINK_FRAME_MAGIC);
         frame.extend_from_slice(&LINK_FRAME_VERSION.to_be_bytes());
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&fnv1a32_bytes(&payload).to_be_bytes());
         frame.extend_from_slice(&payload);
         Ok(frame)
     }
@@ -276,8 +289,7 @@ impl LinkFrameCodec {
             return Err(TransportError::InvalidMagic);
         }
 
-        let version_offset = LINK_FRAME_MAGIC.len();
-        let version = u16::from_be_bytes([frame[version_offset], frame[version_offset + 1]]);
+        let version = u16::from_be_bytes([frame[VERSION_OFFSET], frame[VERSION_OFFSET + 1]]);
         if version != LINK_FRAME_VERSION {
             return Err(TransportError::VersionMismatch {
                 expected: LINK_FRAME_VERSION,
@@ -285,23 +297,40 @@ impl LinkFrameCodec {
             });
         }
 
-        let len_offset = version_offset + 2;
         let declared = u32::from_be_bytes([
-            frame[len_offset],
-            frame[len_offset + 1],
-            frame[len_offset + 2],
-            frame[len_offset + 3],
+            frame[LENGTH_OFFSET],
+            frame[LENGTH_OFFSET + 1],
+            frame[LENGTH_OFFSET + 2],
+            frame[LENGTH_OFFSET + 3],
         ]) as usize;
         let actual = frame.len() - HEADER_LEN;
         if declared != actual {
             return Err(TransportError::LengthMismatch { declared, actual });
         }
+        if declared == 0 {
+            return Err(TransportError::EmptyPayload);
+        }
+        let expected_hash = u32::from_be_bytes([
+            frame[PAYLOAD_HASH_OFFSET],
+            frame[PAYLOAD_HASH_OFFSET + 1],
+            frame[PAYLOAD_HASH_OFFSET + 2],
+            frame[PAYLOAD_HASH_OFFSET + 3],
+        ]);
+        let payload = &frame[HEADER_LEN..];
+        let actual_hash = fnv1a32_bytes(payload);
+        if actual_hash != expected_hash {
+            return Err(TransportError::PayloadHashMismatch {
+                expected: expected_hash,
+                actual: actual_hash,
+            });
+        }
 
         let (wire_frame, bytes_read): (WireLinkFrame, usize) =
-            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], link_frame_binary_config())
-                .map_err(|error| TransportError::InvalidPayload {
+            bincode::serde::decode_from_slice(payload, link_frame_binary_config()).map_err(
+                |error| TransportError::InvalidPayload {
                     message: error.to_string(),
-                })?;
+                },
+            )?;
         if bytes_read != declared {
             return Err(TransportError::LengthMismatch {
                 declared,
@@ -433,9 +462,9 @@ mod tests {
     use crystal_core::battle::turn::BattleAction;
     use crystal_core::models::{BaseStats, Dv, Pokemon, PokemonSpecies};
     use crystal_core::multiplayer::{
-        BattleActionFrame, LinkByteFrame, LinkClockSyncFrame, LinkHello, LinkSessionIdentity,
-        MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame, StateChecksumFrame,
-        TradeConfirmation, TradeOffer, LINK_PREAMBLE_RESPONSE,
+        BattleActionFrame, LINK_PREAMBLE_RESPONSE, LinkByteFrame, LinkClockSyncFrame, LinkHello,
+        LinkSessionIdentity, MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame,
+        StateChecksumFrame, TradeConfirmation, TradeOffer,
     };
     use crystal_core::save::SaveModpackIdentity;
     use crystal_core::timing::Frame;
@@ -484,6 +513,18 @@ mod tests {
         frame.extend_from_slice(LINK_FRAME_MAGIC);
         frame.extend_from_slice(&LINK_FRAME_VERSION.to_be_bytes());
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&fnv1a32_bytes(&payload).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    fn legacy_v1_frame_from_wire_frame(frame: WireLinkFrame) -> Vec<u8> {
+        let payload = bincode::serde::encode_to_vec(&frame, link_frame_binary_config())
+            .expect("encode legacy wire payload");
+        let mut frame = Vec::with_capacity(LINK_FRAME_MAGIC.len() + 2 + 4 + payload.len());
+        frame.extend_from_slice(LINK_FRAME_MAGIC);
+        frame.extend_from_slice(&1_u16.to_be_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(&payload);
         frame
     }
@@ -495,16 +536,18 @@ mod tests {
         let frame = codec.encode(&message).expect("encode");
 
         assert_eq!(&frame[..8], b"CRYSLINK");
-        assert_eq!(u16::from_be_bytes([frame[8], frame[9]]), LINK_FRAME_VERSION);
+        assert_eq!(
+            u16::from_be_bytes([frame[VERSION_OFFSET], frame[VERSION_OFFSET + 1]]),
+            LINK_FRAME_VERSION
+        );
         assert_eq!(codec.decode(&frame).expect("decode"), message);
     }
 
     #[test]
     fn binary_link_frame_round_trips_input_message() {
         let codec = session_codec();
-        let message = LinkMessage::Input(
-            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
-        );
+        let message =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
         let frame = codec.encode(&message).expect("encode");
 
         assert_eq!(codec.decode(&frame).expect("decode"), message);
@@ -626,7 +669,7 @@ mod tests {
     fn binary_link_codec_rejects_protocol_version_drift() {
         let codec = LinkFrameCodec::default();
         let mut frame = codec.encode(&hello_message()).expect("encode");
-        frame[9] = LINK_FRAME_VERSION as u8 + 1;
+        frame[VERSION_OFFSET + 1] = LINK_FRAME_VERSION as u8 + 1;
 
         assert_eq!(
             codec.decode(&frame),
@@ -634,6 +677,45 @@ mod tests {
                 expected: LINK_FRAME_VERSION,
                 actual: LINK_FRAME_VERSION + 1,
             })
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_legacy_unchecksummed_v1_frames() {
+        let codec = LinkFrameCodec::default();
+        let frame = legacy_v1_frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::Hello(
+                LinkHello::from_session(session(), player(7, "P7")).expect("hello"),
+            ),
+        });
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::VersionMismatch {
+                expected: LINK_FRAME_VERSION,
+                actual: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_payload_hash_mismatch() {
+        let codec = LinkFrameCodec::default();
+        let mut frame = codec.encode(&hello_message()).expect("encode");
+        let expected = u32::from_be_bytes([
+            frame[PAYLOAD_HASH_OFFSET],
+            frame[PAYLOAD_HASH_OFFSET + 1],
+            frame[PAYLOAD_HASH_OFFSET + 2],
+            frame[PAYLOAD_HASH_OFFSET + 3],
+        ]);
+        let last = frame.last_mut().expect("payload byte");
+        *last ^= 0x01;
+        let actual = fnv1a32_bytes(&frame[HEADER_LEN..]);
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::PayloadHashMismatch { expected, actual })
         );
     }
 
@@ -699,7 +781,7 @@ mod tests {
             2,
             12,
             BattleAction::Run,
-            Some(String::new()),
+            String::new(),
         ));
         assert_eq!(
             codec.encode(&empty_hash),
@@ -719,7 +801,7 @@ mod tests {
                 2,
                 12,
                 BattleAction::Run,
-                Some(" 2222".to_string()),
+                " 2222".to_string(),
             ),
         ));
         assert_eq!(
@@ -729,10 +811,9 @@ mod tests {
             })
         );
 
-        let empty_trade_frame =
-            frame_from_wire_message(WireLinkMessage::TradeConfirmation(
-                TradeConfirmation::new_unchecked_for_tests("", 1, true),
-            ));
+        let empty_trade_frame = frame_from_wire_message(WireLinkMessage::TradeConfirmation(
+            TradeConfirmation::new_unchecked_for_tests("", 1, true),
+        ));
         assert_eq!(
             codec.decode(&empty_trade_frame),
             Err(TransportError::InvalidMessage {
@@ -758,17 +839,16 @@ mod tests {
             })
         );
 
-        let empty_interaction_frame =
-            frame_from_wire_message(WireLinkMessage::InteractionRequest(
-                MultiplayerInteractionRequest::new_unchecked_for_tests(
-                    "",
-                    "user-a",
-                    "Player A",
-                    "user-b",
-                    MultiplayerInteractionKind::Trade,
-                    123,
-                ),
-            ));
+        let empty_interaction_frame = frame_from_wire_message(WireLinkMessage::InteractionRequest(
+            MultiplayerInteractionRequest::new_unchecked_for_tests(
+                "",
+                "user-a",
+                "Player A",
+                "user-b",
+                MultiplayerInteractionKind::Trade,
+                123,
+            ),
+        ));
         assert_eq!(
             codec.decode(&empty_interaction_frame),
             Err(TransportError::InvalidMessage {
@@ -867,11 +947,21 @@ mod tests {
     #[test]
     fn binary_link_codec_rejects_truncated_or_trailing_payloads() {
         let codec = LinkFrameCodec::default();
+        let mut empty = Vec::with_capacity(HEADER_LEN);
+        empty.extend_from_slice(LINK_FRAME_MAGIC);
+        empty.extend_from_slice(&LINK_FRAME_VERSION.to_be_bytes());
+        empty.extend_from_slice(&0_u32.to_be_bytes());
+        empty.extend_from_slice(&fnv1a32_bytes(&[]).to_be_bytes());
+        assert_eq!(codec.decode(&empty), Err(TransportError::EmptyPayload));
+
         let mut truncated = codec.encode(&hello_message()).expect("encode");
         truncated.pop();
-        let declared =
-            u32::from_be_bytes([truncated[10], truncated[11], truncated[12], truncated[13]])
-                as usize;
+        let declared = u32::from_be_bytes([
+            truncated[LENGTH_OFFSET],
+            truncated[LENGTH_OFFSET + 1],
+            truncated[LENGTH_OFFSET + 2],
+            truncated[LENGTH_OFFSET + 3],
+        ]) as usize;
 
         assert_eq!(
             codec.decode(&truncated),
@@ -882,8 +972,12 @@ mod tests {
         );
 
         let mut trailing = codec.encode(&hello_message()).expect("encode");
-        let declared =
-            u32::from_be_bytes([trailing[10], trailing[11], trailing[12], trailing[13]]) as usize;
+        let declared = u32::from_be_bytes([
+            trailing[LENGTH_OFFSET],
+            trailing[LENGTH_OFFSET + 1],
+            trailing[LENGTH_OFFSET + 2],
+            trailing[LENGTH_OFFSET + 3],
+        ]) as usize;
         trailing.push(0);
         assert_eq!(
             codec.decode(&trailing),
@@ -929,9 +1023,8 @@ mod tests {
     fn memory_transport_delivers_binary_framed_messages_bidirectionally() {
         let (mut host, mut peer) = MemoryLinkTransport::pair_with_codec(session_codec());
         let hello = hello_message();
-        let input = LinkMessage::Input(
-            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
-        );
+        let input =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
 
         host.send(hello.clone()).expect("host send");
         peer.send(input.clone()).expect("peer send");
@@ -940,6 +1033,18 @@ mod tests {
         assert_eq!(host.poll().expect("host poll"), vec![input]);
         assert_eq!(peer.poll().expect("peer poll"), vec![hello]);
         assert!(host.poll().expect("host poll empty").is_empty());
+    }
+
+    #[test]
+    fn memory_transport_pair_for_session_binds_gameplay_frames_to_exact_pack_session() {
+        let (mut host, mut peer) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
+        let input =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
+
+        host.send(input.clone()).expect("session-bound send");
+
+        assert_eq!(peer.poll().expect("peer poll"), vec![input]);
     }
 
     #[test]

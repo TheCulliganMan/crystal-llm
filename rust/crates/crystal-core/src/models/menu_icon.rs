@@ -43,7 +43,11 @@ pub fn menu_icon_catalog_issues(
 }
 
 fn is_exact_nonempty_menu_icon_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -56,6 +60,7 @@ mod tests {
             ("CHIKORITA".to_string(), String::new()),
             ("EGG".to_string(), "ICON_EGG".to_string()),
             (" CYNDAQUIL".to_string(), "ICON_CYNDAQUIL".to_string()),
+            ("NEW MON".to_string(), "ICON_NEW MON".to_string()),
             ("TOTODILE".to_string(), " ICON_TOTODILE".to_string()),
             ("missingno".to_string(), "ICON_GLITCH".to_string()),
         ]
@@ -77,6 +82,12 @@ mod tests {
                 },
                 MenuIconCatalogIssue::InvalidIcon {
                     species_id: "CHIKORITA".to_string(),
+                },
+                MenuIconCatalogIssue::InvalidSpeciesId {
+                    species_id: "NEW MON".to_string(),
+                },
+                MenuIconCatalogIssue::InvalidIcon {
+                    species_id: "NEW MON".to_string(),
                 },
                 MenuIconCatalogIssue::InvalidIcon {
                     species_id: "TOTODILE".to_string(),

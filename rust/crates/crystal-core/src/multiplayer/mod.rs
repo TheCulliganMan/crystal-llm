@@ -16,6 +16,7 @@ pub type SessionId = String;
 pub const LINK_PROTOCOL_VERSION: u16 = 1;
 pub const LINK_PREAMBLE_BYTE: u8 = 0x00;
 pub const LINK_PREAMBLE_RESPONSE: u8 = 0x61;
+const BATTLE_MOVE_SLOTS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,10 +36,13 @@ impl PlayerIdentity {
     }
 
     pub fn validate(&self) -> Result<(), LinkHandshakeError> {
+        if self.id == 0 {
+            return Err(LinkHandshakeError::InvalidPlayerIdentity { player_id: self.id });
+        }
         if self.display_name.is_empty() {
             return Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: self.id });
         }
-        if self.display_name.trim() != self.display_name {
+        if !is_exact_multiplayer_text(&self.display_name) {
             return Err(LinkHandshakeError::InvalidPlayerDisplayName {
                 player_id: self.id,
                 display_name: self.display_name.clone(),
@@ -100,6 +104,11 @@ impl LinkSessionIdentity {
                 session_id: self.session_id.clone(),
             });
         }
+        if !is_exact_session_id(&self.session_id) {
+            return Err(LinkHandshakeError::InvalidSessionId {
+                session_id: self.session_id.clone(),
+            });
+        }
         if self.protocol_version != LINK_PROTOCOL_VERSION {
             return Err(LinkHandshakeError::ProtocolVersionMismatch {
                 expected: LINK_PROTOCOL_VERSION,
@@ -137,6 +146,14 @@ impl LinkSessionIdentity {
     pub fn modpack(&self) -> &SaveModpackIdentity {
         &self.modpack
     }
+}
+
+fn is_exact_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +225,8 @@ pub enum LinkHandshakeError {
     ModpackHashMismatch { expected: String, actual: String },
     #[error("link player {player_id} is not in this lobby")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("link player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("link player {player_id} display name is required")]
     MissingPlayerDisplayName { player_id: PlayerId },
     #[error("link player {player_id} display name {display_name} must be an exact non-empty value")]
@@ -384,9 +403,10 @@ impl OverworldPresence {
     }
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
-        validate_multiplayer_text("presence user id", &self.user_id)?;
+        validate_multiplayer_token("presence user id", &self.user_id)?;
         validate_multiplayer_text("presence player name", &self.player_name)?;
-        validate_multiplayer_text("presence map name", &self.map_name)
+        validate_multiplayer_token("presence map name", &self.map_name)?;
+        validate_presence_tile(self.tile)
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -483,13 +503,18 @@ impl MultiplayerInteractionRequest {
     }
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
-        validate_multiplayer_text("interaction request id", &self.request_id)?;
-        validate_multiplayer_text("interaction request source user id", &self.from_user_id)?;
+        validate_multiplayer_token("interaction request id", &self.request_id)?;
+        validate_multiplayer_token("interaction request source user id", &self.from_user_id)?;
         validate_multiplayer_text(
             "interaction request source player name",
             &self.from_player_name,
         )?;
-        validate_multiplayer_text("interaction request target user id", &self.to_user_id)
+        validate_multiplayer_token("interaction request target user id", &self.to_user_id)?;
+        validate_distinct_interaction_users(
+            "interaction request",
+            &self.from_user_id,
+            &self.to_user_id,
+        )
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -569,9 +594,14 @@ impl MultiplayerInteractionResponse {
     }
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
-        validate_multiplayer_text("interaction response id", &self.request_id)?;
-        validate_multiplayer_text("interaction response source user id", &self.from_user_id)?;
-        validate_multiplayer_text("interaction response target user id", &self.to_user_id)
+        validate_multiplayer_token("interaction response id", &self.request_id)?;
+        validate_multiplayer_token("interaction response source user id", &self.from_user_id)?;
+        validate_multiplayer_token("interaction response target user id", &self.to_user_id)?;
+        validate_distinct_interaction_users(
+            "interaction response",
+            &self.from_user_id,
+            &self.to_user_id,
+        )
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -624,6 +654,12 @@ pub enum MultiplayerMessageError {
     EmptyText { field: &'static str },
     #[error("{field} must be exact and untrimmed")]
     InvalidText { field: &'static str },
+    #[error("multiplayer player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
+    #[error("{field} tile coordinates must be non-negative but got x={x}, y={y}")]
+    InvalidTile { field: &'static str, x: i16, y: i16 },
+    #[error("{field} source and target user ids must be different")]
+    SameInteractionUser { field: &'static str },
     #[error("{message}")]
     InvalidLinkHandshake { message: String },
     #[error("{message}")]
@@ -645,10 +681,57 @@ fn validate_multiplayer_text(
     if value.is_empty() {
         return Err(MultiplayerMessageError::EmptyText { field });
     }
-    if value.trim() != value {
+    if !is_exact_multiplayer_text(value) {
         return Err(MultiplayerMessageError::InvalidText { field });
     }
     Ok(())
+}
+
+fn is_exact_multiplayer_text(value: &str) -> bool {
+    value.trim() == value && !value.chars().any(char::is_control)
+}
+
+fn validate_multiplayer_token(
+    field: &'static str,
+    value: &str,
+) -> Result<(), MultiplayerMessageError> {
+    if value.is_empty() {
+        return Err(MultiplayerMessageError::EmptyText { field });
+    }
+    if !is_exact_multiplayer_token(value) {
+        return Err(MultiplayerMessageError::InvalidText { field });
+    }
+    Ok(())
+}
+
+fn validate_distinct_interaction_users(
+    field: &'static str,
+    from_user_id: &str,
+    to_user_id: &str,
+) -> Result<(), MultiplayerMessageError> {
+    if from_user_id == to_user_id {
+        return Err(MultiplayerMessageError::SameInteractionUser { field });
+    }
+    Ok(())
+}
+
+fn validate_presence_tile(tile: TilePosition) -> Result<(), MultiplayerMessageError> {
+    if tile.x < 0 || tile.y < 0 {
+        return Err(MultiplayerMessageError::InvalidTile {
+            field: "presence",
+            x: tile.x,
+            y: tile.y,
+        });
+    }
+    Ok(())
+}
+
+fn is_exact_multiplayer_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b':'
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,6 +829,11 @@ impl PlayerInputFrame {
     }
 
     pub fn validate(&self) -> Result<(), LockstepSyncError> {
+        if self.player_id == 0 {
+            return Err(LockstepSyncError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
         validate_lockstep_joypad_mask(self.joypad_mask)
     }
 
@@ -817,10 +905,22 @@ impl StateChecksumFrame {
         StateChecksum::new(self.frame, self.hash)
     }
 
+    pub fn validate(&self) -> Result<(), LockstepSyncError> {
+        if self.player_id == 0 {
+            return Err(LockstepSyncError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
+        Ok(())
+    }
+
     pub fn from_game_state(
         player_id: PlayerId,
         state: &GameState,
     ) -> Result<Self, StateChecksumError> {
+        if player_id == 0 {
+            return Err(StateChecksumError::InvalidPlayerIdentity { player_id });
+        }
         let checksum = game_state_checksum(state)?;
         Ok(Self {
             player_id,
@@ -844,6 +944,8 @@ impl StateChecksumFrame {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StateChecksumError {
+    #[error("state checksum player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("failed to encode GameState for deterministic checksum: {0}")]
     Encode(String),
 }
@@ -869,7 +971,7 @@ pub struct BattleActionFrame {
     player_id: PlayerId,
     turn: u64,
     action: BattleAction,
-    state_hash: Option<String>,
+    state_hash: String,
 }
 
 impl BattleActionFrame {
@@ -877,12 +979,14 @@ impl BattleActionFrame {
         player_id: PlayerId,
         turn: u64,
         action: BattleAction,
+        state_hash: impl Into<String>,
     ) -> Result<Self, BattleSyncError> {
+        let state_hash = state_hash.into();
         let frame = Self {
             player_id,
             turn,
             action,
-            state_hash: None,
+            state_hash,
         };
         frame.validate()?;
         Ok(frame)
@@ -894,34 +998,23 @@ impl BattleActionFrame {
         action: BattleAction,
         state_hash: impl Into<String>,
     ) -> Result<Self, BattleSyncError> {
-        let state_hash = state_hash.into();
-        if state_hash.is_empty() {
-            return Err(BattleSyncError::EmptyStateHash);
-        }
-        if state_hash.trim() != state_hash {
-            return Err(BattleSyncError::InvalidStateHash { state_hash });
-        }
-        let frame = Self {
-            player_id,
-            turn,
-            action,
-            state_hash: Some(state_hash),
-        };
-        frame.validate()?;
-        Ok(frame)
+        Self::new(player_id, turn, action, state_hash)
     }
 
     pub fn validate(&self) -> Result<(), BattleSyncError> {
+        if self.player_id == 0 {
+            return Err(BattleSyncError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
         validate_battle_action(&self.action)?;
-        if let Some(state_hash) = &self.state_hash {
-            if state_hash.is_empty() {
-                return Err(BattleSyncError::EmptyStateHash);
-            }
-            if state_hash.trim() != state_hash {
-                return Err(BattleSyncError::InvalidStateHash {
-                    state_hash: state_hash.clone(),
-                });
-            }
+        if self.state_hash.is_empty() {
+            return Err(BattleSyncError::EmptyStateHash);
+        }
+        if !is_exact_state_hash(&self.state_hash) {
+            return Err(BattleSyncError::InvalidStateHash {
+                state_hash: self.state_hash.clone(),
+            });
         }
         Ok(())
     }
@@ -931,7 +1024,7 @@ impl BattleActionFrame {
         player_id: PlayerId,
         turn: u64,
         action: BattleAction,
-        state_hash: Option<String>,
+        state_hash: String,
     ) -> Self {
         Self {
             player_id,
@@ -953,49 +1046,92 @@ impl BattleActionFrame {
         &self.action
     }
 
-    pub fn state_hash(&self) -> Option<&str> {
-        self.state_hash.as_deref()
+    pub fn state_hash(&self) -> &str {
+        self.state_hash.as_str()
     }
 
-    pub fn into_parts(self) -> (PlayerId, u64, BattleAction, Option<String>) {
+    pub fn into_parts(self) -> (PlayerId, u64, BattleAction, String) {
         (self.player_id, self.turn, self.action, self.state_hash)
     }
 }
 
 fn validate_battle_action(action: &BattleAction) -> Result<(), BattleSyncError> {
-    if let BattleAction::Item { item_id } = action {
-        if item_id.is_empty() {
-            return Err(BattleSyncError::EmptyItemId);
+    match action {
+        BattleAction::Move { slot } => {
+            if *slot >= BATTLE_MOVE_SLOTS {
+                return Err(BattleSyncError::InvalidMoveSlot { slot: *slot });
+            }
         }
-        if item_id.trim() != item_id {
-            return Err(BattleSyncError::InvalidItemId {
-                item_id: item_id.clone(),
-            });
+        BattleAction::Switch { party_index } => {
+            if *party_index >= PARTY_SIZE {
+                return Err(BattleSyncError::InvalidSwitchPartyIndex {
+                    party_index: *party_index,
+                });
+            }
         }
+        BattleAction::Item { item_id } => {
+            if item_id.is_empty() {
+                return Err(BattleSyncError::EmptyItemId);
+            }
+            if !is_exact_multiplayer_item_id(item_id) {
+                return Err(BattleSyncError::InvalidItemId {
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+        BattleAction::Run => {}
     }
     Ok(())
+}
+
+fn is_exact_state_hash(value: &str) -> bool {
+    value.len() == 8
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_exact_multiplayer_item_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':')
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum BattleSyncError {
     #[error("battle sync player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("battle sync player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("battle sync roster must contain at least one player")]
     EmptyRoster,
     #[error("battle sync state hash must be non-empty")]
     EmptyStateHash,
     #[error("battle sync state hash {state_hash} must be exact and untrimmed")]
     InvalidStateHash { state_hash: String },
+    #[error("battle sync missing state hash for player {player_id}")]
+    MissingStateHash { player_id: PlayerId },
+    #[error("battle sync has state hash for player {player_id} without an action")]
+    UnexpectedStateHash { player_id: PlayerId },
     #[error("battle sync item id must be non-empty")]
     EmptyItemId,
     #[error("battle sync item id {item_id} must be exact and untrimmed")]
     InvalidItemId { item_id: String },
+    #[error("battle sync move slot {slot} is outside move range 0..4")]
+    InvalidMoveSlot { slot: usize },
+    #[error("battle sync switch party index {party_index} is outside party range 0..6")]
+    InvalidSwitchPartyIndex { party_index: usize },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LockstepSyncError {
     #[error("lockstep player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("lockstep player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("lockstep roster must contain at least one player")]
     EmptyRoster,
     #[error("lockstep input mask {mask:#010b} has conflicting direction buttons")]
@@ -1034,6 +1170,8 @@ impl TradeParticipants {
     ) -> Result<Self, TradeError> {
         let trade_id = trade_id.into();
         validate_trade_id(&trade_id)?;
+        validate_trade_player_identity(player_a)?;
+        validate_trade_player_identity(player_b)?;
         if player_a == player_b {
             return Err(TradeError::DuplicateParticipant {
                 player_id: player_a,
@@ -1101,6 +1239,7 @@ impl TradeOffer {
     ) -> Result<Self, TradeError> {
         let trade_id = trade_id.into();
         validate_trade_id(&trade_id)?;
+        validate_trade_player_identity(player_id)?;
         if party_slot >= PARTY_SIZE {
             return Err(TradeError::InvalidPartySlot { party_slot });
         }
@@ -1117,11 +1256,18 @@ impl TradeOffer {
 
     pub fn validate(&self) -> Result<(), TradeError> {
         validate_trade_id(&self.trade_id)?;
+        validate_trade_player_identity(self.player_id)?;
         if self.party_slot >= PARTY_SIZE {
             return Err(TradeError::InvalidPartySlot {
                 party_slot: self.party_slot,
             });
         }
+        self.pokemon
+            .validate_saved_state()
+            .map_err(|error| TradeError::InvalidPokemon {
+                trade_id: self.trade_id.clone(),
+                message: error,
+            })?;
         Ok(())
     }
 
@@ -1181,7 +1327,8 @@ impl TradeConfirmation {
     }
 
     pub fn validate(&self) -> Result<(), TradeError> {
-        validate_trade_id(&self.trade_id)
+        validate_trade_id(&self.trade_id)?;
+        validate_trade_player_identity(self.player_id)
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -1255,7 +1402,21 @@ impl TradeOutcome {
     pub fn validate(&self) -> Result<(), TradeError> {
         validate_trade_id(&self.trade_id)?;
         if self.cancelled {
+            if !self.replacements.is_empty() {
+                return Err(TradeError::InvalidReplacementCount {
+                    trade_id: self.trade_id.clone(),
+                    expected: 0,
+                    actual: self.replacements.len(),
+                });
+            }
             return Ok(());
+        }
+        if self.replacements.len() != 2 {
+            return Err(TradeError::InvalidReplacementCount {
+                trade_id: self.trade_id.clone(),
+                expected: 2,
+                actual: self.replacements.len(),
+            });
         }
         for replacement in self.replacements.values() {
             replacement.validate()?;
@@ -1304,6 +1465,12 @@ impl TradeReplacement {
                 party_slot: self.party_slot,
             });
         }
+        self.received
+            .validate_saved_state()
+            .map_err(|error| TradeError::InvalidPokemon {
+                trade_id: "trade replacement".to_string(),
+                message: error,
+            })?;
         Ok(())
     }
 
@@ -1326,6 +1493,8 @@ pub enum TradeError {
     TradeIdMismatch { expected: TradeId, actual: TradeId },
     #[error("trade player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("trade player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("trade player {player_id} is not a participant in trade {trade_id}")]
     NotParticipant {
         player_id: PlayerId,
@@ -1344,18 +1513,41 @@ pub enum TradeError {
         player_id: PlayerId,
         trade_id: TradeId,
     },
+    #[error("trade {trade_id} has {actual} replacements but expected {expected}")]
+    InvalidReplacementCount {
+        trade_id: TradeId,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("trade {trade_id} carries invalid Pokemon: {message}")]
+    InvalidPokemon { trade_id: TradeId, message: String },
 }
 
 fn validate_trade_id(trade_id: &TradeId) -> Result<(), TradeError> {
     if trade_id.is_empty() {
         return Err(TradeError::MissingTradeId);
     }
-    if trade_id.trim() != trade_id {
+    if !is_exact_trade_id(trade_id) {
         return Err(TradeError::InvalidTradeId {
             trade_id: trade_id.clone(),
         });
     }
     Ok(())
+}
+
+fn validate_trade_player_identity(player_id: PlayerId) -> Result<(), TradeError> {
+    if player_id == 0 {
+        return Err(TradeError::InvalidPlayerIdentity { player_id });
+    }
+    Ok(())
+}
+
+fn is_exact_trade_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1378,6 +1570,11 @@ impl LinkByteFrame {
     }
 
     pub fn validate(&self) -> Result<(), LinkCableError> {
+        if self.player_id == 0 {
+            return Err(LinkCableError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
         if self.clock == 0 {
             return Err(LinkCableError::InvalidClock { clock: self.clock });
         }
@@ -1428,6 +1625,11 @@ impl LinkClockSyncFrame {
     }
 
     pub fn validate(&self) -> Result<(), LinkCableError> {
+        if self.player_id == 0 {
+            return Err(LinkCableError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
         if self.t0 > self.t1 || self.t1 > self.t2 {
             return Err(LinkCableError::InvalidClockSync {
                 t0: self.t0,
@@ -1471,6 +1673,8 @@ pub enum LinkCableError {
     DuplicateEndpoint { player_id: PlayerId },
     #[error("link cable player {player_id} is not in the accepted link roster")]
     UnknownPlayer { player_id: PlayerId },
+    #[error("link cable player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
     #[error("link cable frame from player {player_id} does not match remote player {expected}")]
     UnexpectedPeer {
         expected: PlayerId,
@@ -1501,6 +1705,16 @@ pub struct LinkCableState {
 
 impl LinkCableState {
     pub fn new(local_player: PlayerId, remote_player: PlayerId) -> Result<Self, LinkCableError> {
+        if local_player == 0 {
+            return Err(LinkCableError::InvalidPlayerIdentity {
+                player_id: local_player,
+            });
+        }
+        if remote_player == 0 {
+            return Err(LinkCableError::InvalidPlayerIdentity {
+                player_id: remote_player,
+            });
+        }
         if local_player == remote_player {
             return Err(LinkCableError::DuplicateEndpoint {
                 player_id: local_player,
@@ -1841,7 +2055,15 @@ impl LockstepFrame {
     }
 
     fn validate_inputs(&self) -> Result<(), LockstepSyncError> {
-        for mask in self.inputs.values() {
+        if self.inputs.is_empty() {
+            return Err(LockstepSyncError::EmptyRoster);
+        }
+        for (player_id, mask) in &self.inputs {
+            if *player_id == 0 {
+                return Err(LockstepSyncError::InvalidPlayerIdentity {
+                    player_id: *player_id,
+                });
+            }
             validate_lockstep_joypad_mask(*mask)?;
         }
         Ok(())
@@ -1886,16 +2108,43 @@ impl BattleActionTurn {
             actions,
             state_hashes,
         };
-        action_turn.validate_state_hashes()?;
+        action_turn.validate()?;
         Ok(action_turn)
     }
 
-    fn validate_state_hashes(&self) -> Result<(), BattleSyncError> {
+    pub fn validate(&self) -> Result<(), BattleSyncError> {
+        if self.actions.is_empty() || self.state_hashes.is_empty() {
+            return Err(BattleSyncError::EmptyRoster);
+        }
+        for player_id in self.actions.keys().chain(self.state_hashes.keys()) {
+            if *player_id == 0 {
+                return Err(BattleSyncError::InvalidPlayerIdentity {
+                    player_id: *player_id,
+                });
+            }
+        }
+        for action in self.actions.values() {
+            validate_battle_action(action)?;
+        }
+        for player_id in self.actions.keys() {
+            if !self.state_hashes.contains_key(player_id) {
+                return Err(BattleSyncError::MissingStateHash {
+                    player_id: *player_id,
+                });
+            }
+        }
+        for player_id in self.state_hashes.keys() {
+            if !self.actions.contains_key(player_id) {
+                return Err(BattleSyncError::UnexpectedStateHash {
+                    player_id: *player_id,
+                });
+            }
+        }
         for state_hash in self.state_hashes.values() {
             if state_hash.is_empty() {
                 return Err(BattleSyncError::EmptyStateHash);
             }
-            if state_hash.trim() != state_hash {
+            if !is_exact_state_hash(state_hash) {
                 return Err(BattleSyncError::InvalidStateHash {
                     state_hash: state_hash.clone(),
                 });
@@ -1937,6 +2186,7 @@ impl BattleActionSyncBuffer {
         if players.is_empty() {
             return Err(BattleSyncError::EmptyRoster);
         }
+        validate_battle_sync_roster_identities(&players)?;
         Ok(Self {
             players,
             actions: BTreeMap::new(),
@@ -1961,52 +2211,40 @@ impl BattleActionSyncBuffer {
         if !self.players.contains(&player_id) {
             return Err(BattleSyncError::UnknownPlayer { player_id });
         }
-        if let Some(state_hash) = state_hash {
-            if let Some(existing_action) = self
-                .actions
+        if let Some(existing_action) = self
+            .actions
+            .get(&turn)
+            .and_then(|turn_actions| turn_actions.get(&player_id))
+        {
+            if existing_action != &battle_action {
+                return Ok(InsertBattleActionResult::Conflict);
+            }
+            if let Some(existing_hash) = self
+                .state_hashes
                 .get(&turn)
-                .and_then(|turn_actions| turn_actions.get(&player_id))
+                .and_then(|turn_hashes| turn_hashes.get(&player_id))
             {
-                if existing_action != &battle_action {
+                if existing_hash != &state_hash {
                     return Ok(InsertBattleActionResult::Conflict);
                 }
-                if let Some(existing_hash) = self
-                    .state_hashes
-                    .get(&turn)
-                    .and_then(|turn_hashes| turn_hashes.get(&player_id))
-                {
-                    if existing_hash != &state_hash {
-                        return Ok(InsertBattleActionResult::Conflict);
-                    }
-                    return Ok(InsertBattleActionResult::Duplicate);
-                }
-                self.state_hashes
-                    .entry(turn)
-                    .or_default()
-                    .insert(player_id, state_hash);
                 return Ok(InsertBattleActionResult::Duplicate);
             }
-
-            self.actions
-                .entry(turn)
-                .or_default()
-                .insert(player_id, battle_action);
             self.state_hashes
                 .entry(turn)
                 .or_default()
                 .insert(player_id, state_hash);
-            return Ok(InsertBattleActionResult::Inserted);
+            return Ok(InsertBattleActionResult::Duplicate);
         }
 
-        let turn_actions = self.actions.entry(turn).or_default();
-        Ok(match turn_actions.get(&player_id) {
-            Some(existing) if existing == &battle_action => InsertBattleActionResult::Duplicate,
-            Some(_) => InsertBattleActionResult::Conflict,
-            None => {
-                turn_actions.insert(player_id, battle_action);
-                InsertBattleActionResult::Inserted
-            }
-        })
+        self.actions
+            .entry(turn)
+            .or_default()
+            .insert(player_id, battle_action);
+        self.state_hashes
+            .entry(turn)
+            .or_default()
+            .insert(player_id, state_hash);
+        Ok(InsertBattleActionResult::Inserted)
     }
 
     pub fn is_turn_ready(&self, turn: u64) -> bool {
@@ -2026,10 +2264,7 @@ impl BattleActionSyncBuffer {
         if !self.is_turn_ready(turn) {
             return None;
         }
-        let state_hashes = match self.state_hashes.get(&turn) {
-            Some(state_hashes) => state_hashes.clone(),
-            None => BTreeMap::new(),
-        };
+        let state_hashes = self.state_hashes.get(&turn)?.clone();
         Some(
             BattleActionTurn::new(turn, self.actions.get(&turn)?.clone(), state_hashes)
                 .expect("battle action buffer stores validated state hashes"),
@@ -2063,6 +2298,15 @@ impl BattleActionSyncBuffer {
     }
 }
 
+fn validate_battle_sync_roster_identities(
+    players: &BTreeSet<PlayerId>,
+) -> Result<(), BattleSyncError> {
+    if players.contains(&0) {
+        return Err(BattleSyncError::InvalidPlayerIdentity { player_id: 0 });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockstepBuffer {
     players: BTreeSet<PlayerId>,
@@ -2076,6 +2320,7 @@ impl LockstepBuffer {
         if players.is_empty() {
             return Err(LockstepSyncError::EmptyRoster);
         }
+        validate_lockstep_roster_identities(&players)?;
         Ok(Self {
             players,
             inputs: BTreeMap::new(),
@@ -2141,6 +2386,9 @@ impl LockstepBuffer {
         player_id: PlayerId,
         checksum: StateChecksum,
     ) -> Result<InsertChecksumResult, LockstepSyncError> {
+        if player_id == 0 {
+            return Err(LockstepSyncError::InvalidPlayerIdentity { player_id });
+        }
         if !self.players.contains(&player_id) {
             return Err(LockstepSyncError::UnknownPlayer { player_id });
         }
@@ -2159,6 +2407,7 @@ impl LockstepBuffer {
         &mut self,
         checksum: StateChecksumFrame,
     ) -> Result<InsertChecksumResult, LockstepSyncError> {
+        checksum.validate()?;
         self.insert_checksum(checksum.player_id(), checksum.checksum())
     }
 
@@ -2194,6 +2443,15 @@ fn validate_lockstep_joypad_mask(mask: u8) -> Result<(), LockstepSyncError> {
     Ok(())
 }
 
+fn validate_lockstep_roster_identities(
+    players: &BTreeSet<PlayerId>,
+) -> Result<(), LockstepSyncError> {
+    if players.contains(&0) {
+        return Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeterministicLockstep {
@@ -2208,18 +2466,14 @@ impl DeterministicLockstep {
         players: impl IntoIterator<Item = PlayerId>,
         local_player_id: PlayerId,
     ) -> Result<Self, LockstepSyncError> {
-        let players = players.into_iter().collect::<BTreeSet<_>>();
-        if !players.contains(&local_player_id) {
-            return Err(LockstepSyncError::UnknownPlayer {
-                player_id: local_player_id,
-            });
-        }
-        Ok(Self {
+        let lockstep = Self {
             local_player_id,
-            players,
+            players: players.into_iter().collect(),
             next_frame: 0,
             previous_local_joypad_mask: 0,
-        })
+        };
+        lockstep.validate()?;
+        Ok(lockstep)
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -2249,6 +2503,24 @@ impl DeterministicLockstep {
         self.previous_local_joypad_mask
     }
 
+    pub fn validate(&self) -> Result<(), LockstepSyncError> {
+        if self.players.is_empty() {
+            return Err(LockstepSyncError::EmptyRoster);
+        }
+        validate_lockstep_roster_identities(&self.players)?;
+        if self.local_player_id == 0 {
+            return Err(LockstepSyncError::InvalidPlayerIdentity {
+                player_id: self.local_player_id,
+            });
+        }
+        if !self.players.contains(&self.local_player_id) {
+            return Err(LockstepSyncError::UnknownPlayer {
+                player_id: self.local_player_id,
+            });
+        }
+        validate_lockstep_joypad_mask(self.previous_local_joypad_mask)
+    }
+
     pub fn from_lobby(
         lobby: &LinkLobby,
         local_player_id: PlayerId,
@@ -2264,6 +2536,7 @@ impl DeterministicLockstep {
         &mut self,
         frame: LockstepFrame,
     ) -> Result<AppliedLockstepFrame, LockstepSyncError> {
+        self.validate()?;
         self.validate_frame(&frame)?;
         let local_joypad_mask = frame.joypad_mask_for(self.local_player_id).ok_or(
             LockstepSyncError::MissingPlayerInput {
@@ -2395,21 +2668,27 @@ pub enum LinkMessage {
 impl LinkMessage {
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
         match self {
-            Self::Hello(hello) => hello
-                .validate()
-                .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
-                    message: error.to_string(),
-                }),
-            Self::BattleAction(action) => action
-                .validate()
-                .map_err(|error| MultiplayerMessageError::InvalidBattleAction {
-                    message: error.to_string(),
-                }),
-            Self::TradeOffer(offer) => offer
-                .validate()
-                .map_err(|error| MultiplayerMessageError::InvalidTradeFrame {
-                    message: error.to_string(),
-                }),
+            Self::Hello(hello) => {
+                hello
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
+                        message: error.to_string(),
+                    })
+            }
+            Self::BattleAction(action) => {
+                action
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidBattleAction {
+                        message: error.to_string(),
+                    })
+            }
+            Self::TradeOffer(offer) => {
+                offer
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidTradeFrame {
+                        message: error.to_string(),
+                    })
+            }
             Self::TradeConfirmation(confirmation) => confirmation.validate().map_err(|error| {
                 MultiplayerMessageError::InvalidTradeFrame {
                     message: error.to_string(),
@@ -2428,23 +2707,38 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
-            Self::Input(input) => input
-                .validate()
-                .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
-                    message: error.to_string(),
-                }),
+            Self::Input(input) => {
+                input
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
+                        message: error.to_string(),
+                    })
+            }
             Self::Presence(presence) => presence.validate(),
             Self::InteractionRequest(request) => request.validate(),
             Self::InteractionResponse(response) => response.validate(),
-            Self::Disconnect { reason, .. } => {
+            Self::Disconnect { player_id, reason } => {
+                if *player_id == 0 {
+                    return Err(MultiplayerMessageError::InvalidPlayerIdentity {
+                        player_id: *player_id,
+                    });
+                }
                 validate_multiplayer_text("disconnect reason", reason)
             }
-            Self::RngInit { state } => state
-                .validate()
-                .map_err(|error| MultiplayerMessageError::InvalidBattleRng {
-                    message: error.to_string(),
-                }),
-            Self::StateHash(_) => Ok(()),
+            Self::RngInit { state } => {
+                state
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidBattleRng {
+                        message: error.to_string(),
+                    })
+            }
+            Self::StateHash(frame) => {
+                frame
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
+                        message: error.to_string(),
+                    })
+            }
         }
     }
 }
@@ -2528,9 +2822,8 @@ mod tests {
 
     #[test]
     fn link_messages_are_serializable_for_transport_neutral_netcode() {
-        let message = LinkMessage::Input(
-            PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
-        );
+        let message =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
         let json = serde_json::to_string(&message).expect("serialize link message");
         assert_eq!(
             json,
@@ -2582,6 +2875,10 @@ mod tests {
         assert_eq!(checksum.frame(), 144);
         assert_eq!(frame.player_id(), 2);
         assert_eq!(frame.checksum(), checksum);
+        assert_eq!(
+            StateChecksumFrame::from_game_state(0, &state),
+            Err(StateChecksumError::InvalidPlayerIdentity { player_id: 0 })
+        );
 
         let mut moved = state;
         moved.overworld = crate::state::OverworldMemory::Active {
@@ -2653,6 +2950,21 @@ mod tests {
                 || nested_error.contains("unknown field `normalized_name`"),
             "{nested_error}"
         );
+
+        let missing_hash_error = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "battle_action",
+            "player_id": 1,
+            "turn": 7,
+            "action": {
+                "type": "run"
+            }
+        }))
+        .expect_err("battle action messages must include deterministic state hash")
+        .to_string();
+        assert!(
+            missing_hash_error.contains("missing field `state_hash`"),
+            "{missing_hash_error}"
+        );
     }
 
     #[test]
@@ -2700,6 +3012,16 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_empty_player_display_names_without_placeholders() {
+        let zero_id_player = PlayerIdentity::new_unchecked_for_tests(0, "P0");
+        assert_eq!(
+            LinkHello::new(
+                "session-1",
+                modpack("core-modular", "1234abcd"),
+                zero_id_player,
+            ),
+            Err(LinkHandshakeError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
         let empty_player = PlayerIdentity::new_unchecked_for_tests(2, "");
         assert_eq!(
             LinkHello::new(
@@ -2720,6 +3042,19 @@ mod tests {
             Err(LinkHandshakeError::InvalidPlayerDisplayName {
                 player_id: 2,
                 display_name: " P2".to_string(),
+            })
+        );
+
+        let control_player = PlayerIdentity::new_unchecked_for_tests(2, "P\n2");
+        assert_eq!(
+            LinkHello::new(
+                "session-1",
+                modpack("core-modular", "1234abcd"),
+                control_player
+            ),
+            Err(LinkHandshakeError::InvalidPlayerDisplayName {
+                player_id: 2,
+                display_name: "P\n2".to_string(),
             })
         );
 
@@ -2746,11 +3081,20 @@ mod tests {
             })
         );
 
+        let control_bypassed = LinkHello::new_unchecked_for_tests(
+            local.clone(),
+            PlayerIdentity::new_unchecked_for_tests(3, "P3\0"),
+        );
         assert_eq!(
-            LinkLobby::new(
-                local,
-                PlayerIdentity::new_unchecked_for_tests(1, ""),
-            ),
+            validate_link_hello(&local, &control_bypassed),
+            Err(LinkHandshakeError::InvalidPlayerDisplayName {
+                player_id: 3,
+                display_name: "P3\0".to_string(),
+            })
+        );
+
+        assert_eq!(
+            LinkLobby::new(local, PlayerIdentity::new_unchecked_for_tests(1, ""),),
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 1 })
         );
     }
@@ -2767,6 +3111,13 @@ mod tests {
                 .and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: " session-1".to_string(),
+            })
+        );
+        assert_eq!(
+            LinkSessionIdentity::new("session 1", modpack.clone())
+                .and_then(|session| session.validate()),
+            Err(LinkHandshakeError::InvalidSessionId {
+                session_id: "session 1".to_string(),
             })
         );
 
@@ -3011,8 +3362,13 @@ mod tests {
         let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
 
         assert_eq!(
+            BattleActionFrame::new(0, 1, BattleAction::Move { slot: 0 }, "11111111"),
+            Err(BattleSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
             sync.insert_action(
-                BattleActionFrame::new(3, 1, BattleAction::Move { slot: 0 }).expect("action"),
+                BattleActionFrame::new(3, 1, BattleAction::Move { slot: 0 }, "11111111")
+                    .expect("action"),
             ),
             Err(BattleSyncError::UnknownPlayer { player_id: 3 })
         );
@@ -3027,11 +3383,23 @@ mod tests {
             })
         );
         assert_eq!(
+            BattleActionFrame::with_state_hash(1, 1, BattleAction::Move { slot: 0 }, "AAAABBBB"),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: "AAAABBBB".to_string(),
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::with_state_hash(1, 1, BattleAction::Move { slot: 0 }, "1111"),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: "1111".to_string(),
+            })
+        );
+        assert_eq!(
             sync.insert_action(BattleActionFrame::new_unchecked_for_tests(
                 1,
                 1,
                 BattleAction::Move { slot: 0 },
-                Some("2222 ".to_string()),
+                "2222 ".to_string(),
             )),
             Err(BattleSyncError::InvalidStateHash {
                 state_hash: "2222 ".to_string(),
@@ -3041,13 +3409,154 @@ mod tests {
             BattleActionFrame::new(
                 1,
                 1,
+                BattleAction::Move {
+                    slot: BATTLE_MOVE_SLOTS,
+                },
+                "11111111",
+            ),
+            Err(BattleSyncError::InvalidMoveSlot {
+                slot: BATTLE_MOVE_SLOTS,
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::Switch {
+                    party_index: PARTY_SIZE,
+                },
+                "11111111",
+            ),
+            Err(BattleSyncError::InvalidSwitchPartyIndex {
+                party_index: PARTY_SIZE,
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::Item {
+                    item_id: "EMBER ORB".to_string(),
+                },
+                "11111111",
+            ),
+            Err(BattleSyncError::InvalidItemId {
+                item_id: "EMBER ORB".to_string()
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
                 BattleAction::Item {
                     item_id: " POTION".to_string(),
                 },
+                "11111111",
             ),
             Err(BattleSyncError::InvalidItemId {
                 item_id: " POTION".to_string(),
             })
+        );
+        assert!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::Item {
+                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                },
+                "11111111",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn battle_action_turn_rejects_empty_or_malformed_aggregate_payloads() {
+        assert_eq!(
+            BattleActionTurn::new(3, BTreeMap::new(), BTreeMap::new()),
+            Err(BattleSyncError::EmptyRoster)
+        );
+
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(0, BattleAction::Move { slot: 0 })]),
+                BTreeMap::from([(0, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(
+                    1,
+                    BattleAction::Item {
+                        item_id: "EMBER ORB".to_string(),
+                    },
+                )]),
+                BTreeMap::from([(1, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidItemId {
+                item_id: "EMBER ORB".to_string(),
+            })
+        );
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(
+                    1,
+                    BattleAction::Move {
+                        slot: BATTLE_MOVE_SLOTS,
+                    },
+                )]),
+                BTreeMap::from([(1, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidMoveSlot {
+                slot: BATTLE_MOVE_SLOTS,
+            })
+        );
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(
+                    1,
+                    BattleAction::Switch {
+                        party_index: PARTY_SIZE,
+                    },
+                )]),
+                BTreeMap::from([(1, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidSwitchPartyIndex {
+                party_index: PARTY_SIZE,
+            })
+        );
+
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(1, BattleAction::Move { slot: 0 })]),
+                BTreeMap::new(),
+            ),
+            Err(BattleSyncError::EmptyRoster)
+        );
+
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(1, BattleAction::Move { slot: 0 })]),
+                BTreeMap::from([(2, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::MissingStateHash { player_id: 1 })
+        );
+
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(1, BattleAction::Move { slot: 0 })]),
+                BTreeMap::from([(1, "11111111".to_string()), (2, "11111111".to_string())]),
+            ),
+            Err(BattleSyncError::UnexpectedStateHash { player_id: 2 })
         );
     }
 
@@ -3055,7 +3564,7 @@ mod tests {
     fn battle_action_sync_reports_duplicates_conflicts_and_hash_disagreements() {
         let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
         let action =
-            BattleActionFrame::with_state_hash(1, 7, BattleAction::Move { slot: 0 }, "1111")
+            BattleActionFrame::with_state_hash(1, 7, BattleAction::Move { slot: 0 }, "11111111")
                 .expect("action");
 
         assert_eq!(
@@ -3068,14 +3577,19 @@ mod tests {
         );
         assert_eq!(
             sync.insert_action(
-                BattleActionFrame::with_state_hash(1, 7, BattleAction::Move { slot: 0 }, "9999",)
-                    .expect("hash conflict")
+                BattleActionFrame::with_state_hash(
+                    1,
+                    7,
+                    BattleAction::Move { slot: 0 },
+                    "99999999",
+                )
+                .expect("hash conflict")
             ),
             Ok(InsertBattleActionResult::Conflict)
         );
         assert_eq!(
             sync.insert_action(
-                BattleActionFrame::with_state_hash(1, 7, BattleAction::Run, "3333",)
+                BattleActionFrame::with_state_hash(1, 7, BattleAction::Run, "33333333",)
                     .expect("conflict")
             ),
             Ok(InsertBattleActionResult::Conflict)
@@ -3086,7 +3600,7 @@ mod tests {
                     2,
                     7,
                     BattleAction::Switch { party_index: 3 },
-                    "2222",
+                    "22222222",
                 )
                 .expect("player 2")
             ),
@@ -3095,7 +3609,10 @@ mod tests {
 
         assert_eq!(
             sync.state_hash_disagreement(7),
-            Some(vec![(1, "1111".to_string()), (2, "2222".to_string())])
+            Some(vec![
+                (1, "11111111".to_string()),
+                (2, "22222222".to_string())
+            ])
         );
         assert_eq!(
             sync.turn(7)
@@ -3131,6 +3648,10 @@ mod tests {
             BattleActionSyncBuffer::new(std::iter::empty::<PlayerId>()),
             Err(BattleSyncError::EmptyRoster)
         );
+        assert_eq!(
+            BattleActionSyncBuffer::new([0, 1]),
+            Err(BattleSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
     }
 
     #[test]
@@ -3142,6 +3663,7 @@ mod tests {
                 BattleAction::Item {
                     item_id: "johto_plus:EMBER_ORB".to_string(),
                 },
+                "11111111",
             )
             .expect("action"),
         );
@@ -3149,6 +3671,7 @@ mod tests {
 
         assert!(json.contains(r#""type":"battle_action""#));
         assert!(json.contains(r#""item_id":"johto_plus:EMBER_ORB""#));
+        assert!(json.contains(r#""state_hash":"11111111""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize action message"),
             message
@@ -3252,6 +3775,50 @@ mod tests {
     }
 
     #[test]
+    fn trade_outcome_requires_exact_replacement_shape_without_apply_fallbacks() {
+        assert_eq!(
+            TradeOutcome::new("trade-1", false, BTreeMap::new()),
+            Err(TradeError::InvalidReplacementCount {
+                trade_id: "trade-1".to_string(),
+                expected: 2,
+                actual: 0,
+            })
+        );
+
+        assert_eq!(
+            TradeOutcome::new(
+                "trade-1",
+                false,
+                BTreeMap::from([(
+                    1,
+                    TradeReplacement::new(0, pokemon("PIKACHU", None)).expect("replacement"),
+                )]),
+            ),
+            Err(TradeError::InvalidReplacementCount {
+                trade_id: "trade-1".to_string(),
+                expected: 2,
+                actual: 1,
+            })
+        );
+
+        assert_eq!(
+            TradeOutcome::new(
+                "trade-1",
+                true,
+                BTreeMap::from([(
+                    1,
+                    TradeReplacement::new(0, pokemon("PIKACHU", None)).expect("replacement"),
+                )]),
+            ),
+            Err(TradeError::InvalidReplacementCount {
+                trade_id: "trade-1".to_string(),
+                expected: 0,
+                actual: 1,
+            })
+        );
+    }
+
+    #[test]
     fn trade_sync_rejects_unknown_players_wrong_trade_ids_and_empty_slots() {
         let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
@@ -3264,6 +3831,10 @@ mod tests {
         assert_eq!(
             TradeParticipants::new("trade-1", 1, 1),
             Err(TradeError::DuplicateParticipant { player_id: 1 })
+        );
+        assert_eq!(
+            TradeParticipants::new("trade-1", 0, 1),
+            Err(TradeError::InvalidPlayerIdentity { player_id: 0 })
         );
         assert_eq!(
             TradeParticipants::new(" trade-1", 1, 2),
@@ -3282,9 +3853,22 @@ mod tests {
             Err(TradeError::EmptyPartySlot { party_slot: 0 })
         );
         assert_eq!(
+            TradeOffer::new("trade-1", 0, 0, pokemon("PIKACHU", None)),
+            Err(TradeError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
             TradeOffer::new("trade-1", 1, PARTY_SIZE, pokemon("PIKACHU", None)),
             Err(TradeError::InvalidPartySlot {
                 party_slot: PARTY_SIZE,
+            })
+        );
+        let mut impossible_pokemon = pokemon("PIKACHU", None);
+        impossible_pokemon.level = 0;
+        assert_eq!(
+            TradeOffer::new("trade-1", 1, 0, impossible_pokemon),
+            Err(TradeError::InvalidPokemon {
+                trade_id: "trade-1".to_string(),
+                message: "pokemon.level 0 is outside range 1..100".to_string(),
             })
         );
 
@@ -3293,6 +3877,16 @@ mod tests {
             Err(TradeError::InvalidTradeId {
                 trade_id: " trade-1".to_string(),
             })
+        );
+        assert_eq!(
+            TradeConfirmation::new("trade 1", 1, true),
+            Err(TradeError::InvalidTradeId {
+                trade_id: "trade 1".to_string(),
+            })
+        );
+        assert_eq!(
+            TradeConfirmation::new("trade-1", 0, true),
+            Err(TradeError::InvalidPlayerIdentity { player_id: 0 })
         );
         let mut trade =
             TradeSyncBuffer::new(TradeParticipants::new("trade-1", 1, 2).expect("participants"));
@@ -3365,8 +3959,7 @@ mod tests {
             offer_message
         );
 
-        let confirm_message =
-            LinkMessage::TradeConfirmation(confirmation("trade-1", 1, true));
+        let confirm_message = LinkMessage::TradeConfirmation(confirmation("trade-1", 1, true));
         let confirm_json = serde_json::to_string(&confirm_message).expect("serialize confirm");
         assert!(confirm_json.contains(r#""type":"trade_confirmation""#));
         assert_eq!(
@@ -3421,6 +4014,14 @@ mod tests {
         let mut cable = LinkCableState::new(1, 2).expect("cable");
 
         assert_eq!(
+            LinkByteFrame::new(0, 0x42, 1),
+            Err(LinkCableError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
+            LinkClockSyncFrame::new(0, 1, 2, 3),
+            Err(LinkCableError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
             cable.receive_byte_frame(LinkByteFrame::new_unchecked_for_tests(2, 0x42, 0)),
             Err(LinkCableError::InvalidClock { clock: 0 })
         );
@@ -3456,6 +4057,14 @@ mod tests {
         assert_eq!(
             LinkCableState::new(1, 1),
             Err(LinkCableError::DuplicateEndpoint { player_id: 1 })
+        );
+        assert_eq!(
+            LinkCableState::new(0, 1),
+            Err(LinkCableError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
+            LinkCableState::new(1, 0),
+            Err(LinkCableError::InvalidPlayerIdentity { player_id: 0 })
         );
     }
 
@@ -3523,9 +4132,8 @@ mod tests {
 
     #[test]
     fn link_byte_messages_are_transport_neutral_json() {
-        let message = LinkMessage::LinkByte(
-            LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("frame"),
-        );
+        let message =
+            LinkMessage::LinkByte(LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("frame"));
         let json = serde_json::to_string(&message).expect("serialize byte");
 
         assert_eq!(
@@ -3612,8 +4220,7 @@ mod tests {
 
         let held_right = lockstep
             .apply_frame(
-                LockstepFrame::new(1, BTreeMap::from([(2, 0), (4, 0b0000_0001)]))
-                    .expect("frame"),
+                LockstepFrame::new(1, BTreeMap::from([(2, 0), (4, 0b0000_0001)])).expect("frame"),
             )
             .expect("apply second");
 
@@ -3628,8 +4235,7 @@ mod tests {
         let mut lockstep = DeterministicLockstep::new([1, 2], 1).expect("lockstep");
         lockstep
             .apply_frame(
-                LockstepFrame::new(0, BTreeMap::from([(1, 0x10), (2, 0x20)]))
-                    .expect("frame"),
+                LockstepFrame::new(0, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame"),
             )
             .expect("apply");
 
@@ -3642,6 +4248,44 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<DeterministicLockstep>(&json).expect("deserialize lockstep"),
             lockstep
+        );
+    }
+
+    #[test]
+    fn deterministic_lockstep_validates_deserialized_cursor_without_fallbacks() {
+        let empty_roster: DeterministicLockstep = serde_json::from_str(
+            r#"{"local_player_id":1,"players":[],"next_frame":0,"previous_local_joypad_mask":0}"#,
+        )
+        .expect("decode exact lockstep shape");
+        assert_eq!(empty_roster.validate(), Err(LockstepSyncError::EmptyRoster));
+
+        let missing_local: DeterministicLockstep = serde_json::from_str(
+            r#"{"local_player_id":3,"players":[1,2],"next_frame":0,"previous_local_joypad_mask":0}"#,
+        )
+        .expect("decode exact lockstep shape");
+        assert_eq!(
+            missing_local.validate(),
+            Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
+        );
+
+        let zero_local: DeterministicLockstep = serde_json::from_str(
+            r#"{"local_player_id":0,"players":[0,1],"next_frame":0,"previous_local_joypad_mask":0}"#,
+        )
+        .expect("decode exact lockstep shape");
+        assert_eq!(
+            zero_local.validate(),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
+        let conflicting_mask: DeterministicLockstep = serde_json::from_str(
+            r#"{"local_player_id":1,"players":[1,2],"next_frame":0,"previous_local_joypad_mask":3}"#,
+        )
+        .expect("decode exact lockstep shape");
+        assert_eq!(
+            conflicting_mask.validate(),
+            Err(LockstepSyncError::ConflictingJoypadDirections {
+                mask: B_PAD_LEFT | B_PAD_RIGHT,
+            })
         );
     }
 
@@ -3665,9 +4309,7 @@ mod tests {
         assert_eq!(lockstep.next_frame(), 0);
 
         assert_eq!(
-            lockstep.apply_frame(
-                LockstepFrame::new(0, BTreeMap::from([(1, 0)])).expect("frame"),
-            ),
+            lockstep.apply_frame(LockstepFrame::new(0, BTreeMap::from([(1, 0)])).expect("frame"),),
             Err(LockstepSyncError::MissingPlayerInput {
                 frame: 0,
                 player_id: 2,
@@ -3677,8 +4319,7 @@ mod tests {
 
         assert_eq!(
             lockstep.apply_frame(
-                LockstepFrame::new(0, BTreeMap::from([(1, 0), (2, 0), (3, 0)]))
-                    .expect("frame"),
+                LockstepFrame::new(0, BTreeMap::from([(1, 0), (2, 0), (3, 0)])).expect("frame"),
             ),
             Err(LockstepSyncError::NonRosterPlayerInput {
                 frame: 0,
@@ -3698,16 +4339,11 @@ mod tests {
         );
         assert_eq!(lockstep.next_frame(), 0);
 
-        let mut lockstep = DeterministicLockstep::new_unchecked_for_tests(
-            1,
-            BTreeSet::from([1, 2]),
-            u64::MAX,
-            0,
-        );
+        let mut lockstep =
+            DeterministicLockstep::new_unchecked_for_tests(1, BTreeSet::from([1, 2]), u64::MAX, 0);
         assert_eq!(
             lockstep.apply_frame(
-                LockstepFrame::new(u64::MAX, BTreeMap::from([(1, 0), (2, 0)]))
-                    .expect("frame"),
+                LockstepFrame::new(u64::MAX, BTreeMap::from([(1, 0), (2, 0)])).expect("frame"),
             ),
             Err(LockstepSyncError::FrameCursorOverflow { frame: u64::MAX })
         );
@@ -3743,6 +4379,32 @@ mod tests {
             })
         );
         assert_eq!(buffer.frame(3), None);
+    }
+
+    #[test]
+    fn lockstep_input_rejects_invalid_player_identity_without_roster_fallback() {
+        assert_eq!(
+            PlayerInputFrame::new(0, Frame(3), 0x10),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
+        let mut buffer = LockstepBuffer::new([1, 2]).expect("lockstep buffer");
+        assert_eq!(
+            buffer.insert_input(PlayerInputFrame::new_unchecked_for_tests(0, 3, 0x10)),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+    }
+
+    #[test]
+    fn lockstep_frame_rejects_empty_input_sets_without_idle_fallback() {
+        assert_eq!(
+            LockstepFrame::new(4, BTreeMap::new()),
+            Err(LockstepSyncError::EmptyRoster)
+        );
+        assert_eq!(
+            LockstepFrame::new(4, BTreeMap::from([(0, 0x10)])),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
     }
 
     #[test]
@@ -3794,13 +4456,18 @@ mod tests {
         );
         assert_eq!(buffer.players(), vec![1, 2]);
         assert_eq!(
-            buffer.insert_checksum(
-                3,
-                StateChecksum::new(7, 0xaaaa),
-            ),
+            buffer.insert_checksum(3, StateChecksum::new(7, 0xaaaa),),
             Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
         );
         assert_eq!(buffer.players(), vec![1, 2]);
+        assert_eq!(
+            buffer.insert_checksum(0, StateChecksum::new(7, 0xaaaa)),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
+            buffer.insert_checksum_frame(StateChecksumFrame::new(0, Frame(7), 0xaaaa)),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        );
     }
 
     #[test]
@@ -3820,6 +4487,10 @@ mod tests {
         assert_eq!(
             LockstepBuffer::new(std::iter::empty::<PlayerId>()),
             Err(LockstepSyncError::EmptyRoster)
+        );
+        assert_eq!(
+            LockstepBuffer::new([0, 1]),
+            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
         );
     }
 
@@ -3914,6 +4585,53 @@ mod tests {
                 field: "presence user id",
             })
         );
+        let malformed_map = OverworldPresence::new_unchecked_for_tests(
+            "u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE 29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            malformed_map.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "presence map name",
+            })
+        );
+        let malformed_name = OverworldPresence::new_unchecked_for_tests(
+            "u1",
+            "CHRIS\nRED",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            malformed_name.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "presence player name",
+            })
+        );
+        let negative_tile = OverworldPresence::new_unchecked_for_tests(
+            "u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(-1, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            negative_tile.validate(),
+            Err(MultiplayerMessageError::InvalidTile {
+                field: "presence",
+                x: -1,
+                y: 12,
+            })
+        );
 
         let request = MultiplayerInteractionRequest::new_unchecked_for_tests(
             "",
@@ -3927,6 +4645,34 @@ mod tests {
             request.validate(),
             Err(MultiplayerMessageError::EmptyText {
                 field: "interaction request id",
+            })
+        );
+        let malformed_request = MultiplayerInteractionRequest::new_unchecked_for_tests(
+            "request 1",
+            "u1",
+            "CHRIS",
+            "u2",
+            MultiplayerInteractionKind::Trade,
+            1234,
+        );
+        assert_eq!(
+            malformed_request.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "interaction request id",
+            })
+        );
+        let self_request = MultiplayerInteractionRequest::new_unchecked_for_tests(
+            "request-1",
+            "u1",
+            "CHRIS",
+            "u1",
+            MultiplayerInteractionKind::Trade,
+            1234,
+        );
+        assert_eq!(
+            self_request.validate(),
+            Err(MultiplayerMessageError::SameInteractionUser {
+                field: "interaction request",
             })
         );
 
@@ -3944,10 +4690,44 @@ mod tests {
                 field: "interaction response target user id",
             })
         );
+        let self_response = MultiplayerInteractionResponse::new_unchecked_for_tests(
+            "request-1",
+            "u2",
+            "u2",
+            MultiplayerInteractionKind::Trade,
+            true,
+            1235,
+        );
+        assert_eq!(
+            self_response.validate(),
+            Err(MultiplayerMessageError::SameInteractionUser {
+                field: "interaction response",
+            })
+        );
+        assert!(
+            MultiplayerInteractionResponse::new(
+                "battle:request-1",
+                "user-2",
+                "user_1",
+                MultiplayerInteractionKind::Battle,
+                false,
+                1236,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn link_message_validate_owns_protocol_payload_rules() {
+        assert_eq!(
+            LinkMessage::Disconnect {
+                player_id: 0,
+                reason: "done".to_string(),
+            }
+            .validate(),
+            Err(MultiplayerMessageError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
         assert_eq!(
             LinkMessage::Disconnect {
                 player_id: 1,
@@ -3960,15 +4740,33 @@ mod tests {
         );
 
         assert_eq!(
+            LinkMessage::Disconnect {
+                player_id: 1,
+                reason: "done\0now".to_string(),
+            }
+            .validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "disconnect reason",
+            })
+        );
+
+        assert_eq!(
             LinkMessage::BattleAction(BattleActionFrame::new_unchecked_for_tests(
                 1,
                 7,
                 BattleAction::Run,
-                Some(String::new()),
+                String::new(),
             ))
             .validate(),
             Err(MultiplayerMessageError::InvalidBattleAction {
                 message: "battle sync state hash must be non-empty".to_string(),
+            })
+        );
+
+        assert_eq!(
+            LinkMessage::StateHash(StateChecksumFrame::new(0, Frame(7), 0x1111_1111)).validate(),
+            Err(MultiplayerMessageError::InvalidLockstepFrame {
+                message: "lockstep player id 0 is not a valid link identity".to_string(),
             })
         );
     }

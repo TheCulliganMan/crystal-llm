@@ -12,6 +12,9 @@ pub enum RuntimePackPresenceIssue {
     MissingItems,
     MissingTrainers,
     MissingAudio,
+    MissingMusicAudio,
+    MissingSoundEffects,
+    MissingCryAudio,
     MissingPokemonCries,
     MissingTilesets,
     MissingScripts,
@@ -41,6 +44,9 @@ pub struct RuntimePackSections {
     pub has_items: bool,
     pub has_trainers: bool,
     pub has_audio: bool,
+    pub has_music_audio: bool,
+    pub has_sound_effects: bool,
+    pub has_cry_audio: bool,
     pub has_pokemon_cries: bool,
     pub has_tilesets: bool,
     pub has_scripts: bool,
@@ -96,6 +102,15 @@ pub fn runtime_pack_presence_issues(
     }
     if !sections.has_audio {
         issues.push(RuntimePackPresenceIssue::MissingAudio);
+    }
+    if !sections.has_music_audio {
+        issues.push(RuntimePackPresenceIssue::MissingMusicAudio);
+    }
+    if !sections.has_sound_effects {
+        issues.push(RuntimePackPresenceIssue::MissingSoundEffects);
+    }
+    if !sections.has_cry_audio {
+        issues.push(RuntimePackPresenceIssue::MissingCryAudio);
     }
     if !sections.has_pokemon_cries {
         issues.push(RuntimePackPresenceIssue::MissingPokemonCries);
@@ -161,6 +176,9 @@ mod tests {
                 RuntimePackPresenceIssue::MissingItems,
                 RuntimePackPresenceIssue::MissingTrainers,
                 RuntimePackPresenceIssue::MissingAudio,
+                RuntimePackPresenceIssue::MissingMusicAudio,
+                RuntimePackPresenceIssue::MissingSoundEffects,
+                RuntimePackPresenceIssue::MissingCryAudio,
                 RuntimePackPresenceIssue::MissingPokemonCries,
                 RuntimePackPresenceIssue::MissingTilesets,
                 RuntimePackPresenceIssue::MissingScripts,
@@ -176,7 +194,44 @@ mod tests {
                 RuntimePackPresenceIssue::MissingEventBootstrapCatalogs,
             ],
         );
-        assert!(runtime_pack_presence_issues(RuntimePackSections {
+        assert!(
+            runtime_pack_presence_issues(RuntimePackSections {
+                has_pokemon: true,
+                has_moves: true,
+                has_growth_rates: true,
+                has_learnsets: true,
+                has_evolutions: true,
+                has_battle_formula_tables: true,
+                has_battle_rule_catalogs: true,
+                has_economy_catalogs: true,
+                has_field_system_catalogs: true,
+                has_items: true,
+                has_trainers: true,
+                has_audio: true,
+                has_music_audio: true,
+                has_sound_effects: true,
+                has_cry_audio: true,
+                has_pokemon_cries: true,
+                has_tilesets: true,
+                has_scripts: true,
+                has_map_geometry: true,
+                has_map_objects: true,
+                has_runtime_map_metadata: true,
+                has_runtime_spawn_points: true,
+                has_maps: true,
+                has_ui_catalogs: true,
+                has_display_catalogs: true,
+                has_phone_catalogs: true,
+                has_special_system_catalogs: true,
+                has_event_bootstrap_catalogs: true,
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn runtime_pack_presence_requires_each_audio_kind_not_just_any_audio() {
+        let sections = RuntimePackSections {
             has_pokemon: true,
             has_moves: true,
             has_growth_rates: true,
@@ -189,6 +244,9 @@ mod tests {
             has_items: true,
             has_trainers: true,
             has_audio: true,
+            has_music_audio: true,
+            has_sound_effects: false,
+            has_cry_audio: false,
             has_pokemon_cries: true,
             has_tilesets: true,
             has_scripts: true,
@@ -202,7 +260,14 @@ mod tests {
             has_phone_catalogs: true,
             has_special_system_catalogs: true,
             has_event_bootstrap_catalogs: true,
-        })
-        .is_empty());
+        };
+
+        assert_eq!(
+            runtime_pack_presence_issues(sections),
+            vec![
+                RuntimePackPresenceIssue::MissingSoundEffects,
+                RuntimePackPresenceIssue::MissingCryAudio,
+            ]
+        );
     }
 }

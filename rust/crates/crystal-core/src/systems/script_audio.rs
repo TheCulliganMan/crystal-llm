@@ -47,28 +47,38 @@ pub enum ScriptAudioCue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScriptAudioError {
+    InvalidCommand { command: String },
     UnknownCommand { command: String },
     MissingAudioId { command: String },
     UnexpectedAudioId { command: String },
     MissingFadeFrames { command: String },
     UnexpectedFadeFrames { command: String },
+    InvalidMusic { audio_id: String },
     UnknownMusic { audio_id: String },
+    InvalidSoundEffect { audio_id: String },
     UnknownSoundEffect { audio_id: String },
+    InvalidCrySpecies { species_id: String },
     UnknownCrySpecies { species_id: String },
     MissingCryMetadata { species_id: String },
+    InvalidCryAsset { audio_id: String },
     UnknownCryAsset { audio_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptAudioCommandIssue {
+    InvalidCommand,
     MissingMusicId,
+    InvalidMusicId,
     UnknownMusicId,
     MissingSoundEffectId,
+    InvalidSoundEffectId,
     UnknownSoundEffectId,
     MissingCrySpecies,
+    InvalidCrySpecies,
     UnknownCrySpecies,
     MissingCryMetadata,
+    InvalidCryAsset,
     UnknownCryAsset,
     MissingMusicFadeFrames,
     UnexpectedAudioId,
@@ -105,6 +115,7 @@ pub fn script_audio_command_issues(
                 command.audio_id.as_deref(),
                 music_ids,
                 ScriptAudioCommandIssue::MissingMusicId,
+                ScriptAudioCommandIssue::InvalidMusicId,
                 ScriptAudioCommandIssue::UnknownMusicId,
                 &mut issues,
             );
@@ -114,13 +125,20 @@ pub fn script_audio_command_issues(
                 command.audio_id.as_deref(),
                 sound_effect_ids,
                 ScriptAudioCommandIssue::MissingSoundEffectId,
+                ScriptAudioCommandIssue::InvalidSoundEffectId,
                 ScriptAudioCommandIssue::UnknownSoundEffectId,
                 &mut issues,
             );
         }
         "cry" => match command.audio_id.as_deref() {
+            Some(species_id) if !is_exact_audio_token(species_id) => {
+                issues.push(ScriptAudioCommandIssue::InvalidCrySpecies);
+            }
             Some(species_id) if species.contains_key(species_id) => {
                 match cry_by_species.get(species_id) {
+                    Some(cry_id) if !is_exact_audio_token(cry_id) => {
+                        issues.push(ScriptAudioCommandIssue::InvalidCryAsset);
+                    }
                     Some(cry_id) if cry_ids.contains(cry_id) => {}
                     Some(_) => issues.push(ScriptAudioCommandIssue::UnknownCryAsset),
                     None => issues.push(ScriptAudioCommandIssue::MissingCryMetadata),
@@ -134,6 +152,7 @@ pub fn script_audio_command_issues(
                 command.audio_id.as_deref(),
                 music_ids,
                 ScriptAudioCommandIssue::MissingMusicId,
+                ScriptAudioCommandIssue::InvalidMusicId,
                 ScriptAudioCommandIssue::UnknownMusicId,
                 &mut issues,
             );
@@ -145,6 +164,9 @@ pub fn script_audio_command_issues(
             if command.audio_id.is_some() {
                 issues.push(ScriptAudioCommandIssue::UnexpectedAudioId);
             }
+        }
+        _ if !is_exact_audio_command_token(&command.command) => {
+            issues.push(ScriptAudioCommandIssue::InvalidCommand)
         }
         _ => issues.push(ScriptAudioCommandIssue::UnknownCommand),
     }
@@ -164,10 +186,18 @@ pub fn resolve_script_audio_command(
     species: &BTreeMap<String, PokemonSpecies>,
     cry_by_species: &BTreeMap<String, String>,
 ) -> Result<ScriptAudioCue, ScriptAudioError> {
+    if !is_exact_audio_command_token(&command.command) {
+        return Err(ScriptAudioError::InvalidCommand {
+            command: command.command,
+        });
+    }
     match command.command.as_str() {
         "playmusic" => {
             reject_fade_frames(&command)?;
             let audio_id = require_audio_id(&command)?.to_string();
+            if !is_exact_audio_token(&audio_id) {
+                return Err(ScriptAudioError::InvalidMusic { audio_id });
+            }
             if !music_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownMusic { audio_id });
             }
@@ -176,6 +206,9 @@ pub fn resolve_script_audio_command(
         "playsound" => {
             reject_fade_frames(&command)?;
             let audio_id = require_audio_id(&command)?.to_string();
+            if !is_exact_audio_token(&audio_id) {
+                return Err(ScriptAudioError::InvalidSoundEffect { audio_id });
+            }
             if !sound_effect_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownSoundEffect { audio_id });
             }
@@ -184,6 +217,9 @@ pub fn resolve_script_audio_command(
         "cry" => {
             reject_fade_frames(&command)?;
             let species_id = require_audio_id(&command)?.to_string();
+            if !is_exact_audio_token(&species_id) {
+                return Err(ScriptAudioError::InvalidCrySpecies { species_id });
+            }
             if !species.contains_key(&species_id) {
                 return Err(ScriptAudioError::UnknownCrySpecies { species_id });
             }
@@ -192,6 +228,9 @@ pub fn resolve_script_audio_command(
                     species_id: species_id.clone(),
                 }
             })?;
+            if !is_exact_audio_token(&audio_id) {
+                return Err(ScriptAudioError::InvalidCryAsset { audio_id });
+            }
             if !cry_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownCryAsset { audio_id });
             }
@@ -205,6 +244,9 @@ pub fn resolve_script_audio_command(
                     .ok_or_else(|| ScriptAudioError::MissingFadeFrames {
                         command: command.command.clone(),
                     })?;
+            if !is_exact_audio_token(&audio_id) {
+                return Err(ScriptAudioError::InvalidMusic { audio_id });
+            }
             if !music_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownMusic { audio_id });
             }
@@ -327,14 +369,30 @@ fn check_audio_id(
     audio_id: Option<&str>,
     known_ids: &BTreeSet<String>,
     missing: ScriptAudioCommandIssue,
+    invalid: ScriptAudioCommandIssue,
     unknown: ScriptAudioCommandIssue,
     issues: &mut Vec<ScriptAudioCommandIssue>,
 ) {
     match audio_id {
+        Some(audio_id) if !is_exact_audio_token(audio_id) => issues.push(invalid),
         Some(audio_id) if known_ids.contains(audio_id) => {}
         Some(_) => issues.push(unknown),
         None => issues.push(missing),
     }
+}
+
+fn is_exact_audio_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn is_exact_audio_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn runtime_kind(kind: ScriptAudioKind) -> ScriptAudioRuntimeKind {
@@ -406,7 +464,7 @@ mod tests {
         assert!(SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&"waitsfx"));
         assert!(is_known_script_audio_command("playsound"));
         assert!(!is_known_script_audio_command("PlaySound"));
-        assert!(!is_known_script_audio_command("mp3"));
+        assert!(!is_known_script_audio_command("fadeaudio"));
     }
 
     #[test]
@@ -433,6 +491,17 @@ mod tests {
         );
         assert_eq!(
             script_audio_command_issues(
+                &command("playmusic", Some("MUSIC ROUTE 29"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidMusicId]
+        );
+        assert_eq!(
+            script_audio_command_issues(
                 &command("playsound", Some("sfx_get_badge"), None),
                 &music,
                 &sfx,
@@ -441,6 +510,41 @@ mod tests {
                 &cry_by_species,
             ),
             vec![ScriptAudioCommandIssue::UnknownSoundEffectId]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("playsound", Some("SFX GET BADGE"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidSoundEffectId]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("cry", Some("LU GIA"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidCrySpecies]
+        );
+        let invalid_cry_by_species =
+            BTreeMap::from([("LUGIA".to_string(), "CRY LUGIA".to_string())]);
+        assert_eq!(
+            script_audio_command_issues(
+                &command("cry", Some("LUGIA"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &invalid_cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidCryAsset]
         );
         assert_eq!(
             script_audio_command_issues(
@@ -480,7 +584,18 @@ mod tests {
         );
         assert_eq!(
             script_audio_command_issues(
-                &command("mp3", Some("MUSIC_ROUTE_29"), None),
+                &command("PlaySound", Some("SFX_GET_BADGE"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("fadeaudio", Some("MUSIC_ROUTE_29"), None),
                 &music,
                 &sfx,
                 &cries,
@@ -570,6 +685,32 @@ mod tests {
                 source_script: "AudioScript".to_string(),
                 command_index: 7,
             }
+        );
+        assert_eq!(
+            resolve_script_audio_command(
+                command("cry", Some("LU GIA"), None),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            Err(ScriptAudioError::InvalidCrySpecies {
+                species_id: "LU GIA".to_string(),
+            })
+        );
+        assert_eq!(
+            resolve_script_audio_command(
+                command("PlaySound", Some("SFX_GET_BADGE"), None),
+                &BTreeSet::new(),
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            Err(ScriptAudioError::InvalidCommand {
+                command: "PlaySound".to_string(),
+            })
         );
         assert_eq!(
             resolve_script_audio_command(
@@ -713,19 +854,19 @@ mod tests {
         let mut state = GameState::default();
         let error = apply_script_audio_command(
             &mut state,
-            command("playmusic", Some("music_route_29"), None),
+            command("playmusic", Some("MUSIC ROUTE 29"), None),
             &BTreeSet::from(["MUSIC_ROUTE_29".to_string()]),
             &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
         )
-        .expect_err("case-changed music is invalid");
+        .expect_err("malformed music id is invalid");
 
         assert_eq!(
             error,
-            ScriptAudioError::UnknownMusic {
-                audio_id: "music_route_29".to_string()
+            ScriptAudioError::InvalidMusic {
+                audio_id: "MUSIC ROUTE 29".to_string()
             }
         );
         assert!(state.script_runtime.audio_events.is_empty());

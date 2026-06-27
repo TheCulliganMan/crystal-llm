@@ -93,13 +93,14 @@ pub fn pokegear_landmark_issues(
     let landmark_constants: BTreeSet<&str> = payload
         .landmarks
         .iter()
+        .filter(|landmark| is_valid_landmark_constant(&landmark.constant))
         .map(|landmark| landmark.constant.as_str())
         .collect();
 
     for landmark in &payload.landmarks {
         if !is_exact_nonempty_display_token(&landmark.constant)
             || !is_exact_nonempty_display_token(&landmark.label)
-            || !is_exact_nonempty_display_token(&landmark.name)
+            || !is_exact_nonempty_display_text(&landmark.name)
             || !is_exact_nonempty_display_token(&landmark.region)
         {
             issues.push(PokegearLandmarkIssue::InvalidLandmark {
@@ -107,7 +108,7 @@ pub fn pokegear_landmark_issues(
             });
         }
         if is_exact_nonempty_display_token(&landmark.constant)
-            && !landmark.constant.starts_with("LANDMARK_")
+            && !is_valid_landmark_constant(&landmark.constant)
         {
             issues.push(PokegearLandmarkIssue::InvalidConstant {
                 constant: landmark.constant.clone(),
@@ -117,7 +118,7 @@ pub fn pokegear_landmark_issues(
 
     for (map_name, landmark_constant) in &payload.map_to_landmark {
         let invalid_map_name = !is_exact_nonempty_display_token(map_name);
-        let invalid_landmark_constant = !is_exact_nonempty_display_token(landmark_constant);
+        let invalid_landmark_constant = !is_valid_landmark_constant(landmark_constant);
         if invalid_map_name {
             issues.push(PokegearLandmarkIssue::InvalidMapEntry {
                 map_name: map_name.clone(),
@@ -149,6 +150,18 @@ pub fn pokegear_landmark_issues(
 }
 
 fn is_exact_nonempty_display_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_valid_landmark_constant(value: &str) -> bool {
+    is_exact_nonempty_display_token(value) && value.starts_with("LANDMARK_")
+}
+
+fn is_exact_nonempty_display_text(value: &str) -> bool {
     !value.is_empty() && value.trim() == value
 }
 
@@ -199,6 +212,7 @@ mod tests {
         let defaults = [
             ("".to_string(), 0),
             (" SPRITE_SILVER".to_string(), 0),
+            ("SPRITE SILVER".to_string(), 0),
             ("SPRITE_CHRIS".to_string(), 0),
             ("SPRITE_KRIS".to_string(), -1),
         ]
@@ -215,6 +229,9 @@ mod tests {
                     sprite_id: " SPRITE_SILVER".to_string(),
                 },
                 SpritePaletteDefaultIssue::InvalidDefault {
+                    sprite_id: "SPRITE SILVER".to_string(),
+                },
+                SpritePaletteDefaultIssue::InvalidDefault {
                     sprite_id: "SPRITE_KRIS".to_string(),
                 },
             ],
@@ -226,6 +243,7 @@ mod tests {
         let palette_map = [
             ("".to_string(), vec!["PAL_GREEN".to_string()]),
             (" ROUTE_30".to_string(), vec!["PAL_GREEN".to_string()]),
+            ("ROUTE 30".to_string(), vec!["PAL_GREEN".to_string()]),
             ("NEW_BARK_TOWN".to_string(), Vec::new()),
             (
                 "ROUTE_29".to_string(),
@@ -248,6 +266,9 @@ mod tests {
                 },
                 PokegearTownMapPaletteIssue::InvalidEntry {
                     map_name: "NEW_BARK_TOWN".to_string(),
+                },
+                PokegearTownMapPaletteIssue::InvalidEntry {
+                    map_name: "ROUTE 30".to_string(),
                 },
                 PokegearTownMapPaletteIssue::InvalidEntry {
                     map_name: "ROUTE_29".to_string(),
@@ -274,11 +295,20 @@ mod tests {
                 },
                 PokegearLandmark {
                     id: 2,
-                    constant: " route_30".to_string(),
+                    constant: "ROUTE_30".to_string(),
                     label: " ROUTE_30".to_string(),
                     name: "Route 30".to_string(),
                     x: 4,
                     y: 5,
+                    region: "johto".to_string(),
+                },
+                PokegearLandmark {
+                    id: 3,
+                    constant: "LANDMARK_ROUTE_31".to_string(),
+                    label: "ROUTE 31".to_string(),
+                    name: "Route 31".to_string(),
+                    x: 6,
+                    y: 7,
                     region: "johto".to_string(),
                 },
             ],
@@ -286,24 +316,37 @@ mod tests {
                 ("Route29".to_string(), "LANDMARK_ROUTE_30".to_string()),
                 ("MissingRoute".to_string(), "LANDMARK_ROUTE_29".to_string()),
                 (" Route29".to_string(), "LANDMARK_ROUTE_29".to_string()),
+                ("Route 30".to_string(), "LANDMARK_ROUTE_29".to_string()),
                 ("Route30".to_string(), " LANDMARK_ROUTE_29".to_string()),
+                ("Route31".to_string(), "ROUTE_30".to_string()),
             ]
             .into_iter()
             .collect(),
         };
-        let map_names = ["Route29".to_string()].into_iter().collect();
+        let map_names = ["Route29".to_string(), "Route31".to_string()]
+            .into_iter()
+            .collect();
 
         assert_eq!(
             pokegear_landmark_issues(&payload, &map_names),
             vec![
                 PokegearLandmarkIssue::InvalidLandmark {
-                    constant: " route_30".to_string(),
+                    constant: "ROUTE_30".to_string(),
+                },
+                PokegearLandmarkIssue::InvalidConstant {
+                    constant: "ROUTE_30".to_string(),
+                },
+                PokegearLandmarkIssue::InvalidLandmark {
+                    constant: "LANDMARK_ROUTE_31".to_string(),
                 },
                 PokegearLandmarkIssue::InvalidMapEntry {
                     map_name: " Route29".to_string(),
                 },
                 PokegearLandmarkIssue::UnknownMap {
                     map_name: "MissingRoute".to_string(),
+                },
+                PokegearLandmarkIssue::InvalidMapEntry {
+                    map_name: "Route 30".to_string(),
                 },
                 PokegearLandmarkIssue::UnknownLandmarkConstant {
                     map_name: "Route29".to_string(),
@@ -312,6 +355,10 @@ mod tests {
                 PokegearLandmarkIssue::InvalidLandmarkReference {
                     map_name: "Route30".to_string(),
                     landmark_constant: " LANDMARK_ROUTE_29".to_string(),
+                },
+                PokegearLandmarkIssue::InvalidLandmarkReference {
+                    map_name: "Route31".to_string(),
+                    landmark_constant: "ROUTE_30".to_string(),
                 },
             ],
         );

@@ -41,8 +41,8 @@ pub fn pokedex_entry_catalog_issues(
     let mut issues = Vec::new();
 
     for (species_id, entry) in entries {
-        let invalid_species_id = !is_exact_nonempty_pokedex_token(species_id);
-        let invalid_record_species = !is_exact_nonempty_pokedex_token(&entry.species);
+        let invalid_species_id = !is_exact_nonempty_pokedex_id(species_id);
+        let invalid_record_species = !is_exact_nonempty_pokedex_id(&entry.species);
         if invalid_species_id {
             issues.push(PokedexEntryCatalogIssue::InvalidSpeciesId {
                 species_id: species_id.clone(),
@@ -60,12 +60,12 @@ pub fn pokedex_entry_catalog_issues(
             });
         }
         if invalid_record_species
-            || !is_exact_nonempty_pokedex_token(&entry.classification)
+            || !is_exact_nonempty_pokedex_text(&entry.classification)
             || entry.pages.is_empty()
             || entry
                 .pages
                 .iter()
-                .any(|page| !is_exact_nonempty_pokedex_token(page))
+                .any(|page| !is_exact_nonempty_pokedex_text(page))
         {
             issues.push(PokedexEntryCatalogIssue::InvalidEntry {
                 species_id: species_id.clone(),
@@ -84,7 +84,15 @@ pub fn pokedex_entry_catalog_issues(
     issues
 }
 
-fn is_exact_nonempty_pokedex_token(value: &str) -> bool {
+fn is_exact_nonempty_pokedex_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_nonempty_pokedex_text(value: &str) -> bool {
     !value.is_empty() && value.trim() == value
 }
 
@@ -199,6 +207,16 @@ mod tests {
                     pages: vec![" A timid fire Pokemon.".to_string()],
                 },
             ),
+            (
+                "TOTODILE ALT".to_string(),
+                RuntimePokedexEntry {
+                    species: "TOTODILE ALT".to_string(),
+                    classification: "Big Jaw".to_string(),
+                    height_digits: 6,
+                    weight_digits: 95,
+                    pages: vec!["Its well-developed jaws are powerful.".to_string()],
+                },
+            ),
         ]
         .into_iter()
         .collect();
@@ -224,6 +242,12 @@ mod tests {
                 },
                 PokedexEntryCatalogIssue::UnknownSpecies {
                     species_id: "MISSINGNO".to_string(),
+                },
+                PokedexEntryCatalogIssue::InvalidSpeciesId {
+                    species_id: "TOTODILE ALT".to_string(),
+                },
+                PokedexEntryCatalogIssue::InvalidEntry {
+                    species_id: "TOTODILE ALT".to_string(),
                 },
                 PokedexEntryCatalogIssue::MissingSpeciesEntry {
                     species_id: "BAYLEEF".to_string(),

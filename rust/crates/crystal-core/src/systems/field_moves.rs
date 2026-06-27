@@ -283,21 +283,22 @@ fn collect_block_rule_issues(
     let mut seen = BTreeSet::new();
     for (index, replacement) in rule.replacements.iter().enumerate() {
         let replacement_subject = format!("{subject}:replacement:{index}");
-        if replacement.tileset.trim().is_empty()
-            || replacement.tileset.trim() != replacement.tileset
-        {
+        let exact_tileset = is_exact_field_move_token(&replacement.tileset);
+        let exact_variant = is_exact_field_move_token(&replacement.variant);
+        if !exact_tileset {
             issues.push(FieldMoveCatalogIssue::InvalidReplacementTileset {
                 subject: replacement_subject.clone(),
             });
         }
-        if replacement.variant.trim().is_empty()
-            || replacement.variant.trim() != replacement.variant
-        {
+        if !exact_variant {
             issues.push(FieldMoveCatalogIssue::InvalidReplacementVariant {
                 subject: replacement_subject.clone(),
             });
         }
-        if !seen.insert((replacement.tileset.as_str(), replacement.block_id)) {
+        if exact_tileset
+            && exact_variant
+            && !seen.insert((replacement.tileset.as_str(), replacement.block_id))
+        {
             issues.push(FieldMoveCatalogIssue::DuplicateReplacement {
                 subject: replacement_subject,
             });
@@ -313,7 +314,7 @@ fn collect_flag_rule_issues(
 ) {
     collect_move_id_issues(subject, &rule.move_id, moves, issues);
     collect_badge_issues(subject, &rule.move_id, &rule.badge, issues);
-    if rule.engine_flag.trim().is_empty() || rule.engine_flag.trim() != rule.engine_flag {
+    if !is_exact_field_move_token(&rule.engine_flag) {
         issues.push(FieldMoveCatalogIssue::InvalidEngineFlag {
             subject: subject.to_string(),
             move_id: rule.move_id.clone(),
@@ -343,15 +344,15 @@ fn collect_escape_item_rule_issues(
     items: &BTreeMap<String, Item>,
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
-    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+    let invalid_item_id = !is_exact_field_move_token(&rule.item_id);
+    let invalid_escape_rope_mode = !is_exact_field_move_token(&rule.escape_rope_mode);
+    if invalid_item_id {
         issues.push(FieldMoveCatalogIssue::InvalidEscapeItemId);
     }
-    if rule.escape_rope_mode.trim().is_empty()
-        || rule.escape_rope_mode.trim() != rule.escape_rope_mode
-    {
+    if invalid_escape_rope_mode {
         issues.push(FieldMoveCatalogIssue::InvalidEscapeItemMode);
     }
-    if items.is_empty() || rule.item_id.is_empty() || rule.escape_rope_mode.is_empty() {
+    if items.is_empty() || invalid_item_id || invalid_escape_rope_mode {
         return;
     }
     match items.get(&rule.item_id) {
@@ -381,7 +382,7 @@ fn collect_field_item_rule_issues(
     items: &BTreeMap<String, Item>,
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
-    if rule.item_id.trim().is_empty() || rule.item_id.trim() != rule.item_id {
+    if !is_exact_field_move_token(&rule.item_id) {
         issues.push(FieldMoveCatalogIssue::InvalidFieldItemId {
             subject: subject.to_string(),
         });
@@ -401,7 +402,7 @@ fn collect_move_id_issues(
     moves: &BTreeSet<String>,
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
-    if move_id.trim().is_empty() || move_id.trim() != move_id {
+    if !is_exact_field_move_token(move_id) {
         issues.push(FieldMoveCatalogIssue::InvalidMoveId {
             subject: subject.to_string(),
         });
@@ -411,6 +412,14 @@ fn collect_move_id_issues(
             move_id: move_id.to_string(),
         });
     }
+}
+
+fn is_exact_field_move_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn collect_badge_issues(
@@ -486,8 +495,12 @@ pub struct FieldMoveUseOutcome {
 pub enum FieldMoveError {
     #[error("field move {move_id} is missing required modpack rule field {field}")]
     MissingRuleField { move_id: String, field: String },
+    #[error("field move rule field {field} has invalid value {value}")]
+    InvalidRuleField { field: String, value: String },
     #[error("field move {move_id} uses unsupported badge region {region}")]
     UnsupportedBadgeRegion { move_id: String, region: String },
+    #[error("field move {move_id} uses invalid badge index {badge_index}")]
+    InvalidBadgeIndex { move_id: String, badge_index: usize },
     #[error("field move party index {party_index} is outside the party")]
     PartyIndexOutOfRange { party_index: usize },
     #[error("field move party index {party_index} has no Pokemon")]
@@ -957,11 +970,7 @@ fn validate_field_item_id(
     rule: &FieldItemRule,
     item: &Item,
 ) -> Result<(), FieldMoveError> {
-    if rule.item_id.is_empty() {
-        return Err(FieldMoveError::MissingFieldItemId {
-            rule_id: rule_id.to_string(),
-        });
-    }
+    require_field_item_rule_id(rule_id, &rule.item_id)?;
     if item.script_name != rule.item_id {
         return Err(FieldMoveError::InvalidFieldItemId {
             rule_id: rule_id.to_string(),
@@ -970,6 +979,15 @@ fn validate_field_item_id(
         });
     }
     Ok(())
+}
+
+fn require_field_item_rule_id(rule_id: &str, item_id: &str) -> Result<(), FieldMoveError> {
+    if item_id.is_empty() {
+        return Err(FieldMoveError::MissingFieldItemId {
+            rule_id: rule_id.to_string(),
+        });
+    }
+    require_rule_field(item_id, "item_id")
 }
 
 fn validate_move_only_field_move(
@@ -1013,6 +1031,12 @@ fn require_rule_field(value: &str, field: &str) -> Result<(), FieldMoveError> {
             field: field.to_string(),
         });
     }
+    if !is_exact_field_move_token(value) {
+        return Err(FieldMoveError::InvalidRuleField {
+            field: field.to_string(),
+            value: value.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -1027,13 +1051,13 @@ fn require_badge(
             region: badge.region.clone(),
         });
     }
-    if state
-        .badges
-        .johto
-        .get(badge.index)
-        .copied()
-        .unwrap_or(false)
-    {
+    let Some(has_badge) = state.badges.johto.get(badge.index).copied() else {
+        return Err(FieldMoveError::InvalidBadgeIndex {
+            move_id: move_id.to_string(),
+            badge_index: badge.index,
+        });
+    };
+    if has_badge {
         return Ok(());
     }
     Err(FieldMoveError::MissingBadge {
@@ -1696,6 +1720,22 @@ mod tests {
     }
 
     #[test]
+    fn field_move_badge_index_outside_region_is_invalid_rule_data() {
+        let mut catalog = catalog();
+        catalog.fly.badge = badge(8);
+        let state = GameState::default();
+        let storage = storage_with(MOVE_FLY);
+
+        assert_eq!(
+            validate_fly_field_move(&catalog, &state, &storage, 0),
+            Err(FieldMoveError::InvalidBadgeIndex {
+                move_id: MOVE_FLY.to_string(),
+                badge_index: 8,
+            })
+        );
+    }
+
+    #[test]
     fn dig_and_teleport_use_catalog_move_ids_without_hardcoded_move_names() {
         let mut catalog = catalog();
         catalog.dig.move_id = MOVE_TELEPORT.to_string();
@@ -1715,6 +1755,21 @@ mod tests {
                 party_index: 0,
                 move_id: MOVE_DIG.to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn move_only_field_move_rejects_malformed_catalog_move_id_before_party_check() {
+        let mut catalog = catalog();
+        catalog.dig.move_id = "DI G".to_string();
+        let storage = storage_with(MOVE_DIG);
+
+        assert_eq!(
+            validate_dig_field_move(&catalog, &storage, 0),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "move_id".to_string(),
+                value: "DI G".to_string(),
+            })
         );
     }
 
@@ -1751,6 +1806,30 @@ mod tests {
         mod_escape_rope.escape_rope_mode = Some("MOD_WARP".to_string());
         validate_field_escape_item(&catalog, &mod_escape_rope)
             .expect("catalog item id and mode accepted");
+    }
+
+    #[test]
+    fn escape_rope_rejects_malformed_catalog_rule_fields_before_item_check() {
+        let mut catalog = catalog();
+        catalog.escape_rope.item_id = "ESCAPE ROPE".to_string();
+
+        assert_eq!(
+            validate_field_escape_item(&catalog, &escape_item("ESCAPE_ROPE", Some("DIG_WARP"))),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "item_id".to_string(),
+                value: "ESCAPE ROPE".to_string(),
+            })
+        );
+
+        catalog.escape_rope.item_id = "ESCAPE_ROPE".to_string();
+        catalog.escape_rope.escape_rope_mode = "DIG WARP".to_string();
+        assert_eq!(
+            validate_field_escape_item(&catalog, &escape_item("ESCAPE_ROPE", Some("DIG_WARP"))),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "escape_rope_mode".to_string(),
+                value: "DIG WARP".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1796,6 +1875,23 @@ mod tests {
             &field_effect_item("MOD_BICYCLE", "UNRELATED_EFFECT"),
         )
         .expect("catalog bicycle item id accepted");
+    }
+
+    #[test]
+    fn bicycle_item_rejects_malformed_catalog_item_id_before_item_check() {
+        let mut catalog = catalog();
+        catalog.bicycle.item_id = "MOD BICYCLE".to_string();
+
+        assert_eq!(
+            validate_bicycle_item(
+                &catalog,
+                &field_effect_item("MOD_BICYCLE", "BICYCLE_EFFECT")
+            ),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "item_id".to_string(),
+                value: "MOD BICYCLE".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1884,27 +1980,39 @@ mod tests {
                     variant: "tree".to_string(),
                 },
                 FieldMoveReplacement {
-                    tileset: "johto".to_string(),
+                    tileset: "johto cave".to_string(),
                     block_id: 3,
                     replacement_block_id: 4,
-                    variant: " grass".to_string(),
+                    variant: "tall grass".to_string(),
                 },
                 FieldMoveReplacement {
-                    tileset: "johto".to_string(),
+                    tileset: "johto cave".to_string(),
                     block_id: 3,
                     replacement_block_id: 5,
                     variant: "tree".to_string(),
                 },
+                FieldMoveReplacement {
+                    tileset: "JOHTO_CAVE".to_string(),
+                    block_id: 3,
+                    replacement_block_id: 6,
+                    variant: "TREE".to_string(),
+                },
+                FieldMoveReplacement {
+                    tileset: "JOHTO_CAVE".to_string(),
+                    block_id: 3,
+                    replacement_block_id: 7,
+                    variant: "TREE".to_string(),
+                },
             ],
         };
         catalog.fly = FieldMoveRule {
-            move_id: " FLY".to_string(),
+            move_id: "FL Y".to_string(),
             badge: badge(BADGE_STORM),
         };
         catalog.strength = FieldMoveFlagRule {
             move_id: "STRENGTH".to_string(),
             badge: badge(BADGE_PLAIN),
-            engine_flag: "".to_string(),
+            engine_flag: "ENGINE STRENGTH".to_string(),
         };
         catalog.waterfall = FieldMoveTravelRule {
             move_id: "WATERFALL".to_string(),
@@ -1952,6 +2060,11 @@ mod tests {
         );
         assert!(
             issues.contains(&FieldMoveCatalogIssue::DuplicateReplacement {
+                subject: "field_moves:cut:replacement:4".to_string(),
+            })
+        );
+        assert!(
+            !issues.contains(&FieldMoveCatalogIssue::DuplicateReplacement {
                 subject: "field_moves:cut:replacement:2".to_string(),
             })
         );
@@ -1984,6 +2097,9 @@ mod tests {
         catalog.itemfinder = FieldItemRule {
             item_id: " ITEMFINDER".to_string(),
         };
+        catalog.coin_case = FieldItemRule {
+            item_id: "COIN CASE".to_string(),
+        };
 
         let mut escape_rope = escape_item("ESCAPE_ROPE", Some("DIG_WARP"));
         escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
@@ -2009,5 +2125,30 @@ mod tests {
         assert!(issues.contains(&FieldMoveCatalogIssue::InvalidFieldItemId {
             subject: "field_moves:itemfinder".to_string(),
         }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidFieldItemId {
+            subject: "field_moves:coin_case".to_string(),
+        }));
+    }
+
+    #[test]
+    fn field_move_catalog_issues_reject_invalid_escape_rule_without_unknown_fallback() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.escape_rope = FieldEscapeItemRule {
+            item_id: "ESCAPE ROPE".to_string(),
+            escape_rope_mode: "DIG WARP".to_string(),
+        };
+
+        let escape_rope = escape_item("ESCAPE_ROPE", Some("DIG_WARP"));
+        let items = BTreeMap::from([("ESCAPE_ROPE".to_string(), escape_rope)]);
+
+        let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
+
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEscapeItemId));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEscapeItemMode));
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| matches!(issue, FieldMoveCatalogIssue::UnknownEscapeItemRule { .. }))
+        );
     }
 }

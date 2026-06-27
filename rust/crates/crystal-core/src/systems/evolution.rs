@@ -200,8 +200,7 @@ pub fn evolution_table_issues(
                 },
                 METHOD_TRADE => {
                     if let Some(item_id) = entry.held_item.as_deref() {
-                        if item_id != TRADE_ANY_ITEM
-                            && !is_exact_nonempty_evolution_token(item_id)
+                        if item_id != TRADE_ANY_ITEM && !is_exact_nonempty_evolution_token(item_id)
                         {
                             issues.push(EvolutionTableIssue::InvalidTradeItem {
                                 source_species_id: source_species_id.clone(),
@@ -255,7 +254,11 @@ pub fn evolution_table_issues(
 }
 
 fn is_exact_nonempty_evolution_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,20 +416,32 @@ pub enum EvolutionError {
     MissingLearnset { species_id: String },
     #[error("evolution target species {species_id} was not loaded")]
     MissingTargetSpecies { species_id: String },
+    #[error("invalid evolution species id {species_id}")]
+    InvalidSpeciesId { species_id: String },
     #[error("item evolution for {species_id} is missing required item")]
     MissingRequiredItem { species_id: String },
+    #[error("invalid evolution item {item_id} for {species_id}")]
+    InvalidItem { species_id: String, item_id: String },
     #[error("level evolution for {species_id} is missing required level")]
     MissingRequiredLevel { species_id: String },
     #[error("happiness evolution for {species_id} is missing required window")]
     MissingHappinessWindow { species_id: String },
+    #[error("invalid happiness window {window} for {species_id}")]
+    InvalidHappinessWindow { species_id: String, window: String },
     #[error("stat evolution for {species_id} is missing required ratio")]
     MissingStatRatio { species_id: String },
+    #[error("invalid stat ratio {ratio} for {species_id}")]
+    InvalidStatRatio { species_id: String, ratio: String },
     #[error("unknown happiness window {window} for {species_id}")]
     UnknownHappinessWindow { species_id: String, window: String },
     #[error("unknown stat ratio {ratio} for {species_id}")]
     UnknownStatRatio { species_id: String, ratio: String },
+    #[error("invalid evolution method {method} for {species_id}")]
+    InvalidMethod { species_id: String, method: String },
     #[error("unknown evolution method {method} for {species_id}")]
     UnknownMethod { species_id: String, method: String },
+    #[error("invalid move id {move_id} in evolution learnset")]
+    InvalidMoveId { move_id: String },
     #[error("missing move data for evolution move {move_id}")]
     MissingMoveData { move_id: String },
 }
@@ -440,8 +455,22 @@ pub fn find_evolution_candidate<'a>(
     if species_id.is_empty() {
         return Err(EvolutionError::MissingSpeciesId);
     }
+    validate_evolution_runtime_token(species_id).map_err(|_| EvolutionError::InvalidSpeciesId {
+        species_id: species_id.to_string(),
+    })?;
 
     for entry in table.entries_for(species_id)? {
+        validate_evolution_runtime_token(&entry.method).map_err(|_| {
+            EvolutionError::InvalidMethod {
+                species_id: species_id.to_string(),
+                method: entry.method.clone(),
+            }
+        })?;
+        validate_evolution_runtime_token(&entry.species).map_err(|_| {
+            EvolutionError::InvalidSpeciesId {
+                species_id: entry.species.clone(),
+            }
+        })?;
         match entry.method.as_str() {
             METHOD_ITEM => {
                 if !context.force_evolution || context.link_mode != LinkMode::None {
@@ -454,6 +483,12 @@ pub fn find_evolution_candidate<'a>(
                         .ok_or_else(|| EvolutionError::MissingRequiredItem {
                             species_id: species_id.to_string(),
                         })?;
+                validate_evolution_runtime_token(required).map_err(|_| {
+                    EvolutionError::InvalidItem {
+                        species_id: species_id.to_string(),
+                        item_id: required.to_string(),
+                    }
+                })?;
                 if Some(required) == context.current_item {
                     return Ok(Some(entry));
                 }
@@ -483,6 +518,12 @@ pub fn find_evolution_candidate<'a>(
                 let window = entry.happiness.as_deref().ok_or_else(|| {
                     EvolutionError::MissingHappinessWindow {
                         species_id: species_id.to_string(),
+                    }
+                })?;
+                validate_evolution_runtime_token(window).map_err(|_| {
+                    EvolutionError::InvalidHappinessWindow {
+                        species_id: species_id.to_string(),
+                        window: window.to_string(),
                     }
                 })?;
                 match window {
@@ -522,6 +563,12 @@ pub fn find_evolution_candidate<'a>(
                         species_id: species_id.to_string(),
                     }
                 })?;
+                validate_evolution_runtime_token(ratio).map_err(|_| {
+                    EvolutionError::InvalidStatRatio {
+                        species_id: species_id.to_string(),
+                        ratio: ratio.to_string(),
+                    }
+                })?;
                 let matches_ratio = match ratio {
                     STAT_ATK_GT_DEF => pokemon.attack > pokemon.defense,
                     STAT_ATK_LT_DEF => pokemon.attack < pokemon.defense,
@@ -547,6 +594,12 @@ pub fn find_evolution_candidate<'a>(
                 if required == TRADE_ANY_ITEM {
                     return Ok(Some(entry));
                 }
+                validate_evolution_runtime_token(required).map_err(|_| {
+                    EvolutionError::InvalidItem {
+                        species_id: species_id.to_string(),
+                        item_id: required.to_string(),
+                    }
+                })?;
                 if context.link_mode == LinkMode::TimeCapsule {
                     continue;
                 }
@@ -565,17 +618,32 @@ pub fn find_evolution_candidate<'a>(
     Ok(None)
 }
 
+fn validate_evolution_runtime_token(value: &str) -> Result<(), ()> {
+    if is_exact_nonempty_evolution_token(value) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 pub fn evolve_pokemon(
     pokemon: &mut Pokemon,
     entry: &EvolutionEntry,
     context: &EvolutionContext<'_>,
     include_intro: bool,
 ) -> Result<EvolutionReport, EvolutionError> {
+    validate_evolution_runtime_token(&entry.species).map_err(|_| {
+        EvolutionError::InvalidSpeciesId {
+            species_id: entry.species.clone(),
+        }
+    })?;
     let target_species = context.species.get(&entry.species).ok_or_else(|| {
         EvolutionError::MissingTargetSpecies {
             species_id: entry.species.clone(),
         }
     })?;
+    let learned_moves =
+        evolution_moves_for(&target_species.id, pokemon.level, &pokemon.moves, context)?;
 
     let mut events = Vec::new();
     if include_intro {
@@ -601,7 +669,8 @@ pub fn evolve_pokemon(
         }
     }
 
-    for learned in learn_evolution_moves(pokemon, context)? {
+    pokemon.moves.extend(learned_moves.clone());
+    for learned in learned_moves {
         events.push(EvolutionEvent::MoveLearned(learned.name));
     }
 
@@ -647,28 +716,33 @@ fn refresh_evolved_stats(pokemon: &mut Pokemon, old_max_hp: u16, old_hp: u16) {
     pokemon.hp = (i32::from(old_hp) + hp_delta).clamp(0, i32::from(stats.max_hp)) as u16;
 }
 
-fn learn_evolution_moves(
-    pokemon: &mut Pokemon,
+fn evolution_moves_for(
+    species_id: &str,
+    level: u8,
+    known_moves: &[LearnedMove],
     context: &EvolutionContext<'_>,
 ) -> Result<Vec<LearnedMove>, EvolutionError> {
-    if pokemon.level == 0 {
+    if level == 0 {
         return Ok(Vec::new());
     }
-    let mut current = pokemon.moves.clone();
+    let mut current = known_moves.to_vec();
     let mut learned = Vec::new();
     for LearnsetEntry(learn_level, move_name) in
-        level_up_moves_for_species(context.learnsets, &pokemon.species.id).map_err(|_| {
+        level_up_moves_for_species(context.learnsets, species_id).map_err(|_| {
             EvolutionError::MissingLearnset {
-                species_id: pokemon.species.id.clone(),
+                species_id: species_id.to_string(),
             }
         })?
     {
-        if *learn_level != pokemon.level
+        if *learn_level != level
             || current.iter().any(|known| known.name == *move_name)
             || current.len() >= 4
         {
             continue;
         }
+        validate_evolution_runtime_token(move_name).map_err(|_| EvolutionError::InvalidMoveId {
+            move_id: move_name.clone(),
+        })?;
         let move_data =
             context
                 .moves
@@ -684,7 +758,6 @@ fn learn_evolution_moves(
         current.push(entry.clone());
         learned.push(entry);
     }
-    pokemon.moves = current;
     Ok(learned)
 }
 
@@ -757,10 +830,13 @@ mod tests {
                             stat_ratio: None,
                         },
                         EvolutionEntry::item(" BAYLEEF", " THUNDERSTONE"),
+                        EvolutionEntry::item("BAY LEEF", "THUNDER STONE"),
                         EvolutionEntry::item("bayleef", "thunderstone"),
                         EvolutionEntry::happiness("BAYLEEF", " MORNING"),
+                        EvolutionEntry::happiness("BAYLEEF", "TR MORNDAY"),
                         EvolutionEntry::happiness("BAYLEEF", "MORNING"),
                         EvolutionEntry::trade("BAYLEEF", Some(" kings_rock")),
+                        EvolutionEntry::trade("BAYLEEF", Some("KINGS ROCK")),
                         EvolutionEntry::trade("BAYLEEF", Some("kings_rock")),
                         EvolutionEntry {
                             method: METHOD_STAT.to_string(),
@@ -778,10 +854,28 @@ mod tests {
                             item: None,
                             held_item: None,
                             happiness: None,
+                            stat_ratio: Some("ATK GT_DEF".to_string()),
+                        },
+                        EvolutionEntry {
+                            method: METHOD_STAT.to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
                             stat_ratio: Some("ATTACKIER".to_string()),
                         },
                         EvolutionEntry {
                             method: " MOON_PHASE".to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: None,
+                        },
+                        EvolutionEntry {
+                            method: "MOON PHASE".to_string(),
                             species: "BAYLEEF".to_string(),
                             level: None,
                             item: None,
@@ -825,6 +919,14 @@ mod tests {
                     source_species_id: "CHIKORITA".to_string(),
                     item_id: " THUNDERSTONE".to_string(),
                 },
+                EvolutionTableIssue::InvalidTargetSpecies {
+                    source_species_id: "CHIKORITA".to_string(),
+                    target_species_id: "BAY LEEF".to_string(),
+                },
+                EvolutionTableIssue::InvalidItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: "THUNDER STONE".to_string(),
+                },
                 EvolutionTableIssue::UnknownTargetSpecies {
                     source_species_id: "CHIKORITA".to_string(),
                     target_species_id: "bayleef".to_string(),
@@ -837,6 +939,10 @@ mod tests {
                     source_species_id: "CHIKORITA".to_string(),
                     window: " MORNING".to_string(),
                 },
+                EvolutionTableIssue::InvalidHappinessWindow {
+                    source_species_id: "CHIKORITA".to_string(),
+                    window: "TR MORNDAY".to_string(),
+                },
                 EvolutionTableIssue::UnknownHappinessWindow {
                     source_species_id: "CHIKORITA".to_string(),
                     window: "MORNING".to_string(),
@@ -844,6 +950,10 @@ mod tests {
                 EvolutionTableIssue::InvalidTradeItem {
                     source_species_id: "CHIKORITA".to_string(),
                     item_id: " kings_rock".to_string(),
+                },
+                EvolutionTableIssue::InvalidTradeItem {
+                    source_species_id: "CHIKORITA".to_string(),
+                    item_id: "KINGS ROCK".to_string(),
                 },
                 EvolutionTableIssue::UnknownTradeItem {
                     source_species_id: "CHIKORITA".to_string(),
@@ -859,6 +969,13 @@ mod tests {
                 EvolutionTableIssue::MissingStatLevel {
                     source_species_id: "CHIKORITA".to_string(),
                 },
+                EvolutionTableIssue::InvalidStatRatio {
+                    source_species_id: "CHIKORITA".to_string(),
+                    ratio: "ATK GT_DEF".to_string(),
+                },
+                EvolutionTableIssue::MissingStatLevel {
+                    source_species_id: "CHIKORITA".to_string(),
+                },
                 EvolutionTableIssue::UnknownStatRatio {
                     source_species_id: "CHIKORITA".to_string(),
                     ratio: "ATTACKIER".to_string(),
@@ -866,6 +983,10 @@ mod tests {
                 EvolutionTableIssue::InvalidMethod {
                     source_species_id: "CHIKORITA".to_string(),
                     method: " MOON_PHASE".to_string(),
+                },
+                EvolutionTableIssue::InvalidMethod {
+                    source_species_id: "CHIKORITA".to_string(),
+                    method: "MOON PHASE".to_string(),
                 },
                 EvolutionTableIssue::UnknownMethod {
                     source_species_id: "CHIKORITA".to_string(),
@@ -1113,6 +1234,53 @@ mod tests {
                 species_id: "IVYSAUR".to_string(),
             })
         );
+        assert_eq!(pokemon.species.id, "BULBASAUR");
+        assert!(pokemon.moves.is_empty());
+    }
+
+    #[test]
+    fn evolution_rejects_malformed_target_species_before_mutation() {
+        let species_map = BTreeMap::new();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let entry = EvolutionEntry::level("IVY SAUR", 16);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut pokemon = pokemon("BULBASAUR", 16);
+
+        assert_eq!(
+            evolve_pokemon(&mut pokemon, &entry, &context, false),
+            Err(EvolutionError::InvalidSpeciesId {
+                species_id: "IVY SAUR".to_string(),
+            })
+        );
+        assert_eq!(pokemon.species.id, "BULBASAUR");
+        assert!(pokemon.moves.is_empty());
+    }
+
+    #[test]
+    fn evolution_rejects_malformed_learned_move_before_mutation() {
+        let species_map: BTreeMap<_, _> = [("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60))]
+            .into_iter()
+            .collect();
+        let moves = BTreeMap::new();
+        let learnsets = [(
+            "IVYSAUR".to_string(),
+            vec![LearnsetEntry(16, "VINE WHIP".to_string())],
+        )]
+        .into_iter()
+        .collect();
+        let entry = EvolutionEntry::level("IVYSAUR", 16);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut pokemon = pokemon("BULBASAUR", 16);
+
+        assert_eq!(
+            evolve_pokemon(&mut pokemon, &entry, &context, false),
+            Err(EvolutionError::InvalidMoveId {
+                move_id: "VINE WHIP".to_string(),
+            })
+        );
+        assert_eq!(pokemon.species.id, "BULBASAUR");
+        assert!(pokemon.moves.is_empty());
     }
 
     #[test]
@@ -1246,6 +1414,22 @@ mod tests {
             })
         );
 
+        let malformed_window = EvolutionTable(
+            [(
+                "EEVEE".to_string(),
+                vec![EvolutionEntry::happiness("ESPEON", "MORN DAY")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon, &malformed_window, &context),
+            Err(EvolutionError::InvalidHappinessWindow {
+                species_id: "EEVEE".to_string(),
+                window: "MORN DAY".to_string(),
+            })
+        );
+
         let bad_method = EvolutionTable(
             [(
                 "EEVEE".to_string(),
@@ -1267,6 +1451,30 @@ mod tests {
             Err(EvolutionError::UnknownMethod {
                 species_id: "EEVEE".to_string(),
                 method: "MOON_PHASE".to_string(),
+            })
+        );
+
+        let malformed_method = EvolutionTable(
+            [(
+                "EEVEE".to_string(),
+                vec![EvolutionEntry {
+                    method: "MOON PHASE".to_string(),
+                    species: "UMBREON".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon, &malformed_method, &context),
+            Err(EvolutionError::InvalidMethod {
+                species_id: "EEVEE".to_string(),
+                method: "MOON PHASE".to_string(),
             })
         );
     }
@@ -1326,6 +1534,31 @@ mod tests {
             })
         );
 
+        let malformed_item = EvolutionTable(
+            [(
+                "BULBASAUR".to_string(),
+                vec![EvolutionEntry::item("IVYSAUR", "LEAF STONE")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let item_context = EvolutionContext {
+            species: context.species,
+            moves: context.moves,
+            learnsets: context.learnsets,
+            time_of_day: context.time_of_day,
+            current_item: Some("LEAF_STONE"),
+            force_evolution: true,
+            link_mode: context.link_mode,
+        };
+        assert_eq!(
+            find_evolution_candidate(&pokemon("BULBASAUR", 16), &malformed_item, &item_context,),
+            Err(EvolutionError::InvalidItem {
+                species_id: "BULBASAUR".to_string(),
+                item_id: "LEAF STONE".to_string(),
+            })
+        );
+
         let missing_stat_level = EvolutionTable(
             [(
                 "TYROGUE".to_string(),
@@ -1369,6 +1602,30 @@ mod tests {
             find_evolution_candidate(&pokemon("TYROGUE", 20), &missing_ratio, &context),
             Err(EvolutionError::MissingStatRatio {
                 species_id: "TYROGUE".to_string(),
+            })
+        );
+
+        let malformed_stat_ratio = EvolutionTable(
+            [(
+                "TYROGUE".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_STAT.to_string(),
+                    species: "HITMONLEE".to_string(),
+                    level: Some(20),
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: Some("ATK GT_DEF".to_string()),
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&pokemon("TYROGUE", 20), &malformed_stat_ratio, &context),
+            Err(EvolutionError::InvalidStatRatio {
+                species_id: "TYROGUE".to_string(),
+                ratio: "ATK GT_DEF".to_string(),
             })
         );
     }

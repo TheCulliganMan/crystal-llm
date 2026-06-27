@@ -248,8 +248,16 @@ pub fn map_event_section_command_issues(
 
 fn invalid_section_arg(args: &[String]) -> Option<String> {
     args.iter()
-        .find(|arg| arg.is_empty() || arg.trim() != **arg)
+        .find(|arg| !is_exact_nonempty_section_arg(arg))
         .cloned()
+}
+
+fn is_exact_nonempty_section_arg(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +401,19 @@ mod tests {
         assert_eq!(
             map_script_section_command_issues(
                 &MapScriptSectionCommand {
+                    command: "scene_script".to_string(),
+                    args: vec!["Known Script".to_string()],
+                    command_index: 5,
+                },
+                &labels,
+            ),
+            vec![MapScriptSectionCommandIssue::InvalidArg {
+                arg: "Known Script".to_string()
+            }]
+        );
+        assert_eq!(
+            map_script_section_command_issues(
+                &MapScriptSectionCommand {
                     command: "callback".to_string(),
                     args: vec![
                         "MAPCALLBACK_OBJECTS".to_string(),
@@ -458,6 +479,24 @@ mod tests {
             ),
             vec![MapEventSectionCommandIssue::InvalidArg {
                 arg: " KnownSign".to_string()
+            }]
+        );
+        assert_eq!(
+            map_event_section_command_issues(
+                &MapEventSectionCommand {
+                    command: "bg_event".to_string(),
+                    args: vec![
+                        "1".to_string(),
+                        "2".to_string(),
+                        "BGEVENT READ".to_string(),
+                        "KnownSign".to_string(),
+                    ],
+                    command_index: 5,
+                },
+                &labels,
+            ),
+            vec![MapEventSectionCommandIssue::InvalidArg {
+                arg: "BGEVENT READ".to_string()
             }]
         );
         assert_eq!(

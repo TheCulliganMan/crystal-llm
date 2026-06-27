@@ -35,6 +35,7 @@ pub enum FrontpicAnimCommandIssue {
     MissingFrame,
     MissingSetRepeatCount,
     MissingDoRepeatTarget,
+    InvalidDoRepeatTarget,
     UnknownCommand,
 }
 
@@ -122,6 +123,17 @@ pub fn frontpic_anim_catalog_issues(
                     command: command.kind.clone(),
                     issue,
                 });
+            } else if command.kind == FRONTPIC_ANIM_DO_REPEAT_COMMAND
+                && command
+                    .target
+                    .is_some_and(|target| usize::from(target) >= program.commands.len())
+            {
+                issues.push(FrontpicAnimCatalogIssue::Command {
+                    species_id: species_id.clone(),
+                    index,
+                    command: command.kind.clone(),
+                    issue: FrontpicAnimCommandIssue::InvalidDoRepeatTarget,
+                });
             }
         }
     }
@@ -136,7 +148,11 @@ pub fn frontpic_anim_catalog_issues(
 }
 
 fn is_exact_nonempty_frontpic_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn is_frontpic_animation_asset_key(species_id: &str, species_ids: &BTreeSet<String>) -> bool {
@@ -238,6 +254,15 @@ mod tests {
                 },
             ),
             (
+                "CHIKO RITA".to_string(),
+                FrontpicAnimProgram {
+                    commands: vec![FrontpicAnimCommand {
+                        kind: FRONTPIC_ANIM_END_COMMAND.to_string(),
+                        ..FrontpicAnimCommand::default()
+                    }],
+                },
+            ),
+            (
                 "chikorita".to_string(),
                 FrontpicAnimProgram {
                     commands: Vec::new(),
@@ -262,6 +287,16 @@ mod tests {
                 },
             ),
             (
+                "UNOWN_B".to_string(),
+                FrontpicAnimProgram {
+                    commands: vec![FrontpicAnimCommand {
+                        kind: FRONTPIC_ANIM_DO_REPEAT_COMMAND.to_string(),
+                        target: Some(7),
+                        ..FrontpicAnimCommand::default()
+                    }],
+                },
+            ),
+            (
                 "UNOWN_aa".to_string(),
                 FrontpicAnimProgram {
                     commands: vec![FrontpicAnimCommand {
@@ -278,11 +313,20 @@ mod tests {
                 FrontpicAnimCatalogIssue::InvalidSpeciesId {
                     species_id: " BAYLEEF".to_string(),
                 },
+                FrontpicAnimCatalogIssue::InvalidSpeciesId {
+                    species_id: "CHIKO RITA".to_string(),
+                },
                 FrontpicAnimCatalogIssue::Command {
                     species_id: "CHIKORITA".to_string(),
                     index: 0,
                     command: FRONTPIC_ANIM_FRAME_COMMAND.to_string(),
                     issue: FrontpicAnimCommandIssue::MissingFrame,
+                },
+                FrontpicAnimCatalogIssue::Command {
+                    species_id: "UNOWN_B".to_string(),
+                    index: 0,
+                    command: FRONTPIC_ANIM_DO_REPEAT_COMMAND.to_string(),
+                    issue: FrontpicAnimCommandIssue::InvalidDoRepeatTarget,
                 },
                 FrontpicAnimCatalogIssue::UnknownSpecies {
                     species_id: "UNOWN_aa".to_string(),

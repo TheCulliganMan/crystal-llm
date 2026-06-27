@@ -17,6 +17,14 @@ impl TrainerCatalog {
             return Err(TrainerCatalogError::MissingTrainerClass {
                 trainer_id: trainer.trainer_id,
             });
+        } else if !is_exact_nonempty_trainer_token(&trainer.trainer_class) {
+            return Err(TrainerCatalogError::InvalidTrainerClass {
+                trainer_id: trainer.trainer_id,
+                trainer_class: trainer.trainer_class,
+            });
+        }
+        if self.trainers.contains_key(&trainer_id) {
+            return Err(TrainerCatalogError::DuplicateTrainerId { trainer_id });
         }
         self.trainers.insert(trainer_id, trainer);
         Ok(())
@@ -93,21 +101,23 @@ impl Default for Trainer {
 pub enum TrainerCatalogError {
     #[error("trainer is missing explicit trainer_id")]
     MissingTrainerId,
-    #[error("trainer id '{trainer_id}' must be exact and untrimmed")]
+    #[error("trainer id '{trainer_id}' must be an exact nonempty id token")]
     InvalidTrainerId { trainer_id: String },
     #[error("trainer '{trainer_id}' is missing explicit trainer_class")]
     MissingTrainerClass { trainer_id: String },
-    #[error("trainer '{trainer_id}' class '{trainer_class}' must be exact and untrimmed")]
+    #[error("trainer '{trainer_id}' class '{trainer_class}' must be an exact nonempty id token")]
     InvalidTrainerClass {
         trainer_id: String,
         trainer_class: String,
     },
+    #[error("trainer id '{trainer_id}' is duplicated")]
+    DuplicateTrainerId { trainer_id: String },
 }
 
 pub fn trainer_key(trainer: &Trainer) -> Result<String, TrainerCatalogError> {
     if trainer.trainer_id.is_empty() {
         Err(TrainerCatalogError::MissingTrainerId)
-    } else if trainer.trainer_id.trim() != trainer.trainer_id {
+    } else if !is_exact_nonempty_trainer_token(&trainer.trainer_id) {
         Err(TrainerCatalogError::InvalidTrainerId {
             trainer_id: trainer.trainer_id.clone(),
         })
@@ -118,19 +128,63 @@ pub fn trainer_key(trainer: &Trainer) -> Result<String, TrainerCatalogError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrainerCatalogIssue {
-    KeyMismatch { key: String, trainer_id: String },
-    InvalidTrainerId { trainer_id: String },
-    MissingTrainerClass { trainer_id: String },
-    InvalidTrainerClass { trainer_id: String, trainer_class: String },
-    EmptyParty { trainer_id: String },
-    InvalidPartySpecies { trainer_id: String, slot: usize, species: String },
-    UnknownPartySpecies { trainer_id: String, slot: usize, species: String },
-    InvalidPartyItem { trainer_id: String, slot: usize, item_id: String },
-    UnknownPartyItem { trainer_id: String, slot: usize, item_id: String },
-    InvalidBattleItem { trainer_id: String, slot: usize, item_id: String },
-    UnknownBattleItem { trainer_id: String, slot: usize, item_id: String },
-    InvalidPartyMove { trainer_id: String, slot: usize, move_id: String },
-    UnknownPartyMove { trainer_id: String, slot: usize, move_id: String },
+    KeyMismatch {
+        key: String,
+        trainer_id: String,
+    },
+    InvalidTrainerId {
+        trainer_id: String,
+    },
+    MissingTrainerClass {
+        trainer_id: String,
+    },
+    InvalidTrainerClass {
+        trainer_id: String,
+        trainer_class: String,
+    },
+    EmptyParty {
+        trainer_id: String,
+    },
+    InvalidPartySpecies {
+        trainer_id: String,
+        slot: usize,
+        species: String,
+    },
+    UnknownPartySpecies {
+        trainer_id: String,
+        slot: usize,
+        species: String,
+    },
+    InvalidPartyItem {
+        trainer_id: String,
+        slot: usize,
+        item_id: String,
+    },
+    UnknownPartyItem {
+        trainer_id: String,
+        slot: usize,
+        item_id: String,
+    },
+    InvalidBattleItem {
+        trainer_id: String,
+        slot: usize,
+        item_id: String,
+    },
+    UnknownBattleItem {
+        trainer_id: String,
+        slot: usize,
+        item_id: String,
+    },
+    InvalidPartyMove {
+        trainer_id: String,
+        slot: usize,
+        move_id: String,
+    },
+    UnknownPartyMove {
+        trainer_id: String,
+        slot: usize,
+        move_id: String,
+    },
 }
 
 pub fn trainer_catalog_issues(
@@ -156,7 +210,7 @@ pub fn trainer_catalog_issues(
             issues.push(TrainerCatalogIssue::MissingTrainerClass {
                 trainer_id: trainer.trainer_id.clone(),
             });
-        } else if trainer.trainer_class.trim() != trainer.trainer_class {
+        } else if !is_exact_nonempty_trainer_token(&trainer.trainer_class) {
             issues.push(TrainerCatalogIssue::InvalidTrainerClass {
                 trainer_id: trainer.trainer_id.clone(),
                 trainer_class: trainer.trainer_class.clone(),
@@ -235,7 +289,11 @@ pub fn trainer_catalog_issues(
 }
 
 fn is_exact_nonempty_trainer_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -319,6 +377,60 @@ mod tests {
             .to_string();
 
         assert!(error.contains("missing field `trainers`"), "{error}");
+    }
+
+    #[test]
+    fn trainer_catalog_insert_rejects_non_token_identity_without_coercion() {
+        let mut catalog = TrainerCatalog::default();
+        let trainer_id_error = catalog
+            .insert(Trainer {
+                trainer_id: "YOUNGSTER JOEY".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                ..Trainer::default()
+            })
+            .expect_err("trainer ids must be id tokens");
+        assert_eq!(
+            trainer_id_error,
+            TrainerCatalogError::InvalidTrainerId {
+                trainer_id: "YOUNGSTER JOEY".to_string(),
+            }
+        );
+
+        let trainer_class_error = catalog
+            .insert(Trainer {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "YOUNG STER".to_string(),
+                ..Trainer::default()
+            })
+            .expect_err("trainer classes must be id tokens");
+        assert_eq!(
+            trainer_class_error,
+            TrainerCatalogError::InvalidTrainerClass {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "YOUNG STER".to_string(),
+            }
+        );
+
+        catalog
+            .insert(Trainer {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                ..Trainer::default()
+            })
+            .expect("first trainer id is unique");
+        let duplicate_error = catalog
+            .insert(Trainer {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                ..Trainer::default()
+            })
+            .expect_err("trainer catalog must not overwrite duplicate ids");
+        assert_eq!(
+            duplicate_error,
+            TrainerCatalogError::DuplicateTrainerId {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -448,7 +560,9 @@ mod tests {
         trainer.party.clear();
         trainer.items.clear();
         let catalog = TrainerCatalog {
-            trainers: [(trainer.trainer_id.clone(), trainer)].into_iter().collect(),
+            trainers: [(trainer.trainer_id.clone(), trainer)]
+                .into_iter()
+                .collect(),
         };
 
         assert_eq!(

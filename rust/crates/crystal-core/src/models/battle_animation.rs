@@ -8,6 +8,10 @@ pub enum BattleAnimationCatalogIssue {
     InvalidTableEntry {
         index: usize,
     },
+    UnknownTableAnimation {
+        index: usize,
+        label: String,
+    },
     TableCountMismatch {
         actual_count: usize,
         expected_count: usize,
@@ -31,6 +35,11 @@ pub fn battle_animation_catalog_issues(
     for (index, label) in animation_table.iter().enumerate() {
         if !is_exact_nonempty_battle_animation_token(label) {
             issues.push(BattleAnimationCatalogIssue::InvalidTableEntry { index });
+        } else if !animations.contains_key(label) {
+            issues.push(BattleAnimationCatalogIssue::UnknownTableAnimation {
+                index,
+                label: label.clone(),
+            });
         }
     }
     if !animation_table.is_empty() && animation_table.len() != move_count + 1 {
@@ -44,7 +53,11 @@ pub fn battle_animation_catalog_issues(
 }
 
 fn is_exact_nonempty_battle_animation_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -59,6 +72,10 @@ mod tests {
                 " BattleAnim_Padded".to_string(),
                 vec!["anim_wait 1".to_string()],
             ),
+            (
+                "BattleAnim Tackle".to_string(),
+                vec!["anim_wait 1".to_string()],
+            ),
             ("BattleAnim_Pound".to_string(), Vec::new()),
             (
                 "BattleAnim_Tackle".to_string(),
@@ -71,6 +88,7 @@ mod tests {
             "BattleAnim_Dummy".to_string(),
             String::new(),
             "BattleAnim_Tackle ".to_string(),
+            "BattleAnim Tackle".to_string(),
         ];
 
         assert_eq!(
@@ -83,12 +101,20 @@ mod tests {
                     label: " BattleAnim_Padded".to_string(),
                 },
                 BattleAnimationCatalogIssue::InvalidAnimation {
+                    label: "BattleAnim Tackle".to_string(),
+                },
+                BattleAnimationCatalogIssue::InvalidAnimation {
                     label: "BattleAnim_Pound".to_string(),
+                },
+                BattleAnimationCatalogIssue::UnknownTableAnimation {
+                    index: 0,
+                    label: "BattleAnim_Dummy".to_string(),
                 },
                 BattleAnimationCatalogIssue::InvalidTableEntry { index: 1 },
                 BattleAnimationCatalogIssue::InvalidTableEntry { index: 2 },
+                BattleAnimationCatalogIssue::InvalidTableEntry { index: 3 },
                 BattleAnimationCatalogIssue::TableCountMismatch {
-                    actual_count: 3,
+                    actual_count: 4,
                     expected_count: 2,
                 },
             ],

@@ -199,10 +199,12 @@ fn apply_battle_rewards_with_experience(
     if defeated.hp != 0 {
         return Err(BattleRewardError::DefeatedPokemonNotFainted);
     }
-    let level_before = player.level;
-    player.experience = player.experience.saturating_add(experience_awarded);
-    add_stat_experience(player, defeated.species.base_stats);
-    let level_up = apply_experience_level_ups(player, moves, learnsets, growth_rates, rules)?;
+    let mut rewarded = player.clone();
+    let level_before = rewarded.level;
+    rewarded.experience = rewarded.experience.saturating_add(experience_awarded);
+    add_stat_experience(&mut rewarded, defeated.species.base_stats);
+    let level_up =
+        apply_experience_level_ups(&mut rewarded, moves, learnsets, growth_rates, rules)?;
     let evolution_context = crate::systems::evolution::EvolutionContext {
         species,
         moves,
@@ -212,7 +214,8 @@ fn apply_battle_rewards_with_experience(
         force_evolution: false,
         link_mode: crate::systems::evolution::LinkMode::None,
     };
-    let evolution = check_and_evolve(player, evolutions, &evolution_context, true)?;
+    let evolution = check_and_evolve(&mut rewarded, evolutions, &evolution_context, true)?;
+    *player = rewarded;
     Ok(BattleRewardOutcome {
         defeated_species: defeated.species.id.clone(),
         experience_awarded,
@@ -292,22 +295,24 @@ pub fn apply_direct_level_gain(
     level_gain: u8,
 ) -> Result<PokemonLevelUpOutcome, BattleRewardError> {
     require_positive_u8(rules.max_level, "max_level")?;
-    let level_before = player.level;
-    let experience_before = player.experience;
+    let mut leveled = player.clone();
+    let level_before = leveled.level;
+    let experience_before = leveled.experience;
     let target_level = player.level.saturating_add(level_gain).min(rules.max_level);
     let mut learned_moves = Vec::new();
-    while player.level < target_level {
-        player.level += 1;
-        player.experience = player.experience.max(calculate_experience(
+    while leveled.level < target_level {
+        leveled.level += 1;
+        leveled.experience = leveled.experience.max(calculate_experience(
             growth_rates,
-            &player.species.growth_rate,
-            player.level,
+            &leveled.species.growth_rate,
+            leveled.level,
         )?);
-        refresh_level_stats(player);
-        for learned in learn_moves_for_current_level(player, moves, learnsets)? {
+        refresh_level_stats(&mut leveled);
+        for learned in learn_moves_for_current_level(&mut leveled, moves, learnsets)? {
             learned_moves.push(learned.name);
         }
     }
+    *player = leveled;
     Ok(PokemonLevelUpOutcome {
         level_before,
         level_after: player.level,
@@ -662,6 +667,7 @@ mod tests {
         );
 
         defeated.hp = 0;
+        let player_before_missing_move = player.clone();
         assert_eq!(
             apply_wild_battle_rewards(
                 &reward_rules(),
@@ -678,5 +684,39 @@ mod tests {
                 move_id: "razor_leaf".to_string()
             })
         );
+        assert_eq!(player, player_before_missing_move);
+    }
+
+    #[test]
+    fn direct_level_gain_rejects_missing_move_without_partial_mutation() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.experience = calculate_experience(&growth_rates, "GROWTH_MEDIUM_FAST", 15).unwrap();
+        let player_before = player.clone();
+        let learnsets = [(
+            "CHIKORITA".to_string(),
+            vec![LearnsetEntry(16, "razor_leaf".to_string())],
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            apply_direct_level_gain(
+                &mut player,
+                &BTreeMap::new(),
+                &learnsets,
+                &growth_rates,
+                &reward_rules(),
+                1,
+            ),
+            Err(BattleRewardError::MissingMoveData {
+                move_id: "razor_leaf".to_string()
+            })
+        );
+        assert_eq!(player, player_before);
     }
 }

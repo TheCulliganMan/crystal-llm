@@ -164,7 +164,7 @@ pub fn move_priority_table_issues(
 
     let mut effect_priorities = BTreeSet::new();
     for entry in &priorities.effect_priorities {
-        if entry.move_effect.trim().is_empty() || entry.move_effect.trim() != entry.move_effect {
+        if !is_exact_battle_turn_token(&entry.move_effect) {
             issues.push(MovePriorityTableIssue::InvalidMoveEffectPriorityId {
                 move_effect: entry.move_effect.clone(),
             });
@@ -192,7 +192,7 @@ pub fn move_priority_table_issues(
     }
 
     for entry in &priorities.move_priorities {
-        if entry.r#move.trim().is_empty() || entry.r#move.trim() != entry.r#move {
+        if !is_exact_battle_turn_token(&entry.r#move) {
             issues.push(MovePriorityTableIssue::InvalidMovePriorityId {
                 move_name: entry.r#move.clone(),
             });
@@ -212,6 +212,14 @@ pub fn move_priority_table_issues(
     issues
 }
 
+fn is_exact_battle_turn_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleTurnError {
     MissingMoveSlot {
@@ -221,6 +229,14 @@ pub enum BattleTurnError {
     MissingMoveData {
         side: BattleSide,
         move_name: String,
+    },
+    InvalidMoveName {
+        side: BattleSide,
+        move_name: String,
+    },
+    InvalidItem {
+        side: BattleSide,
+        item_id: String,
     },
     UnknownItem {
         side: BattleSide,
@@ -486,6 +502,7 @@ fn execute_item(
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
+    validate_battle_turn_item_id(side, item_id)?;
     let item = items
         .get(item_id)
         .ok_or_else(|| BattleTurnError::UnknownItem {
@@ -534,6 +551,7 @@ fn execute_move_slot(
     else {
         return Err(BattleTurnError::MissingMoveSlot { side, slot });
     };
+    validate_battle_turn_move_name(side, &move_name)?;
     let Some(move_data) = moves.get(&move_name) else {
         return Err(BattleTurnError::MissingMoveData { side, move_name });
     };
@@ -639,6 +657,7 @@ fn action_priority(
                 .moves
                 .get(*slot)
                 .ok_or(BattleTurnError::MissingMoveSlot { side, slot: *slot })?;
+            validate_battle_turn_move_name(side, &learned.name)?;
             let move_data =
                 moves
                     .get(&learned.name)
@@ -650,6 +669,7 @@ fn action_priority(
         }
         BattleAction::Switch { .. } => Ok(6),
         BattleAction::Item { item_id } => {
+            validate_battle_turn_item_id(side, item_id)?;
             let item = items
                 .get(item_id)
                 .ok_or_else(|| BattleTurnError::UnknownItem {
@@ -666,6 +686,29 @@ fn action_priority(
         }
         BattleAction::Run => Err(BattleTurnError::UnsupportedRunAction { side }),
     }
+}
+
+fn validate_battle_turn_move_name(
+    side: BattleSide,
+    move_name: &str,
+) -> Result<(), BattleTurnError> {
+    if !is_exact_battle_turn_token(move_name) {
+        return Err(BattleTurnError::InvalidMoveName {
+            side,
+            move_name: move_name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_battle_turn_item_id(side: BattleSide, item_id: &str) -> Result<(), BattleTurnError> {
+    if !is_exact_battle_turn_token(item_id) {
+        return Err(BattleTurnError::InvalidItem {
+            side,
+            item_id: item_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub fn move_priority(
@@ -1291,6 +1334,10 @@ mod tests {
                     priority: 0,
                 },
                 MoveEffectPriority {
+                    move_effect: "NORMAL HIT".to_string(),
+                    priority: 0,
+                },
+                MoveEffectPriority {
                     move_effect: "NORMAL_HIT".to_string(),
                     priority: -1,
                 },
@@ -1299,6 +1346,10 @@ mod tests {
                 MovePriorityOverride {
                     r#move: " QUICK_ATTACK".to_string(),
                     priority: -1,
+                },
+                MovePriorityOverride {
+                    r#move: "QUICK ATTACK".to_string(),
+                    priority: 1,
                 },
                 MovePriorityOverride {
                     r#move: "EXTREME_SPEED".to_string(),
@@ -1313,6 +1364,9 @@ mod tests {
                 MovePriorityTableIssue::InvalidBasePriority { priority: -1 },
                 MovePriorityTableIssue::InvalidMoveEffectPriorityId {
                     move_effect: " NORMAL_HIT".to_string(),
+                },
+                MovePriorityTableIssue::InvalidMoveEffectPriorityId {
+                    move_effect: "NORMAL HIT".to_string(),
                 },
                 MovePriorityTableIssue::DuplicateMoveEffectPriority {
                     move_effect: "NORMAL_HIT".to_string(),
@@ -1331,6 +1385,9 @@ mod tests {
                 MovePriorityTableIssue::InvalidMovePriority {
                     move_name: " QUICK_ATTACK".to_string(),
                     priority: -1,
+                },
+                MovePriorityTableIssue::InvalidMovePriorityId {
+                    move_name: "QUICK ATTACK".to_string(),
                 },
                 MovePriorityTableIssue::UnknownMovePriority {
                     move_name: "EXTREME_SPEED".to_string(),
@@ -1575,6 +1632,32 @@ mod tests {
             }
         );
 
+        let invalid = resolve_battle_turn_with_items(
+            BattleCombatState::new(player.clone(), enemy.clone(), rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Item {
+                    item_id: "POT ION".to_string(),
+                },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &items,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect_err("malformed item id rejects before unknown lookup");
+        assert_eq!(
+            invalid,
+            BattleTurnError::InvalidItem {
+                side: BattleSide::Player,
+                item_id: "POT ION".to_string()
+            }
+        );
+
         let unusable = resolve_battle_turn_with_items(
             BattleCombatState::new(player.clone(), enemy.clone(), rng.seed()),
             BattleTurnInput {
@@ -1649,7 +1732,7 @@ mod tests {
         let mut rng = Random::new(1);
 
         let error = determine_turn_order(
-            &BattleCombatState::new(player, enemy, rng.seed()),
+            &BattleCombatState::new(player.clone(), enemy.clone(), rng.seed()),
             &BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
                 enemy: BattleAction::Move { slot: 0 },
@@ -1667,6 +1750,29 @@ mod tests {
             BattleTurnError::MissingMoveData {
                 side: BattleSide::Player,
                 move_name: "QUICK_ATTACK".to_string()
+            }
+        );
+
+        let malformed_player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "QUICK ATTACK");
+        let malformed_error = determine_turn_order(
+            &BattleCombatState::new(malformed_player, enemy, rng.seed()),
+            &BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &BTreeMap::new(),
+            &move_priorities(),
+            &stat_multipliers(),
+            &mut rng,
+        )
+        .expect_err("malformed move data must not fall back to normal priority");
+
+        assert_eq!(
+            malformed_error,
+            BattleTurnError::InvalidMoveName {
+                side: BattleSide::Player,
+                move_name: "QUICK ATTACK".to_string()
             }
         );
     }

@@ -135,6 +135,8 @@ pub enum ScriptRuntimeCommandError {
     EmptyArg { command: String },
     #[error("script runtime command '{command}' has a whitespace-padded argument '{arg}'")]
     PaddedArg { command: String, arg: String },
+    #[error("script runtime command '{command}' has invalid numeric token syntax '{token}'")]
+    InvalidNumericToken { command: String, token: String },
     #[error("script runtime command '{command}' has an unknown numeric token '{token}'")]
     UnknownNumericToken { command: String, token: String },
     #[error("script runtime command '{command}' requires script accumulator")]
@@ -171,8 +173,17 @@ pub enum ScriptRuntimeCommandIssue {
     UnknownSpecialRoutine {
         special_id: String,
     },
+    InvalidSpecialRoutine {
+        special_id: String,
+    },
     UnknownTrainer {
         trainer_id: String,
+    },
+    InvalidTrainer {
+        trainer_id: String,
+    },
+    InvalidTrainerClass {
+        trainer_class: String,
     },
     TrainerClassMismatch {
         trainer_id: String,
@@ -182,19 +193,37 @@ pub enum ScriptRuntimeCommandIssue {
     UnknownItem {
         item_id: String,
     },
+    InvalidItem {
+        item_id: String,
+    },
     UnknownSpecies {
+        species_id: String,
+    },
+    InvalidSpecies {
         species_id: String,
     },
     UnknownPhoneContact {
         contact_id: String,
     },
+    InvalidPhoneContact {
+        contact_id: String,
+    },
     UnknownSpecialPhoneCall {
+        call_id: String,
+    },
+    InvalidSpecialPhoneCall {
         call_id: String,
     },
     UnknownNpcTrade {
         trade_id: String,
     },
+    InvalidNpcTrade {
+        trade_id: String,
+    },
     UnknownTarget {
+        target_label: String,
+    },
+    InvalidTarget {
         target_label: String,
     },
 }
@@ -204,7 +233,39 @@ pub const SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID: &str = "ITEM_FROM_MEM";
 pub const SCRIPT_RUNTIME_CURRENT_BANK_TARGET: &str = "BANK(@)";
 
 fn is_exact_nonempty_runtime_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@' | b'(' | b')')
+        })
+}
+
+fn is_exact_nonempty_runtime_arg_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'.' | b'@' | b'(' | b')' | b'-' | b'+' | b'$' | b'%'
+                )
+        })
+}
+
+fn is_exact_nonempty_runtime_pack_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_nonempty_runtime_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
 pub fn script_runtime_command_issues(
@@ -219,7 +280,11 @@ pub fn script_runtime_command_issues(
     match command.command.as_str() {
         "special" => {
             let special_id = &command.args[0];
-            if !catalog.special_routines.contains(special_id) {
+            if !is_exact_nonempty_runtime_pack_id(special_id) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidSpecialRoutine {
+                    special_id: special_id.clone(),
+                });
+            } else if !catalog.special_routines.contains(special_id) {
                 issues.push(ScriptRuntimeCommandIssue::UnknownSpecialRoutine {
                     special_id: special_id.clone(),
                 });
@@ -228,6 +293,21 @@ pub fn script_runtime_command_issues(
         "gettrainername" => {
             let trainer_class = &command.args[1];
             let trainer_id = &command.args[2];
+            let valid_trainer_class = is_exact_nonempty_runtime_pack_id(trainer_class);
+            let valid_trainer_id = is_exact_nonempty_runtime_pack_id(trainer_id);
+            if !valid_trainer_class {
+                issues.push(ScriptRuntimeCommandIssue::InvalidTrainerClass {
+                    trainer_class: trainer_class.clone(),
+                });
+            }
+            if !valid_trainer_id {
+                issues.push(ScriptRuntimeCommandIssue::InvalidTrainer {
+                    trainer_id: trainer_id.clone(),
+                });
+            }
+            if !valid_trainer_class || !valid_trainer_id {
+                return issues;
+            }
             match catalog.trainer_classes.get(trainer_id) {
                 Some(actual_class) if actual_class == trainer_class => {}
                 Some(actual_class) => {
@@ -246,26 +326,39 @@ pub fn script_runtime_command_issues(
             let item_id = &command.args[1];
             if item_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID
                 && item_id != SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID
-                && !catalog.items.contains(item_id)
             {
-                issues.push(ScriptRuntimeCommandIssue::UnknownItem {
-                    item_id: item_id.clone(),
-                });
+                if !is_exact_nonempty_runtime_pack_id(item_id) {
+                    issues.push(ScriptRuntimeCommandIssue::InvalidItem {
+                        item_id: item_id.clone(),
+                    });
+                } else if !catalog.items.contains(item_id) {
+                    issues.push(ScriptRuntimeCommandIssue::UnknownItem {
+                        item_id: item_id.clone(),
+                    });
+                }
             }
         }
         "getmonname" => {
             let species_id = &command.args[1];
-            if species_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID
-                && !catalog.pokemon.contains(species_id)
-            {
-                issues.push(ScriptRuntimeCommandIssue::UnknownSpecies {
-                    species_id: species_id.clone(),
-                });
+            if species_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID {
+                if !is_exact_nonempty_runtime_pack_id(species_id) {
+                    issues.push(ScriptRuntimeCommandIssue::InvalidSpecies {
+                        species_id: species_id.clone(),
+                    });
+                } else if !catalog.pokemon.contains(species_id) {
+                    issues.push(ScriptRuntimeCommandIssue::UnknownSpecies {
+                        species_id: species_id.clone(),
+                    });
+                }
             }
         }
         "addcellnum" => {
             let contact_id = &command.args[0];
-            if !catalog.phone_contacts.contains(contact_id) {
+            if !is_exact_nonempty_runtime_pack_id(contact_id) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidPhoneContact {
+                    contact_id: contact_id.clone(),
+                });
+            } else if !catalog.phone_contacts.contains(contact_id) {
                 issues.push(ScriptRuntimeCommandIssue::UnknownPhoneContact {
                     contact_id: contact_id.clone(),
                 });
@@ -273,7 +366,11 @@ pub fn script_runtime_command_issues(
         }
         "specialphonecall" => {
             let call_id = &command.args[0];
-            if !catalog.special_phone_calls.contains(call_id) {
+            if !is_exact_nonempty_runtime_pack_id(call_id) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidSpecialPhoneCall {
+                    call_id: call_id.clone(),
+                });
+            } else if !catalog.special_phone_calls.contains(call_id) {
                 issues.push(ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall {
                     call_id: call_id.clone(),
                 });
@@ -281,7 +378,11 @@ pub fn script_runtime_command_issues(
         }
         "checkpoke" | "pokepic" => {
             let species_id = &command.args[0];
-            if !catalog.pokemon.contains(species_id) {
+            if !is_exact_nonempty_runtime_pack_id(species_id) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidSpecies {
+                    species_id: species_id.clone(),
+                });
+            } else if !catalog.pokemon.contains(species_id) {
                 issues.push(ScriptRuntimeCommandIssue::UnknownSpecies {
                     species_id: species_id.clone(),
                 });
@@ -289,7 +390,11 @@ pub fn script_runtime_command_issues(
         }
         "trade" => {
             let trade_id = &command.args[0];
-            if !catalog.npc_trades.contains(trade_id) {
+            if !is_exact_nonempty_runtime_pack_id(trade_id) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidNpcTrade {
+                    trade_id: trade_id.clone(),
+                });
+            } else if !catalog.npc_trades.contains(trade_id) {
                 issues.push(ScriptRuntimeCommandIssue::UnknownNpcTrade {
                     trade_id: trade_id.clone(),
                 });
@@ -321,13 +426,19 @@ fn push_unknown_runtime_target_issue(
     catalog: &ScriptRuntimeReferenceCatalog,
     issues: &mut Vec<ScriptRuntimeCommandIssue>,
 ) {
-    if target_label != SCRIPT_RUNTIME_CURRENT_BANK_TARGET
-        && resolve_script_runtime_target_label(
-            &catalog.script_labels,
-            &command.source_script,
-            target_label,
-        )
-        .is_none()
+    if target_label == SCRIPT_RUNTIME_CURRENT_BANK_TARGET {
+        return;
+    }
+    if !is_exact_nonempty_runtime_label(target_label) {
+        issues.push(ScriptRuntimeCommandIssue::InvalidTarget {
+            target_label: target_label.to_string(),
+        });
+    } else if resolve_script_runtime_target_label(
+        &catalog.script_labels,
+        &command.source_script,
+        target_label,
+    )
+    .is_none()
     {
         issues.push(ScriptRuntimeCommandIssue::UnknownTarget {
             target_label: target_label.to_string(),
@@ -429,7 +540,7 @@ pub fn validate_script_runtime_command(
     if command.command.is_empty() {
         return Err(ScriptRuntimeCommandError::EmptyCommand);
     }
-    if command.command.trim() != command.command {
+    if !is_exact_nonempty_runtime_token(&command.command) {
         return Err(ScriptRuntimeCommandError::PaddedCommand {
             command: command.command.clone(),
         });
@@ -453,7 +564,7 @@ pub fn validate_script_runtime_command(
                 command: command.command.clone(),
             });
         }
-        if arg.trim() != arg {
+        if !is_exact_nonempty_runtime_arg_token(arg) {
             return Err(ScriptRuntimeCommandError::PaddedArg {
                 command: command.command.clone(),
                 arg: arg.clone(),
@@ -777,10 +888,17 @@ fn parse_u32_token(command: &str, token: &str) -> Result<u32, ScriptRuntimeComma
 }
 
 fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeCommandError> {
-    if token.trim() != token || token.is_empty() {
-        return Err(ScriptRuntimeCommandError::UnknownNumericToken {
-            command: command.to_string(),
-            token: token.to_string(),
+    if !is_potential_numeric_token(token) {
+        return Err(if is_exact_numeric_symbol(token) {
+            ScriptRuntimeCommandError::UnknownNumericToken {
+                command: command.to_string(),
+                token: token.to_string(),
+            }
+        } else {
+            ScriptRuntimeCommandError::InvalidNumericToken {
+                command: command.to_string(),
+                token: token.to_string(),
+            }
         });
     }
     let (sign, raw) = match token.as_bytes()[0] {
@@ -795,18 +913,55 @@ fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeComma
     } else {
         (10, raw)
     };
-    if digits.is_empty() {
-        return Err(ScriptRuntimeCommandError::UnknownNumericToken {
+    if digits.is_empty() || !digits_are_valid(digits, radix) {
+        return Err(ScriptRuntimeCommandError::InvalidNumericToken {
             command: command.to_string(),
             token: token.to_string(),
         });
     }
     i32::from_str_radix(digits, radix)
         .map(|value| value * sign)
-        .map_err(|_| ScriptRuntimeCommandError::UnknownNumericToken {
+        .map_err(|_| ScriptRuntimeCommandError::InvalidNumericToken {
             command: command.to_string(),
             token: token.to_string(),
         })
+}
+
+fn is_potential_numeric_token(token: &str) -> bool {
+    if token.is_empty() || token.trim() != token {
+        return false;
+    }
+    let raw = match token.as_bytes()[0] {
+        b'-' | b'+' => &token[1..],
+        _ => token,
+    };
+    if raw.is_empty() {
+        return false;
+    }
+    if raw.strip_prefix('$').is_some() || raw.strip_prefix('%').is_some() {
+        return true;
+    }
+    raw.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_exact_numeric_symbol(token: &str) -> bool {
+    let Some(first) = token.bytes().next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && token.trim() == token
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn digits_are_valid(digits: &str, radix: u32) -> bool {
+    match radix {
+        2 => digits.bytes().all(|byte| matches!(byte, b'0' | b'1')),
+        10 => digits.bytes().all(|byte| byte.is_ascii_digit()),
+        16 => digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        _ => false,
+    }
 }
 
 pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
@@ -934,6 +1089,12 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_runtime_command_issues(&command("special", &["$FadeOutMusic"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::InvalidSpecialRoutine {
+                special_id: "$FadeOutMusic".to_string()
+            }]
+        );
+        assert_eq!(
             script_runtime_command_issues(
                 &command(
                     "gettrainername",
@@ -961,11 +1122,37 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
+                &command(
+                    "gettrainername",
+                    &["STRING_BUFFER_4", "$FALKNER", "$FALKNER1"]
+                ),
+                &catalog
+            ),
+            vec![
+                ScriptRuntimeCommandIssue::InvalidTrainerClass {
+                    trainer_class: "$FALKNER".to_string()
+                },
+                ScriptRuntimeCommandIssue::InvalidTrainer {
+                    trainer_id: "$FALKNER1".to_string()
+                }
+            ]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
                 &command("getitemname", &["BUFFER_1", "potion"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::UnknownItem {
                 item_id: "potion".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("getitemname", &["BUFFER_1", "$POTION"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidItem {
+                item_id: "$POTION".to_string()
             }]
         );
         assert_eq!(
@@ -988,9 +1175,30 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_runtime_command_issues(
+                &command("getmonname", &["BUFFER_1", "$PIKACHU"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidSpecies {
+                species_id: "$PIKACHU".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("checkpoke", &["PIKA+CHU"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::InvalidSpecies {
+                species_id: "PIKA+CHU".to_string()
+            }]
+        );
+        assert_eq!(
             script_runtime_command_issues(&command("addcellnum", &["phone_elm"]), &catalog),
             vec![ScriptRuntimeCommandIssue::UnknownPhoneContact {
                 contact_id: "phone_elm".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("addcellnum", &["PHONE ELM"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::InvalidPhoneContact {
+                contact_id: "PHONE ELM".to_string()
             }]
         );
         assert_eq!(
@@ -1003,9 +1211,24 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_runtime_command_issues(
+                &command("specialphonecall", &["SPECIAL CALL MASTERBALL"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidSpecialPhoneCall {
+                call_id: "SPECIAL CALL MASTERBALL".to_string()
+            }]
+        );
+        assert_eq!(
             script_runtime_command_issues(&command("trade", &["npc_trade_mike"]), &catalog),
             vec![ScriptRuntimeCommandIssue::UnknownNpcTrade {
                 trade_id: "npc_trade_mike".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("trade", &["NPC TRADE MIKE"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::InvalidNpcTrade {
+                trade_id: "NPC TRADE MIKE".to_string()
             }]
         );
     }
@@ -1046,6 +1269,18 @@ mod tests {
             ),
             vec![ScriptRuntimeCommandIssue::UnknownTarget {
                 target_label: ".Missing".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "cmdqueue",
+                    &[SCRIPT_RUNTIME_CURRENT_BANK_TARGET, "$Missing"]
+                ),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidTarget {
+                target_label: "$Missing".to_string()
             }]
         );
         assert_eq!(
@@ -1297,6 +1532,15 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::UnknownNumericToken { .. })
         ));
+        state.script_runtime.script_value = Some("12 3".to_string());
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command("getnum", &["STRING_BUFFER_3"]),
+                default_inputs(),
+            ),
+            Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
+        ));
         assert!(state.script_runtime.numeric_buffer_writes.is_empty());
         assert!(state.script_runtime.effects.is_empty());
     }
@@ -1497,9 +1741,21 @@ mod tests {
             Err(ScriptRuntimeCommandError::EmptyCommand)
         ));
         assert!(matches!(
+            apply_script_runtime_command(&mut state, command("pause", &["%102"]), default_inputs()),
+            Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
+        ));
+        assert!(matches!(
             apply_script_runtime_command(
                 &mut state,
                 command(" special", &["HealParty"]),
+                default_inputs()
+            ),
+            Err(ScriptRuntimeCommandError::PaddedCommand { .. })
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command("spe cial", &["HealParty"]),
                 default_inputs()
             ),
             Err(ScriptRuntimeCommandError::PaddedCommand { .. })
@@ -1515,10 +1771,30 @@ mod tests {
         assert!(matches!(
             apply_script_runtime_command(
                 &mut state,
+                command("special", &["Heal Party"]),
+                default_inputs()
+            ),
+            Err(ScriptRuntimeCommandError::PaddedArg { .. })
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
                 command("pause", &["FOREVER"]),
                 default_inputs()
             ),
             Err(ScriptRuntimeCommandError::UnknownNumericToken { .. })
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(&mut state, command("pause", &["$"]), default_inputs()),
+            Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command("pause", &["999999999999999999999999"]),
+                default_inputs()
+            ),
+            Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
         ));
         assert!(matches!(
             apply_script_runtime_command(

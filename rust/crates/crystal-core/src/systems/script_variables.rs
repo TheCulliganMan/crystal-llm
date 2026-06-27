@@ -256,7 +256,7 @@ fn require_target(command: &ScriptVariableCommand) -> Result<&str, ScriptVariabl
             command: command.command.clone(),
         });
     }
-    if target.trim() != target {
+    if !is_exact_script_variable_target_token(target) {
         return Err(ScriptVariableCommandError::InvalidTarget {
             command: command.command.clone(),
             target: target.to_string(),
@@ -291,7 +291,7 @@ fn require_joined_value(
     if let Some(token) = command
         .value_tokens
         .iter()
-        .find(|token| token.trim() != **token)
+        .find(|token| !is_exact_script_variable_value_token(token))
     {
         return Err(ScriptVariableCommandError::InvalidValueToken {
             command: command.command.clone(),
@@ -332,6 +332,18 @@ fn parse_time_token(token: &str) -> Result<TimeOfDay, ScriptVariableCommandError
             time_token: other.to_string(),
         }),
     }
+}
+
+fn is_exact_script_variable_target_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_script_variable_value_token(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[cfg(test)]
@@ -458,7 +470,15 @@ mod tests {
             Err(ScriptVariableCommandError::InvalidTarget { .. })
         ));
         assert!(matches!(
+            validate_script_variable_command(&command("readvar", Some("VAR CALLERID"), &[])),
+            Err(ScriptVariableCommandError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
             validate_script_variable_command(&command("setval", None, &[" TRUE"])),
+            Err(ScriptVariableCommandError::InvalidValueToken { .. })
+        ));
+        assert!(matches!(
+            validate_script_variable_command(&command("setval", None, &["PHONE BIRDKEEPER_VANCE"])),
             Err(ScriptVariableCommandError::InvalidValueToken { .. })
         ));
         assert!(matches!(
@@ -484,7 +504,9 @@ mod tests {
             command("checktime", None, &["night"]),
             command("readvar", Some(""), &[]),
             command("readmem", Some(" wVanceFightCount"), &[]),
+            command("loadvar", Some("VAR CALLERID"), &["PHONE_BIRDKEEPER_VANCE"]),
             command("setval", None, &[" TRUE"]),
+            command("setval", None, &["PHONE BIRDKEEPER_VANCE"]),
             command("setval", Some("VAR_BADGES"), &["7"]),
             command("loadvar", Some("VAR_CALLERID"), &["PHONE_BIRDKEEPER_VANCE"]),
         ];
@@ -517,9 +539,25 @@ mod tests {
                 ScriptVariableCommandIssue {
                     source_script: "VarScript".to_string(),
                     command_index: 5,
+                    error: ScriptVariableCommandError::InvalidTarget {
+                        command: "loadvar".to_string(),
+                        target: "VAR CALLERID".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
                     error: ScriptVariableCommandError::InvalidValueToken {
                         command: "setval".to_string(),
                         token: " TRUE".to_string(),
+                    },
+                },
+                ScriptVariableCommandIssue {
+                    source_script: "VarScript".to_string(),
+                    command_index: 5,
+                    error: ScriptVariableCommandError::InvalidValueToken {
+                        command: "setval".to_string(),
+                        token: "PHONE BIRDKEEPER_VANCE".to_string(),
                     },
                 },
                 ScriptVariableCommandIssue {

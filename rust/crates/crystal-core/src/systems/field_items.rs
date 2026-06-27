@@ -42,6 +42,10 @@ pub enum FruitTreeCatalogIssue {
         fruit_tree_id: String,
         item_id: String,
     },
+    InvalidItem {
+        fruit_tree_id: String,
+        item_id: String,
+    },
 }
 
 pub fn fruit_tree_catalog_issues(
@@ -54,12 +58,17 @@ pub fn fruit_tree_catalog_issues(
             issues.push(FruitTreeCatalogIssue::EmptyFruitTreeId {
                 fruit_tree_id: fruit_tree_id.clone(),
             });
-        } else if fruit_tree_id.trim() != fruit_tree_id {
+        } else if !is_exact_field_item_token(fruit_tree_id) {
             issues.push(FruitTreeCatalogIssue::InvalidFruitTreeId {
                 fruit_tree_id: fruit_tree_id.clone(),
             });
         }
-        if !items.contains_key(item_id) {
+        if !is_exact_field_item_token(item_id) {
+            issues.push(FruitTreeCatalogIssue::InvalidItem {
+                fruit_tree_id: fruit_tree_id.clone(),
+                item_id: item_id.clone(),
+            });
+        } else if !items.contains_key(item_id) {
             issues.push(FruitTreeCatalogIssue::UnknownItem {
                 fruit_tree_id: fruit_tree_id.clone(),
                 item_id: item_id.clone(),
@@ -75,6 +84,11 @@ impl ScriptFieldPickup {
             "itemball" => FieldItemSource::ItemBall,
             "hiddenitem" => FieldItemSource::HiddenItem,
             "fruittree" => return Err(FieldItemError::FruitTreeRequiresCatalog),
+            other if !is_exact_script_field_pickup_command_token(other) => {
+                return Err(FieldItemError::InvalidScriptPickupCommand {
+                    command: other.to_string(),
+                });
+            }
             other => {
                 return Err(FieldItemError::UnknownScriptPickupCommand {
                     command: other.to_string(),
@@ -122,6 +136,9 @@ impl ScriptFieldPickup {
                     command: self.command.clone(),
                     reason: "missing fruit_tree_id".to_string(),
                 })?;
+        validate_field_item_token(fruit_tree_id).map_err(|_| FieldItemError::InvalidFruitTree {
+            fruit_tree_id: fruit_tree_id.clone(),
+        })?;
         let item_id = fruit_trees.0.get(fruit_tree_id).cloned().ok_or_else(|| {
             FieldItemError::UnknownFruitTree {
                 fruit_tree_id: fruit_tree_id.clone(),
@@ -149,7 +166,9 @@ pub fn is_known_script_field_pickup_command(command: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptFieldPickupIssue {
+    InvalidCommand,
     MissingItem,
+    InvalidItem,
     UnknownItem,
     InvalidQuantity,
     MissingEvent,
@@ -170,6 +189,9 @@ pub fn script_field_pickup_issues(
     let mut issues = Vec::new();
     if SCRIPT_FIELD_ITEM_PICKUP_COMMANDS.contains(&pickup.command.as_str()) {
         match pickup.item_id.as_deref() {
+            Some(item_id) if !is_exact_field_item_token(item_id) => {
+                issues.push(ScriptFieldPickupIssue::InvalidItem);
+            }
             Some(item_id) if item_catalog.contains_key(item_id) => {}
             Some(_) => issues.push(ScriptFieldPickupIssue::UnknownItem),
             None => issues.push(ScriptFieldPickupIssue::MissingItem),
@@ -186,15 +208,9 @@ pub fn script_field_pickup_issues(
         match pickup.fruit_tree_id.as_deref() {
             Some(fruit_tree_id) if fruit_tree_id.trim().is_empty() => {
                 issues.push(ScriptFieldPickupIssue::EmptyFruitTree);
-                if !fruit_trees.0.contains_key(fruit_tree_id) {
-                    issues.push(ScriptFieldPickupIssue::UnknownFruitTree);
-                }
             }
-            Some(fruit_tree_id) if fruit_tree_id.trim() != fruit_tree_id => {
+            Some(fruit_tree_id) if !is_exact_field_item_token(fruit_tree_id) => {
                 issues.push(ScriptFieldPickupIssue::InvalidFruitTree);
-                if !fruit_trees.0.contains_key(fruit_tree_id) {
-                    issues.push(ScriptFieldPickupIssue::UnknownFruitTree);
-                }
             }
             Some(fruit_tree_id) if fruit_trees.0.contains_key(fruit_tree_id) => {}
             Some(_) => issues.push(ScriptFieldPickupIssue::UnknownFruitTree),
@@ -203,10 +219,26 @@ pub fn script_field_pickup_issues(
         if pickup.item_id.is_some() || pickup.event_flag.is_some() {
             issues.push(ScriptFieldPickupIssue::MalformedFruitTree);
         }
+    } else if !is_exact_script_field_pickup_command_token(&pickup.command) {
+        issues.push(ScriptFieldPickupIssue::InvalidCommand);
     } else if !is_known_script_field_pickup_command(&pickup.command) {
         issues.push(ScriptFieldPickupIssue::UnknownCommand);
     }
     issues
+}
+
+fn is_exact_field_item_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_script_field_pickup_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,8 +272,11 @@ pub enum FieldItemPickupOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldItemError {
+    InvalidItem { item_id: String },
+    InvalidFruitTree { fruit_tree_id: String },
     UnknownItem { item_id: String },
     UnknownFruitTree { fruit_tree_id: String },
+    InvalidScriptPickupCommand { command: String },
     UnknownScriptPickupCommand { command: String },
     UnexpectedFruitTreeCommand { command: String },
     FruitTreeRequiresCatalog,
@@ -275,6 +310,9 @@ pub fn pickup_field_item(
         return Err(FieldItemError::InvalidQuantity);
     }
     validate_collectible_flag(&pickup.event_flag)?;
+    validate_field_item_token(&pickup.item_id).map_err(|_| FieldItemError::InvalidItem {
+        item_id: pickup.item_id.clone(),
+    })?;
     if state
         .flags
         .is_event_flag_set(&pickup.event_flag)
@@ -327,6 +365,14 @@ fn validate_collectible_flag(event_flag: &str) -> Result<(), FieldItemError> {
         });
     }
     Ok(())
+}
+
+fn validate_field_item_token(value: &str) -> Result<(), ()> {
+    if is_exact_field_item_token(value) {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(test)]
@@ -403,11 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn fruit_tree_catalog_issues_reject_empty_ids_and_unknown_exact_items() {
+    fn fruit_tree_catalog_issues_reject_empty_ids_invalid_items_and_unknown_exact_items() {
         let fruit_trees = FruitTreeCatalog(
             [
                 ("".to_string(), "BERRY".to_string()),
                 (" ROUTE_29_FRUIT_TREE".to_string(), "BERRY".to_string()),
+                ("ROUTE 29_FRUIT_TREE".to_string(), "BERRY".to_string()),
+                ("ROUTE_30_FRUIT_TREE".to_string(), "GOLD BERRY".to_string()),
                 ("ROUTE_29_FRUIT_TREE".to_string(), "berry".to_string()),
             ]
             .into_iter()
@@ -423,6 +471,13 @@ mod tests {
                 },
                 FruitTreeCatalogIssue::InvalidFruitTreeId {
                     fruit_tree_id: " ROUTE_29_FRUIT_TREE".to_string(),
+                },
+                FruitTreeCatalogIssue::InvalidFruitTreeId {
+                    fruit_tree_id: "ROUTE 29_FRUIT_TREE".to_string(),
+                },
+                FruitTreeCatalogIssue::InvalidItem {
+                    fruit_tree_id: "ROUTE_30_FRUIT_TREE".to_string(),
+                    item_id: "GOLD BERRY".to_string(),
                 },
                 FruitTreeCatalogIssue::UnknownItem {
                     fruit_tree_id: "ROUTE_29_FRUIT_TREE".to_string(),
@@ -564,6 +619,32 @@ mod tests {
     }
 
     #[test]
+    fn pickup_rejects_malformed_item_id_before_unknown_lookup() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("RARE_CANDY", item_pocket("ITEM"))]);
+
+        assert_eq!(
+            pickup_field_item(
+                &mut state,
+                &items,
+                pickup(
+                    "RARE CANDY",
+                    "EVENT_GOT_HIDDEN_ANTIDOTE",
+                    FieldItemSource::HiddenItem,
+                ),
+            ),
+            Err(FieldItemError::InvalidItem {
+                item_id: "RARE CANDY".to_string(),
+            })
+        );
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_GOT_HIDDEN_ANTIDOTE"),
+            Ok(false)
+        );
+        assert!(state.bag.items.is_empty());
+    }
+
+    #[test]
     fn pickup_rejects_unhideable_event_flags() {
         let mut state = GameState::default();
         let items = catalog(vec![item("ANTIDOTE", item_pocket("ITEM"))]);
@@ -594,6 +675,23 @@ mod tests {
             script_field_pickup_issues(&pickup, &BTreeMap::new(), &FruitTreeCatalog::default()),
             vec![ScriptFieldPickupIssue::UnknownCommand]
         );
+
+        let pickup = script_pickup("ItemBall");
+        assert_eq!(
+            pickup.to_field_item_pickup(),
+            Err(FieldItemError::InvalidScriptPickupCommand {
+                command: "ItemBall".to_string(),
+            })
+        );
+        assert_eq!(
+            script_field_pickup_issues(&pickup, &BTreeMap::new(), &FruitTreeCatalog::default()),
+            vec![ScriptFieldPickupIssue::InvalidCommand]
+        );
+        let pickup = script_pickup("item ball");
+        assert_eq!(
+            script_field_pickup_issues(&pickup, &BTreeMap::new(), &FruitTreeCatalog::default()),
+            vec![ScriptFieldPickupIssue::InvalidCommand]
+        );
     }
 
     #[test]
@@ -617,6 +715,16 @@ mod tests {
             ]
         );
 
+        bad_item.item_id = Some("RARE CANDY".to_string());
+        assert_eq!(
+            script_field_pickup_issues(&bad_item, &items, &fruit_trees),
+            vec![
+                ScriptFieldPickupIssue::InvalidItem,
+                ScriptFieldPickupIssue::InvalidQuantity,
+                ScriptFieldPickupIssue::InvalidCollectibleFlag,
+            ]
+        );
+
         let mut bad_fruit = script_pickup("fruittree");
         bad_fruit.fruit_tree_id = Some(String::new());
         bad_fruit.item_id = Some("BERRY".to_string());
@@ -624,7 +732,6 @@ mod tests {
             script_field_pickup_issues(&bad_fruit, &items, &fruit_trees),
             vec![
                 ScriptFieldPickupIssue::EmptyFruitTree,
-                ScriptFieldPickupIssue::UnknownFruitTree,
                 ScriptFieldPickupIssue::MalformedFruitTree,
             ]
         );
@@ -634,7 +741,14 @@ mod tests {
             script_field_pickup_issues(&bad_fruit, &items, &fruit_trees),
             vec![
                 ScriptFieldPickupIssue::InvalidFruitTree,
-                ScriptFieldPickupIssue::UnknownFruitTree,
+                ScriptFieldPickupIssue::MalformedFruitTree,
+            ]
+        );
+        bad_fruit.fruit_tree_id = Some("FRUITTREE ROUTE_29".to_string());
+        assert_eq!(
+            script_field_pickup_issues(&bad_fruit, &items, &fruit_trees),
+            vec![
+                ScriptFieldPickupIssue::InvalidFruitTree,
                 ScriptFieldPickupIssue::MalformedFruitTree,
             ]
         );
@@ -696,6 +810,33 @@ mod tests {
             state
                 .flags
                 .is_event_flag_set("fruittree_route_29_COLLECTED"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn fruit_tree_pickup_rejects_malformed_tree_id_before_unknown_lookup() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
+        let fruit_trees = FruitTreeCatalog(
+            [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut pickup = script_pickup("fruittree");
+        pickup.fruit_tree_id = Some("FRUITTREE ROUTE_29".to_string());
+
+        assert_eq!(
+            pickup_script_field_item(&mut state, &items, &fruit_trees, pickup),
+            Err(FieldItemError::InvalidFruitTree {
+                fruit_tree_id: "FRUITTREE ROUTE_29".to_string(),
+            })
+        );
+        assert!(state.bag.items.is_empty());
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("FRUITTREE_ROUTE_29_COLLECTED"),
             Ok(false)
         );
     }

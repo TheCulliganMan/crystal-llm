@@ -582,6 +582,15 @@ pub enum SpecialRoutineError {
     MissingBattleTowerRules { routine: String },
     #[error("special routine {routine} has invalid Battle Tower rules: {message}")]
     InvalidBattleTowerRules { routine: String, message: String },
+    #[error(
+        "special routine {routine} has invalid Battle Tower level group {level_group}; expected {minimum}..={maximum}"
+    )]
+    InvalidBattleTowerLevelGroup {
+        routine: String,
+        level_group: u8,
+        minimum: u8,
+        maximum: u8,
+    },
     #[error("special routine {routine} requires Oak rating entries from the modpack")]
     MissingOakRatingTable { routine: String },
     #[error("special routine {routine} has invalid Oak rating table: {message}")]
@@ -711,7 +720,7 @@ pub fn bug_contest_config_issues(
     }
     let mut seen = BTreeSet::new();
     for (index, flag) in config.contestant_flags.iter().enumerate() {
-        if flag.trim().is_empty() || flag.trim() != flag {
+        if !is_exact_nonempty_special_token(flag) {
             issues.push(BugContestConfigIssue::InvalidContestantFlag {
                 index,
                 flag: flag.clone(),
@@ -827,7 +836,7 @@ pub fn battle_tower_rules_issues(
             rules.egg_failure_text.as_str(),
         ),
     ] {
-        if value.trim().is_empty() || value.trim() != value {
+        if !is_exact_nonempty_special_token(value) {
             issues.push(BattleTowerRulesIssue::InvalidFailureText {
                 field,
                 text_id: value.to_string(),
@@ -836,7 +845,7 @@ pub fn battle_tower_rules_issues(
     }
     let mut seen = BTreeSet::new();
     for (index, species_id) in rules.banned_species.iter().enumerate() {
-        if species_id.trim().is_empty() || species_id.trim() != species_id {
+        if !is_exact_nonempty_special_token(species_id) {
             issues.push(BattleTowerRulesIssue::InvalidBannedSpecies {
                 index,
                 species_id: species_id.clone(),
@@ -895,13 +904,13 @@ pub fn oak_rating_table_issues(
     let mut issues = Vec::new();
     let mut previous_limit = None;
     for (index, entry) in entries.iter().enumerate() {
-        if entry.fanfare.trim().is_empty() || entry.fanfare.trim() != entry.fanfare {
+        if !is_exact_nonempty_special_token(&entry.fanfare) {
             issues.push(OakRatingTableIssue::InvalidFanfare {
                 index,
                 fanfare: entry.fanfare.clone(),
             });
         }
-        if entry.text_label.trim().is_empty() || entry.text_label.trim() != entry.text_label {
+        if !is_exact_nonempty_special_token(&entry.text_label) {
             issues.push(OakRatingTableIssue::InvalidTextLabel {
                 index,
                 text_label: entry.text_label.clone(),
@@ -1006,7 +1015,7 @@ pub fn odd_egg_definition_issues(
     }
 
     for (index, definition) in definitions.iter().enumerate() {
-        if definition.species.trim().is_empty() || definition.species.trim() != definition.species {
+        if !is_exact_nonempty_special_token(&definition.species) {
             issues.push(OddEggDefinitionIssue::InvalidSpecies {
                 index,
                 species_id: definition.species.clone(),
@@ -1024,7 +1033,7 @@ pub fn odd_egg_definition_issues(
             });
         }
         for (move_index, move_id) in definition.moves.iter().enumerate() {
-            if move_id.trim().is_empty() || move_id.trim() != move_id {
+            if !is_exact_nonempty_special_token(move_id) {
                 issues.push(OddEggDefinitionIssue::InvalidMove {
                     index,
                     move_index,
@@ -1150,10 +1159,12 @@ pub struct HappinessServiceOutcome {
 pub enum HappinessDataIssue {
     EmptyChanges,
     EmptyChangeCode { change_code: u8 },
+    InvalidChangeCode { code: String, change_code: u8 },
     DuplicateChangeCode { code: String, change_code: u8 },
     DuplicateChangeIndex { change_code: u8 },
     EmptyServices,
     EmptyServiceRoutine { routine: String },
+    InvalidServiceRoutine { routine: String },
     DuplicateService { routine: String },
     EmptyServiceOutcomes { routine: String },
     UnknownServiceChange { routine: String, change_code: u8 },
@@ -1170,6 +1181,11 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
     for entry in &data.changes {
         if entry.code.trim().is_empty() {
             issues.push(HappinessDataIssue::EmptyChangeCode {
+                change_code: entry.change_code,
+            });
+        } else if !is_exact_nonempty_special_token(&entry.code) {
+            issues.push(HappinessDataIssue::InvalidChangeCode {
+                code: entry.code.clone(),
                 change_code: entry.change_code,
             });
         }
@@ -1193,6 +1209,10 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
     for service in &data.services {
         if service.routine.trim().is_empty() {
             issues.push(HappinessDataIssue::EmptyServiceRoutine {
+                routine: service.routine.clone(),
+            });
+        } else if !is_exact_nonempty_special_token(&service.routine) {
+            issues.push(HappinessDataIssue::InvalidServiceRoutine {
                 routine: service.routine.clone(),
             });
         }
@@ -1228,6 +1248,10 @@ pub struct DratiniMoveSetDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DratiniMoveSetIssue {
+    DuplicateMode {
+        index: usize,
+        mode: u8,
+    },
     EmptyMoveSet {
         index: usize,
     },
@@ -1248,7 +1272,14 @@ pub fn dratini_move_set_issues(
     move_ids: &BTreeSet<String>,
 ) -> Vec<DratiniMoveSetIssue> {
     let mut issues = Vec::new();
+    let mut seen_modes = BTreeSet::new();
     for (index, move_set) in move_sets.iter().enumerate() {
+        if !seen_modes.insert(move_set.mode) {
+            issues.push(DratiniMoveSetIssue::DuplicateMode {
+                index,
+                mode: move_set.mode,
+            });
+        }
         if move_set.moves.is_empty() {
             issues.push(DratiniMoveSetIssue::EmptyMoveSet { index });
         }
@@ -1272,7 +1303,11 @@ pub fn dratini_move_set_issues(
 }
 
 fn is_exact_nonempty_special_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1290,12 +1325,15 @@ pub struct ShuckieGiftDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShuckieGiftIssue {
     EmptySpecies,
+    InvalidSpecies { species: String },
     UnknownSpecies { species: String },
     InvalidLevel,
     EmptyHeldItem,
+    InvalidHeldItem { held_item: String },
     UnknownHeldItem { held_item: String },
     EmptyName,
     EmptyEngineFlag,
+    InvalidEngineFlag { engine_flag: String },
     UnknownEngineFlag { engine_flag: String },
 }
 
@@ -1308,6 +1346,10 @@ pub fn shuckie_gift_issues(
     let mut issues = Vec::new();
     if gift.species.trim().is_empty() {
         issues.push(ShuckieGiftIssue::EmptySpecies);
+    } else if !is_exact_nonempty_special_token(&gift.species) {
+        issues.push(ShuckieGiftIssue::InvalidSpecies {
+            species: gift.species.clone(),
+        });
     } else if !species_ids.contains(&gift.species) {
         issues.push(ShuckieGiftIssue::UnknownSpecies {
             species: gift.species.clone(),
@@ -1318,6 +1360,10 @@ pub fn shuckie_gift_issues(
     }
     if gift.held_item.trim().is_empty() {
         issues.push(ShuckieGiftIssue::EmptyHeldItem);
+    } else if !is_exact_nonempty_special_token(&gift.held_item) {
+        issues.push(ShuckieGiftIssue::InvalidHeldItem {
+            held_item: gift.held_item.clone(),
+        });
     } else if !item_ids.contains(&gift.held_item) {
         issues.push(ShuckieGiftIssue::UnknownHeldItem {
             held_item: gift.held_item.clone(),
@@ -1328,6 +1374,10 @@ pub fn shuckie_gift_issues(
     }
     if gift.got_today_engine_flag.trim().is_empty() {
         issues.push(ShuckieGiftIssue::EmptyEngineFlag);
+    } else if !is_exact_nonempty_special_token(&gift.got_today_engine_flag) {
+        issues.push(ShuckieGiftIssue::InvalidEngineFlag {
+            engine_flag: gift.got_today_engine_flag.clone(),
+        });
     } else if !engine_flags.contains(&gift.got_today_engine_flag) {
         issues.push(ShuckieGiftIssue::UnknownEngineFlag {
             engine_flag: gift.got_today_engine_flag.clone(),
@@ -1362,12 +1412,21 @@ pub fn is_known_buena_password_category_type(category_type: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuenaPasswordCategoryIssue {
+    DuplicateId {
+        index: usize,
+        id: String,
+    },
     EmptyId {
         index: usize,
     },
     InvalidId {
         index: usize,
         id: String,
+    },
+    InvalidCategoryType {
+        index: usize,
+        id: String,
+        category_type: String,
     },
     UnknownCategoryType {
         index: usize,
@@ -1413,16 +1472,28 @@ pub fn buena_password_category_issues(
     move_ids: &BTreeSet<String>,
 ) -> Vec<BuenaPasswordCategoryIssue> {
     let mut issues = Vec::new();
+    let mut seen_ids = BTreeSet::new();
     for (index, category) in categories.iter().enumerate() {
         if category.id.is_empty() {
             issues.push(BuenaPasswordCategoryIssue::EmptyId { index });
-        } else if category.id.trim() != category.id {
+        } else if !is_exact_nonempty_special_token(&category.id) {
             issues.push(BuenaPasswordCategoryIssue::InvalidId {
                 index,
                 id: category.id.clone(),
             });
+        } else if !seen_ids.insert(category.id.clone()) {
+            issues.push(BuenaPasswordCategoryIssue::DuplicateId {
+                index,
+                id: category.id.clone(),
+            });
         }
-        if !is_known_buena_password_category_type(&category.category_type) {
+        if !is_exact_nonempty_special_token(&category.category_type) {
+            issues.push(BuenaPasswordCategoryIssue::InvalidCategoryType {
+                index,
+                id: category.id.clone(),
+                category_type: category.category_type.clone(),
+            });
+        } else if !is_known_buena_password_category_type(&category.category_type) {
             issues.push(BuenaPasswordCategoryIssue::UnknownCategoryType {
                 index,
                 id: category.id.clone(),
@@ -1443,7 +1514,7 @@ pub fn buena_password_category_issues(
                 });
                 continue;
             }
-            if option.trim() != option {
+            if !is_exact_nonempty_special_token(option) {
                 issues.push(BuenaPasswordCategoryIssue::InvalidOption {
                     index,
                     option_index,
@@ -1489,6 +1560,7 @@ pub struct KurtApricornRecipe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KurtApricornRecipeIssue {
+    DuplicateApricorn { index: usize, apricorn: String },
     EmptyApricorn { index: usize },
     InvalidApricorn { index: usize, apricorn: String },
     UnknownApricorn { index: usize, apricorn: String },
@@ -1502,10 +1574,11 @@ pub fn kurt_apricorn_recipe_issues(
     item_ids: &BTreeSet<String>,
 ) -> Vec<KurtApricornRecipeIssue> {
     let mut issues = Vec::new();
+    let mut seen_apricorns = BTreeSet::new();
     for (index, recipe) in recipes.iter().enumerate() {
         if recipe.apricorn.is_empty() {
             issues.push(KurtApricornRecipeIssue::EmptyApricorn { index });
-        } else if recipe.apricorn.trim() != recipe.apricorn {
+        } else if !is_exact_nonempty_special_token(&recipe.apricorn) {
             issues.push(KurtApricornRecipeIssue::InvalidApricorn {
                 index,
                 apricorn: recipe.apricorn.clone(),
@@ -1515,10 +1588,15 @@ pub fn kurt_apricorn_recipe_issues(
                 index,
                 apricorn: recipe.apricorn.clone(),
             });
+        } else if !seen_apricorns.insert(recipe.apricorn.clone()) {
+            issues.push(KurtApricornRecipeIssue::DuplicateApricorn {
+                index,
+                apricorn: recipe.apricorn.clone(),
+            });
         }
         if recipe.ball.is_empty() {
             issues.push(KurtApricornRecipeIssue::EmptyBall { index });
-        } else if recipe.ball.trim() != recipe.ball {
+        } else if !is_exact_nonempty_special_token(&recipe.ball) {
             issues.push(KurtApricornRecipeIssue::InvalidBall {
                 index,
                 ball: recipe.ball.clone(),
@@ -1542,6 +1620,7 @@ pub struct BuenaPrizeDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuenaPrizeDefinitionIssue {
+    DuplicateItem { index: usize, item_id: String },
     EmptyItem { index: usize },
     InvalidItem { index: usize, item_id: String },
     UnknownItem { index: usize, item_id: String },
@@ -1553,16 +1632,22 @@ pub fn buena_prize_definition_issues(
     item_ids: &BTreeSet<String>,
 ) -> Vec<BuenaPrizeDefinitionIssue> {
     let mut issues = Vec::new();
+    let mut seen_items = BTreeSet::new();
     for (index, prize) in prizes.iter().enumerate() {
         if prize.item_id.is_empty() {
             issues.push(BuenaPrizeDefinitionIssue::EmptyItem { index });
-        } else if prize.item_id.trim() != prize.item_id {
+        } else if !is_exact_nonempty_special_token(&prize.item_id) {
             issues.push(BuenaPrizeDefinitionIssue::InvalidItem {
                 index,
                 item_id: prize.item_id.clone(),
             });
         } else if !item_ids.contains(&prize.item_id) {
             issues.push(BuenaPrizeDefinitionIssue::UnknownItem {
+                index,
+                item_id: prize.item_id.clone(),
+            });
+        } else if !seen_items.insert(prize.item_id.clone()) {
+            issues.push(BuenaPrizeDefinitionIssue::DuplicateItem {
                 index,
                 item_id: prize.item_id.clone(),
             });
@@ -1585,7 +1670,9 @@ pub struct RoamingPokemonDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoamingPokemonDefinitionIssue {
+    DuplicateSpecies { index: usize, species: String },
     EmptySpecies { index: usize },
+    InvalidSpecies { index: usize, species: String },
     UnknownSpecies { index: usize, species: String },
     InvalidLevel { index: usize },
 }
@@ -1595,11 +1682,22 @@ pub fn roaming_pokemon_definition_issues(
     species_ids: &BTreeSet<String>,
 ) -> Vec<RoamingPokemonDefinitionIssue> {
     let mut issues = Vec::new();
+    let mut seen_species = BTreeSet::new();
     for (index, definition) in definitions.iter().enumerate() {
         if definition.species.trim().is_empty() {
             issues.push(RoamingPokemonDefinitionIssue::EmptySpecies { index });
+        } else if !is_exact_nonempty_special_token(&definition.species) {
+            issues.push(RoamingPokemonDefinitionIssue::InvalidSpecies {
+                index,
+                species: definition.species.clone(),
+            });
         } else if !species_ids.contains(&definition.species) {
             issues.push(RoamingPokemonDefinitionIssue::UnknownSpecies {
+                index,
+                species: definition.species.clone(),
+            });
+        } else if !seen_species.insert(definition.species.clone()) {
+            issues.push(RoamingPokemonDefinitionIssue::DuplicateSpecies {
                 index,
                 species: definition.species.clone(),
             });
@@ -1688,7 +1786,11 @@ pub fn runtime_spawn_point_catalog_issues(
 }
 
 fn is_exact_nonempty_spawn_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub const EXECUTABLE_SPECIAL_ROUTINES: &[&str] = &[
@@ -1876,6 +1978,7 @@ pub fn is_known_special_routine(routine: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpecialRoutineCatalogIssue {
     EmptyRoutine { routine: String },
+    InvalidRoutine { routine: String },
     UnknownRoutine { routine: String },
 }
 
@@ -1888,6 +1991,12 @@ pub fn special_routine_catalog_issues(
             issues.push(SpecialRoutineCatalogIssue::EmptyRoutine {
                 routine: routine.clone(),
             });
+            continue;
+        } else if !is_exact_nonempty_special_token(routine) {
+            issues.push(SpecialRoutineCatalogIssue::InvalidRoutine {
+                routine: routine.clone(),
+            });
+            continue;
         }
         if !is_known_special_routine(routine) {
             issues.push(SpecialRoutineCatalogIssue::UnknownRoutine {
@@ -3817,12 +3926,7 @@ fn apply_happiness_service(
     let happiness_data = require_happiness_data(happiness_data, routine)?;
     let outcomes = happiness_service_outcomes(happiness_data, routine)?;
     let party_slot = required_usize_script_variable(state, routine, "_party_slot")?;
-    let roll = optional_u8_script_variable(state, routine, "_rng_roll")?.unwrap_or_else(|| {
-        let mut rng = Random::new(state.rng_seed);
-        let value = rng.randrange(256) as u8;
-        state.rng_seed = rng.seed();
-        value
-    });
+    let roll = required_u8_script_variable(state, routine, "_rng_roll")?;
     let selected = select_happiness_service_outcome(outcomes, roll);
     let (species, nickname, old_happiness, new_happiness) = {
         let pokemon = required_party_pokemon_mut(state, routine, party_slot)?;
@@ -5771,11 +5875,8 @@ fn battle_tower_action(
                     routine: routine.to_string(),
                 })?;
             validate_battle_tower_rules(rules, routine)?;
-            let level_cap = state
-                .battle_tower
-                .level_group
-                .clamp(rules.minimum_level_group, rules.maximum_level_group)
-                * rules.level_group_size;
+            let level_group = exact_battle_tower_level_group(state, rules, routine)?;
+            let level_cap = level_group * rules.level_group_size;
             let highest = state
                 .storage
                 .party
@@ -5784,7 +5885,9 @@ fn battle_tower_action(
                 .flatten()
                 .map(|pokemon| pokemon.level)
                 .max()
-                .unwrap_or(0);
+                .ok_or_else(|| SpecialRoutineError::EmptyParty {
+                    routine: routine.to_string(),
+                })?;
             if highest > level_cap {
                 (highest.to_string(), true)
             } else {
@@ -5841,6 +5944,23 @@ fn battle_tower_action(
             truthy,
         },
     })
+}
+
+fn exact_battle_tower_level_group(
+    state: &GameState,
+    rules: &BattleTowerRules,
+    routine: &str,
+) -> Result<u8, SpecialRoutineError> {
+    let level_group = state.battle_tower.level_group;
+    if level_group < rules.minimum_level_group || level_group > rules.maximum_level_group {
+        return Err(SpecialRoutineError::InvalidBattleTowerLevelGroup {
+            routine: routine.to_string(),
+            level_group,
+            minimum: rules.minimum_level_group,
+            maximum: rules.maximum_level_group,
+        });
+    }
+    Ok(level_group)
 }
 
 fn check_for_battle_tower_rules(
@@ -7540,6 +7660,7 @@ mod tests {
         assert_eq!(
             special_routine_catalog_issues(&BTreeSet::from([
                 "HealParty".to_string(),
+                "Heal Party".to_string(),
                 "healparty".to_string(),
                 String::new(),
             ])),
@@ -7547,8 +7668,8 @@ mod tests {
                 SpecialRoutineCatalogIssue::EmptyRoutine {
                     routine: String::new(),
                 },
-                SpecialRoutineCatalogIssue::UnknownRoutine {
-                    routine: String::new(),
+                SpecialRoutineCatalogIssue::InvalidRoutine {
+                    routine: "Heal Party".to_string(),
                 },
                 SpecialRoutineCatalogIssue::UnknownRoutine {
                     routine: "healparty".to_string(),
@@ -7568,16 +7689,28 @@ mod tests {
                 map_number: 1,
             },
             RoamingPokemonDefinition {
-                species: "raikou".to_string(),
+                species: "RAI KOU".to_string(),
                 level: 40,
                 map_group: 1,
                 map_number: 2,
             },
             RoamingPokemonDefinition {
-                species: "RAIKOU".to_string(),
+                species: "raikou".to_string(),
                 level: 40,
                 map_group: 1,
                 map_number: 3,
+            },
+            RoamingPokemonDefinition {
+                species: "RAIKOU".to_string(),
+                level: 40,
+                map_group: 1,
+                map_number: 4,
+            },
+            RoamingPokemonDefinition {
+                species: "RAIKOU".to_string(),
+                level: 40,
+                map_group: 1,
+                map_number: 5,
             },
         ];
 
@@ -7586,9 +7719,17 @@ mod tests {
             vec![
                 RoamingPokemonDefinitionIssue::EmptySpecies { index: 0 },
                 RoamingPokemonDefinitionIssue::InvalidLevel { index: 0 },
-                RoamingPokemonDefinitionIssue::UnknownSpecies {
+                RoamingPokemonDefinitionIssue::InvalidSpecies {
                     index: 1,
+                    species: "RAI KOU".to_string(),
+                },
+                RoamingPokemonDefinitionIssue::UnknownSpecies {
+                    index: 2,
                     species: "raikou".to_string(),
+                },
+                RoamingPokemonDefinitionIssue::DuplicateSpecies {
+                    index: 4,
+                    species: "RAIKOU".to_string(),
                 },
             ]
         );
@@ -7603,7 +7744,7 @@ mod tests {
                 cost: 0,
             },
             BuenaPrizeDefinition {
-                item_id: " ULTRA_BALL".to_string(),
+                item_id: "ULTRA BALL".to_string(),
                 cost: 2,
             },
             BuenaPrizeDefinition {
@@ -7614,6 +7755,10 @@ mod tests {
                 item_id: "ULTRA_BALL".to_string(),
                 cost: 2,
             },
+            BuenaPrizeDefinition {
+                item_id: "ULTRA_BALL".to_string(),
+                cost: 3,
+            },
         ];
 
         assert_eq!(
@@ -7623,11 +7768,15 @@ mod tests {
                 BuenaPrizeDefinitionIssue::InvalidCost { index: 0 },
                 BuenaPrizeDefinitionIssue::InvalidItem {
                     index: 1,
-                    item_id: " ULTRA_BALL".to_string(),
+                    item_id: "ULTRA BALL".to_string(),
                 },
                 BuenaPrizeDefinitionIssue::UnknownItem {
                     index: 2,
                     item_id: "ultra_ball".to_string(),
+                },
+                BuenaPrizeDefinitionIssue::DuplicateItem {
+                    index: 4,
+                    item_id: "ULTRA_BALL".to_string(),
                 },
             ]
         );
@@ -7641,17 +7790,17 @@ mod tests {
         let categories = vec![
             BuenaPasswordCategoryDefinition {
                 id: String::new(),
-                category_type: "buena_mon".to_string(),
+                category_type: "buena mon".to_string(),
                 points: 0,
                 options: Vec::new(),
             },
             BuenaPasswordCategoryDefinition {
-                id: " MON".to_string(),
+                id: "BUENA MON".to_string(),
                 category_type: BUENA_PASSWORD_CATEGORY_MON.to_string(),
                 points: 1,
                 options: vec![
                     String::new(),
-                    "PIKACHU ".to_string(),
+                    "PIKA CHU".to_string(),
                     "pikachu".to_string(),
                     "PIKACHU".to_string(),
                 ],
@@ -7660,7 +7809,11 @@ mod tests {
                 id: "ITEM".to_string(),
                 category_type: BUENA_PASSWORD_CATEGORY_ITEM.to_string(),
                 points: 1,
-                options: vec![" POTION".to_string(), "potion".to_string(), "POTION".to_string()],
+                options: vec![
+                    "POT ION".to_string(),
+                    "potion".to_string(),
+                    "POTION".to_string(),
+                ],
             },
             BuenaPasswordCategoryDefinition {
                 id: "MOVE".to_string(),
@@ -7672,22 +7825,34 @@ mod tests {
                     "THUNDERBOLT".to_string(),
                 ],
             },
+            BuenaPasswordCategoryDefinition {
+                id: "UNKNOWN".to_string(),
+                category_type: "BUENA_UNKNOWN".to_string(),
+                points: 1,
+                options: vec!["TEXT".to_string()],
+            },
+            BuenaPasswordCategoryDefinition {
+                id: "MOVE".to_string(),
+                category_type: BUENA_PASSWORD_CATEGORY_STRING.to_string(),
+                points: 1,
+                options: vec!["TEXT".to_string()],
+            },
         ];
 
         assert_eq!(
             buena_password_category_issues(&categories, &species_ids, &item_ids, &move_ids),
             vec![
                 BuenaPasswordCategoryIssue::EmptyId { index: 0 },
-                BuenaPasswordCategoryIssue::UnknownCategoryType {
+                BuenaPasswordCategoryIssue::InvalidCategoryType {
                     index: 0,
                     id: String::new(),
-                    category_type: "buena_mon".to_string(),
+                    category_type: "buena mon".to_string(),
                 },
                 BuenaPasswordCategoryIssue::InvalidPoints { index: 0 },
                 BuenaPasswordCategoryIssue::EmptyOptions { index: 0 },
                 BuenaPasswordCategoryIssue::InvalidId {
                     index: 1,
-                    id: " MON".to_string(),
+                    id: "BUENA MON".to_string(),
                 },
                 BuenaPasswordCategoryIssue::EmptyOption {
                     index: 1,
@@ -7696,7 +7861,7 @@ mod tests {
                 BuenaPasswordCategoryIssue::InvalidOption {
                     index: 1,
                     option_index: 1,
-                    option: "PIKACHU ".to_string(),
+                    option: "PIKA CHU".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownSpecies {
                     index: 1,
@@ -7706,7 +7871,7 @@ mod tests {
                 BuenaPasswordCategoryIssue::InvalidOption {
                     index: 2,
                     option_index: 0,
-                    option: " POTION".to_string(),
+                    option: "POT ION".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownItem {
                     index: 2,
@@ -7723,6 +7888,15 @@ mod tests {
                     option_index: 1,
                     move_id: "thunderbolt".to_string(),
                 },
+                BuenaPasswordCategoryIssue::UnknownCategoryType {
+                    index: 4,
+                    id: "UNKNOWN".to_string(),
+                    category_type: "BUENA_UNKNOWN".to_string(),
+                },
+                BuenaPasswordCategoryIssue::DuplicateId {
+                    index: 5,
+                    id: "MOVE".to_string(),
+                },
             ]
         );
     }
@@ -7736,12 +7910,16 @@ mod tests {
                 ball: String::new(),
             },
             KurtApricornRecipe {
-                apricorn: " BLU_APRICORN".to_string(),
-                ball: "LURE_BALL ".to_string(),
+                apricorn: "BLU APRICORN".to_string(),
+                ball: "LURE BALL".to_string(),
             },
             KurtApricornRecipe {
                 apricorn: "blu_apricorn".to_string(),
                 ball: "lure_ball".to_string(),
+            },
+            KurtApricornRecipe {
+                apricorn: "BLU_APRICORN".to_string(),
+                ball: "LURE_BALL".to_string(),
             },
             KurtApricornRecipe {
                 apricorn: "BLU_APRICORN".to_string(),
@@ -7756,11 +7934,11 @@ mod tests {
                 KurtApricornRecipeIssue::EmptyBall { index: 0 },
                 KurtApricornRecipeIssue::InvalidApricorn {
                     index: 1,
-                    apricorn: " BLU_APRICORN".to_string(),
+                    apricorn: "BLU APRICORN".to_string(),
                 },
                 KurtApricornRecipeIssue::InvalidBall {
                     index: 1,
-                    ball: "LURE_BALL ".to_string(),
+                    ball: "LURE BALL".to_string(),
                 },
                 KurtApricornRecipeIssue::UnknownApricorn {
                     index: 2,
@@ -7769,6 +7947,10 @@ mod tests {
                 KurtApricornRecipeIssue::UnknownBall {
                     index: 2,
                     ball: "lure_ball".to_string(),
+                },
+                KurtApricornRecipeIssue::DuplicateApricorn {
+                    index: 4,
+                    apricorn: "BLU_APRICORN".to_string(),
                 },
             ]
         );
@@ -7807,27 +7989,27 @@ mod tests {
         assert_eq!(
             shuckie_gift_issues(
                 &ShuckieGiftDefinition {
-                    species: "shuckle".to_string(),
+                    species: "SHUCK LE".to_string(),
                     level: 15,
-                    held_item: "berry".to_string(),
+                    held_item: "BE RRY".to_string(),
                     nickname: "SHUCKIE".to_string(),
                     original_trainer_name: "MANIA".to_string(),
                     original_trainer_id: 518,
-                    got_today_engine_flag: "engine_got_shuckie_today".to_string(),
+                    got_today_engine_flag: "ENGINE GOT SHUCKIE TODAY".to_string(),
                 },
                 &species_ids,
                 &item_ids,
                 &engine_flags,
             ),
             vec![
-                ShuckieGiftIssue::UnknownSpecies {
-                    species: "shuckle".to_string(),
+                ShuckieGiftIssue::InvalidSpecies {
+                    species: "SHUCK LE".to_string(),
                 },
-                ShuckieGiftIssue::UnknownHeldItem {
-                    held_item: "berry".to_string(),
+                ShuckieGiftIssue::InvalidHeldItem {
+                    held_item: "BE RRY".to_string(),
                 },
-                ShuckieGiftIssue::UnknownEngineFlag {
-                    engine_flag: "engine_got_shuckie_today".to_string(),
+                ShuckieGiftIssue::InvalidEngineFlag {
+                    engine_flag: "ENGINE GOT SHUCKIE TODAY".to_string(),
                 },
             ]
         );
@@ -10702,7 +10884,7 @@ mod tests {
         let data = HappinessData {
             changes: vec![
                 HappinessChangeEntry {
-                    code: String::new(),
+                    code: "HAPPINESS CHANGE".to_string(),
                     change_code: 1,
                     low: 1,
                     mid: 1,
@@ -10722,7 +10904,7 @@ mod tests {
                     outcomes: Vec::new(),
                 },
                 HappinessServiceTable {
-                    routine: String::new(),
+                    routine: "Haircut Brothers".to_string(),
                     outcomes: vec![HappinessServiceOutcome {
                         roll_weight: 1,
                         script_value: 0,
@@ -10745,12 +10927,11 @@ mod tests {
         assert_eq!(
             happiness_data_issues(&data),
             vec![
-                HappinessDataIssue::EmptyChangeCode { change_code: 1 },
-                HappinessDataIssue::EmptyChangeCode { change_code: 1 },
-                HappinessDataIssue::DuplicateChangeCode {
-                    code: String::new(),
+                HappinessDataIssue::InvalidChangeCode {
+                    code: "HAPPINESS CHANGE".to_string(),
                     change_code: 1,
                 },
+                HappinessDataIssue::EmptyChangeCode { change_code: 1 },
                 HappinessDataIssue::DuplicateChangeIndex { change_code: 1 },
                 HappinessDataIssue::EmptyServiceRoutine {
                     routine: String::new(),
@@ -10758,14 +10939,11 @@ mod tests {
                 HappinessDataIssue::EmptyServiceOutcomes {
                     routine: String::new(),
                 },
-                HappinessDataIssue::EmptyServiceRoutine {
-                    routine: String::new(),
-                },
-                HappinessDataIssue::DuplicateService {
-                    routine: String::new(),
+                HappinessDataIssue::InvalidServiceRoutine {
+                    routine: "Haircut Brothers".to_string(),
                 },
                 HappinessDataIssue::UnknownServiceChange {
-                    routine: String::new(),
+                    routine: "Haircut Brothers".to_string(),
                     change_code: 9,
                 },
             ],
@@ -10783,7 +10961,7 @@ mod tests {
             OakRatingEntry {
                 caught_count_limit: 2,
                 fanfare: "SFX_DEX_FANFARE_20_49".to_string(),
-                text_label: " OakRating02".to_string(),
+                text_label: "Oak Rating02".to_string(),
             },
         ];
 
@@ -10796,7 +10974,7 @@ mod tests {
                 },
                 OakRatingTableIssue::InvalidTextLabel {
                     index: 1,
-                    text_label: " OakRating02".to_string(),
+                    text_label: "Oak Rating02".to_string(),
                 },
                 OakRatingTableIssue::InvalidOrder {
                     index: 1,
@@ -10846,7 +11024,7 @@ mod tests {
         let rules = BattleTowerRules {
             banned_species: vec![
                 "MEWTWO".to_string(),
-                " mew".to_string(),
+                "ME W".to_string(),
                 "MEWTWO".to_string(),
             ],
             required_party_count: 0,
@@ -10856,7 +11034,7 @@ mod tests {
             level_group_size: 0,
             party_count_failure_text: String::new(),
             duplicate_species_failure_text: "DuplicateSpeciesText".to_string(),
-            duplicate_held_item_failure_text: " DuplicateHeldItemText".to_string(),
+            duplicate_held_item_failure_text: "Duplicate HeldItemText".to_string(),
             egg_failure_text: "EggText".to_string(),
         };
         let species_ids = BTreeSet::from(["MEW".to_string()]);
@@ -10874,7 +11052,7 @@ mod tests {
                 },
                 BattleTowerRulesIssue::InvalidFailureText {
                     field: BattleTowerFailureTextField::DuplicateHeldItem,
-                    text_id: " DuplicateHeldItemText".to_string(),
+                    text_id: "Duplicate HeldItemText".to_string(),
                 },
                 BattleTowerRulesIssue::UnknownBannedSpecies {
                     index: 0,
@@ -10882,7 +11060,7 @@ mod tests {
                 },
                 BattleTowerRulesIssue::InvalidBannedSpecies {
                     index: 1,
-                    species_id: " mew".to_string(),
+                    species_id: "ME W".to_string(),
                 },
                 BattleTowerRulesIssue::DuplicateBannedSpecies {
                     index: 2,
@@ -10904,8 +11082,8 @@ mod tests {
     fn odd_egg_definition_issues_validate_exact_pack_rows() {
         let definitions = vec![
             OddEggDefinition {
-                species: "cleffa".to_string(),
-                moves: vec!["pound".to_string(), " ".to_string()],
+                species: "CLE FFA".to_string(),
+                moves: vec!["POU ND".to_string(), " ".to_string()],
                 original_trainer_id: 768,
                 dvs: [2, 10, 10, 10],
                 probability: 0,
@@ -10943,14 +11121,14 @@ mod tests {
                 OddEggDefinitionIssue::InvalidProbabilityTotal {
                     total_probability: 25,
                 },
-                OddEggDefinitionIssue::UnknownSpecies {
+                OddEggDefinitionIssue::InvalidSpecies {
                     index: 0,
-                    species_id: "cleffa".to_string(),
+                    species_id: "CLE FFA".to_string(),
                 },
-                OddEggDefinitionIssue::UnknownMove {
+                OddEggDefinitionIssue::InvalidMove {
                     index: 0,
                     move_index: 0,
-                    move_id: "pound".to_string(),
+                    move_id: "POU ND".to_string(),
                 },
                 OddEggDefinitionIssue::InvalidMove {
                     index: 0,
@@ -11010,8 +11188,13 @@ mod tests {
                 moves: vec![
                     String::new(),
                     "EXTREMESPEED ".to_string(),
+                    "EXTREME SPEED".to_string(),
                     "EXTREMESPEED".to_string(),
                 ],
+            },
+            DratiniMoveSetDefinition {
+                mode: 1,
+                moves: vec!["SURF".to_string()],
             },
         ];
         let move_ids = BTreeSet::from(["SURF".to_string()]);
@@ -11030,11 +11213,17 @@ mod tests {
                     move_index: 1,
                     move_id: "EXTREMESPEED ".to_string(),
                 },
-                DratiniMoveSetIssue::UnknownMove {
+                DratiniMoveSetIssue::InvalidMove {
                     index: 1,
                     move_index: 2,
+                    move_id: "EXTREME SPEED".to_string(),
+                },
+                DratiniMoveSetIssue::UnknownMove {
+                    index: 1,
+                    move_index: 3,
                     move_id: "EXTREMESPEED".to_string(),
                 },
+                DratiniMoveSetIssue::DuplicateMode { index: 2, mode: 1 },
             ],
         );
     }
@@ -11051,6 +11240,7 @@ mod tests {
                 "EVENT_BUG_CONTESTANT_1".to_string(),
                 "EVENT_BUG_CONTESTANT_1".to_string(),
                 "EVENT_MISSING".to_string(),
+                "EVENT BUG".to_string(),
             ],
         };
         let event_flags = BTreeSet::from(["EVENT_BUG_CONTESTANT_1".to_string()]);
@@ -11072,18 +11262,22 @@ mod tests {
                     index: 3,
                     flag: "EVENT_MISSING".to_string(),
                 },
+                BugContestConfigIssue::InvalidContestantFlag {
+                    index: 4,
+                    flag: "EVENT BUG".to_string(),
+                },
             ],
         );
 
         let too_few_flags = BugContestConfig {
-            selected_contestant_count: 5,
+            selected_contestant_count: 6,
             ..config
         };
         assert!(
             bug_contest_config_issues(&too_few_flags, &event_flags).contains(
                 &BugContestConfigIssue::SelectedContestantCountExceedsFlags {
-                    selected_contestant_count: 5,
-                    contestant_flag_count: 4,
+                    selected_contestant_count: 6,
+                    contestant_flag_count: 5,
                 }
             )
         );
@@ -11226,6 +11420,38 @@ mod tests {
             .script_runtime
             .variables
             .insert("_party_slot".to_string(), "0".to_string());
+        let happiness_before = state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("party pokemon")
+            .happiness;
+        let rng_seed_before = state.rng_seed;
+        let missing_roll = apply_special_routine_with_context(
+            &mut state,
+            full_context_with_happiness_data(
+                &move_catalog,
+                &species_catalog,
+                &EMPTY_TEST_LEARNSETS,
+                &item_catalog,
+                &happiness_data,
+            ),
+            "OlderHaircutBrother",
+        )
+        .expect_err("rng roll required");
+        assert!(matches!(
+            missing_roll,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "OlderHaircutBrother" && variable == "_rng_roll"
+        ));
+        assert_eq!(
+            state.storage.party.pokemon[0]
+                .as_ref()
+                .expect("party pokemon")
+                .happiness,
+            happiness_before
+        );
+        assert_eq!(state.rng_seed, rng_seed_before);
+        assert_eq!(state.script_runtime.script_value, None);
+
         state
             .script_runtime
             .variables
@@ -13334,6 +13560,67 @@ mod tests {
     }
 
     #[test]
+    fn battle_tower_level_check_rejects_saved_level_group_without_clamp_fallback() {
+        let move_catalog = moves();
+        let rules = battle_tower_rules_with_banned_species(vec![]);
+        let mut empty_party = GameState::default();
+        empty_party.battle_tower.level_group = rules.minimum_level_group;
+        empty_party.script_runtime.variables.insert(
+            "_value".to_string(),
+            "BATTLETOWERACTION_LEVEL_CHECK".to_string(),
+        );
+        let before_empty_party = empty_party.clone();
+
+        let empty_party_error = apply_special_routine_with_context(
+            &mut empty_party,
+            full_context_with_battle_tower_rules(&move_catalog, &rules),
+            "BattleTowerAction",
+        )
+        .expect_err("empty party must not pass as level zero");
+        assert!(matches!(
+            empty_party_error,
+            SpecialRoutineError::EmptyParty { routine } if routine == "BattleTowerAction"
+        ));
+        assert_eq!(empty_party, before_empty_party);
+
+        for level_group in [0, rules.maximum_level_group + 1] {
+            let mut state = GameState::default();
+            state.battle_tower.level_group = level_group;
+            state
+                .storage
+                .register_capture(pokemon("CHIKORITA"))
+                .expect("party capture");
+            state.sync_party_from_storage();
+            state.script_runtime.variables.insert(
+                "_value".to_string(),
+                "BATTLETOWERACTION_LEVEL_CHECK".to_string(),
+            );
+            let before = state.clone();
+
+            let error = apply_special_routine_with_context(
+                &mut state,
+                full_context_with_battle_tower_rules(&move_catalog, &rules),
+                "BattleTowerAction",
+            )
+            .expect_err("saved level group must be exact pack-owned state");
+
+            assert!(matches!(
+                error,
+                SpecialRoutineError::InvalidBattleTowerLevelGroup {
+                    routine,
+                    level_group: rejected,
+                    minimum,
+                    maximum,
+                } if routine == "BattleTowerAction"
+                    && rejected == level_group
+                    && minimum == rules.minimum_level_group
+                    && maximum == rules.maximum_level_group
+            ));
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
     fn battle_tower_ubers_check_requires_exact_modpack_rules_without_builtin_species() {
         let move_catalog = moves();
 
@@ -14150,12 +14437,12 @@ mod tests {
                 },
             ),
             (
-                " 3".to_string(),
+                "3 4".to_string(),
                 RuntimeSpawnPointRef {
                     identifier: 3,
-                    map_constant: " ROUTE_29".to_string(),
-                    map_name: " Route29".to_string(),
-                    group_name: "GROUP_ROUTE_29".to_string(),
+                    map_constant: "ROUTE 29".to_string(),
+                    map_name: "Route 29".to_string(),
+                    group_name: "GROUP ROUTE_29".to_string(),
                     ..spawn_point(3, "ROUTE_29", 1, 3, 5, 6)
                 },
             ),
@@ -14169,13 +14456,6 @@ mod tests {
         assert_eq!(
             runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
             vec![
-                RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint {
-                    key: " 3".to_string(),
-                },
-                RuntimeSpawnPointCatalogIssue::IdentifierMismatch {
-                    key: " 3".to_string(),
-                    identifier: 3,
-                },
                 RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint {
                     key: "1".to_string(),
                 },
@@ -14191,6 +14471,13 @@ mod tests {
                     key: "2".to_string(),
                     map_name: "WrongMap".to_string(),
                     metadata_name: "Route29".to_string(),
+                },
+                RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint {
+                    key: "3 4".to_string(),
+                },
+                RuntimeSpawnPointCatalogIssue::IdentifierMismatch {
+                    key: "3 4".to_string(),
+                    identifier: 3,
                 },
             ],
         );

@@ -209,6 +209,61 @@ impl TimeState {
         self.game_time_hours = self.registers.hours;
         self.day_of_week = self.current_day % 7;
     }
+
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        validate_clock_field("time.start_time.hour", self.start_time.hour, 24)?;
+        validate_clock_field("time.start_time.minute", self.start_time.minute, 60)?;
+        validate_clock_field("time.start_time.second", self.start_time.second, 60)?;
+        validate_clock_field("time.registers.rtc_seconds", self.registers.rtc_seconds, 60)?;
+        validate_clock_field("time.registers.rtc_minutes", self.registers.rtc_minutes, 60)?;
+        validate_clock_field("time.registers.rtc_hours", self.registers.rtc_hours, 24)?;
+        validate_clock_field("time.registers.seconds", self.registers.seconds, 60)?;
+        validate_clock_field("time.registers.minutes", self.registers.minutes, 60)?;
+        validate_clock_field("time.registers.hours", self.registers.hours, 24)?;
+        if self.game_time_seconds != self.registers.seconds {
+            return Err(format!(
+                "time.game_time_seconds {} does not match registers.seconds {}",
+                self.game_time_seconds, self.registers.seconds
+            ));
+        }
+        if self.game_time_minutes != self.registers.minutes {
+            return Err(format!(
+                "time.game_time_minutes {} does not match registers.minutes {}",
+                self.game_time_minutes, self.registers.minutes
+            ));
+        }
+        if self.game_time_hours != self.registers.hours {
+            return Err(format!(
+                "time.game_time_hours {} does not match registers.hours {}",
+                self.game_time_hours, self.registers.hours
+            ));
+        }
+        let expected_day_of_week = self.current_day % 7;
+        if self.day_of_week != expected_day_of_week {
+            return Err(format!(
+                "time.day_of_week {} does not match current_day modulo 7 {}",
+                self.day_of_week, expected_day_of_week
+            ));
+        }
+        let expected_time_of_day = time_of_day_for_hour(self.registers.hours);
+        if self.time_of_day != expected_time_of_day {
+            return Err(format!(
+                "time.time_of_day {:?} does not match registers.hours {} ({:?})",
+                self.time_of_day, self.registers.hours, expected_time_of_day
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_clock_field(field: &str, value: u8, exclusive_max: u8) -> Result<(), String> {
+    if value >= exclusive_max {
+        return Err(format!(
+            "{field} {value} is outside clock range 0..{}",
+            exclusive_max - 1
+        ));
+    }
+    Ok(())
 }
 
 impl Default for TimeState {

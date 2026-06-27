@@ -11,8 +11,15 @@ pub struct Frame(pub u64);
 impl Frame {
     pub const ZERO: Self = Self(0);
 
-    pub const fn next(self) -> Self {
-        Self(self.0 + 1)
+    pub fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(frame) => Some(Self(frame)),
+            None => None,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        self.checked_next().expect("frame cursor overflow")
     }
 
     pub fn elapsed_seconds(self) -> f64 {
@@ -34,5 +41,10 @@ mod tests {
     fn frame_elapsed_seconds_uses_hardware_duration() {
         assert_eq!(Frame::ZERO.next(), Frame(1));
         assert!((Frame(60).elapsed_seconds() - 1.0045623779296875).abs() < 0.000000001);
+    }
+
+    #[test]
+    fn frame_next_exposes_overflow_as_absent_value() {
+        assert_eq!(Frame(u64::MAX).checked_next(), None);
     }
 }

@@ -30,6 +30,7 @@ pub fn is_known_script_mart_type(mart_type: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptShopCommand {
+    pub command: String,
     pub mart_type: String,
     pub mart_id: String,
     pub source_script: String,
@@ -54,6 +55,7 @@ impl MartCatalog {
 pub enum MartCatalogIssue {
     EmptyMartId { mart_id: String },
     InvalidMartId { mart_id: String },
+    InvalidItem { mart_id: String, item_id: String },
     UnknownItem { mart_id: String, item_id: String },
 }
 
@@ -67,13 +69,18 @@ pub fn mart_catalog_issues(
             issues.push(MartCatalogIssue::EmptyMartId {
                 mart_id: mart_id.clone(),
             });
-        } else if mart_id.trim() != mart_id {
+        } else if !is_exact_shop_token(mart_id) {
             issues.push(MartCatalogIssue::InvalidMartId {
                 mart_id: mart_id.clone(),
             });
         }
         for item_id in item_ids {
-            if !items.contains_key(item_id) {
+            if !is_exact_shop_token(item_id) {
+                issues.push(MartCatalogIssue::InvalidItem {
+                    mart_id: mart_id.clone(),
+                    item_id: item_id.clone(),
+                });
+            } else if !items.contains_key(item_id) {
                 issues.push(MartCatalogIssue::UnknownItem {
                     mart_id: mart_id.clone(),
                     item_id: item_id.clone(),
@@ -118,8 +125,14 @@ pub enum ShopError {
     UnknownMartItem { mart_id: String, item_id: String },
     #[error("item '{item_id}' was not loaded")]
     UnknownItem { item_id: String },
+    #[error("invalid item id '{item_id}'")]
+    InvalidItemId { item_id: String },
     #[error("quantity must be positive")]
     InvalidQuantity,
+    #[error("invalid script shop command '{command}'")]
+    InvalidCommand { command: String },
+    #[error("unknown script shop command '{command}'")]
+    UnknownCommand { command: String },
     #[error("shop quantity {quantity} exceeds runtime quantity limit")]
     QuantityTooLarge { quantity: u32 },
     #[error("unknown script mart type '{mart_type}'")]
@@ -155,6 +168,8 @@ pub fn script_shop_command_issues(
             |command| match validate_script_shop_command(catalog, command) {
                 Err(
                     error @ (ShopError::InvalidMartType { .. }
+                    | ShopError::InvalidCommand { .. }
+                    | ShopError::UnknownCommand { .. }
                     | ShopError::UnknownMartType { .. }
                     | ShopError::InvalidMartId { .. }
                     | ShopError::InvalidZeroMart { .. }
@@ -216,10 +231,11 @@ pub fn validate_script_shop_command(
     catalog: &MartCatalog,
     command: &ScriptShopCommand,
 ) -> Result<(), ShopError> {
+    validate_script_shop_command_token(&command.command)?;
     validate_script_mart_type(&command.mart_type)?;
     if command.mart_id == "0" {
         validate_zero_mart(&command.mart_type)
-    } else if command.mart_id.trim().is_empty() || command.mart_id.trim() != command.mart_id {
+    } else if !is_exact_shop_token(&command.mart_id) {
         Err(ShopError::InvalidMartId {
             mart_id: command.mart_id.clone(),
         })
@@ -233,7 +249,7 @@ pub fn format_price(value: u32) -> String {
 }
 
 fn validate_script_mart_type(mart_type: &str) -> Result<(), ShopError> {
-    if mart_type.trim().is_empty() || mart_type.trim() != mart_type {
+    if !is_exact_shop_token(mart_type) {
         Err(ShopError::InvalidMartType {
             mart_type: mart_type.to_string(),
         })
@@ -244,6 +260,34 @@ fn validate_script_mart_type(mart_type: &str) -> Result<(), ShopError> {
             mart_type: mart_type.to_string(),
         })
     }
+}
+
+fn validate_script_shop_command_token(command: &str) -> Result<(), ShopError> {
+    if !is_exact_script_shop_command_token(command) {
+        Err(ShopError::InvalidCommand {
+            command: command.to_string(),
+        })
+    } else if is_known_script_shop_command(command) {
+        Ok(())
+    } else {
+        Err(ShopError::UnknownCommand {
+            command: command.to_string(),
+        })
+    }
+}
+
+fn is_exact_script_shop_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn is_exact_shop_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn validate_zero_mart(mart_type: &str) -> Result<(), ShopError> {
@@ -319,6 +363,7 @@ pub fn buy_item(
     if quantity == 0 {
         return Err(ShopError::InvalidQuantity);
     }
+    validate_shop_item_id(item_id)?;
     let item = items.get(item_id).ok_or_else(|| ShopError::UnknownItem {
         item_id: item_id.to_string(),
     })?;
@@ -359,6 +404,7 @@ pub fn sell_item(
     if quantity == 0 {
         return Err(ShopError::InvalidQuantity);
     }
+    validate_shop_item_id(item_id)?;
     let item = items.get(item_id).ok_or_else(|| ShopError::UnknownItem {
         item_id: item_id.to_string(),
     })?;
@@ -398,6 +444,16 @@ pub fn sell_item(
         message: format_price(payout),
         credited: state.money - starting_money,
     })
+}
+
+fn validate_shop_item_id(item_id: &str) -> Result<(), ShopError> {
+    if is_exact_shop_token(item_id) {
+        Ok(())
+    } else {
+        Err(ShopError::InvalidItemId {
+            item_id: item_id.to_string(),
+        })
+    }
 }
 
 fn shop_money_cap(currency_constants: &CurrencyCatalog) -> Result<u32, ShopError> {
@@ -519,6 +575,21 @@ mod tests {
 
     fn shop_command(mart_type: &str, mart_id: &str) -> ScriptShopCommand {
         ScriptShopCommand {
+            command: "pokemart".to_string(),
+            mart_type: mart_type.to_string(),
+            mart_id: mart_id.to_string(),
+            source_script: "ShopScript".to_string(),
+            command_index: 11,
+        }
+    }
+
+    fn shop_command_with_command(
+        command: &str,
+        mart_type: &str,
+        mart_id: &str,
+    ) -> ScriptShopCommand {
+        ScriptShopCommand {
+            command: command.to_string(),
             mart_type: mart_type.to_string(),
             mart_id: mart_id.to_string(),
             source_script: "ShopScript".to_string(),
@@ -531,14 +602,19 @@ mod tests {
     }
 
     #[test]
-    fn mart_catalog_issues_reject_empty_ids_and_unknown_exact_items() {
+    fn mart_catalog_issues_reject_empty_ids_invalid_items_and_unknown_exact_items() {
         let catalog = MartCatalog(
             [
                 ("".to_string(), vec!["POTION".to_string()]),
                 (" CHERRYGROVE_MART".to_string(), vec!["POTION".to_string()]),
+                ("CHERRYGROVE MART".to_string(), vec!["POTION".to_string()]),
                 (
                     "CHERRYGROVE_MART".to_string(),
-                    vec!["POTION".to_string(), "potion".to_string()],
+                    vec![
+                        "POTION".to_string(),
+                        "RARE CANDY".to_string(),
+                        "potion".to_string(),
+                    ],
                 ),
             ]
             .into_iter()
@@ -553,6 +629,13 @@ mod tests {
                 },
                 MartCatalogIssue::InvalidMartId {
                     mart_id: " CHERRYGROVE_MART".to_string(),
+                },
+                MartCatalogIssue::InvalidMartId {
+                    mart_id: "CHERRYGROVE MART".to_string(),
+                },
+                MartCatalogIssue::InvalidItem {
+                    mart_id: "CHERRYGROVE_MART".to_string(),
+                    item_id: "RARE CANDY".to_string(),
                 },
                 MartCatalogIssue::UnknownItem {
                     mart_id: "CHERRYGROVE_MART".to_string(),
@@ -744,6 +827,12 @@ mod tests {
             })
         );
         assert_eq!(
+            validate_script_shop_command(&catalog, &shop_command("MARTTYPE STANDARD", "MART")),
+            Err(ShopError::InvalidMartType {
+                mart_type: "MARTTYPE STANDARD".to_string()
+            })
+        );
+        assert_eq!(
             validate_script_shop_command(&catalog, &shop_command("MARTTYPE_STANDARD", "0")),
             Err(ShopError::InvalidZeroMart {
                 mart_type: "MARTTYPE_STANDARD".to_string()
@@ -761,6 +850,30 @@ mod tests {
                 mart_id: " MART".to_string()
             })
         );
+        assert_eq!(
+            validate_script_shop_command(&catalog, &shop_command("MARTTYPE_STANDARD", "MA RT")),
+            Err(ShopError::InvalidMartId {
+                mart_id: "MA RT".to_string()
+            })
+        );
+        assert_eq!(
+            validate_script_shop_command(
+                &catalog,
+                &shop_command_with_command("PokeMart", "MARTTYPE_STANDARD", "MART")
+            ),
+            Err(ShopError::InvalidCommand {
+                command: "PokeMart".to_string()
+            })
+        );
+        assert_eq!(
+            validate_script_shop_command(
+                &catalog,
+                &shop_command_with_command("sellmart", "MARTTYPE_STANDARD", "MART")
+            ),
+            Err(ShopError::UnknownCommand {
+                command: "sellmart".to_string()
+            })
+        );
     }
 
     #[test]
@@ -772,6 +885,8 @@ mod tests {
         );
         let commands = vec![
             shop_command("MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
+            shop_command_with_command("PokeMart", "MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
+            shop_command_with_command("sellmart", "MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
             shop_command("marttype_standard", "MART_CHERRYGROVE"),
             shop_command(" MARTTYPE_STANDARD", "MART_CHERRYGROVE"),
             shop_command("MARTTYPE_STANDARD", "0"),
@@ -782,6 +897,20 @@ mod tests {
         assert_eq!(
             script_shop_command_issues(&catalog, &commands),
             vec![
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::InvalidCommand {
+                        command: "PokeMart".to_string(),
+                    },
+                },
+                ScriptShopCommandIssue {
+                    source_script: "ShopScript".to_string(),
+                    command_index: 11,
+                    error: ShopError::UnknownCommand {
+                        command: "sellmart".to_string(),
+                    },
+                },
                 ScriptShopCommandIssue {
                     source_script: "ShopScript".to_string(),
                     command_index: 11,
@@ -885,6 +1014,24 @@ mod tests {
     }
 
     #[test]
+    fn buying_rejects_malformed_item_id_before_state_change() {
+        let mut state = GameState {
+            money: 1000,
+            ..GameState::default()
+        };
+        let items = items();
+
+        assert_eq!(
+            buy_item(&mut state, &items, "PO TION", 1),
+            Err(ShopError::InvalidItemId {
+                item_id: "PO TION".to_string(),
+            })
+        );
+        assert_eq!(state.money, 1000);
+        assert_eq!(state.bag.quantity(&items["POTION"]), 0);
+    }
+
+    #[test]
     fn max_buy_quantity_respects_money_stack_and_full_pocket() {
         let mut state = GameState {
             money: 1000,
@@ -950,6 +1097,29 @@ mod tests {
             ),
             Err(ShopError::MissingCurrencyLimit {
                 constant: "MAX_MONEY".to_string(),
+            })
+        );
+        assert_eq!(state.money, 500);
+        assert_eq!(state.bag.quantity(&items["RARE_CANDY"]), 1);
+    }
+
+    #[test]
+    fn selling_rejects_malformed_item_id_before_state_change() {
+        let currency_constants = currency_constants(999_999);
+        let mut state = GameState {
+            money: 500,
+            ..GameState::default()
+        };
+        let items = items();
+        state
+            .bag
+            .add_item(&items["RARE_CANDY"], 1)
+            .expect("add item");
+
+        assert_eq!(
+            sell_item(&mut state, &items, &currency_constants, "RARE CANDY", 1),
+            Err(ShopError::InvalidItemId {
+                item_id: "RARE CANDY".to_string(),
             })
         );
         assert_eq!(state.money, 500);

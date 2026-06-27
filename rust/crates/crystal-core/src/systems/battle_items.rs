@@ -109,6 +109,8 @@ pub enum BattleItemError {
     MissingMoveSlot { item_id: String },
     #[error("battle item {item_id} move slot {slot} is outside the target moves")]
     MoveSlotOutOfRange { item_id: String, slot: usize },
+    #[error("battle item {item_id} references invalid move id {move_id}")]
+    InvalidMoveId { item_id: String, move_id: String },
     #[error("battle item {item_id} references unknown move {move_id}")]
     UnknownMove { item_id: String, move_id: String },
     #[error("battle item {item_id} has invalid PP restore points {points}")]
@@ -250,53 +252,53 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
     }
     if item.script_name.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingScriptName);
-    } else if item.script_name.trim() != item.script_name {
+    } else if !is_exact_item_id_token(&item.script_name) {
         issues.push(ItemPayloadIssue::InvalidScriptName {
             script_name: item.script_name.clone(),
         });
     }
     if item.pocket.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingPocket);
-    } else if item.pocket.trim() != item.pocket {
+    } else if !is_exact_item_id_token(&item.pocket) {
         issues.push(ItemPayloadIssue::InvalidPocket {
             pocket: item.pocket.clone(),
         });
     }
     if item.effect.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingEffect);
-    } else if item.effect.trim() != item.effect {
+    } else if !is_exact_item_id_token(&item.effect) {
         issues.push(ItemPayloadIssue::InvalidEffect {
             effect: item.effect.clone(),
         });
     }
     if item.held_effect.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingHeldEffect);
-    } else if item.held_effect.trim() != item.held_effect {
+    } else if !is_exact_item_id_token(&item.held_effect) {
         issues.push(ItemPayloadIssue::InvalidHeldEffect {
             held_effect: item.held_effect.clone(),
         });
     }
-    if !item.property.is_empty() && item.property.trim() != item.property {
+    if !item.property.is_empty() && !is_exact_item_id_token(&item.property) {
         issues.push(ItemPayloadIssue::InvalidProperty {
             property: item.property.clone(),
         });
     }
     if item.field_menu.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingFieldMenu);
-    } else if item.field_menu.trim() != item.field_menu {
+    } else if !is_exact_item_id_token(&item.field_menu) {
         issues.push(ItemPayloadIssue::InvalidFieldMenu {
             menu: item.field_menu.clone(),
         });
     }
     if item.battle_menu.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingBattleMenu);
-    } else if item.battle_menu.trim() != item.battle_menu {
+    } else if !is_exact_item_id_token(&item.battle_menu) {
         issues.push(ItemPayloadIssue::InvalidBattleMenu {
             menu: item.battle_menu.clone(),
         });
     }
     for (index, status) in item.status_heals.iter().enumerate() {
-        if status.trim().is_empty() || status.trim() != status {
+        if !is_exact_item_id_token(status) {
             issues.push(ItemPayloadIssue::InvalidStatusHeal {
                 index,
                 status: status.clone(),
@@ -422,7 +424,7 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
     }
     if item.pocket == ITEM_POCKET_TM_HM {
         if let Some(move_id) = item.tmhm_move.as_deref() {
-            if !move_id.is_empty() && move_id.trim() != move_id {
+            if !move_id.is_empty() && !is_exact_item_id_token(move_id) {
                 issues.push(ItemPayloadIssue::InvalidTmhmMove {
                     move_id: move_id.to_string(),
                 });
@@ -444,14 +446,19 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
     issues
 }
 
-pub fn item_reference_issues(
-    item: &Item,
-    move_ids: &BTreeSet<String>,
-) -> Vec<ItemReferenceIssue> {
+fn is_exact_item_id_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+pub fn item_reference_issues(item: &Item, move_ids: &BTreeSet<String>) -> Vec<ItemReferenceIssue> {
     let mut issues = Vec::new();
     if item.pocket == ITEM_POCKET_TM_HM {
         if let Some(move_id) = item.tmhm_move.as_deref() {
-            if !move_id.is_empty() && !move_ids.contains(move_id) {
+            if is_exact_item_id_token(move_id) && !move_ids.contains(move_id) {
                 issues.push(ItemReferenceIssue::UnknownTmhmMove {
                     move_id: move_id.to_string(),
                 });
@@ -668,10 +675,11 @@ pub fn apply_rare_candy_item_effect(
         });
     }
 
-    let hp_before = pokemon.hp;
-    let status_before = pokemon.status.clone();
+    let mut changed = pokemon.clone();
+    let hp_before = changed.hp;
+    let status_before = changed.status.clone();
     let level_up = apply_direct_level_gain(
-        pokemon,
+        &mut changed,
         moves,
         learnsets,
         growth_rates,
@@ -688,8 +696,9 @@ pub fn apply_rare_candy_item_effect(
         force_evolution: false,
         link_mode: LinkMode::None,
     };
-    let evolution = check_and_evolve(pokemon, evolutions, &evolution_context, true)
+    let evolution = check_and_evolve(&mut changed, evolutions, &evolution_context, true)
         .map_err(|error| rare_candy_evolution_error(&item.script_name, error))?;
+    *pokemon = changed;
 
     Ok(BattleItemOutcome {
         item_id: item.script_name.clone(),
@@ -724,10 +733,11 @@ pub fn apply_evolution_stone_item_effect(
     time_of_day: TimeOfDay,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
-    let hp_before = pokemon.hp;
-    let level_before = pokemon.level;
-    let experience_before = pokemon.experience;
-    let status_before = pokemon.status.clone();
+    let mut changed = pokemon.clone();
+    let hp_before = changed.hp;
+    let level_before = changed.level;
+    let experience_before = changed.experience;
+    let status_before = changed.status.clone();
     let evolution_context = EvolutionContext {
         species,
         moves,
@@ -737,7 +747,7 @@ pub fn apply_evolution_stone_item_effect(
         force_evolution: true,
         link_mode: LinkMode::None,
     };
-    let evolution = check_and_evolve(pokemon, evolutions, &evolution_context, true)
+    let evolution = check_and_evolve(&mut changed, evolutions, &evolution_context, true)
         .map_err(|error| evolution_stone_error(&item.script_name, error))?;
     let Some(evolution_target) = evolution.target_species else {
         return Err(BattleItemError::NoTargetChange {
@@ -752,6 +762,7 @@ pub fn apply_evolution_stone_item_effect(
             _ => None,
         })
         .collect();
+    *pokemon = changed;
 
     Ok(BattleItemOutcome {
         item_id: item.script_name.clone(),
@@ -997,6 +1008,7 @@ fn apply_restore_pp(
     let mut changes = Vec::new();
     for slot in target_slots {
         let learned = &pokemon.moves[slot];
+        validate_runtime_move_id(item, &learned.name)?;
         let move_data = moves
             .get(&learned.name)
             .ok_or_else(|| BattleItemError::UnknownMove {
@@ -1053,6 +1065,16 @@ fn apply_restore_pp(
     })
 }
 
+fn validate_runtime_move_id(item: &Item, move_id: &str) -> Result<(), BattleItemError> {
+    if !is_exact_item_id_token(move_id) {
+        return Err(BattleItemError::InvalidMoveId {
+            item_id: item.script_name.clone(),
+            move_id: move_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn apply_pp_up(
     pokemon: &mut Pokemon,
     item: &Item,
@@ -1081,6 +1103,7 @@ fn apply_pp_up(
         });
     }
     let learned = &pokemon.moves[slot];
+    validate_runtime_move_id(item, &learned.name)?;
     let move_data = moves
         .get(&learned.name)
         .ok_or_else(|| BattleItemError::UnknownMove {
@@ -1800,6 +1823,9 @@ mod tests {
         tm.tmhm_move = Some("MUD_SLAP".to_string());
         assert_eq!(item_reference_issues(&tm, &move_ids), Vec::new());
 
+        tm.tmhm_move = Some("MUD SLAP".to_string());
+        assert_eq!(item_reference_issues(&tm, &move_ids), Vec::new());
+
         tm.tmhm_move = None;
         assert_eq!(item_reference_issues(&tm, &move_ids), Vec::new());
     }
@@ -1809,12 +1835,12 @@ mod tests {
         let mut tm = test_item("TM_MUD_SLAP", 0);
         tm.pocket = ITEM_POCKET_TM_HM.to_string();
         tm.tmhm_index = Some(30);
-        tm.tmhm_move = Some(" MUD_SLAP".to_string());
+        tm.tmhm_move = Some("MUD SLAP".to_string());
 
         assert_eq!(
             item_payload_issues(&tm),
             vec![ItemPayloadIssue::InvalidTmhmMove {
-                move_id: " MUD_SLAP".to_string(),
+                move_id: "MUD SLAP".to_string(),
             }]
         );
     }
@@ -1828,6 +1854,14 @@ mod tests {
             item_payload_issues(&item),
             vec![ItemPayloadIssue::InvalidScriptName {
                 script_name: " MOD_ITEM".to_string(),
+            }]
+        );
+
+        item.script_name = "MOD ITEM".to_string();
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidScriptName {
+                script_name: "MOD ITEM".to_string(),
             }]
         );
     }
@@ -1848,7 +1882,10 @@ mod tests {
         assert_eq!(item_payload_issues(&item), Vec::new());
 
         item.name = String::new();
-        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingName]);
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingName]
+        );
     }
 
     #[test]
@@ -1876,12 +1913,12 @@ mod tests {
     #[test]
     fn item_payload_issues_reject_malformed_pocket_without_enum_restriction() {
         let mut item = test_item("MOD_ITEM", 0);
-        item.pocket = " BATTLE_PASS".to_string();
+        item.pocket = "BATTLE PASS".to_string();
 
         assert_eq!(
             item_payload_issues(&item),
             vec![ItemPayloadIssue::InvalidPocket {
-                pocket: " BATTLE_PASS".to_string(),
+                pocket: "BATTLE PASS".to_string(),
             }]
         );
 
@@ -1889,18 +1926,21 @@ mod tests {
         assert_eq!(item_payload_issues(&item), Vec::new());
 
         item.pocket = String::new();
-        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingPocket]);
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingPocket]
+        );
     }
 
     #[test]
     fn item_payload_issues_reject_malformed_effect_without_enum_restriction() {
         let mut item = test_item("MOD_ITEM", 0);
-        item.effect = " MODDED_FLASH_STEP".to_string();
+        item.effect = "MODDED FLASH_STEP".to_string();
 
         assert_eq!(
             item_payload_issues(&item),
             vec![ItemPayloadIssue::InvalidEffect {
-                effect: " MODDED_FLASH_STEP".to_string(),
+                effect: "MODDED FLASH_STEP".to_string(),
             }]
         );
 
@@ -1908,18 +1948,21 @@ mod tests {
         assert_eq!(item_payload_issues(&item), Vec::new());
 
         item.effect = String::new();
-        assert_eq!(item_payload_issues(&item), vec![ItemPayloadIssue::MissingEffect]);
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingEffect]
+        );
     }
 
     #[test]
     fn item_payload_issues_reject_malformed_held_effect_without_enum_restriction() {
         let mut item = test_item("MOD_ITEM", 0);
-        item.held_effect = " HELD_MODDED".to_string();
+        item.held_effect = "HELD MODDED".to_string();
 
         assert_eq!(
             item_payload_issues(&item),
             vec![ItemPayloadIssue::InvalidHeldEffect {
-                held_effect: " HELD_MODDED".to_string(),
+                held_effect: "HELD MODDED".to_string(),
             }]
         );
 
@@ -1945,6 +1988,14 @@ mod tests {
             }]
         );
 
+        item.property = "CANT SELECT".to_string();
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::InvalidProperty {
+                property: "CANT SELECT".to_string(),
+            }]
+        );
+
         item.property = "CANT_SELECT".to_string();
         assert_eq!(item_payload_issues(&item), Vec::new());
 
@@ -1955,14 +2006,14 @@ mod tests {
     #[test]
     fn item_payload_issues_reject_malformed_menus_without_enum_restriction() {
         let mut item = test_item("MOD_ITEM", 0);
-        item.field_menu = " ITEMMENU_MODDED".to_string();
+        item.field_menu = "ITEMMENU MODDED".to_string();
         item.battle_menu = String::new();
 
         assert_eq!(
             item_payload_issues(&item),
             vec![
                 ItemPayloadIssue::InvalidFieldMenu {
-                    menu: " ITEMMENU_MODDED".to_string(),
+                    menu: "ITEMMENU MODDED".to_string(),
                 },
                 ItemPayloadIssue::MissingBattleMenu,
             ]
@@ -2551,6 +2602,25 @@ mod tests {
         );
         assert_eq!(unknown, unknown_before);
 
+        let mut malformed = pokemon_with_pp(20, 1);
+        malformed.moves[1].name = "GROW L".to_string();
+        let malformed_before = malformed.clone();
+        assert_eq!(
+            apply_battle_pp_item_effect(
+                &mut malformed,
+                &pp_item(Some("POKEMON"), Some(10)),
+                &moves,
+                None,
+                true
+            )
+            .expect_err("malformed move ids are invalid save or pack state"),
+            BattleItemError::InvalidMoveId {
+                item_id: "ETHER".to_string(),
+                move_id: "GROW L".to_string(),
+            }
+        );
+        assert_eq!(malformed, malformed_before);
+
         let mut full = pokemon_with_pp(35, 40);
         let full_before = full.clone();
         assert_eq!(
@@ -2619,6 +2689,25 @@ mod tests {
             }
         );
         assert_eq!(invalid, invalid_before);
+
+        let mut malformed_move = pokemon_with_pp(20, 1);
+        malformed_move.moves[0].name = "TACK LE".to_string();
+        let malformed_move_before = malformed_move.clone();
+        assert_eq!(
+            apply_battle_pp_item_effect(
+                &mut malformed_move,
+                &pp_up_item(Some(1)),
+                &moves,
+                Some(0),
+                true
+            )
+            .expect_err("malformed PP Up move ids are invalid save or pack state"),
+            BattleItemError::InvalidMoveId {
+                item_id: "PP_UP".to_string(),
+                move_id: "TACK LE".to_string(),
+            }
+        );
+        assert_eq!(malformed_move, malformed_move_before);
 
         let mut maxed = pokemon_with_pp(56, 1);
         maxed.moves[0].pp_ups = 3;
@@ -2982,6 +3071,50 @@ mod tests {
     }
 
     #[test]
+    fn rare_candy_rejects_evolution_errors_without_partial_level_mutation() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let species = species_catalog();
+        let moves = rare_candy_moves();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("BAYLEEF".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [(
+                "CHIKORITA".to_string(),
+                vec![EvolutionEntry::level("MISSING_EVOLUTION", 16)],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut pokemon = Pokemon::new_for_tests(species["CHIKORITA"].clone(), 15, Dv::default());
+        pokemon.experience = 15_i32.pow(3);
+        let before = pokemon.clone();
+
+        let error = apply_rare_candy_item_effect(
+            &mut pokemon,
+            &rare_candy_item(Some(1)),
+            &species,
+            &moves,
+            &learnsets,
+            &growth_rates,
+            &reward_rules(),
+            &evolutions,
+            TimeOfDay::Day,
+            true,
+        )
+        .expect_err("invalid evolution target rejects the whole candy transaction");
+
+        assert!(matches!(
+            error,
+            BattleItemError::RareCandyEvolution { item_id, .. } if item_id == "RARE_CANDY"
+        ));
+        assert_eq!(pokemon, before);
+    }
+
+    #[test]
     fn evolution_stone_uses_exact_item_evolution_table_and_learns_target_moves() {
         let item = evolution_stone_item("THUNDERSTONE");
         let species = species_catalog();
@@ -3057,6 +3190,47 @@ mod tests {
                 item_id: "FIRE_STONE".to_string(),
             }
         );
+        assert_eq!(pokemon, before);
+    }
+
+    #[test]
+    fn evolution_stone_rejects_target_move_errors_without_partial_mutation() {
+        let item = evolution_stone_item("THUNDERSTONE");
+        let species = species_catalog();
+        let moves = rare_candy_moves();
+        let learnsets = [(
+            "RAICHU".to_string(),
+            vec![LearnsetEntry(20, "MISSING_STONE_MOVE".to_string())],
+        )]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [(
+                "PIKACHU".to_string(),
+                vec![EvolutionEntry::item("RAICHU", "THUNDERSTONE")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut pokemon = Pokemon::new_for_tests(species["PIKACHU"].clone(), 20, Dv::default());
+        let before = pokemon.clone();
+
+        let error = apply_evolution_stone_item_effect(
+            &mut pokemon,
+            &item,
+            &species,
+            &moves,
+            &learnsets,
+            &evolutions,
+            TimeOfDay::Day,
+            true,
+        )
+        .expect_err("missing target move data rejects the whole stone transaction");
+
+        assert!(matches!(
+            error,
+            BattleItemError::EvolutionStone { item_id, .. } if item_id == "THUNDERSTONE"
+        ));
         assert_eq!(pokemon, before);
     }
 

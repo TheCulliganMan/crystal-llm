@@ -313,6 +313,168 @@ impl Pokemon {
             stat,
         )
     }
+
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        validate_exact_token("pokemon.species.id", &self.species.id)?;
+        validate_exact_text("pokemon.nickname", &self.nickname)?;
+        validate_exact_text("pokemon.original_trainer_name", &self.original_trainer_name)?;
+        if let Some(item) = &self.item {
+            validate_exact_token("pokemon.item", item)?;
+        }
+        if let Some(status) = &self.status {
+            validate_exact_token("pokemon.status", status)?;
+        }
+        if self.level == 0 || self.level > 100 {
+            return Err(format!(
+                "pokemon.level {} is outside range 1..100",
+                self.level
+            ));
+        }
+        if self.max_hp == 0 {
+            return Err("pokemon.max_hp must be nonzero".to_string());
+        }
+        if self.hp > self.max_hp {
+            return Err(format!(
+                "pokemon.hp {} cannot exceed max_hp {}",
+                self.hp, self.max_hp
+            ));
+        }
+        validate_dvs(self.dvs)?;
+        self.validate_stat_projection()?;
+        if self.experience < 0 {
+            return Err(format!(
+                "pokemon.experience {} must be nonnegative",
+                self.experience
+            ));
+        }
+        if self.moves.len() > 4 {
+            return Err(format!(
+                "pokemon.moves has {} entries, maximum is 4",
+                self.moves.len()
+            ));
+        }
+        for (index, learned_move) in self.moves.iter().enumerate() {
+            learned_move.validate_saved_state(index)?;
+        }
+        validate_stat_boosts(&self.stat_boosts)
+    }
+
+    fn validate_stat_projection(&self) -> Result<(), String> {
+        let expected = calculate_stats(
+            &self.species,
+            self.level,
+            self.dvs,
+            StatExperience {
+                hp: self.hp_exp,
+                attack: self.attack_exp,
+                defense: self.defense_exp,
+                speed: self.speed_exp,
+                special: self.special_exp,
+            },
+        );
+        for (field, actual, expected) in [
+            ("max_hp", self.max_hp, expected.max_hp),
+            ("attack", self.attack, expected.attack),
+            ("defense", self.defense, expected.defense),
+            ("speed", self.speed, expected.speed),
+            (
+                "special_attack",
+                self.special_attack,
+                expected.special_attack,
+            ),
+            (
+                "special_defense",
+                self.special_defense,
+                expected.special_defense,
+            ),
+        ] {
+            if actual != expected {
+                return Err(format!(
+                    "pokemon.{field} {actual} does not match calculated stat {expected}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LearnedMove {
+    pub fn validate_saved_state(&self, index: usize) -> Result<(), String> {
+        validate_exact_token(&format!("pokemon.moves[{index}].name"), &self.name)?;
+        if self.pp_ups > 3 {
+            return Err(format!(
+                "pokemon.moves[{index}].pp_ups {} is outside range 0..3",
+                self.pp_ups
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_dvs(dvs: Dv) -> Result<(), String> {
+    for (field, value) in [
+        ("attack", dvs.attack),
+        ("defense", dvs.defense),
+        ("speed", dvs.speed),
+        ("special", dvs.special),
+        ("hp", dvs.hp),
+    ] {
+        if value > 15 {
+            return Err(format!(
+                "pokemon.dvs.{field} {value} is outside range 0..15"
+            ));
+        }
+    }
+    let expected_hp = Dv::from_non_hp(dvs.attack, dvs.defense, dvs.speed, dvs.special).hp;
+    if dvs.hp != expected_hp {
+        return Err(format!(
+            "pokemon.dvs.hp {} does not match derived HP DV {}",
+            dvs.hp, expected_hp
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stat_boosts(stat_boosts: &BTreeMap<Stat, i8>) -> Result<(), String> {
+    let expected = default_stat_boosts();
+    if stat_boosts.len() != expected.len() {
+        return Err(format!(
+            "pokemon.stat_boosts has {} entries, expected {}",
+            stat_boosts.len(),
+            expected.len()
+        ));
+    }
+    for stat in expected.keys() {
+        let Some(value) = stat_boosts.get(stat) else {
+            return Err(format!("pokemon.stat_boosts is missing {:?}", stat));
+        };
+        if !(-6..=6).contains(value) {
+            return Err(format!(
+                "pokemon.stat_boosts.{stat:?} {value} is outside range -6..6"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_token(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value {
+        return Err(format!("{field} has invalid token '{value}'"));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.'))
+    {
+        return Err(format!("{field} has invalid token '{value}'"));
+    }
+    Ok(())
+}
+
+fn validate_exact_text(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!("{field} has invalid text '{value}'"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +835,64 @@ mod tests {
         .expect_err("learned moves must declare PP Up stages explicitly")
         .to_string();
         assert!(error.contains("missing field `pp_ups`"), "{error}");
+    }
+
+    #[test]
+    fn pokemon_saved_state_rejects_impossible_runtime_records() {
+        let mut pokemon = Pokemon::new_for_tests(chikorita(), 5, Dv::from_non_hp(1, 2, 3, 4));
+        pokemon.validate_saved_state().expect("valid Pokemon");
+
+        pokemon.level = 0;
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err("pokemon.level 0 is outside range 1..100".to_string())
+        );
+
+        pokemon.level = 5;
+        pokemon.hp = pokemon.max_hp + 1;
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err(format!(
+                "pokemon.hp {} cannot exceed max_hp {}",
+                pokemon.hp, pokemon.max_hp
+            ))
+        );
+
+        pokemon.hp = pokemon.max_hp;
+        pokemon.dvs.attack = 16;
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err("pokemon.dvs.attack 16 is outside range 0..15".to_string())
+        );
+
+        pokemon.dvs.attack = 1;
+        pokemon.dvs.hp ^= 1;
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err("pokemon.dvs.hp 11 does not match derived HP DV 10".to_string())
+        );
+
+        pokemon.dvs = Dv::from_non_hp(1, 2, 3, 4);
+        pokemon.attack += 1;
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err(format!(
+                "pokemon.attack {} does not match calculated stat {}",
+                pokemon.attack,
+                pokemon.attack - 1
+            ))
+        );
+
+        pokemon.attack -= 1;
+        pokemon.moves.push(LearnedMove {
+            name: "THUNDER PUNCH".to_string(),
+            current_pp: 15,
+            pp_ups: 0,
+        });
+        assert_eq!(
+            pokemon.validate_saved_state(),
+            Err("pokemon.moves[0].name has invalid token 'THUNDER PUNCH'".to_string())
+        );
     }
 
     #[test]
