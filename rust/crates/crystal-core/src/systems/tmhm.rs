@@ -16,6 +16,7 @@ pub struct TmHmLearnOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum TmHmLearnError {
     #[error("invalid TM/HM item id '{item_id}'")]
     InvalidItemId { item_id: String },
@@ -37,6 +38,16 @@ pub enum TmHmLearnError {
     MoveListFull,
     #[error("replacement slot {slot} is outside the Pokemon move list")]
     InvalidReplacementSlot { slot: usize },
+    #[error("saved bag.tm_hm has {slots} slots, compiled TM/HM max index is {max_index}")]
+    SavedTmHmSlotsExceedCompiledMax { slots: usize, max_index: usize },
+    #[error("saved bag.tm_hm has {slots} slots, but compiled pack has no TM/HM items")]
+    SavedTmHmSlotsWithoutCompiledItems { slots: usize },
+    #[error("saved bag.tm_hm[{index}] has no compiled TM/HM item with matching tmhm_index")]
+    SavedTmHmMissingCompiledItem { index: usize },
+    #[error(
+        "saved bag.tm_hm[{index}] matches {matches} compiled TM/HM items; tmhm_index must be unique"
+    )]
+    SavedTmHmDuplicateCompiledItems { index: usize, matches: usize },
 }
 
 pub fn teach_tmhm_move(
@@ -115,6 +126,45 @@ pub fn teach_tmhm_move(
     })
 }
 
+pub fn validate_saved_tmhm_references(
+    items: &BTreeMap<String, Item>,
+    tm_hm: &[bool],
+) -> Result<(), TmHmLearnError> {
+    let max_index = items
+        .values()
+        .filter(|item| item.pocket == ITEM_POCKET_TM_HM)
+        .filter_map(|item| item.tmhm_index)
+        .max();
+    match max_index {
+        Some(max_index) if tm_hm.len() > max_index + 1 => {
+            return Err(TmHmLearnError::SavedTmHmSlotsExceedCompiledMax {
+                slots: tm_hm.len(),
+                max_index,
+            });
+        }
+        None if !tm_hm.is_empty() => {
+            return Err(TmHmLearnError::SavedTmHmSlotsWithoutCompiledItems { slots: tm_hm.len() });
+        }
+        _ => {}
+    }
+    for (index, owned) in tm_hm.iter().enumerate() {
+        if !owned {
+            continue;
+        }
+        let matches = items
+            .values()
+            .filter(|item| item.pocket == ITEM_POCKET_TM_HM && item.tmhm_index == Some(index))
+            .count();
+        if matches == 0 {
+            return Err(TmHmLearnError::SavedTmHmMissingCompiledItem { index });
+        }
+        if matches > 1 {
+            return Err(TmHmLearnError::SavedTmHmDuplicateCompiledItems { index, matches });
+        }
+    }
+    Ok(())
+}
+
 fn validate_tmhm_item_id(item_id: &str) -> Result<(), TmHmLearnError> {
     if !is_exact_tmhm_token(item_id) {
         return Err(TmHmLearnError::InvalidItemId {
@@ -137,9 +187,15 @@ fn validate_tmhm_move_id(item_id: &str, move_id: &str) -> Result<(), TmHmLearnEr
 fn is_exact_tmhm_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -230,6 +286,36 @@ mod tests {
             })
             .collect();
         pokemon
+    }
+
+    #[test]
+    fn tmhm_error_json_rejects_unknown_fallback_fields() {
+        let move_error = serde_json::from_value::<TmHmLearnError>(serde_json::json!({
+            "UnknownMove": {
+                "item_id": "TM_HEADBUTT",
+                "move_id": "MOD_MOVE",
+                "fallback_move_id": "TACKLE"
+            }
+        }))
+        .expect_err("TM/HM errors must not accept fallback move ids")
+        .to_string();
+        assert!(
+            move_error.contains("unknown field `fallback_move_id`"),
+            "{move_error}"
+        );
+
+        let slot_error = serde_json::from_value::<TmHmLearnError>(serde_json::json!({
+            "InvalidReplacementSlot": {
+                "slot": 9,
+                "default_slot": 0
+            }
+        }))
+        .expect_err("TM/HM errors must not accept default replacement slots")
+        .to_string();
+        assert!(
+            slot_error.contains("unknown field `default_slot`"),
+            "{slot_error}"
+        );
     }
 
     #[test]
@@ -339,6 +425,31 @@ mod tests {
             TmHmLearnError::InvalidMoveId {
                 item_id: "TM_HEADBUTT".to_string(),
                 move_id: "HEAD BUTT".to_string(),
+            }
+        );
+        assert_eq!(pokemon.moves.len(), 1);
+
+        bad_item_id.script_name = "fallback_tm_headbutt".to_string();
+        bad_item_id.tmhm_move = Some("HEADBUTT".to_string());
+        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
+            .expect_err("reserved item ids are invalid pack data");
+        assert_eq!(
+            error,
+            TmHmLearnError::InvalidItemId {
+                item_id: "fallback_tm_headbutt".to_string()
+            }
+        );
+        assert_eq!(pokemon.moves.len(), 1);
+
+        bad_item_id.script_name = "TM_HEADBUTT".to_string();
+        bad_item_id.tmhm_move = Some("legacy_headbutt".to_string());
+        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
+            .expect_err("reserved move ids are invalid pack data");
+        assert_eq!(
+            error,
+            TmHmLearnError::InvalidMoveId {
+                item_id: "TM_HEADBUTT".to_string(),
+                move_id: "legacy_headbutt".to_string(),
             }
         );
         assert_eq!(pokemon.moves.len(), 1);

@@ -5,7 +5,7 @@ use super::map::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Terrain {
     Land,
     Water,
@@ -13,6 +13,7 @@ pub enum Terrain {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PlayerTraversalState {
     Walk,
     Surf,
@@ -641,5 +642,32 @@ mod tests {
             Direction::Down,
             2,
         ));
+    }
+
+    #[test]
+    fn collision_discriminants_reject_legacy_alias_payloads() {
+        let terrain_error = serde_json::from_value::<Terrain>(serde_json::json!({
+            "water": {
+                "fallback_terrain": "land"
+            }
+        }))
+        .expect_err("terrain must not accept fallback object payloads")
+        .to_string();
+        assert!(
+            terrain_error.contains("invalid type") || terrain_error.contains("unknown variant"),
+            "{terrain_error}"
+        );
+
+        let traversal_error = serde_json::from_value::<PlayerTraversalState>(serde_json::json!({
+            "Surf": {
+                "legacy_state": "WALK"
+            }
+        }))
+        .expect_err("traversal state must not accept legacy object payloads")
+        .to_string();
+        assert!(
+            traversal_error.contains("invalid type") || traversal_error.contains("unknown variant"),
+            "{traversal_error}"
+        );
     }
 }

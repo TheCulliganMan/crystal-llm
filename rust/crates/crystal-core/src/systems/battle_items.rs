@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::models::pokemon::StatExperience;
 use crate::models::{
     ITEM_POCKET_TM_HM, Item, Move, Party, Pokemon, PokemonSpecies, Stat, calculate_stats,
+    max_move_pp,
 };
+use crate::state::{BattleMemory, GameState};
 use crate::systems::battle_rewards::{
     BattleRewardError, BattleRewardRules, apply_direct_level_gain,
 };
@@ -84,6 +86,7 @@ pub struct BattleItemOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum BattleItemError {
     #[error("battle item {item_id} declares no battle item payload")]
     MissingBattleItemPayload { item_id: String },
@@ -171,6 +174,16 @@ pub enum BattleItemError {
     MissingBattleStatDropGuardTurns { item_id: String },
     #[error("battle item {item_id} has invalid battle stat drop guard turns {turns}")]
     InvalidBattleStatDropGuardTurns { item_id: String, turns: u8 },
+    #[error("cannot use battle item without an active battle")]
+    InactiveBattle,
+    #[error("cannot use wild battle escape item in trainer battle {trainer_id}")]
+    ActiveTrainerBattle { trainer_id: String },
+    #[error("cannot use field party item during an active battle")]
+    ActiveBattle,
+    #[error("battle item party index {index} is outside the party")]
+    PartyIndexOutOfRange { index: usize },
+    #[error("battle item party index {index} has no Pokemon")]
+    EmptyPartySlot { index: usize },
     #[error("battle item {item_id} would not change the target")]
     NoTargetChange { item_id: String },
 }
@@ -449,9 +462,15 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
 fn is_exact_item_id_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn item_reference_issues(item: &Item, move_ids: &BTreeSet<String>) -> Vec<ItemReferenceIssue> {
@@ -495,6 +514,22 @@ pub fn validate_battle_escape_item(item: &Item) -> Result<&str, BattleItemError>
     Ok(mode)
 }
 
+pub fn require_wild_battle_for_escape_item(state: &GameState) -> Result<(), BattleItemError> {
+    match &state.battle {
+        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => Ok(()),
+        BattleMemory::Trainer { trainer_id, .. } => Err(BattleItemError::ActiveTrainerBattle {
+            trainer_id: trainer_id.clone(),
+        }),
+        BattleMemory::Inactive => Err(BattleItemError::InactiveBattle),
+    }
+}
+
+pub fn apply_battle_escape_item_use(state: &mut GameState) -> Result<(), BattleItemError> {
+    require_wild_battle_for_escape_item(state)?;
+    crate::battle::start::deactivate_battle(state);
+    Ok(())
+}
+
 pub fn validate_battle_stat_drop_guard_item(item: &Item) -> Result<u8, BattleItemError> {
     match item.battle_stat_drop_guard {
         Some(true) => {}
@@ -521,6 +556,94 @@ pub fn validate_battle_stat_drop_guard_item(item: &Item) -> Result<u8, BattleIte
         });
     }
     Ok(turns)
+}
+
+pub fn clone_active_battle_party_pokemon(
+    state: &GameState,
+    party_index: usize,
+) -> Result<Pokemon, BattleItemError> {
+    require_active_battle_for_party_item(state)?;
+    state
+        .storage
+        .party
+        .pokemon
+        .get(party_index)
+        .ok_or(BattleItemError::PartyIndexOutOfRange { index: party_index })?
+        .clone()
+        .ok_or(BattleItemError::EmptyPartySlot { index: party_index })
+}
+
+pub fn require_active_battle_party_pokemon_mut(
+    state: &mut GameState,
+    party_index: usize,
+) -> Result<&mut Pokemon, BattleItemError> {
+    require_active_battle_for_party_item(state)?;
+    state
+        .storage
+        .party
+        .pokemon
+        .get_mut(party_index)
+        .ok_or(BattleItemError::PartyIndexOutOfRange { index: party_index })?
+        .as_mut()
+        .ok_or(BattleItemError::EmptyPartySlot { index: party_index })
+}
+
+fn require_active_battle_for_party_item(state: &GameState) -> Result<(), BattleItemError> {
+    match &state.battle {
+        BattleMemory::Wild { .. }
+        | BattleMemory::StaticWild { .. }
+        | BattleMemory::Trainer { .. } => Ok(()),
+        BattleMemory::Inactive => Err(BattleItemError::InactiveBattle),
+    }
+}
+
+pub fn clone_field_party_pokemon(
+    state: &GameState,
+    party_index: usize,
+) -> Result<Pokemon, BattleItemError> {
+    require_no_active_battle_for_party_item(state)?;
+    state
+        .storage
+        .party
+        .pokemon
+        .get(party_index)
+        .ok_or(BattleItemError::PartyIndexOutOfRange { index: party_index })?
+        .clone()
+        .ok_or(BattleItemError::EmptyPartySlot { index: party_index })
+}
+
+pub fn require_field_party_pokemon_mut(
+    state: &mut GameState,
+    party_index: usize,
+) -> Result<&mut Pokemon, BattleItemError> {
+    require_no_active_battle_for_party_item(state)?;
+    state
+        .storage
+        .party
+        .pokemon
+        .get_mut(party_index)
+        .ok_or(BattleItemError::PartyIndexOutOfRange { index: party_index })?
+        .as_mut()
+        .ok_or(BattleItemError::EmptyPartySlot { index: party_index })
+}
+
+pub fn clone_field_party(state: &GameState) -> Result<Party, BattleItemError> {
+    require_no_active_battle_for_party_item(state)?;
+    Ok(state.storage.party.clone())
+}
+
+pub fn require_field_party_mut(state: &mut GameState) -> Result<&mut Party, BattleItemError> {
+    require_no_active_battle_for_party_item(state)?;
+    Ok(&mut state.storage.party)
+}
+
+fn require_no_active_battle_for_party_item(state: &GameState) -> Result<(), BattleItemError> {
+    match &state.battle {
+        BattleMemory::Inactive => Ok(()),
+        BattleMemory::Wild { .. }
+        | BattleMemory::StaticWild { .. }
+        | BattleMemory::Trainer { .. } => Err(BattleItemError::ActiveBattle),
+    }
 }
 
 pub fn apply_active_battle_item_effect(
@@ -721,6 +844,49 @@ pub fn apply_rare_candy_item_effect(
         evolution_target: evolution.target_species,
         consumed,
     })
+}
+
+pub fn apply_party_special_item_effect(
+    pokemon: &mut Pokemon,
+    item: &Item,
+    species: &BTreeMap<String, PokemonSpecies>,
+    moves: &BTreeMap<String, Move>,
+    learnsets: &SpeciesLearnsets,
+    growth_rates: &GrowthRateCatalog,
+    reward_rules: &BattleRewardRules,
+    evolutions: &EvolutionTable,
+    time_of_day: TimeOfDay,
+    consumed: bool,
+) -> Result<BattleItemOutcome, BattleItemError> {
+    if item.rare_candy_level_gain.is_some() {
+        apply_rare_candy_item_effect(
+            pokemon,
+            item,
+            species,
+            moves,
+            learnsets,
+            growth_rates,
+            reward_rules,
+            evolutions,
+            time_of_day,
+            consumed,
+        )
+    } else if evolutions.contains_item_evolution(&item.script_name) {
+        apply_evolution_stone_item_effect(
+            pokemon,
+            item,
+            species,
+            moves,
+            learnsets,
+            evolutions,
+            time_of_day,
+            consumed,
+        )
+    } else {
+        Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
+        })
+    }
 }
 
 pub fn apply_evolution_stone_item_effect(
@@ -1528,10 +1694,6 @@ fn recalculate_pokemon_stats(pokemon: &mut Pokemon, max_hp_before: u16) {
     }
 }
 
-fn max_move_pp(base_pp: u8, pp_ups: u8) -> u8 {
-    base_pp.saturating_add((base_pp / 5).saturating_mul(pp_ups.min(3)))
-}
-
 fn restore_hp(pokemon: &mut Pokemon, item: &Item) -> Result<(), BattleItemError> {
     if item.parameter == 0 || item.parameter < -1 {
         return Err(BattleItemError::InvalidHealAmount {
@@ -1580,6 +1742,116 @@ mod tests {
         pokemon.hp = hp;
         pokemon.max_hp = max_hp;
         pokemon
+    }
+
+    #[test]
+    fn battle_item_error_json_rejects_unknown_fallback_fields() {
+        let item_error = serde_json::from_value::<BattleItemError>(serde_json::json!({
+            "MissingBattleItemPayload": {
+                "item_id": "POTION",
+                "fallback_effect": "RESTORE_HP"
+            }
+        }))
+        .expect_err("battle item errors must not accept fallback effects")
+        .to_string();
+        assert!(
+            item_error.contains("unknown field `fallback_effect`"),
+            "{item_error}"
+        );
+
+        let move_error = serde_json::from_value::<BattleItemError>(serde_json::json!({
+            "UnknownMove": {
+                "item_id": "ETHER",
+                "move_id": "MOD_MOVE",
+                "legacy_move_id": "TACKLE"
+            }
+        }))
+        .expect_err("battle item errors must not accept legacy move ids")
+        .to_string();
+        assert!(
+            move_error.contains("unknown field `legacy_move_id`"),
+            "{move_error}"
+        );
+    }
+
+    #[test]
+    fn active_battle_party_target_requires_battle_and_exact_slot() {
+        let mut state = GameState::default();
+        assert_eq!(
+            clone_active_battle_party_pokemon(&state, 0),
+            Err(BattleItemError::InactiveBattle)
+        );
+
+        let pokemon = test_pokemon(10, 20);
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon.clone()],
+        };
+        assert_eq!(
+            clone_active_battle_party_pokemon(&state, 0),
+            Err(BattleItemError::EmptyPartySlot { index: 0 })
+        );
+
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        assert_eq!(clone_active_battle_party_pokemon(&state, 0), Ok(pokemon));
+
+        let target = require_active_battle_party_pokemon_mut(&mut state, 0).unwrap();
+        target.hp = 7;
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 7);
+        assert_eq!(
+            clone_active_battle_party_pokemon(&state, 6),
+            Err(BattleItemError::PartyIndexOutOfRange { index: 6 })
+        );
+    }
+
+    #[test]
+    fn field_party_target_rejects_active_battle_and_requires_exact_slot() {
+        let mut state = GameState::default();
+        assert_eq!(
+            clone_field_party_pokemon(&state, 0),
+            Err(BattleItemError::EmptyPartySlot { index: 0 })
+        );
+
+        let pokemon = test_pokemon(10, 20);
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        assert_eq!(clone_field_party_pokemon(&state, 0), Ok(pokemon.clone()));
+
+        let target = require_field_party_pokemon_mut(&mut state, 0).unwrap();
+        target.hp = 8;
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 8);
+        assert_eq!(
+            clone_field_party_pokemon(&state, 6),
+            Err(BattleItemError::PartyIndexOutOfRange { index: 6 })
+        );
+        assert_eq!(
+            clone_field_party(&state).unwrap().pokemon[0]
+                .as_ref()
+                .unwrap()
+                .hp,
+            8
+        );
+        require_field_party_mut(&mut state).unwrap().pokemon[0]
+            .as_mut()
+            .unwrap()
+            .hp = 6;
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 6);
+
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon],
+        };
+        assert_eq!(
+            clone_field_party_pokemon(&state, 0),
+            Err(BattleItemError::ActiveBattle)
+        );
+        assert_eq!(
+            clone_field_party(&state),
+            Err(BattleItemError::ActiveBattle)
+        );
     }
 
     fn test_item(effect: &str, parameter: i16) -> Item {
@@ -1675,6 +1947,69 @@ mod tests {
                 mode: "TRAINER_BATTLE".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn battle_escape_item_requires_wild_battle_and_deactivates() {
+        let pokemon = test_pokemon(10, 20);
+        let mut inactive = GameState::default();
+        assert_eq!(
+            require_wild_battle_for_escape_item(&inactive),
+            Err(BattleItemError::InactiveBattle)
+        );
+        assert_eq!(
+            apply_battle_escape_item_use(&mut inactive),
+            Err(BattleItemError::InactiveBattle)
+        );
+
+        let mut trainer = GameState::default();
+        trainer.battle = BattleMemory::Trainer {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_name: "JOEY".to_string(),
+            event_flag: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            seen_text: "YoungsterJoeySeenText".to_string(),
+            win_text: "YoungsterJoeyWinText".to_string(),
+            loss_text: "YoungsterJoeyLossText".to_string(),
+            callback: "TrainerCallback".to_string(),
+            source_script: "Route30YoungsterJoeyScript".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon.clone()],
+            reward: 4,
+            encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+        assert_eq!(
+            require_wild_battle_for_escape_item(&trainer),
+            Err(BattleItemError::ActiveTrainerBattle {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+            })
+        );
+
+        let mut wild = GameState::default();
+        wild.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon],
+        };
+        wild.battle_active_party_index = Some(0);
+        wild.battle_active_enemy_party_index = Some(0);
+        wild.battle_rewarded_enemy_party_indices.insert(0);
+        wild.battle_escape_attempts = 3;
+        wild.battle_player_stat_drop_guard_turns = 4;
+
+        assert_eq!(require_wild_battle_for_escape_item(&wild), Ok(()));
+        assert_eq!(apply_battle_escape_item_use(&mut wild), Ok(()));
+        assert_eq!(wild.battle, BattleMemory::Inactive);
+        assert_eq!(wild.battle_active_party_index, None);
+        assert_eq!(wild.battle_active_enemy_party_index, None);
+        assert!(wild.battle_rewarded_enemy_party_indices.is_empty());
+        assert_eq!(wild.battle_escape_attempts, 0);
+        assert_eq!(wild.battle_player_stat_drop_guard_turns, 0);
     }
 
     #[test]
@@ -1863,6 +2198,36 @@ mod tests {
             vec![ItemPayloadIssue::InvalidScriptName {
                 script_name: "MOD ITEM".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn item_payload_issues_reject_reserved_pack_prefix_tokens() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.script_name = "fallback_item_script".to_string();
+        item.effect = "legacy_restore_hp".to_string();
+        item.status_heals = vec!["fallback_poison".to_string()];
+        item.pocket = ITEM_POCKET_TM_HM.to_string();
+        item.tmhm_index = Some(30);
+        item.tmhm_move = Some("legacy_mud_slap".to_string());
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![
+                ItemPayloadIssue::InvalidScriptName {
+                    script_name: "fallback_item_script".to_string(),
+                },
+                ItemPayloadIssue::InvalidEffect {
+                    effect: "legacy_restore_hp".to_string(),
+                },
+                ItemPayloadIssue::InvalidStatusHeal {
+                    index: 0,
+                    status: "fallback_poison".to_string(),
+                },
+                ItemPayloadIssue::InvalidTmhmMove {
+                    move_id: "legacy_mud_slap".to_string(),
+                },
+            ]
         );
     }
 

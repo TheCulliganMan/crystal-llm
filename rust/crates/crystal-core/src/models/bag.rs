@@ -10,14 +10,38 @@ pub const MAX_ITEM_STACK: u16 = 99;
 pub const ITEM_POCKET_CAPACITY: usize = 20;
 pub const BALL_POCKET_CAPACITY: usize = 12;
 pub const KEY_ITEM_POCKET_CAPACITY: usize = 25;
+pub const PC_ITEM_CAPACITY: usize = 50;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bag {
     pub items: BTreeMap<String, u16>,
+    pub pc_items: BTreeMap<String, u16>,
     pub balls: BTreeMap<String, u16>,
     pub key_items: BTreeMap<String, u16>,
     pub tm_hm: Vec<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum BagSaveError {
+    #[error("saved {path} item {item_id} is missing from compiled pack items")]
+    MissingItem { path: String, item_id: String },
+    #[error("saved {path} item {item_id} does not match compiled item script_name {script_name}")]
+    ItemScriptNameMismatch {
+        path: String,
+        item_id: String,
+        script_name: String,
+    },
+    #[error(
+        "saved {path} item {item_id} is in compiled pocket {actual_pocket}, expected {expected_pocket}"
+    )]
+    WrongPocket {
+        path: String,
+        item_id: String,
+        actual_pocket: String,
+        expected_pocket: String,
+    },
 }
 
 impl Bag {
@@ -75,6 +99,29 @@ impl Bag {
         self.quantity(definition) > 0
     }
 
+    pub fn has_pc_item(&self, definition: &Item) -> bool {
+        self.pc_item_quantity(definition) > 0
+    }
+
+    pub fn add_pc_item(&mut self, definition: &Item, quantity: u16) -> Result<bool, String> {
+        if quantity == 0 {
+            return Err("quantity must be positive".to_string());
+        }
+        if definition.pocket != ITEM_POCKET_ITEM {
+            return Err(format!(
+                "PC item '{}' is not in the ITEM pocket",
+                definition.script_name
+            ));
+        }
+        add_to_inventory(
+            &mut self.pc_items,
+            &definition.script_name,
+            quantity,
+            MAX_ITEM_STACK,
+            Some(PC_ITEM_CAPACITY),
+        )
+    }
+
     pub fn quantity(&self, definition: &Item) -> u16 {
         match definition.pocket.as_str() {
             ITEM_POCKET_ITEM => self
@@ -99,6 +146,16 @@ impl Bag {
                 .unwrap_or(0),
             _ => 0,
         }
+    }
+
+    pub fn pc_item_quantity(&self, definition: &Item) -> u16 {
+        if definition.pocket != ITEM_POCKET_ITEM {
+            return 0;
+        }
+        self.pc_items
+            .get(&definition.script_name)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn consume_ball(&mut self, definition: &Item) -> Result<bool, String> {
@@ -147,10 +204,43 @@ impl Bag {
 
     pub fn validate(&self) -> Result<(), String> {
         validate_inventory(&self.items, MAX_ITEM_STACK, ITEM_POCKET_CAPACITY, "items")?;
+        validate_inventory(&self.pc_items, MAX_ITEM_STACK, PC_ITEM_CAPACITY, "pc_items")?;
         validate_inventory(&self.balls, MAX_ITEM_STACK, BALL_POCKET_CAPACITY, "balls")?;
         validate_inventory(&self.key_items, 1, KEY_ITEM_POCKET_CAPACITY, "key_items")?;
         Ok(())
     }
+}
+
+pub fn validate_saved_bag_pocket_references(
+    items: &BTreeMap<String, Item>,
+    path: &str,
+    inventory: &BTreeMap<String, u16>,
+    expected_pocket: &str,
+) -> Result<(), BagSaveError> {
+    for item_id in inventory.keys() {
+        let item = items
+            .get(item_id)
+            .ok_or_else(|| BagSaveError::MissingItem {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+            })?;
+        if item.script_name.as_str() != item_id {
+            return Err(BagSaveError::ItemScriptNameMismatch {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+                script_name: item.script_name.clone(),
+            });
+        }
+        if item.pocket != expected_pocket {
+            return Err(BagSaveError::WrongPocket {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+                actual_pocket: item.pocket.clone(),
+                expected_pocket: expected_pocket.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn add_to_inventory(
@@ -240,9 +330,15 @@ fn validate_inventory(
 fn is_exact_item_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 fn validate_item_id(item_id: &str) -> Result<(), String> {
@@ -377,6 +473,29 @@ mod tests {
     }
 
     #[test]
+    fn bag_rejects_reserved_pack_prefix_item_ids() {
+        let fallback_ball = item("fallback_POKE_BALL", item_pocket("BALL"));
+        let mut bag = Bag::default();
+
+        assert_eq!(
+            bag.add_item(&fallback_ball, 1),
+            Err(
+                "item id 'fallback_POKE_BALL' must contain only ASCII letters, numbers, or underscores"
+                    .to_string()
+            ),
+        );
+
+        bag.balls.insert("legacy_POKE_BALL".to_string(), 1);
+        assert_eq!(
+            bag.validate(),
+            Err(
+                "balls contains item id 'legacy_POKE_BALL' that must contain only ASCII letters, numbers, or underscores"
+                    .to_string()
+            ),
+        );
+    }
+
+    #[test]
     fn key_items_do_not_stack_and_tmhm_flags_are_exact() {
         let bicycle = item("BICYCLE", item_pocket("KEY_ITEM"));
         let mut tm_mud_slap = item("TM_MUD_SLAP", item_pocket("TM_HM"));
@@ -403,9 +522,26 @@ mod tests {
     }
 
     #[test]
+    fn pc_items_use_exact_item_pocket_storage() {
+        let potion = item("POTION", item_pocket("ITEM"));
+        let ball = item("POKE_BALL", item_pocket("BALL"));
+        let mut bag = Bag::default();
+
+        assert!(bag.add_pc_item(&potion, 2).expect("add pc item"));
+        assert_eq!(bag.pc_item_quantity(&potion), 2);
+        assert!(bag.has_pc_item(&potion));
+        assert_eq!(
+            bag.add_pc_item(&ball, 1),
+            Err("PC item 'POKE_BALL' is not in the ITEM pocket".to_string())
+        );
+        bag.validate().expect("valid pc items");
+    }
+
+    #[test]
     fn bag_json_rejects_unknown_inventory_fields_without_legacy_fallbacks() {
         let error = serde_json::from_value::<Bag>(serde_json::json!({
             "items": {},
+            "pc_items": {},
             "balls": {},
             "key_items": {},
             "tm_hm": [],
@@ -421,6 +557,7 @@ mod tests {
     fn bag_json_requires_all_inventory_pockets_without_empty_defaults() {
         let complete = serde_json::json!({
             "items": {},
+            "pc_items": {},
             "balls": {},
             "key_items": {},
             "tm_hm": []
@@ -428,7 +565,7 @@ mod tests {
         serde_json::from_value::<Bag>(complete.clone())
             .expect("explicit empty bag pockets are valid");
 
-        for field in ["items", "balls", "key_items", "tm_hm"] {
+        for field in ["items", "pc_items", "balls", "key_items", "tm_hm"] {
             let mut missing = complete.clone();
             missing.as_object_mut().expect("bag object").remove(field);
             let error = serde_json::from_value::<Bag>(missing)

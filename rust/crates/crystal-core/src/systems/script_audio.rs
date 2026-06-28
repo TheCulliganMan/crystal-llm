@@ -8,15 +8,18 @@ use crate::state::{GameState, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, S
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptAudioCommand {
+    #[serde(deserialize_with = "required_audio_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_audio_token")]
     pub audio_id: Option<String>,
     pub fade_frames: Option<u16>,
+    #[serde(deserialize_with = "required_audio_token")]
     pub source_script: String,
     pub command_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptAudioKind {
     Music,
     SoundEffect,
@@ -24,7 +27,7 @@ pub enum ScriptAudioKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptAudioCue {
     Play {
         command: String,
@@ -46,6 +49,7 @@ pub enum ScriptAudioCue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptAudioError {
     InvalidCommand { command: String },
     UnknownCommand { command: String },
@@ -65,7 +69,7 @@ pub enum ScriptAudioError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptAudioCommandIssue {
     InvalidCommand,
     MissingMusicId,
@@ -385,6 +389,7 @@ fn is_exact_audio_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_audio_token(value: &str) -> bool {
@@ -393,6 +398,54 @@ fn is_exact_audio_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_audio_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_audio_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script audio command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_audio_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_audio_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script audio token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_audio_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_audio_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script audio token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 fn runtime_kind(kind: ScriptAudioKind) -> ScriptAudioRuntimeKind {
@@ -465,6 +518,41 @@ mod tests {
         assert!(is_known_script_audio_command("playsound"));
         assert!(!is_known_script_audio_command("PlaySound"));
         assert!(!is_known_script_audio_command("fadeaudio"));
+    }
+
+    #[test]
+    fn script_audio_serialized_variants_reject_unknown_fallback_fields() {
+        let cue_error = serde_json::from_value::<ScriptAudioCue>(serde_json::json!({
+            "play": {
+                "command": "cry",
+                "kind": "cry",
+                "audio_id": "CRY_LUGIA",
+                "source_script": "AudioScript",
+                "command_index": 7,
+                "fallback_audio_id": "CRY_DEFAULT"
+            }
+        }))
+        .expect_err("audio cues must not accept fallback audio ids");
+        assert!(
+            cue_error
+                .to_string()
+                .contains("unknown field `fallback_audio_id`"),
+            "{cue_error}"
+        );
+
+        let error_error = serde_json::from_value::<ScriptAudioError>(serde_json::json!({
+            "UnknownCryAsset": {
+                "audio_id": "CRY_LUGIA",
+                "legacy_audio_id": "LUGIA"
+            }
+        }))
+        .expect_err("audio errors must not accept legacy audio ids");
+        assert!(
+            error_error
+                .to_string()
+                .contains("unknown field `legacy_audio_id`"),
+            "{error_error}"
+        );
     }
 
     #[test]
@@ -604,6 +692,73 @@ mod tests {
             ),
             vec![ScriptAudioCommandIssue::UnknownCommand]
         );
+    }
+
+    #[test]
+    fn script_audio_commands_reject_reserved_pack_prefixes() {
+        let music = BTreeSet::from(["MUSIC_ROUTE_29".to_string()]);
+        let sfx = BTreeSet::from(["SFX_GET_BADGE".to_string()]);
+        let cries = BTreeSet::from(["CRY_LUGIA".to_string()]);
+        let species = BTreeMap::from([("LUGIA".to_string(), species("LUGIA"))]);
+        let cry_by_species = BTreeMap::from([("LUGIA".to_string(), "legacy_cry".to_string())]);
+
+        assert_eq!(
+            script_audio_command_issues(
+                &command("fallbacksound", Some("SFX_GET_BADGE"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("playmusic", Some("fallback_music"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidMusicId]
+        );
+        assert_eq!(
+            script_audio_command_issues(
+                &command("cry", Some("LUGIA"), None),
+                &music,
+                &sfx,
+                &cries,
+                &species,
+                &cry_by_species,
+            ),
+            vec![ScriptAudioCommandIssue::InvalidCryAsset]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbacksound")),
+            ("audio_id", serde_json::json!("legacy_audio")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "playmusic",
+                "audio_id": "MUSIC_ROUTE_29",
+                "fade_frames": null,
+                "source_script": "AudioScript",
+                "command_index": 7
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptAudioCommand>(payload)
+                .expect_err("reserved script audio command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script audio"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -871,5 +1026,17 @@ mod tests {
         );
         assert!(state.script_runtime.audio_events.is_empty());
         assert_eq!(state.script_runtime.current_music, None);
+    }
+
+    #[test]
+    fn script_audio_kind_json_rejects_legacy_alias_payloads() {
+        let error =
+            serde_json::from_str::<ScriptAudioKind>(r#"{"cry":{"fallback_kind":"sound_effect"}}"#)
+                .expect_err("script audio kinds must not accept fallback aliases")
+                .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown field `fallback_kind`"),
+            "{error}"
+        );
     }
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::GameState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum MoneyAccount {
     YourMoney,
     MomsMoney,
@@ -38,8 +38,25 @@ pub struct ScriptEconomyCommand {
     pub command_index: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct CurrencyCatalog(pub BTreeMap<String, u32>);
+
+impl<'de> Deserialize<'de> for CurrencyCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, u32>::deserialize(deserializer)?;
+        for constant in values.keys() {
+            if !is_exact_economy_token(constant) {
+                return Err(serde::de::Error::custom(format!(
+                    "currency constant must be exact ASCII alphanumeric/underscore, found {constant:?}"
+                )));
+            }
+        }
+        Ok(Self(values))
+    }
+}
 
 impl CurrencyCatalog {
     pub fn get(&self, id: &str) -> Option<u32> {
@@ -48,7 +65,7 @@ impl CurrencyCatalog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum AmountComparison {
     HaveLess,
     HaveAmount,
@@ -79,7 +96,7 @@ pub struct CurrencyCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptEconomyOutcome {
     Check {
         command: String,
@@ -106,6 +123,7 @@ pub enum ScriptEconomyOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum EconomyError {
     EmptyAmountExpression,
     InvalidAmountExpression { expression: String },
@@ -120,10 +138,13 @@ pub enum EconomyError {
     UnknownEconomyCommand { command: String },
     MissingMoneyAccount { command: String },
     UnexpectedMoneyAccount { command: String },
+    SavedMoneyExceedsLimit { amount: u32, limit: u32 },
+    SavedMomsMoneyExceedsLimit { amount: u32, limit: u32 },
+    SavedCoinsExceedsLimit { amount: u16, limit: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptEconomyCommandIssue {
     InvalidCommand,
     UnknownCommand,
@@ -198,6 +219,7 @@ pub fn script_economy_command_issues(
 fn is_exact_economy_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -206,7 +228,13 @@ fn is_exact_economy_token(value: &str) -> bool {
 fn is_exact_economy_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn apply_script_economy_command(
@@ -450,6 +478,34 @@ pub fn take_coins(
     Ok(state.coins)
 }
 
+pub fn validate_save_currency_for_runtime_pack(
+    state: &GameState,
+    constants: &CurrencyCatalog,
+) -> Result<(), EconomyError> {
+    let max_money = money_cap(constants)?;
+    if state.money > max_money {
+        return Err(EconomyError::SavedMoneyExceedsLimit {
+            amount: state.money,
+            limit: max_money,
+        });
+    }
+    if state.moms_money > max_money {
+        return Err(EconomyError::SavedMomsMoneyExceedsLimit {
+            amount: state.moms_money,
+            limit: max_money,
+        });
+    }
+
+    let max_coins = coin_cap(constants)?;
+    if state.coins > max_coins {
+        return Err(EconomyError::SavedCoinsExceedsLimit {
+            amount: state.coins,
+            limit: max_coins,
+        });
+    }
+    Ok(())
+}
+
 fn resolve_coin_amount(
     amount_tokens: &[String],
     constants: &CurrencyCatalog,
@@ -530,6 +586,56 @@ mod tests {
             source_script: "EconomyScript".to_string(),
             command_index: 9,
         }
+    }
+
+    #[test]
+    fn economy_serialized_variants_reject_unknown_fallback_fields() {
+        let outcome_error = serde_json::from_value::<ScriptEconomyOutcome>(serde_json::json!({
+            "money_changed": {
+                "command": "givemoney",
+                "account": "YOUR_MONEY",
+                "balance": 500,
+                "source_script": "EconomyScript",
+                "command_index": 9,
+                "fallback_balance": 0
+            }
+        }))
+        .expect_err("economy outcomes must not accept fallback balances")
+        .to_string();
+        assert!(
+            outcome_error.contains("unknown field `fallback_balance`"),
+            "{outcome_error}"
+        );
+
+        let error_error = serde_json::from_value::<EconomyError>(serde_json::json!({
+            "MissingCurrencyLimit": {
+                "constant": "MAX_MONEY",
+                "fallback_limit": 999999
+            }
+        }))
+        .expect_err("economy errors must not accept fallback currency limits")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `fallback_limit`"),
+            "{error_error}"
+        );
+
+        let issue_error = serde_json::from_value::<ScriptEconomyCommandIssue>(serde_json::json!({
+            "unresolved_amount": {
+                "error": {
+                    "InvalidEconomyCommand": {
+                        "command": "giveMoney",
+                        "normalized_command": "givemoney"
+                    }
+                }
+            }
+        }))
+        .expect_err("economy command issues must not accept normalized command aliases")
+        .to_string();
+        assert!(
+            issue_error.contains("unknown field `normalized_command`"),
+            "{issue_error}"
+        );
     }
 
     #[test]
@@ -666,6 +772,25 @@ mod tests {
 
         assert_eq!(constants.get("MAX_COINS"), None);
         assert_eq!(constants.get("MAX_MONEY"), None);
+
+        let error = serde_json::from_str::<CurrencyCatalog>(
+            r#"{"constants":{"MAX_COINS":9999},"fallback_limit":999999}"#,
+        )
+        .expect_err("currency catalogs must be the compiler-emitted constant map")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("invalid value"),
+            "{error}"
+        );
+
+        let error = serde_json::from_str::<CurrencyCatalog>(r#"{"MAX MONEY":999999}"#)
+            .expect_err("malformed currency constant keys must fail during JSON load")
+            .to_string();
+        assert!(
+            error.contains("currency constant")
+                && error.contains("exact ASCII alphanumeric/underscore"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -749,6 +874,35 @@ mod tests {
                 &constants,
             ),
             vec![ScriptEconomyCommandIssue::UnknownCommand]
+        );
+    }
+
+    #[test]
+    fn economy_tokens_reject_reserved_pack_prefixes() {
+        let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
+
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("fallbackmoney", Some("YOUR_MONEY"), &["PRICE"]),
+                &constants,
+            ),
+            vec![ScriptEconomyCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_economy_command_issues(
+                &economy_command("takemoney", Some("legacy_money"), &["PRICE"]),
+                &constants,
+            ),
+            vec![
+                ScriptEconomyCommandIssue::InvalidMoneyAccount,
+                ScriptEconomyCommandIssue::MissingMoneyCap,
+            ]
+        );
+        assert_eq!(
+            resolve_amount(&["fallback_price".to_string()], &constants),
+            Err(EconomyError::InvalidAmountToken {
+                token: "fallback_price".to_string(),
+            })
         );
     }
 
@@ -944,5 +1098,34 @@ mod tests {
         assert_eq!(state.money, 800);
         assert_eq!(state.coins, 10);
         assert_eq!(state.script_runtime.script_value, None);
+    }
+
+    #[test]
+    fn economy_json_rejects_legacy_alias_payloads() {
+        let account_error = serde_json::from_value::<MoneyAccount>(serde_json::json!({
+            "YOUR_MONEY": {
+                "legacy_account": "money"
+            }
+        }))
+        .expect_err("money accounts must not accept object-shaped aliases")
+        .to_string();
+        assert!(
+            account_error.contains("invalid type")
+                || account_error.contains("unknown field `legacy_account`"),
+            "{account_error}"
+        );
+
+        let comparison_error = serde_json::from_value::<AmountComparison>(serde_json::json!({
+            "HAVE_AMOUNT": {
+                "fallback_comparison": "equal"
+            }
+        }))
+        .expect_err("amount comparisons must not accept fallback aliases")
+        .to_string();
+        assert!(
+            comparison_error.contains("invalid type")
+                || comparison_error.contains("unknown field `fallback_comparison`"),
+            "{comparison_error}"
+        );
     }
 }

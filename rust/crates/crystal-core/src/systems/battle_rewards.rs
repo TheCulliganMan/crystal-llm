@@ -3,8 +3,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::battle::start::{
+    ActiveBattleEnemyError, ActiveBattlePartyError, claim_active_trainer_battle_reward_index,
+    deactivate_battle, require_active_battle_party_index, update_active_battle_enemy,
+};
 use crate::models::pokemon::StatExperience;
 use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
+use crate::state::{BattleMemory, GameState};
 use crate::systems::evolution::{
     EvolutionError, EvolutionReport, EvolutionTable, check_and_evolve,
 };
@@ -33,6 +38,7 @@ impl Default for BattleRewardRules {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleRewardRulesField {
     MaxLevel,
     WildExpDivisor,
@@ -52,6 +58,7 @@ impl BattleRewardRulesField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleRewardRulesIssue {
     MissingMaxLevel,
     InvalidWildExpDivisor { value: i32 },
@@ -132,6 +139,118 @@ pub enum BattleRewardError {
     Experience(#[from] ExperienceError),
     #[error("battle reward rules field {field} must be nonzero")]
     InvalidRule { field: String },
+    #[error("battle reward rules are missing")]
+    MissingRules,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ActiveWildBattleRewardError {
+    #[error("wild battle rewards require an active wild battle")]
+    MissingActiveWildBattle,
+    #[error("trainer battle {trainer_id} rewards require trainer-completion sequencing")]
+    ActiveTrainerBattle { trainer_id: String },
+    #[error("active battle party error: {0:?}")]
+    ActiveParty(#[from] ActiveBattlePartyError),
+    #[error("battle reward error: {0:?}")]
+    Reward(#[from] BattleRewardError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ActiveTrainerBattleRewardError {
+    #[error("trainer battle rewards require an active trainer battle")]
+    MissingActiveTrainerBattle,
+    #[error("wild battle rewards require wild reward flow")]
+    ActiveWildBattle,
+    #[error("active battle party error: {0:?}")]
+    ActiveParty(#[from] ActiveBattlePartyError),
+    #[error("active battle enemy error: {0:?}")]
+    ActiveEnemy(#[from] ActiveBattleEnemyError),
+    #[error("battle reward error: {0:?}")]
+    Reward(#[from] BattleRewardError),
+}
+
+pub fn claim_active_trainer_battle_rewards(
+    state: &mut GameState,
+    rules: &BattleRewardRules,
+    species: &BTreeMap<String, PokemonSpecies>,
+    moves: &BTreeMap<String, Move>,
+    learnsets: &SpeciesLearnsets,
+    growth_rates: &GrowthRateCatalog,
+    evolutions: &EvolutionTable,
+    time_of_day: TimeOfDay,
+) -> Result<BattleRewardOutcome, ActiveTrainerBattleRewardError> {
+    let enemy = match &state.battle {
+        BattleMemory::Trainer { enemy_pokemon, .. } => enemy_pokemon.clone(),
+        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => {
+            return Err(ActiveTrainerBattleRewardError::ActiveWildBattle);
+        }
+        BattleMemory::Inactive => {
+            return Err(ActiveTrainerBattleRewardError::MissingActiveTrainerBattle);
+        }
+    };
+    let active_index = require_active_battle_party_index(state)?;
+    let player = state.storage.party.pokemon[active_index].as_mut().ok_or(
+        ActiveBattlePartyError::EmptyPartySlot {
+            index: active_index,
+        },
+    )?;
+    let outcome = apply_trainer_battle_rewards(
+        rules,
+        player,
+        &enemy,
+        species,
+        moves,
+        learnsets,
+        growth_rates,
+        evolutions,
+        time_of_day,
+    )?;
+    state.sync_party_from_storage();
+    update_active_battle_enemy(state, enemy)?;
+    claim_active_trainer_battle_reward_index(state)?;
+    Ok(outcome)
+}
+
+pub fn claim_active_wild_battle_rewards(
+    state: &mut GameState,
+    rules: &BattleRewardRules,
+    species: &BTreeMap<String, PokemonSpecies>,
+    moves: &BTreeMap<String, Move>,
+    learnsets: &SpeciesLearnsets,
+    growth_rates: &GrowthRateCatalog,
+    evolutions: &EvolutionTable,
+    time_of_day: TimeOfDay,
+) -> Result<BattleRewardOutcome, ActiveWildBattleRewardError> {
+    let enemy = match &state.battle {
+        BattleMemory::Wild { enemy_pokemon, .. }
+        | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
+        BattleMemory::Trainer { trainer_id, .. } => {
+            return Err(ActiveWildBattleRewardError::ActiveTrainerBattle {
+                trainer_id: trainer_id.clone(),
+            });
+        }
+        BattleMemory::Inactive => return Err(ActiveWildBattleRewardError::MissingActiveWildBattle),
+    };
+    let active_index = require_active_battle_party_index(state)?;
+    let player = state.storage.party.pokemon[active_index].as_mut().ok_or(
+        ActiveBattlePartyError::EmptyPartySlot {
+            index: active_index,
+        },
+    )?;
+    let outcome = apply_wild_battle_rewards(
+        rules,
+        player,
+        &enemy,
+        species,
+        moves,
+        learnsets,
+        growth_rates,
+        evolutions,
+        time_of_day,
+    )?;
+    deactivate_battle(state);
+    state.sync_party_from_storage();
+    Ok(outcome)
 }
 
 pub fn apply_wild_battle_rewards(
@@ -145,6 +264,7 @@ pub fn apply_wild_battle_rewards(
     evolutions: &EvolutionTable,
     time_of_day: TimeOfDay,
 ) -> Result<BattleRewardOutcome, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     apply_battle_rewards_with_experience(
         rules,
         player,
@@ -170,6 +290,7 @@ pub fn apply_trainer_battle_rewards(
     evolutions: &EvolutionTable,
     time_of_day: TimeOfDay,
 ) -> Result<BattleRewardOutcome, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     apply_battle_rewards_with_experience(
         rules,
         player,
@@ -230,6 +351,7 @@ pub fn wild_experience_award(
     rules: &BattleRewardRules,
     defeated: &Pokemon,
 ) -> Result<i32, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     require_positive_i32(rules.wild_exp_divisor, "wild_exp_divisor")?;
     Ok((i32::from(defeated.species.base_exp) * i32::from(defeated.level)) / rules.wild_exp_divisor)
 }
@@ -238,6 +360,7 @@ pub fn trainer_experience_award(
     rules: &BattleRewardRules,
     defeated: &Pokemon,
 ) -> Result<i32, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     require_positive_i32(rules.trainer_exp_numerator, "trainer_exp_numerator")?;
     require_positive_i32(rules.trainer_exp_denominator, "trainer_exp_denominator")?;
     Ok(
@@ -261,6 +384,7 @@ pub fn apply_experience_level_ups(
     growth_rates: &GrowthRateCatalog,
     rules: &BattleRewardRules,
 ) -> Result<PokemonLevelUpOutcome, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     require_positive_u8(rules.max_level, "max_level")?;
     let level_before = player.level;
     let experience_before = player.experience;
@@ -294,6 +418,7 @@ pub fn apply_direct_level_gain(
     rules: &BattleRewardRules,
     level_gain: u8,
 ) -> Result<PokemonLevelUpOutcome, BattleRewardError> {
+    require_battle_reward_rules(rules)?;
     require_positive_u8(rules.max_level, "max_level")?;
     let mut leveled = player.clone();
     let level_before = leveled.level;
@@ -340,6 +465,13 @@ fn require_positive_u8(value: u8, field: &str) -> Result<(), BattleRewardError> 
     Ok(())
 }
 
+fn require_battle_reward_rules(rules: &BattleRewardRules) -> Result<(), BattleRewardError> {
+    if rules == &BattleRewardRules::default() {
+        return Err(BattleRewardError::MissingRules);
+    }
+    Ok(())
+}
+
 fn refresh_level_stats(player: &mut Pokemon) {
     let old_max_hp = player.max_hp;
     let old_hp = player.hp;
@@ -372,8 +504,12 @@ fn learn_moves_for_current_level(
 ) -> Result<Vec<LearnedMove>, BattleRewardError> {
     let entries =
         level_up_moves_for_species(learnsets, &player.species.id).map_err(|error| match error {
-            LearnsetError::MissingSpecies { species_id } => {
+            LearnsetError::InvalidSpecies { species_id }
+            | LearnsetError::MissingSpecies { species_id } => {
                 BattleRewardError::MissingLearnset { species_id }
+            }
+            LearnsetError::InvalidMove { move_id, .. } => {
+                BattleRewardError::MissingMoveData { move_id }
             }
         })?;
     let mut learned = Vec::new();
@@ -473,6 +609,64 @@ mod tests {
     }
 
     #[test]
+    fn reward_application_rejects_missing_rules_without_zero_reward_fallback() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        let player_before = player.clone();
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [("CHIKORITA".to_string(), Vec::new())]
+                .into_iter()
+                .collect(),
+        );
+
+        assert_eq!(
+            wild_experience_award(&BattleRewardRules::default(), &defeated),
+            Err(BattleRewardError::MissingRules)
+        );
+        assert_eq!(
+            trainer_experience_award(&BattleRewardRules::default(), &defeated),
+            Err(BattleRewardError::MissingRules)
+        );
+        assert_eq!(
+            apply_wild_battle_rewards(
+                &BattleRewardRules::default(),
+                &mut player,
+                &defeated,
+                &species,
+                &BTreeMap::new(),
+                &learnsets,
+                &growth_rates,
+                &evolutions,
+                TimeOfDay::Day,
+            ),
+            Err(BattleRewardError::MissingRules)
+        );
+        assert_eq!(player, player_before);
+    }
+
+    #[test]
     fn wild_battle_rewards_award_exp_stat_exp_level_moves_and_evolution() {
         let growth_rates = crystal_growth_rate_catalog_for_tests();
         let mut player = Pokemon::new_for_tests(
@@ -555,6 +749,180 @@ mod tests {
         assert_eq!(player.hp_exp, 45);
         assert_eq!(player.attack_exp, 49);
         assert!(player.moves.iter().any(|known| known.name == "RAZOR_LEAF"));
+    }
+
+    #[test]
+    fn active_wild_battle_rewards_commit_player_deactivate_and_sync_party() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 35,
+            pp_ups: 0,
+        }];
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let moves = [("TACKLE".to_string(), move_data("TACKLE", 35))]
+            .into_iter()
+            .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                ("CHIKORITA".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(player);
+        state.battle_active_party_index = Some(0);
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated],
+        };
+
+        let outcome = claim_active_wild_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &moves,
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            TimeOfDay::Day,
+        )
+        .expect("claim wild rewards");
+
+        assert_eq!(outcome.defeated_species, "PIDGEY");
+        assert_eq!(state.battle, BattleMemory::Inactive);
+        assert_eq!(state.battle_active_party_index, None);
+        assert_eq!(
+            state.party.pokemon[0]
+                .as_ref()
+                .map(|pokemon| pokemon.species.as_str()),
+            Some("CHIKORITA")
+        );
+        assert!(state.storage.party.pokemon[0].as_ref().unwrap().experience > 0);
+    }
+
+    #[test]
+    fn active_trainer_battle_rewards_commit_player_enemy_and_reward_index() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 35,
+            pp_ups: 0,
+        }];
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let moves = [("TACKLE".to_string(), move_data("TACKLE", 35))]
+            .into_iter()
+            .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                ("CHIKORITA".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(player);
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle = BattleMemory::Trainer {
+            battle_type: "BATTLETYPE_TRAINER".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_name: "JOEY".to_string(),
+            event_flag: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            seen_text: String::new(),
+            win_text: String::new(),
+            loss_text: String::new(),
+            callback: String::new(),
+            source_script: "TrainerScript".to_string(),
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated],
+            reward: 64,
+            encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+
+        let outcome = claim_active_trainer_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &moves,
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            TimeOfDay::Day,
+        )
+        .expect("claim trainer rewards");
+
+        assert_eq!(outcome.defeated_species, "PIDGEY");
+        assert!(state.battle_rewarded_enemy_party_indices.contains(&0));
+        assert_eq!(
+            state.party.pokemon[0]
+                .as_ref()
+                .map(|pokemon| pokemon.species.as_str()),
+            Some("CHIKORITA")
+        );
+        let BattleMemory::Trainer {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        } = &state.battle
+        else {
+            panic!("expected trainer battle");
+        };
+        assert_eq!(enemy_pokemon.hp, 0);
+        assert_eq!(enemy_party[0].hp, 0);
     }
 
     #[test]
@@ -718,5 +1086,18 @@ mod tests {
             })
         );
         assert_eq!(player, player_before);
+    }
+
+    #[test]
+    fn battle_reward_issue_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<BattleRewardRulesIssue>(serde_json::json!({
+            "InvalidWildExpDivisor": {
+                "value": 0,
+                "default_divisor": 1
+            }
+        }))
+        .expect_err("default divisor must be rejected")
+        .to_string();
+        assert!(error.contains("unknown field `default_divisor`"), "{error}");
     }
 }

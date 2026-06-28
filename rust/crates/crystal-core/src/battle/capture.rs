@@ -3,8 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::battle::start::deactivate_battle;
 use crate::models::{Bag, CaptureStorageLocation, Item, PokedexState, Pokemon, PokemonStorage};
 use crate::random::Random;
+use crate::state::{BattleMemory, GameState};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +33,7 @@ pub struct CaptureBallRule {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureBallRuleIssue {
     InvalidBallId,
     InvalidBattleType,
@@ -39,7 +41,7 @@ pub enum CaptureBallRuleIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureRulesIssue {
     MissingBallRules,
     InvalidFastBallSpecies {
@@ -60,10 +62,16 @@ pub enum CaptureRulesIssue {
     UnknownBallRuleItem {
         ball_id: String,
     },
+    UnusableBallRuleItem {
+        ball_id: String,
+    },
     InvalidGuaranteedCaptureBall {
         ball_id: String,
     },
     UnknownGuaranteedCaptureBall {
+        ball_id: String,
+    },
+    UnusableGuaranteedCaptureBall {
         ball_id: String,
     },
     InvalidBallRule {
@@ -73,7 +81,7 @@ pub enum CaptureRulesIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureWobbleProbabilityIssue {
     MissingTable,
     InvalidCatchRate,
@@ -90,6 +98,10 @@ pub struct CaptureWobbleProbability {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CaptureError {
+    #[error("missing capture rules")]
+    MissingRules,
+    #[error("missing capture wobble probability table")]
+    MissingWobbleTable,
     #[error("missing Heavy Ball modifier for species '{0}'")]
     MissingHeavyBallModifier(String),
     #[error("invalid capture ball '{0}'")]
@@ -175,6 +187,7 @@ pub fn resolve_capture_attempt(
     rng: &mut Random,
 ) -> Result<CaptureOutcome, CaptureError> {
     validate_capture_ball_id(&context.ball_id)?;
+    require_capture_runtime_rules(rules, wobble_probabilities)?;
     if context.trainer_battle {
         return Ok(CaptureOutcome {
             caught: false,
@@ -256,6 +269,7 @@ pub fn throw_ball_from_bag(
 }
 
 pub fn validate_capture_ball_item(rules: &CaptureRules, ball: &Item) -> Result<(), CaptureError> {
+    require_capture_rules(rules)?;
     validate_capture_ball_id(&ball.script_name)?;
     if rules.ball_rules.contains_key(&ball.script_name)
         || rules.guaranteed_capture_balls.contains(&ball.script_name)
@@ -292,7 +306,7 @@ pub fn capture_ball_rule_issues(
 pub fn capture_rules_issues(
     rules: &CaptureRules,
     species_ids: &BTreeSet<String>,
-    ball_item_ids: &BTreeSet<String>,
+    ball_items: &BTreeMap<String, Item>,
     has_ball_pocket_items: bool,
 ) -> Vec<CaptureRulesIssue> {
     let mut issues = Vec::new();
@@ -326,10 +340,18 @@ pub fn capture_rules_issues(
             issues.push(CaptureRulesIssue::InvalidBallRuleItem {
                 ball_id: ball_id.clone(),
             });
-        } else if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
-            issues.push(CaptureRulesIssue::UnknownBallRuleItem {
-                ball_id: ball_id.clone(),
-            });
+        } else if !ball_items.is_empty() {
+            match ball_items.get(ball_id) {
+                Some(item) if !item.battle_usable => {
+                    issues.push(CaptureRulesIssue::UnusableBallRuleItem {
+                        ball_id: ball_id.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => issues.push(CaptureRulesIssue::UnknownBallRuleItem {
+                    ball_id: ball_id.clone(),
+                }),
+            }
         }
         for issue in capture_ball_rule_issues(ball_id, rule) {
             issues.push(CaptureRulesIssue::InvalidBallRule {
@@ -343,10 +365,18 @@ pub fn capture_rules_issues(
             issues.push(CaptureRulesIssue::InvalidGuaranteedCaptureBall {
                 ball_id: ball_id.clone(),
             });
-        } else if !ball_item_ids.is_empty() && !ball_item_ids.contains(ball_id) {
-            issues.push(CaptureRulesIssue::UnknownGuaranteedCaptureBall {
-                ball_id: ball_id.clone(),
-            });
+        } else if !ball_items.is_empty() {
+            match ball_items.get(ball_id) {
+                Some(item) if !item.battle_usable => {
+                    issues.push(CaptureRulesIssue::UnusableGuaranteedCaptureBall {
+                        ball_id: ball_id.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => issues.push(CaptureRulesIssue::UnknownGuaranteedCaptureBall {
+                    ball_id: ball_id.clone(),
+                }),
+            }
         }
     }
     issues
@@ -355,9 +385,15 @@ pub fn capture_rules_issues(
 fn is_exact_capture_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn validate_capture_ball_rule_shape(
@@ -435,12 +471,41 @@ pub fn complete_captured_pokemon(
     Ok(stored)
 }
 
+pub fn complete_active_wild_capture(
+    state: &mut GameState,
+    outcome: &CaptureOutcome,
+) -> Result<Option<StoredCapture>, String> {
+    let enemy_pokemon = match &state.battle {
+        BattleMemory::Wild { enemy_pokemon, .. }
+        | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
+        BattleMemory::Trainer { trainer_id, .. } => {
+            return Err(format!("cannot capture during trainer battle {trainer_id}"));
+        }
+        BattleMemory::Inactive => {
+            return Err("cannot complete capture without an active wild battle".to_string());
+        }
+    };
+    let stored = complete_captured_pokemon(
+        outcome,
+        &mut state.storage,
+        &mut state.pokedex,
+        enemy_pokemon,
+    )?;
+    if stored.is_some() {
+        state.battle_result |= 1 << 6;
+        deactivate_battle(state);
+    }
+    state.sync_party_from_storage();
+    Ok(stored)
+}
+
 pub fn compute_final_catch_rate(
     player: &Pokemon,
     enemy: &Pokemon,
     context: &CaptureAttemptContext,
     rules: &CaptureRules,
 ) -> Result<u8, CaptureError> {
+    require_capture_rules(rules)?;
     let rate_result = apply_ball_multiplier(&context.ball_id, player, enemy, context, rules)?;
     if rate_result.skip_hp_calc {
         return Ok(rate_result.rate);
@@ -461,6 +526,7 @@ pub fn apply_ball_multiplier(
     context: &CaptureAttemptContext,
     rules: &CaptureRules,
 ) -> Result<BallCatchRateResult, CaptureError> {
+    require_capture_rules(rules)?;
     validate_capture_ball_id(ball_id)?;
     let mut rate = clamp_catch_rate(enemy.species.catch_rate as i32, 0);
     let mut skip_hp_calc = false;
@@ -562,12 +628,33 @@ pub fn wobble_chance_for_rate(
     final_catch_rate: u8,
     probabilities: &[CaptureWobbleProbability],
 ) -> Result<u8, CaptureError> {
+    if probabilities.is_empty() {
+        return Err(CaptureError::MissingWobbleTable);
+    }
     for entry in probabilities {
         if final_catch_rate <= entry.catch_rate {
             return Ok(entry.chance);
         }
     }
     Err(CaptureError::MissingWobbleProbability(final_catch_rate))
+}
+
+fn require_capture_runtime_rules(
+    rules: &CaptureRules,
+    probabilities: &[CaptureWobbleProbability],
+) -> Result<(), CaptureError> {
+    require_capture_rules(rules)?;
+    if probabilities.is_empty() {
+        return Err(CaptureError::MissingWobbleTable);
+    }
+    Ok(())
+}
+
+fn require_capture_rules(rules: &CaptureRules) -> Result<(), CaptureError> {
+    if rules.ball_rules.is_empty() && rules.guaranteed_capture_balls.is_empty() {
+        return Err(CaptureError::MissingRules);
+    }
+    Ok(())
 }
 
 fn clamp_catch_rate(value: i32, min: u8) -> u8 {
@@ -764,6 +851,48 @@ mod tests {
         rules
     }
 
+    fn test_ball(script_name: &str) -> Item {
+        use crate::models::item_pocket;
+
+        Item {
+            name: script_name.to_string(),
+            description: String::new(),
+            effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
+            price: 200,
+            held_effect: "HELD_NONE".to_string(),
+            parameter: 0,
+            property: String::new(),
+            pocket: item_pocket("BALL"),
+            field_menu: String::new(),
+            field_usable: true,
+            battle_menu: String::new(),
+            battle_usable: true,
+            script_name: script_name.to_string(),
+            consumable: true,
+            tmhm_index: None,
+            tmhm_move: None,
+        }
+    }
+
     #[test]
     fn hp_and_sleep_bonus_match_gen_two_catch_rate() {
         let player = pokemon("CHIKORITA", 45, 5, 20, 20);
@@ -953,6 +1082,49 @@ mod tests {
     }
 
     #[test]
+    fn capture_rule_tokens_reject_reserved_pack_prefixes() {
+        let mut rule = ball_rule(1, 1);
+        rule.battle_type = "legacy_battletype_fish".to_string();
+        assert_eq!(
+            capture_ball_rule_issues("fallback_lure_ball", &rule),
+            vec![
+                CaptureBallRuleIssue::InvalidBallId,
+                CaptureBallRuleIssue::InvalidBattleType,
+            ]
+        );
+
+        let rules = CaptureRules {
+            fast_ball_species: BTreeSet::from(["fallback_magnemite".to_string()]),
+            heavy_ball_modifiers: BTreeMap::from([("legacy_snorlax".to_string(), 40)]),
+            ball_rules: BTreeMap::from([("fallback_poke_ball".to_string(), ball_rule(1, 1))]),
+            guaranteed_capture_balls: BTreeSet::from(["legacy_master_ball".to_string()]),
+            status_bonus: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            capture_rules_issues(&rules, &BTreeSet::new(), &BTreeMap::new(), true),
+            vec![
+                CaptureRulesIssue::InvalidFastBallSpecies {
+                    species: "fallback_magnemite".to_string(),
+                },
+                CaptureRulesIssue::InvalidHeavyBallSpecies {
+                    species: "legacy_snorlax".to_string(),
+                },
+                CaptureRulesIssue::InvalidBallRuleItem {
+                    ball_id: "fallback_poke_ball".to_string(),
+                },
+                CaptureRulesIssue::InvalidBallRule {
+                    ball_id: "fallback_poke_ball".to_string(),
+                    issue: CaptureBallRuleIssue::InvalidBallId,
+                },
+                CaptureRulesIssue::InvalidGuaranteedCaptureBall {
+                    ball_id: "legacy_master_ball".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn capture_rules_issues_validate_definitive_pack_references() {
         let mut rules = CaptureRules {
             fast_ball_species: BTreeSet::from([
@@ -973,10 +1145,13 @@ mod tests {
             status_bonus: BTreeMap::new(),
         };
         let species = BTreeSet::from(["MAGNEMITE".to_string(), "SNORLAX".to_string()]);
-        let ball_item_ids = BTreeSet::from(["POKE_BALL".to_string(), "MASTER_BALL".to_string()]);
+        let ball_items = BTreeMap::from([
+            ("POKE_BALL".to_string(), test_ball("POKE_BALL")),
+            ("MASTER_BALL".to_string(), test_ball("MASTER_BALL")),
+        ]);
 
         assert_eq!(
-            capture_rules_issues(&rules, &species, &ball_item_ids, true),
+            capture_rules_issues(&rules, &species, &ball_items, true),
             vec![
                 CaptureRulesIssue::InvalidFastBallSpecies {
                     species: "MAGNE MITE".to_string()
@@ -1012,14 +1187,45 @@ mod tests {
 
         rules.ball_rules.clear();
         assert_eq!(
-            capture_rules_issues(&rules, &species, &ball_item_ids, true)
+            capture_rules_issues(&rules, &species, &ball_items, true)
                 .into_iter()
                 .next(),
             Some(CaptureRulesIssue::MissingBallRules)
         );
         assert!(
-            !capture_rules_issues(&rules, &species, &ball_item_ids, false)
+            !capture_rules_issues(&rules, &species, &ball_items, false)
                 .contains(&CaptureRulesIssue::MissingBallRules)
+        );
+    }
+
+    #[test]
+    fn capture_rules_issues_reject_capture_balls_that_are_not_battle_usable() {
+        let rules = CaptureRules {
+            fast_ball_species: BTreeSet::new(),
+            heavy_ball_modifiers: BTreeMap::new(),
+            ball_rules: BTreeMap::from([("POKE_BALL".to_string(), ball_rule(1, 1))]),
+            guaranteed_capture_balls: BTreeSet::from(["MASTER_BALL".to_string()]),
+            status_bonus: BTreeMap::new(),
+        };
+        let mut poke_ball = test_ball("POKE_BALL");
+        poke_ball.battle_usable = false;
+        let mut master_ball = test_ball("MASTER_BALL");
+        master_ball.battle_usable = false;
+        let ball_items = BTreeMap::from([
+            ("POKE_BALL".to_string(), poke_ball),
+            ("MASTER_BALL".to_string(), master_ball),
+        ]);
+
+        assert_eq!(
+            capture_rules_issues(&rules, &BTreeSet::new(), &ball_items, true),
+            vec![
+                CaptureRulesIssue::UnusableBallRuleItem {
+                    ball_id: "POKE_BALL".to_string(),
+                },
+                CaptureRulesIssue::UnusableGuaranteedCaptureBall {
+                    ball_id: "MASTER_BALL".to_string(),
+                },
+            ]
         );
     }
 
@@ -1152,6 +1358,72 @@ mod tests {
     }
 
     #[test]
+    fn capture_attempt_requires_definitive_runtime_rules_before_any_outcome() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut rng = Random::new(1);
+
+        let missing_rules = resolve_capture_attempt(
+            &player,
+            &enemy,
+            &CaptureAttemptContext::wild("MASTER_BALL"),
+            &CaptureRules::default(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect_err("missing capture rules must not become guaranteed capture behavior");
+        assert_eq!(missing_rules, CaptureError::MissingRules);
+
+        let mut trainer_context = CaptureAttemptContext::wild("POKE_BALL");
+        trainer_context.trainer_battle = true;
+        let missing_wobble = resolve_capture_attempt(
+            &player,
+            &enemy,
+            &trainer_context,
+            &capture_rules(),
+            &[],
+            &mut rng,
+        )
+        .expect_err("missing wobble table must not become trainer block behavior");
+        assert_eq!(missing_wobble, CaptureError::MissingWobbleTable);
+    }
+
+    #[test]
+    fn capture_helpers_reject_missing_rules_without_unknown_ball_fallback() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 100, 5, 10, 20);
+        let ball = test_ball("POKE_BALL");
+
+        assert_eq!(
+            validate_capture_ball_item(&CaptureRules::default(), &ball),
+            Err(CaptureError::MissingRules)
+        );
+        assert_eq!(
+            compute_final_catch_rate(
+                &player,
+                &enemy,
+                &CaptureAttemptContext::wild("POKE_BALL"),
+                &CaptureRules::default(),
+            ),
+            Err(CaptureError::MissingRules)
+        );
+        assert_eq!(
+            apply_ball_multiplier(
+                "POKE_BALL",
+                &player,
+                &enemy,
+                &CaptureAttemptContext::wild("POKE_BALL"),
+                &CaptureRules::default(),
+            ),
+            Err(CaptureError::MissingRules)
+        );
+        assert_eq!(
+            wobble_chance_for_rate(200, &[]),
+            Err(CaptureError::MissingWobbleTable)
+        );
+    }
+
+    #[test]
     fn successful_capture_registers_pokemon_in_storage() {
         let player = pokemon("CHIKORITA", 45, 5, 20, 20);
         let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
@@ -1205,6 +1477,45 @@ mod tests {
         assert!(pokedex.has_caught("modpack-PIDGEY"));
         assert!(!pokedex.has_seen("PIDGEY"));
         assert!(!pokedex.has_caught("MODPACK-PIDGEY"));
+    }
+
+    #[test]
+    fn complete_active_wild_capture_commits_storage_pokedex_battle_result_and_sync() {
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut state = GameState::default();
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        let outcome = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: 1,
+        };
+
+        let stored = complete_active_wild_capture(&mut state, &outcome)
+            .expect("complete active capture")
+            .expect("stored capture");
+
+        assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
+        assert!(state.pokedex.has_seen("PIDGEY"));
+        assert!(state.pokedex.has_caught("PIDGEY"));
+        assert_eq!(state.battle_result & (1 << 6), 1 << 6);
+        assert_eq!(state.battle, BattleMemory::Inactive);
+        assert_eq!(state.battle_active_party_index, None);
+        assert_eq!(
+            state.party.pokemon[0]
+                .as_ref()
+                .map(|pokemon| pokemon.species.as_str()),
+            Some("PIDGEY")
+        );
     }
 
     #[test]
@@ -1440,6 +1751,32 @@ mod tests {
     }
 
     #[test]
+    fn reserved_capture_ball_id_rejects_before_rule_lookup() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut rules = capture_rules();
+        rules
+            .guaranteed_capture_balls
+            .insert("fallback_master_ball".to_string());
+        let mut rng = Random::new(1);
+
+        let error = resolve_capture_attempt(
+            &player,
+            &enemy,
+            &CaptureAttemptContext::wild("fallback_master_ball"),
+            &rules,
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect_err("reserved capture ball ids are invalid content");
+
+        assert_eq!(
+            error,
+            CaptureError::InvalidBall("fallback_master_ball".to_string())
+        );
+    }
+
+    #[test]
     fn capture_wobble_requires_explicit_probability_row() {
         assert_eq!(
             wobble_chance_for_rate(
@@ -1469,6 +1806,54 @@ mod tests {
         assert!(
             error.contains("unknown field `fallback_ball_id`"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn capture_issue_json_rejects_unknown_fallback_fields() {
+        let rules_error = serde_json::from_value::<CaptureRulesIssue>(serde_json::json!({
+            "unknown_ball_rule_item": {
+                "ball_id": "MOD_BALL",
+                "fallback_ball_id": "POKE_BALL"
+            }
+        }))
+        .expect_err("capture rule issues must not accept fallback ball ids")
+        .to_string();
+        assert!(
+            rules_error.contains("unknown field `fallback_ball_id`"),
+            "{rules_error}"
+        );
+
+        let ball_rule_error = serde_json::from_value::<CaptureRulesIssue>(serde_json::json!({
+            "invalid_ball_rule": {
+                "ball_id": "MOD_BALL",
+                "issue": {
+                    "invalid_battle_type": {
+                        "default_battle_type": "BATTLETYPE_NORMAL"
+                    }
+                }
+            }
+        }))
+        .expect_err("capture ball rule issues must not accept default battle types")
+        .to_string();
+        assert!(
+            ball_rule_error.contains("unknown field `default_battle_type`"),
+            "{ball_rule_error}"
+        );
+
+        let wobble_error =
+            serde_json::from_value::<CaptureWobbleProbabilityIssue>(serde_json::json!({
+                "unordered_catch_rate": {
+                    "catch_rate": 100,
+                    "previous": 200,
+                    "fallback_chance": 0
+                }
+            }))
+            .expect_err("wobble issues must not accept fallback chances")
+            .to_string();
+        assert!(
+            wobble_error.contains("unknown field `fallback_chance`"),
+            "{wobble_error}"
         );
     }
 

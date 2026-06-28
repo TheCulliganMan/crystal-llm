@@ -16,19 +16,21 @@ pub fn item_pocket(id: &str) -> ItemPocket {
 pub struct Item {
     pub name: String,
     pub description: String,
+    #[serde(deserialize_with = "required_item_token")]
     pub effect: String,
+    #[serde(deserialize_with = "required_item_token_vec")]
     pub status_heals: Vec<String>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub revive_hp_percent: Option<u8>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub party_revive_hp_percent: Option<u8>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub pp_restore_scope: Option<String>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub pp_restore_points: Option<u8>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub pp_up_stages: Option<u8>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub vitamin_stat: Option<String>,
     #[serde(deserialize_with = "required_nullable_u16")]
     pub vitamin_stat_exp: Option<u16>,
@@ -36,11 +38,11 @@ pub struct Item {
     pub vitamin_max_stat_exp: Option<u16>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub rare_candy_level_gain: Option<u8>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub battle_stat_boost_stat: Option<String>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub battle_stat_boost_stages: Option<u8>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub battle_escape_mode: Option<String>,
     #[serde(deserialize_with = "required_nullable_bool")]
     pub battle_focus_energy: Option<bool>,
@@ -52,23 +54,112 @@ pub struct Item {
     pub confusion_heal: Option<bool>,
     #[serde(deserialize_with = "required_nullable_u16")]
     pub repel_steps: Option<u16>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub escape_rope_mode: Option<String>,
     pub price: u16,
+    #[serde(deserialize_with = "required_item_token")]
     pub held_effect: String,
     pub parameter: i16,
+    #[serde(deserialize_with = "required_empty_or_item_token")]
     pub property: String,
+    #[serde(deserialize_with = "required_item_token")]
     pub pocket: ItemPocket,
+    #[serde(deserialize_with = "required_empty_or_item_token")]
     pub field_menu: String,
     pub field_usable: bool,
+    #[serde(deserialize_with = "required_empty_or_item_token")]
     pub battle_menu: String,
     pub battle_usable: bool,
+    #[serde(deserialize_with = "required_item_token")]
     pub script_name: String,
     pub consumable: bool,
     #[serde(deserialize_with = "required_nullable_usize")]
     pub tmhm_index: Option<usize>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_item_token")]
     pub tmhm_move: Option<String>,
+}
+
+fn required_item_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if !is_exact_item_token(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "item token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )));
+    }
+    validate_no_reserved_item_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_empty_or_item_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Ok(value);
+    }
+    if !is_exact_item_token(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "item token must be empty or exact ASCII alphanumeric/underscore, found {value:?}"
+        )));
+    }
+    validate_no_reserved_item_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_nullable_item_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_item_token(&token) => {
+            validate_no_reserved_item_token(&token).map_err(serde::de::Error::custom)?;
+            Ok(Some(token))
+        }
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "item token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_item_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if let Some(token) = values.iter().find(|token| !is_exact_item_token(token)) {
+        Err(serde::de::Error::custom(format!(
+            "item token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        )))
+    } else {
+        for token in &values {
+            validate_no_reserved_item_token(token).map_err(serde::de::Error::custom)?;
+        }
+        Ok(values)
+    }
+}
+
+fn is_exact_item_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn validate_no_reserved_item_token(value: &str) -> Result<(), String> {
+    let lowered = value.to_ascii_lowercase();
+    if lowered.starts_with("fallback") || lowered.starts_with("legacy") {
+        return Err(format!(
+            "item token '{value}' uses reserved modpack payload prefix"
+        ));
+    }
+    Ok(())
 }
 
 fn required_nullable_u8<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
@@ -1023,5 +1114,83 @@ mod tests {
                 || error.contains("expected a string"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn item_identifier_fields_reject_malformed_tokens_at_deserialization() {
+        for (field, value) in [
+            ("effect", serde_json::json!(" MODDED_FLASH_STEP")),
+            ("effect", serde_json::json!("fallback_EFFECT")),
+            ("status_heals", serde_json::json!(["SLP", "BAD POISON"])),
+            ("status_heals", serde_json::json!(["SLP", "legacy_POISON"])),
+            ("pp_restore_scope", serde_json::json!("PARTY PP")),
+            ("vitamin_stat", serde_json::json!("SPECIAL ATTACK")),
+            (
+                "battle_stat_boost_stat",
+                serde_json::json!("SPECIAL DEFENSE"),
+            ),
+            ("battle_escape_mode", serde_json::json!("BATTLE ESCAPE")),
+            ("held_effect", serde_json::json!("HELD NONE")),
+            ("property", serde_json::json!("CANT SELECT")),
+            ("pocket", serde_json::json!("KEY ITEM")),
+            ("field_menu", serde_json::json!("ITEMMENU PARTY")),
+            ("battle_menu", serde_json::json!("ITEMMENU NOUSE")),
+            ("escape_rope_mode", serde_json::json!("FIELD ESCAPE")),
+            ("script_name", serde_json::json!("FLASH STEP CHARM")),
+            ("tmhm_move", serde_json::json!("MUD SLAP")),
+        ] {
+            let mut item = valid_item_json();
+            item[field] = value;
+
+            let error = serde_json::from_value::<Item>(item)
+                .expect_err("malformed item identifier fields must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("item token must be")
+                    || error.contains("uses reserved modpack payload prefix"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    fn valid_item_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "Flash Step Charm",
+            "description": "A modded effect item.",
+            "effect": "MODDED_FLASH_STEP",
+            "status_heals": [],
+            "revive_hp_percent": null,
+            "party_revive_hp_percent": null,
+            "pp_restore_scope": null,
+            "pp_restore_points": null,
+            "pp_up_stages": null,
+            "vitamin_stat": null,
+            "vitamin_stat_exp": null,
+            "vitamin_max_stat_exp": null,
+            "rare_candy_level_gain": null,
+            "battle_stat_boost_stat": null,
+            "battle_stat_boost_stages": null,
+            "battle_escape_mode": null,
+            "battle_focus_energy": null,
+            "battle_stat_drop_guard": null,
+            "battle_stat_drop_guard_turns": null,
+            "confusion_heal": null,
+            "repel_steps": null,
+            "escape_rope_mode": null,
+            "price": 100,
+            "held_effect": "HELD_NONE",
+            "parameter": 0,
+            "property": "",
+            "pocket": "ITEM",
+            "field_menu": "",
+            "field_usable": true,
+            "battle_menu": "",
+            "battle_usable": true,
+            "script_name": "FLASH_STEP_CHARM",
+            "consumable": true,
+            "tmhm_index": null,
+            "tmhm_move": null
+        })
     }
 }

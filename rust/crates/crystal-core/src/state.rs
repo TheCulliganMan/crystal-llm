@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::map::MapSceneTable;
-use crate::models::{Bag, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonStorage};
+use crate::models::{
+    Bag, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonSpecies, PokemonStorage, Trainer,
+};
 use crate::systems::script_audio::{
     SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
     SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS, SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS,
@@ -74,6 +77,7 @@ pub struct GameState {
     pub fishing: FishingMemory,
     pub step_events: StepEventCounters,
     pub time: TimeState,
+    pub unused_two_day_timer: UnusedTwoDayTimerState,
     pub lucky_number_show_flag: bool,
     pub lucky_number_day: Option<u8>,
     pub lucky_id_number: u16,
@@ -136,6 +140,7 @@ impl Default for GameState {
             fishing: FishingMemory::default(),
             step_events: StepEventCounters::default(),
             time: TimeState::default(),
+            unused_two_day_timer: UnusedTwoDayTimerState::default(),
             lucky_number_show_flag: false,
             lucky_number_day: None,
             lucky_id_number: 0,
@@ -166,6 +171,29 @@ impl Default for GameState {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct UnusedTwoDayTimerState {
+    pub active: bool,
+    pub remaining_days: u8,
+    pub start_day: u8,
+}
+
+impl UnusedTwoDayTimerState {
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        if self.remaining_days > 2 {
+            return Err(format!(
+                "remaining_days {} exceeds the two-day timer length",
+                self.remaining_days
+            ));
+        }
+        if !self.active && (self.remaining_days != 0 || self.start_day != 0) {
+            return Err("inactive timer must have remaining_days 0 and start_day 0".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkSessionState {
     pub link_mode: u8,
     pub player_link_action: u8,
@@ -180,7 +208,7 @@ pub struct LinkSessionState {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LinkSerialConnectionStatus {
     #[default]
     NotEstablished,
@@ -202,6 +230,28 @@ impl LinkSessionState {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum LinkSessionSaveError {
+    #[error("saved link_session.active_room {room} is missing from compiled pack special routines")]
+    MissingActiveRoom { room: String },
+}
+
+pub fn validate_saved_link_session_references<F>(
+    link_session: &LinkSessionState,
+    special_routine_exists: F,
+) -> Result<(), LinkSessionSaveError>
+where
+    F: Fn(&str) -> bool,
+{
+    if let Some(room) = &link_session.active_room {
+        if !special_routine_exists(room) {
+            return Err(LinkSessionSaveError::MissingActiveRoom { room: room.clone() });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +422,12 @@ impl MobileLinkState {
                 MOBILE_LOGIN_PASSWORD_LENGTH
             ));
         }
+        if !self.login_password.is_empty()
+            && (self.login_password.trim() != self.login_password
+                || self.login_password.chars().any(char::is_control))
+        {
+            return Err("mobile_link.login_password must be exact text".to_string());
+        }
         if self.terminated && self.handshakes == 0 {
             return Err(
                 "mobile_link.terminated cannot be saved before a mobile handshake".to_string(),
@@ -429,6 +485,12 @@ impl MobileBattleTowerRecord {
             &format!("mobile_link.leaderboard[{index}].outcome"),
             &self.outcome,
         )?;
+        if !matches!(self.outcome.as_str(), "win" | "loss") {
+            return Err(format!(
+                "mobile_link.leaderboard[{index}].outcome {} is not a saved mobile Battle Tower outcome",
+                self.outcome
+            ));
+        }
         if self.day >= 7 {
             return Err(format!(
                 "mobile_link.leaderboard[{index}].day {} is outside weekday range 0..6",
@@ -833,6 +895,39 @@ impl MysteryGiftState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum MysteryGiftSaveError {
+    #[error("saved {path} {item_id} is missing from compiled pack items")]
+    MissingItem { path: &'static str, item_id: String },
+}
+
+pub fn validate_saved_mystery_gift_references<F>(
+    mystery_gift: &MysteryGiftState,
+    item_exists: F,
+) -> Result<(), MysteryGiftSaveError>
+where
+    F: Fn(&str) -> bool,
+{
+    if let Some(item_id) = &mystery_gift.stored_item {
+        if !item_exists(item_id) {
+            return Err(MysteryGiftSaveError::MissingItem {
+                path: "mystery_gift.stored_item",
+                item_id: item_id.clone(),
+            });
+        }
+    }
+    if let Some(item_id) = &mystery_gift.backup_item {
+        if !item_exists(item_id) {
+            return Err(MysteryGiftSaveError::MissingItem {
+                path: "mystery_gift.backup_item",
+                item_id: item_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuenasPasswordState {
@@ -895,6 +990,67 @@ impl RoamingPokemonState {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum RoamingSaveError {
+    #[error(
+        "saved roaming_pokemon[{index}].species {species} is missing from compiled pack pokemon"
+    )]
+    MissingSpecies { index: usize, species: String },
+    #[error(
+        "saved roaming_pokemon[{index}] {species} level {level} is not declared by compiled roaming Pokemon definitions"
+    )]
+    MissingDefinition {
+        index: usize,
+        species: String,
+        level: u8,
+    },
+    #[error(
+        "saved roaming_pokemon[{index}] location group {map_group} map {map_number} is missing from compiled runtime map metadata"
+    )]
+    MissingMapLocation {
+        index: usize,
+        map_group: u16,
+        map_number: u16,
+    },
+}
+
+pub fn validate_saved_roaming_references<F, G, H>(
+    roaming_pokemon: &[RoamingPokemonState],
+    species_exists: F,
+    roaming_definition_exists: G,
+    map_location_exists: H,
+) -> Result<(), RoamingSaveError>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&str, u8) -> bool,
+    H: Fn(u16, u16) -> bool,
+{
+    for (index, roaming) in roaming_pokemon.iter().enumerate() {
+        if !species_exists(&roaming.species) {
+            return Err(RoamingSaveError::MissingSpecies {
+                index,
+                species: roaming.species.clone(),
+            });
+        }
+        if !roaming_definition_exists(&roaming.species, roaming.level) {
+            return Err(RoamingSaveError::MissingDefinition {
+                index,
+                species: roaming.species.clone(),
+                level: roaming.level,
+            });
+        }
+        if !map_location_exists(roaming.map_group, roaming.map_number) {
+            return Err(RoamingSaveError::MissingMapLocation {
+                index,
+                map_group: roaming.map_group,
+                map_number: roaming.map_number,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,7 +1140,7 @@ pub struct OverworldFollowMemory {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BattleMemory {
     #[default]
     Inactive,
@@ -1159,7 +1315,7 @@ fn validate_battle_enemy_party_state(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OverworldMemory {
     #[default]
     Inactive,
@@ -1399,7 +1555,7 @@ impl ScriptRuntimeMemory {
                 &format!("numeric_buffer_writes[{index}].source_script"),
                 &write.source_script,
             )?;
-            validate_numeric_buffer_write_payload(index, write)?;
+            validate_numeric_buffer_write_payload(index, write, &self.named_buffers)?;
         }
         for (index, floor) in self.elevator_floors.iter().enumerate() {
             validate_script_runtime_token(
@@ -1674,6 +1830,24 @@ fn validate_script_shop_request(field: &str, request: &ScriptShopRequest) -> Res
     validate_script_runtime_label(&format!("{field}.source_script"), &request.source_script)
 }
 
+pub fn saved_shop_event_command_payload(
+    event: &ScriptShopRuntimeEvent,
+) -> (&'static str, Vec<String>) {
+    (
+        "pokemart",
+        vec![event.mart_type.clone(), event.mart_id.clone()],
+    )
+}
+
+pub fn saved_shop_request_command_payload(
+    request: &ScriptShopRequest,
+) -> (&'static str, Vec<String>) {
+    (
+        "pokemart",
+        vec![request.mart_type.clone(), request.mart_id.clone()],
+    )
+}
+
 fn validate_script_shop_mart_type(
     field: &str,
     mart_type: &str,
@@ -1766,6 +1940,7 @@ fn validate_asm_directive_payload(
 fn validate_numeric_buffer_write_payload(
     index: usize,
     write: &ScriptRuntimeNumericBufferWrite,
+    named_buffers: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     let parsed = write.value.parse::<u16>().map_err(|_| {
         format!(
@@ -1785,7 +1960,61 @@ fn validate_numeric_buffer_write_payload(
             write.width
         ));
     }
-    Ok(())
+    match named_buffers.get(&write.target_buffer) {
+        Some(value) if value == &write.value => Ok(()),
+        Some(value) => Err(format!(
+            "numeric_buffer_writes[{index}].value {} does not match named_buffers[{}] {}",
+            write.value, write.target_buffer, value
+        )),
+        None => Err(format!(
+            "numeric_buffer_writes[{index}].target_buffer {} is missing from named_buffers",
+            write.target_buffer
+        )),
+    }
+}
+
+pub fn saved_variable_write_command_payload(
+    write: &ScriptRuntimeVariableWrite,
+) -> (&'static str, Vec<String>) {
+    ("writevar", vec![write.target.clone()])
+}
+
+pub fn saved_numeric_buffer_write_command_payload(
+    write: &ScriptRuntimeNumericBufferWrite,
+) -> (&'static str, Vec<String>) {
+    ("getnum", vec![write.target_buffer.clone()])
+}
+
+pub fn saved_elevator_floor_command_payload(
+    floor: &ScriptRuntimeElevatorFloor,
+) -> (&'static str, Vec<String>) {
+    (
+        "elevfloor",
+        vec![
+            floor.floor.clone(),
+            floor.warp.to_string(),
+            floor.target_map.clone(),
+        ],
+    )
+}
+
+pub fn saved_stone_table_entry_command_payload(
+    entry: &ScriptRuntimeStoneTableEntry,
+) -> (&'static str, Vec<String>) {
+    (
+        "stonetable",
+        vec![
+            entry.warp.to_string(),
+            entry.object_event.clone(),
+            entry.script.clone(),
+        ],
+    )
+}
+
+pub fn saved_decoration_description_command_payload(
+    description: &ScriptRuntimeDecorationDescription,
+) -> (&'static str, Vec<String>) {
+    ("describedecoration", vec![description.decoration.clone()])
 }
 
 fn validate_delay_payload(index: usize, delay: &ScriptRuntimeDelay) -> Result<(), String> {
@@ -1819,13 +2048,391 @@ fn validate_earthquake_payload(
     Ok(())
 }
 
+pub fn saved_delay_command_payload(delay: &ScriptRuntimeDelay) -> (&str, Vec<String>) {
+    (&delay.command, vec![delay.frames.to_string()])
+}
+
+pub fn saved_music_fade_command_payload(fade: &ScriptMusicFade) -> (&'static str, Vec<String>) {
+    (
+        "musicfadeout",
+        vec![fade.audio_id.clone(), fade.fade_frames.to_string()],
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScriptAudioRuntimeCommandError {
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has unexpected fade_frames"
+    )]
+    UnexpectedFadeFrames {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error("saved {path} {source_script}:{command_index} is missing audio_id")]
+    MissingAudioId {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} is missing fade_frames")]
+    MissingFadeFrames {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} command waitsfx has unexpected audio_id")]
+    UnexpectedWaitSfxAudioId {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command waitsfx has unexpected fade_frames"
+    )]
+    UnexpectedWaitSfxFadeFrames {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} special audio event must use command_index 0"
+    )]
+    UnexpectedSpecialCommandIndex {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {source_script} special audio event is {actual:?}, expected {expected:?}"
+    )]
+    SpecialKindMismatch {
+        path: String,
+        source_script: String,
+        actual: ScriptAudioRuntimeKind,
+        expected: ScriptAudioRuntimeKind,
+    },
+    #[error("saved {path} {source_script} special cry event is missing audio_id")]
+    MissingSpecialCryAudioId { path: String, source_script: String },
+    #[error("saved {path} {source_script} special audio event has unexpected audio_id {actual}")]
+    UnexpectedSpecialAudioId {
+        path: String,
+        source_script: String,
+        actual: String,
+    },
+    #[error("saved {path} {source_script} special audio event is missing audio_id {expected}")]
+    MissingSpecialAudioId {
+        path: String,
+        source_script: String,
+        expected: &'static str,
+    },
+    #[error(
+        "saved {path} {source_script} special audio event audio_id {actual} does not match {expected}"
+    )]
+    SpecialAudioIdMismatch {
+        path: String,
+        source_script: String,
+        actual: String,
+        expected: &'static str,
+    },
+    #[error("saved {path} {source_script} special audio event has unexpected fade_frames {actual}")]
+    UnexpectedSpecialFadeFrames {
+        path: String,
+        source_script: String,
+        actual: u16,
+    },
+    #[error("saved {path} {source_script} special audio event is missing fade_frames {expected}")]
+    MissingSpecialFadeFrames {
+        path: String,
+        source_script: String,
+        expected: u16,
+    },
+    #[error(
+        "saved {path} {source_script} special audio event fade_frames {actual} does not match {expected}"
+    )]
+    SpecialFadeFramesMismatch {
+        path: String,
+        source_script: String,
+        actual: u16,
+        expected: u16,
+    },
+    #[error("saved {path} special routine {routine} does not emit audio")]
+    SpecialRoutineDoesNotEmitAudio { path: String, routine: String },
+}
+
+pub fn saved_audio_runtime_event_command_args(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+) -> Result<Option<Vec<String>>, ScriptAudioRuntimeCommandError> {
+    match event.command.as_str() {
+        "special" => {
+            validate_special_audio_runtime_event_shape(path, event)?;
+            Ok(None)
+        }
+        "playmusic" | "playsound" => {
+            if event.fade_frames.is_some() {
+                return Err(audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::UnexpectedFadeFrames,
+                ));
+            }
+            let audio_id = event.audio_id.clone().ok_or_else(|| {
+                audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::MissingAudioId,
+                )
+            })?;
+            Ok(Some(vec![audio_id]))
+        }
+        "musicfadeout" => {
+            let audio_id = event.audio_id.clone().ok_or_else(|| {
+                audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::MissingAudioId,
+                )
+            })?;
+            let fade_frames = event.fade_frames.ok_or_else(|| {
+                audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::MissingFadeFrames,
+                )
+            })?;
+            Ok(Some(vec![audio_id, fade_frames.to_string()]))
+        }
+        "waitsfx" => {
+            if event.audio_id.is_some() {
+                return Err(audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::UnexpectedWaitSfxAudioId,
+                ));
+            }
+            if event.fade_frames.is_some() {
+                return Err(audio_command_error(
+                    path,
+                    event,
+                    ScriptAudioRuntimeCommandErrorKind::UnexpectedWaitSfxFadeFrames,
+                ));
+            }
+            Ok(Some(Vec::new()))
+        }
+        "cry" => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+enum ScriptAudioRuntimeCommandErrorKind {
+    UnexpectedFadeFrames,
+    MissingAudioId,
+    MissingFadeFrames,
+    UnexpectedWaitSfxAudioId,
+    UnexpectedWaitSfxFadeFrames,
+}
+
+fn audio_command_error(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+    kind: ScriptAudioRuntimeCommandErrorKind,
+) -> ScriptAudioRuntimeCommandError {
+    match kind {
+        ScriptAudioRuntimeCommandErrorKind::UnexpectedFadeFrames => {
+            ScriptAudioRuntimeCommandError::UnexpectedFadeFrames {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptAudioRuntimeCommandErrorKind::MissingAudioId => {
+            ScriptAudioRuntimeCommandError::MissingAudioId {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        }
+        ScriptAudioRuntimeCommandErrorKind::MissingFadeFrames => {
+            ScriptAudioRuntimeCommandError::MissingFadeFrames {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        }
+        ScriptAudioRuntimeCommandErrorKind::UnexpectedWaitSfxAudioId => {
+            ScriptAudioRuntimeCommandError::UnexpectedWaitSfxAudioId {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        }
+        ScriptAudioRuntimeCommandErrorKind::UnexpectedWaitSfxFadeFrames => {
+            ScriptAudioRuntimeCommandError::UnexpectedWaitSfxFadeFrames {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        }
+    }
+}
+
+fn validate_special_audio_runtime_event_shape(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+) -> Result<(), ScriptAudioRuntimeCommandError> {
+    if event.command_index != 0 {
+        return Err(
+            ScriptAudioRuntimeCommandError::UnexpectedSpecialCommandIndex {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            },
+        );
+    }
+    match event.source_script.as_str() {
+        "FadeOutMusic" => {
+            validate_special_audio_event_kind(path, event, ScriptAudioRuntimeKind::FadeMusic)?;
+            validate_special_audio_event_id(path, event, Some("MUSIC_NONE"))?;
+            validate_special_audio_event_fade(path, event, Some(2))
+        }
+        "WaitSFX" => {
+            validate_special_audio_event_kind(
+                path,
+                event,
+                ScriptAudioRuntimeKind::WaitForSoundEffect,
+            )?;
+            validate_special_audio_event_id(path, event, None)?;
+            validate_special_audio_event_fade(path, event, None)
+        }
+        "PlayCurMonCry" | "PlaySlowCry" => {
+            validate_special_audio_event_kind(path, event, ScriptAudioRuntimeKind::Cry)?;
+            if event.audio_id.is_none() {
+                return Err(ScriptAudioRuntimeCommandError::MissingSpecialCryAudioId {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                });
+            }
+            validate_special_audio_event_fade(path, event, None)
+        }
+        "GetMysteryGiftItem" => {
+            validate_special_audio_event_kind(path, event, ScriptAudioRuntimeKind::SoundEffect)?;
+            validate_special_audio_event_id(path, event, Some("SFX_ITEM"))?;
+            validate_special_audio_event_fade(path, event, None)
+        }
+        routine => Err(
+            ScriptAudioRuntimeCommandError::SpecialRoutineDoesNotEmitAudio {
+                path: path.to_string(),
+                routine: routine.to_string(),
+            },
+        ),
+    }
+}
+
+fn validate_special_audio_event_kind(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+    expected: ScriptAudioRuntimeKind,
+) -> Result<(), ScriptAudioRuntimeCommandError> {
+    if event.kind != expected {
+        return Err(ScriptAudioRuntimeCommandError::SpecialKindMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            actual: event.kind,
+            expected,
+        });
+    }
+    Ok(())
+}
+
+fn validate_special_audio_event_id(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+    expected: Option<&'static str>,
+) -> Result<(), ScriptAudioRuntimeCommandError> {
+    match (event.audio_id.as_deref(), expected) {
+        (actual, expected) if actual == expected => Ok(()),
+        (Some(actual), None) => Err(ScriptAudioRuntimeCommandError::UnexpectedSpecialAudioId {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            actual: actual.to_string(),
+        }),
+        (None, Some(expected)) => Err(ScriptAudioRuntimeCommandError::MissingSpecialAudioId {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            expected,
+        }),
+        (Some(actual), Some(expected)) => {
+            Err(ScriptAudioRuntimeCommandError::SpecialAudioIdMismatch {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                actual: actual.to_string(),
+                expected,
+            })
+        }
+        (None, None) => Ok(()),
+    }
+}
+
+fn validate_special_audio_event_fade(
+    path: &str,
+    event: &ScriptAudioRuntimeEvent,
+    expected: Option<u16>,
+) -> Result<(), ScriptAudioRuntimeCommandError> {
+    match (event.fade_frames, expected) {
+        (actual, expected) if actual == expected => Ok(()),
+        (Some(actual), None) => Err(
+            ScriptAudioRuntimeCommandError::UnexpectedSpecialFadeFrames {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                actual,
+            },
+        ),
+        (None, Some(expected)) => Err(ScriptAudioRuntimeCommandError::MissingSpecialFadeFrames {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            expected,
+        }),
+        (Some(actual), Some(expected)) => {
+            Err(ScriptAudioRuntimeCommandError::SpecialFadeFramesMismatch {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                actual,
+                expected,
+            })
+        }
+        (None, None) => Ok(()),
+    }
+}
+
+pub fn saved_earthquake_command_payload(
+    earthquake: &ScriptRuntimeEarthquake,
+) -> (&'static str, Vec<String>) {
+    ("earthquake", vec![earthquake.parameter.to_string()])
+}
+
+pub fn saved_emote_command_payload(emote: &ScriptRuntimeEmote) -> (&'static str, Vec<String>) {
+    (
+        "showemote",
+        vec![
+            emote.emote.clone(),
+            emote.object.clone(),
+            emote.duration.to_string(),
+        ],
+    )
+}
+
 fn validate_audio_event_payload(
     index: usize,
     event: &ScriptAudioRuntimeEvent,
 ) -> Result<(), String> {
     match event.kind {
         ScriptAudioRuntimeKind::Music => {
-            if !SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&event.command.as_str()) {
+            if event.command != "special"
+                && !SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "audio_events[{index}].command {} is not valid for Music",
                     event.command
@@ -1844,7 +2451,9 @@ fn validate_audio_event_payload(
             }
         }
         ScriptAudioRuntimeKind::SoundEffect => {
-            if !SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&event.command.as_str()) {
+            if event.command != "special"
+                && !SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "audio_events[{index}].command {} is not valid for SoundEffect",
                     event.command
@@ -1863,7 +2472,9 @@ fn validate_audio_event_payload(
             }
         }
         ScriptAudioRuntimeKind::Cry => {
-            if !SCRIPT_AUDIO_CRY_COMMANDS.contains(&event.command.as_str()) {
+            if event.command != "special"
+                && !SCRIPT_AUDIO_CRY_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "audio_events[{index}].command {} is not valid for Cry",
                     event.command
@@ -1882,7 +2493,9 @@ fn validate_audio_event_payload(
             }
         }
         ScriptAudioRuntimeKind::FadeMusic => {
-            if !SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&event.command.as_str()) {
+            if event.command != "special"
+                && !SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "audio_events[{index}].command {} is not valid for FadeMusic",
                     event.command
@@ -1900,7 +2513,9 @@ fn validate_audio_event_payload(
             }
         }
         ScriptAudioRuntimeKind::WaitForSoundEffect => {
-            if !SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&event.command.as_str()) {
+            if event.command != "special"
+                && !SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "audio_events[{index}].command {} is not valid for WaitForSoundEffect",
                     event.command
@@ -1935,6 +2550,116 @@ fn validate_pending_screen_fade_payload(fade: &ScriptScreenFade) -> Result<(), S
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptScreenFadeRoutineError {
+    #[error("saved {path} {routine} is not a screen fade routine")]
+    UnknownRoutine { path: String, routine: String },
+    #[error("saved {path} {routine} color {actual:?} does not match {expected:?}")]
+    ColorMismatch {
+        path: String,
+        routine: String,
+        actual: ScriptFadeColor,
+        expected: ScriptFadeColor,
+    },
+    #[error("saved {path} {routine} direction {actual:?} does not match {expected:?}")]
+    DirectionMismatch {
+        path: String,
+        routine: String,
+        actual: ScriptFadeDirection,
+        expected: ScriptFadeDirection,
+    },
+    #[error("saved {path} {routine} frames {actual} does not match 8")]
+    FrameMismatch {
+        path: String,
+        routine: String,
+        actual: u16,
+    },
+}
+
+pub fn validate_saved_screen_fade_routine(
+    path: &str,
+    routine: &str,
+    color: ScriptFadeColor,
+    direction: ScriptFadeDirection,
+    frames: u16,
+) -> Result<(), ScriptScreenFadeRoutineError> {
+    let Some((expected_color, expected_direction)) = screen_fade_routine_fields(routine) else {
+        return Err(ScriptScreenFadeRoutineError::UnknownRoutine {
+            path: path.to_string(),
+            routine: routine.to_string(),
+        });
+    };
+    if color != expected_color {
+        return Err(ScriptScreenFadeRoutineError::ColorMismatch {
+            path: path.to_string(),
+            routine: routine.to_string(),
+            actual: color,
+            expected: expected_color,
+        });
+    }
+    if direction != expected_direction {
+        return Err(ScriptScreenFadeRoutineError::DirectionMismatch {
+            path: path.to_string(),
+            routine: routine.to_string(),
+            actual: direction,
+            expected: expected_direction,
+        });
+    }
+    if frames != 8 {
+        return Err(ScriptScreenFadeRoutineError::FrameMismatch {
+            path: path.to_string(),
+            routine: routine.to_string(),
+            actual: frames,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptScreenFadeSaveError {
+    #[error("saved {path} {source_script}:{command_index} screen fade must use command index 0")]
+    CommandIndexMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(transparent)]
+    Routine(#[from] ScriptScreenFadeRoutineError),
+}
+
+pub fn validate_saved_pending_screen_fade_shape(
+    path: &str,
+    fade: &ScriptScreenFade,
+) -> Result<(), ScriptScreenFadeSaveError> {
+    if fade.command_index != 0 {
+        return Err(ScriptScreenFadeSaveError::CommandIndexMismatch {
+            path: path.to_string(),
+            source_script: fade.source_script.clone(),
+            command_index: fade.command_index,
+        });
+    }
+    validate_saved_screen_fade_routine(
+        path,
+        &fade.source_script,
+        fade.color,
+        fade.direction,
+        fade.frames,
+    )?;
+    Ok(())
+}
+
+fn screen_fade_routine_fields(routine: &str) -> Option<(ScriptFadeColor, ScriptFadeDirection)> {
+    match routine {
+        "FadeOutToWhite" => Some((ScriptFadeColor::White, ScriptFadeDirection::Out)),
+        "FadeInFromWhite" => Some((ScriptFadeColor::White, ScriptFadeDirection::In)),
+        "FadeOutToBlack" => Some((ScriptFadeColor::Black, ScriptFadeDirection::Out)),
+        "FadeInFromBlack" => Some((ScriptFadeColor::Black, ScriptFadeDirection::In)),
+        _ => None,
+    }
 }
 
 fn validate_graphics_event_payload(
@@ -1985,6 +2710,111 @@ fn validate_graphics_event_payload(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptGraphicsRuntimeEventError {
+    #[error(
+        "saved {path} {source_script}:{command_index} graphics command {command} does not match special"
+    )]
+    CommandMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} graphics special must use command index 0"
+    )]
+    CommandIndexMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} screen fade is missing color")]
+    MissingScreenFadeColor {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} screen fade is missing direction")]
+    MissingScreenFadeDirection {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} screen fade is missing frames")]
+    MissingScreenFadeFrames {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} graphics event has unexpected fade payload"
+    )]
+    UnexpectedFadePayload {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(transparent)]
+    ScreenFadeRoutine(#[from] ScriptScreenFadeRoutineError),
+}
+
+pub fn validate_saved_graphics_runtime_event_shape(
+    path: &str,
+    event: &ScriptGraphicsRuntimeEvent,
+) -> Result<(), ScriptGraphicsRuntimeEventError> {
+    if event.command != "special" {
+        return Err(ScriptGraphicsRuntimeEventError::CommandMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+        });
+    }
+    if event.command_index != 0 {
+        return Err(ScriptGraphicsRuntimeEventError::CommandIndexMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+        });
+    }
+    if event.kind == ScriptGraphicsRuntimeKind::ScreenFade {
+        let color =
+            event
+                .color
+                .ok_or_else(|| ScriptGraphicsRuntimeEventError::MissingScreenFadeColor {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                })?;
+        let direction = event.direction.ok_or_else(|| {
+            ScriptGraphicsRuntimeEventError::MissingScreenFadeDirection {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        })?;
+        let frames = event.frames.ok_or_else(|| {
+            ScriptGraphicsRuntimeEventError::MissingScreenFadeFrames {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+            }
+        })?;
+        validate_saved_screen_fade_routine(path, &event.source_script, color, direction, frames)?;
+        return Ok(());
+    }
+    if event.color.is_some() || event.direction.is_some() || event.frames.is_some() {
+        return Err(ScriptGraphicsRuntimeEventError::UnexpectedFadePayload {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+        });
+    }
+    Ok(())
+}
+
 fn validate_money_event_payload(
     index: usize,
     event: &ScriptMoneyRuntimeEvent,
@@ -2030,6 +2860,1562 @@ fn validate_money_event_payload(
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptMoneyRuntimeRoutineError {
+    #[error("saved {path} {routine} is not a money display routine")]
+    UnknownRoutine { path: String, routine: String },
+    #[error("saved {path} {routine} kind {actual:?} does not match {expected:?}")]
+    KindMismatch {
+        path: String,
+        routine: String,
+        actual: ScriptMoneyRuntimeKind,
+        expected: ScriptMoneyRuntimeKind,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptMoneyRuntimeEventError {
+    #[error(
+        "saved {path} {source_script}:{command_index} money command {command} does not match special"
+    )]
+    CommandMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error("saved {path} {source_script}:{command_index} money special must use command index 0")]
+    CommandIndexMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} money event has unexpected coins")]
+    UnexpectedCoins {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} money event is missing coins")]
+    MissingCoins {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} money {money} does not match 0")]
+    MoneyMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        money: u32,
+    },
+    #[error(transparent)]
+    Routine(#[from] ScriptMoneyRuntimeRoutineError),
+}
+
+pub fn validate_saved_money_runtime_event_shape(
+    path: &str,
+    event: &ScriptMoneyRuntimeEvent,
+) -> Result<(), ScriptMoneyRuntimeEventError> {
+    if event.command != "special" {
+        return Err(ScriptMoneyRuntimeEventError::CommandMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+        });
+    }
+    if event.command_index != 0 {
+        return Err(ScriptMoneyRuntimeEventError::CommandIndexMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+        });
+    }
+    match event.kind {
+        ScriptMoneyRuntimeKind::PlaceMoneyTopRight => {
+            if event.coins.is_some() {
+                return Err(ScriptMoneyRuntimeEventError::UnexpectedCoins {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+        ScriptMoneyRuntimeKind::DisplayMoneyAndCoinBalance => {
+            if event.coins.is_none() {
+                return Err(ScriptMoneyRuntimeEventError::MissingCoins {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+        ScriptMoneyRuntimeKind::DisplayCoinCaseBalance => {
+            if event.money != 0 {
+                return Err(ScriptMoneyRuntimeEventError::MoneyMismatch {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                    money: event.money,
+                });
+            }
+            if event.coins.is_none() {
+                return Err(ScriptMoneyRuntimeEventError::MissingCoins {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+    }
+    validate_saved_money_runtime_routine(path, event)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum LastTalkedObjectSaveError {
+    #[error("saved script_runtime.last_talked_object {object_id} requires an active overworld map")]
+    InactiveOverworld { object_id: String },
+    #[error(
+        "saved script_runtime.last_talked_object.map {map_name} is missing from compiled pack maps"
+    )]
+    MissingMap { map_name: String },
+    #[error(
+        "saved script_runtime.last_talked_object {object_id} is missing from compiled map {map_name} objects"
+    )]
+    MissingObject { map_name: String, object_id: String },
+}
+
+pub fn validate_saved_last_talked_object_reference(
+    state: &GameState,
+    object_id: &str,
+    mut map_exists: impl FnMut(&str) -> bool,
+    mut object_exists: impl FnMut(&str, &str) -> bool,
+) -> Result<(), LastTalkedObjectSaveError> {
+    let OverworldMemory::Active { map_name, .. } = &state.overworld else {
+        return Err(LastTalkedObjectSaveError::InactiveOverworld {
+            object_id: object_id.to_string(),
+        });
+    };
+    if !map_exists(map_name) {
+        return Err(LastTalkedObjectSaveError::MissingMap {
+            map_name: map_name.clone(),
+        });
+    }
+    if !object_exists(map_name, object_id) {
+        return Err(LastTalkedObjectSaveError::MissingObject {
+            map_name: map_name.clone(),
+            object_id: object_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptCommandReferenceError {
+    #[error("compiled script {script_label} for saved {path} is not a command array")]
+    NonArrayScript { path: String, script_label: String },
+    #[error(
+        "saved {path} {script_label}:{command_index} is outside compiled script command count {command_count}"
+    )]
+    CommandIndexOutOfBounds {
+        path: String,
+        script_label: String,
+        command_index: usize,
+        command_count: usize,
+    },
+    #[error(
+        "compiled script {script_label}:{command_index} for saved {path} is missing command name"
+    )]
+    MissingCommandName {
+        path: String,
+        script_label: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {script_label}:{command_index} command {saved_command} does not match compiled command {compiled_command}"
+    )]
+    CommandMismatch {
+        path: String,
+        script_label: String,
+        command_index: usize,
+        saved_command: String,
+        compiled_command: String,
+    },
+    #[error("compiled script {script_label}:{command_index} for saved {path} has non-array args")]
+    NonArrayArgs {
+        path: String,
+        script_label: String,
+        command_index: usize,
+    },
+    #[error(
+        "compiled script {script_label}:{command_index} for saved {path} has non-string arg {arg_index}"
+    )]
+    NonStringArg {
+        path: String,
+        script_label: String,
+        command_index: usize,
+        arg_index: usize,
+    },
+    #[error(
+        "saved {path} {script_label}:{command_index} args {saved_args:?} do not match compiled args {compiled_args:?}"
+    )]
+    ArgsMismatch {
+        path: String,
+        script_label: String,
+        command_index: usize,
+        saved_args: Vec<String>,
+        compiled_args: Vec<String>,
+    },
+}
+
+pub fn validate_saved_compiled_script_command_reference(
+    script_body: &serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+) -> Result<(), ScriptCommandReferenceError> {
+    let commands = compiled_script_commands(script_body, path, script_label)?;
+    if command_index < commands.len() {
+        Ok(())
+    } else {
+        Err(ScriptCommandReferenceError::CommandIndexOutOfBounds {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+            command_count: commands.len(),
+        })
+    }
+}
+
+pub fn validate_saved_compiled_script_command_name_reference(
+    script_body: &serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+    saved_command: &str,
+) -> Result<(), ScriptCommandReferenceError> {
+    let command = compiled_script_command(script_body, path, script_label, command_index)?;
+    let compiled_command =
+        compiled_script_command_name(command, path, script_label, command_index)?;
+    if compiled_command == saved_command {
+        Ok(())
+    } else {
+        Err(ScriptCommandReferenceError::CommandMismatch {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+            saved_command: saved_command.to_string(),
+            compiled_command: compiled_command.to_string(),
+        })
+    }
+}
+
+pub fn validate_saved_compiled_script_command_payload_reference(
+    script_body: &serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+    saved_command: &str,
+    saved_args: &[String],
+) -> Result<(), ScriptCommandReferenceError> {
+    let command = compiled_script_command(script_body, path, script_label, command_index)?;
+    let compiled_command =
+        compiled_script_command_name(command, path, script_label, command_index)?;
+    if compiled_command != saved_command {
+        return Err(ScriptCommandReferenceError::CommandMismatch {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+            saved_command: saved_command.to_string(),
+            compiled_command: compiled_command.to_string(),
+        });
+    }
+    let compiled_args = compiled_script_command_args(command, path, script_label, command_index)?;
+    if compiled_args == saved_args {
+        Ok(())
+    } else {
+        Err(ScriptCommandReferenceError::ArgsMismatch {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+            saved_args: saved_args.to_vec(),
+            compiled_args,
+        })
+    }
+}
+
+pub fn validate_saved_compiled_script_return_reference(
+    script_body: &serde_json::Value,
+    path: &str,
+    script_label: &str,
+    next_command_index: usize,
+) -> Result<(), ScriptCommandReferenceError> {
+    let commands = compiled_script_commands(script_body, path, script_label)?;
+    if next_command_index <= commands.len() {
+        Ok(())
+    } else {
+        Err(ScriptCommandReferenceError::CommandIndexOutOfBounds {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index: next_command_index,
+            command_count: commands.len(),
+        })
+    }
+}
+
+fn compiled_script_commands<'a>(
+    script_body: &'a serde_json::Value,
+    path: &str,
+    script_label: &str,
+) -> Result<&'a Vec<serde_json::Value>, ScriptCommandReferenceError> {
+    script_body
+        .as_array()
+        .ok_or_else(|| ScriptCommandReferenceError::NonArrayScript {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+        })
+}
+
+fn compiled_script_command<'a>(
+    script_body: &'a serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+) -> Result<&'a serde_json::Value, ScriptCommandReferenceError> {
+    let commands = compiled_script_commands(script_body, path, script_label)?;
+    commands.get(command_index).ok_or_else(|| {
+        ScriptCommandReferenceError::CommandIndexOutOfBounds {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+            command_count: commands.len(),
+        }
+    })
+}
+
+fn compiled_script_command_name<'a>(
+    command: &'a serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+) -> Result<&'a str, ScriptCommandReferenceError> {
+    command
+        .get("command")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| ScriptCommandReferenceError::MissingCommandName {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+        })
+}
+
+fn compiled_script_command_args(
+    command: &serde_json::Value,
+    path: &str,
+    script_label: &str,
+    command_index: usize,
+) -> Result<Vec<String>, ScriptCommandReferenceError> {
+    let Some(args) = command.get("args") else {
+        return Ok(Vec::new());
+    };
+    let Some(args) = args.as_array() else {
+        return Err(ScriptCommandReferenceError::NonArrayArgs {
+            path: path.to_string(),
+            script_label: script_label.to_string(),
+            command_index,
+        });
+    };
+    args.iter()
+        .enumerate()
+        .map(|(arg_index, value)| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                ScriptCommandReferenceError::NonStringArg {
+                    path: path.to_string(),
+                    script_label: script_label.to_string(),
+                    command_index,
+                    arg_index,
+                }
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum TrainerEnemyPartySaveError {
+    #[error(
+        "saved battle.trainer.enemy_party has {saved_len} Pokemon, compiled trainer {trainer_id} has {expected_len}"
+    )]
+    PartyLengthMismatch {
+        trainer_id: String,
+        saved_len: usize,
+        expected_len: usize,
+    },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}] species {saved_species} does not match compiled trainer {trainer_id} species {expected_species}"
+    )]
+    SpeciesMismatch {
+        trainer_id: String,
+        index: usize,
+        saved_species: String,
+        expected_species: String,
+    },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}] level {saved_level} does not match compiled trainer {trainer_id} level {expected_level}"
+    )]
+    LevelMismatch {
+        trainer_id: String,
+        index: usize,
+        saved_level: u8,
+        expected_level: u8,
+    },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}] DVs do not match compiled trainer {trainer_id} DVs"
+    )]
+    DvMismatch { trainer_id: String, index: usize },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}] original trainer identity does not match compiled trainer {trainer_id}"
+    )]
+    OriginalTrainerMismatch { trainer_id: String, index: usize },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}] has {saved_len} moves, compiled trainer {trainer_id} has {expected_len}"
+    )]
+    MoveLengthMismatch {
+        trainer_id: String,
+        index: usize,
+        saved_len: usize,
+        expected_len: usize,
+    },
+    #[error(
+        "saved battle.trainer.enemy_party[{index}].moves[{move_index}] {saved_move} pp_ups {saved_pp_ups} does not match compiled trainer {trainer_id} move {expected_move} pp_ups {expected_pp_ups}"
+    )]
+    MoveMismatch {
+        trainer_id: String,
+        index: usize,
+        move_index: usize,
+        saved_move: String,
+        saved_pp_ups: u8,
+        expected_move: String,
+        expected_pp_ups: u8,
+    },
+    #[error(
+        "saved battle.trainer.enemy_pokemon {species} level {level} does not match any compiled trainer {trainer_id} party slot"
+    )]
+    ActiveEnemyMissingFromParty {
+        trainer_id: String,
+        species: String,
+        level: u8,
+    },
+}
+
+pub fn validate_saved_trainer_enemy_party_identity(
+    trainer_id: &str,
+    enemy_party: &[Pokemon],
+    enemy_pokemon: &Pokemon,
+    expected_party: &[Pokemon],
+) -> Result<(), TrainerEnemyPartySaveError> {
+    if enemy_party.len() != expected_party.len() {
+        return Err(TrainerEnemyPartySaveError::PartyLengthMismatch {
+            trainer_id: trainer_id.to_string(),
+            saved_len: enemy_party.len(),
+            expected_len: expected_party.len(),
+        });
+    }
+    for (index, (saved, expected)) in enemy_party.iter().zip(expected_party.iter()).enumerate() {
+        validate_saved_trainer_enemy_pokemon_identity(trainer_id, index, saved, expected)?;
+    }
+    if !enemy_party.iter().any(|pokemon| {
+        pokemon.species.id == enemy_pokemon.species.id
+            && pokemon.level == enemy_pokemon.level
+            && pokemon.dvs == enemy_pokemon.dvs
+    }) {
+        return Err(TrainerEnemyPartySaveError::ActiveEnemyMissingFromParty {
+            trainer_id: trainer_id.to_string(),
+            species: enemy_pokemon.species.id.clone(),
+            level: enemy_pokemon.level,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum WildBattleSaveError {
+    #[error(
+        "saved battle.wild.battle_type {battle_type} does not match runtime wild battle type BATTLETYPE_NORMAL"
+    )]
+    BattleTypeMismatch { battle_type: String },
+    #[error(
+        "saved battle.wild {map_name} encounter {species}:{level} is missing from compiled wild encounter sources"
+    )]
+    MissingEncounter {
+        map_name: String,
+        species: String,
+        level: u8,
+    },
+}
+
+pub fn validate_saved_wild_battle_origin_reference(
+    battle_type: &str,
+    map_name: &str,
+    enemy_pokemon: &Pokemon,
+    mut encounter_exists: impl FnMut(&str, &str, u8) -> bool,
+) -> Result<(), WildBattleSaveError> {
+    if battle_type != "BATTLETYPE_NORMAL" {
+        return Err(WildBattleSaveError::BattleTypeMismatch {
+            battle_type: battle_type.to_string(),
+        });
+    }
+    let species = enemy_pokemon.species.id.as_str();
+    let level = enemy_pokemon.level;
+    if encounter_exists(map_name, species, level) {
+        Ok(())
+    } else {
+        Err(WildBattleSaveError::MissingEncounter {
+            map_name: map_name.to_string(),
+            species: species.to_string(),
+            level,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum StaticWildBattleSaveError {
+    #[error(
+        "saved battle.static_wild {source_script} request {battle_type}:{species}:{level} is missing from compiled scripted wild battles"
+    )]
+    MissingScriptedBattle {
+        source_script: String,
+        battle_type: String,
+        species: String,
+        level: u8,
+    },
+}
+
+pub fn validate_saved_static_wild_battle_origin_reference(
+    battle_type: &str,
+    species: &str,
+    level: u8,
+    source_script: &str,
+    mut scripted_battle_exists: impl FnMut(&str, &str, &str, u8) -> bool,
+) -> Result<(), StaticWildBattleSaveError> {
+    if scripted_battle_exists(source_script, battle_type, species, level) {
+        Ok(())
+    } else {
+        Err(StaticWildBattleSaveError::MissingScriptedBattle {
+            source_script: source_script.to_string(),
+            battle_type: battle_type.to_string(),
+            species: species.to_string(),
+            level,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum TrainerBattleRequestSaveError {
+    #[error(
+        "saved battle.trainer.source_script {source_script} is missing from compiled pack trainer battle sources"
+    )]
+    MissingSource { source_script: String },
+    #[error(
+        "saved battle.trainer.{field} {saved} does not match compiled trainer battle {source_script} {field} {compiled}"
+    )]
+    FieldMismatch {
+        field: String,
+        saved: String,
+        compiled: String,
+        source_script: String,
+    },
+}
+
+pub fn validate_saved_trainer_battle_source_reference(
+    source_script: &str,
+    source_exists: impl FnOnce(&str) -> bool,
+) -> Result<(), TrainerBattleRequestSaveError> {
+    if source_exists(source_script) {
+        Ok(())
+    } else {
+        Err(TrainerBattleRequestSaveError::MissingSource {
+            source_script: source_script.to_string(),
+        })
+    }
+}
+
+pub fn validate_saved_trainer_battle_request_field(
+    field: &str,
+    saved: &str,
+    compiled: &str,
+    source_script: &str,
+) -> Result<(), TrainerBattleRequestSaveError> {
+    if saved == compiled {
+        Ok(())
+    } else {
+        Err(TrainerBattleRequestSaveError::FieldMismatch {
+            field: field.to_string(),
+            saved: saved.to_string(),
+            compiled: compiled.to_string(),
+            source_script: source_script.to_string(),
+        })
+    }
+}
+
+pub struct SavedTrainerBattleFields<'a> {
+    pub battle_type: &'a str,
+    pub trainer_class: &'a str,
+    pub event_flag: &'a str,
+    pub seen_text: &'a str,
+    pub win_text: &'a str,
+    pub loss_text: &'a str,
+    pub callback: &'a str,
+}
+
+pub fn validate_saved_trainer_battle_request_fields(
+    saved: SavedTrainerBattleFields<'_>,
+    compiled: SavedTrainerBattleFields<'_>,
+    source_script: &str,
+) -> Result<(), TrainerBattleRequestSaveError> {
+    validate_saved_trainer_battle_request_field(
+        "battle_type",
+        saved.battle_type,
+        compiled.battle_type,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "trainer_class",
+        saved.trainer_class,
+        compiled.trainer_class,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "event_flag",
+        saved.event_flag,
+        compiled.event_flag,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "seen_text",
+        saved.seen_text,
+        compiled.seen_text,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "win_text",
+        saved.win_text,
+        compiled.win_text,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "loss_text",
+        saved.loss_text,
+        compiled.loss_text,
+        source_script,
+    )?;
+    validate_saved_trainer_battle_request_field(
+        "callback",
+        saved.callback,
+        compiled.callback,
+        source_script,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum TrainerMetadataSaveError {
+    #[error(
+        "saved battle.trainer.trainer_class {saved} does not match compiled pack trainer {trainer_id} class {compiled}"
+    )]
+    ClassMismatch {
+        trainer_id: String,
+        saved: String,
+        compiled: String,
+    },
+    #[error(
+        "saved battle.trainer.trainer_name {saved} does not match compiled pack trainer {trainer_id} name {compiled}"
+    )]
+    NameMismatch {
+        trainer_id: String,
+        saved: String,
+        compiled: String,
+    },
+    #[error(
+        "saved battle.trainer.ai_move_flags {saved} does not match compiled pack trainer {trainer_id} ai_move_flags {compiled}"
+    )]
+    AiMoveFlagsMismatch {
+        trainer_id: String,
+        saved: u32,
+        compiled: u32,
+    },
+    #[error(
+        "saved battle.trainer.ai_item_switch_flags {saved} does not match compiled pack trainer {trainer_id} ai_item_switch_flags {compiled}"
+    )]
+    AiItemSwitchFlagsMismatch {
+        trainer_id: String,
+        saved: u32,
+        compiled: u32,
+    },
+    #[error(
+        "saved battle.trainer.ai_layers {saved:?} do not match compiled pack trainer {trainer_id} ai_layers {compiled:?}"
+    )]
+    AiLayersMismatch {
+        trainer_id: String,
+        saved: Vec<String>,
+        compiled: Vec<String>,
+    },
+    #[error(
+        "saved battle.trainer.reward {saved} does not match compiled pack trainer {trainer_id} base_reward {compiled}"
+    )]
+    RewardMismatch {
+        trainer_id: String,
+        saved: u32,
+        compiled: u32,
+    },
+    #[error(
+        "saved battle.trainer.encounter_music {saved} does not match compiled pack trainer {trainer_id} encounter music {compiled}"
+    )]
+    EncounterMusicMismatch {
+        trainer_id: String,
+        saved: String,
+        compiled: String,
+    },
+}
+
+pub struct SavedTrainerMetadata<'a> {
+    pub trainer_class: &'a str,
+    pub trainer_name: &'a str,
+    pub ai_move_flags: u32,
+    pub ai_item_switch_flags: u32,
+    pub ai_layers: &'a [String],
+    pub reward: u32,
+    pub encounter_music: &'a str,
+}
+
+pub fn validate_saved_trainer_metadata(
+    trainer: &Trainer,
+    saved: SavedTrainerMetadata<'_>,
+) -> Result<(), TrainerMetadataSaveError> {
+    if trainer.trainer_class != saved.trainer_class {
+        return Err(TrainerMetadataSaveError::ClassMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.trainer_class.to_string(),
+            compiled: trainer.trainer_class.clone(),
+        });
+    }
+    if trainer.name != saved.trainer_name {
+        return Err(TrainerMetadataSaveError::NameMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.trainer_name.to_string(),
+            compiled: trainer.name.clone(),
+        });
+    }
+    if trainer.ai_move_flags != saved.ai_move_flags {
+        return Err(TrainerMetadataSaveError::AiMoveFlagsMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.ai_move_flags,
+            compiled: trainer.ai_move_flags,
+        });
+    }
+    if trainer.ai_item_switch_flags != saved.ai_item_switch_flags {
+        return Err(TrainerMetadataSaveError::AiItemSwitchFlagsMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.ai_item_switch_flags,
+            compiled: trainer.ai_item_switch_flags,
+        });
+    }
+    if trainer.ai_layers != saved.ai_layers {
+        return Err(TrainerMetadataSaveError::AiLayersMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.ai_layers.to_vec(),
+            compiled: trainer.ai_layers.clone(),
+        });
+    }
+    if trainer.base_reward != saved.reward {
+        return Err(TrainerMetadataSaveError::RewardMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.reward,
+            compiled: trainer.base_reward,
+        });
+    }
+    if trainer.encounter_music != saved.encounter_music {
+        return Err(TrainerMetadataSaveError::EncounterMusicMismatch {
+            trainer_id: trainer.trainer_id.clone(),
+            saved: saved.encounter_music.to_string(),
+            compiled: trainer.encounter_music.clone(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum PokemonReferenceSaveError {
+    #[error("saved {path}.species {species} is missing from compiled pack pokemon")]
+    MissingSpecies { path: String, species: String },
+    #[error("saved {path}.species {species} does not match compiled pack species data")]
+    SpeciesMismatch { path: String, species: String },
+    #[error("saved {path}.item {item_id} is missing from compiled pack items")]
+    MissingItem { path: String, item_id: String },
+    #[error("saved {path}.status {status} is missing from compiled pack status declarations")]
+    MissingStatus { path: String, status: String },
+    #[error("saved {path}.moves[{index}] {move_name} is missing from compiled pack moves")]
+    MissingMove {
+        path: String,
+        index: usize,
+        move_name: String,
+    },
+    #[error(
+        "saved {path}.moves[{index}] {move_name} does not match compiled move name {compiled_move}"
+    )]
+    MoveNameMismatch {
+        path: String,
+        index: usize,
+        move_name: String,
+        compiled_move: String,
+    },
+    #[error(
+        "saved {path}.moves[{index}] {move_name} current_pp {current_pp} exceeds compiled max PP {max_pp}"
+    )]
+    MovePpOverflow {
+        path: String,
+        index: usize,
+        move_name: String,
+        current_pp: u8,
+        max_pp: u8,
+    },
+}
+
+pub fn validate_saved_pokemon_reference(
+    path: &str,
+    pokemon: &Pokemon,
+    mut compiled_species: impl FnMut(&str) -> Option<PokemonSpecies>,
+    mut item_exists: impl FnMut(&str) -> bool,
+    mut status_exists: impl FnMut(&str) -> bool,
+    mut compiled_move: impl FnMut(&str) -> Option<(String, u8)>,
+) -> Result<(), PokemonReferenceSaveError> {
+    let species_id = pokemon.species.id.as_str();
+    let Some(compiled) = compiled_species(species_id) else {
+        return Err(PokemonReferenceSaveError::MissingSpecies {
+            path: path.to_string(),
+            species: species_id.to_string(),
+        });
+    };
+    if pokemon.species != compiled {
+        return Err(PokemonReferenceSaveError::SpeciesMismatch {
+            path: path.to_string(),
+            species: species_id.to_string(),
+        });
+    }
+    if let Some(item_id) = &pokemon.item {
+        if !item_exists(item_id) {
+            return Err(PokemonReferenceSaveError::MissingItem {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+            });
+        }
+    }
+    if let Some(status) = &pokemon.status {
+        if !status_exists(status) {
+            return Err(PokemonReferenceSaveError::MissingStatus {
+                path: path.to_string(),
+                status: status.clone(),
+            });
+        }
+    }
+    for (index, learned_move) in pokemon.moves.iter().enumerate() {
+        let Some((compiled_name, base_pp)) = compiled_move(&learned_move.name) else {
+            return Err(PokemonReferenceSaveError::MissingMove {
+                path: path.to_string(),
+                index,
+                move_name: learned_move.name.clone(),
+            });
+        };
+        if compiled_name != learned_move.name {
+            return Err(PokemonReferenceSaveError::MoveNameMismatch {
+                path: path.to_string(),
+                index,
+                move_name: learned_move.name.clone(),
+                compiled_move: compiled_name,
+            });
+        }
+        let max_pp = crate::models::max_move_pp(base_pp, learned_move.pp_ups);
+        if learned_move.current_pp > max_pp {
+            return Err(PokemonReferenceSaveError::MovePpOverflow {
+                path: path.to_string(),
+                index,
+                move_name: learned_move.name.clone(),
+                current_pp: learned_move.current_pp,
+                max_pp,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum PokemonPartyReferenceSaveError {
+    #[error("{0}")]
+    Pokemon(String),
+}
+
+pub fn validate_saved_pokemon_party_references(
+    path: &str,
+    party: &[Pokemon],
+    mut validate_pokemon: impl FnMut(&str, &Pokemon) -> Result<(), String>,
+) -> Result<(), PokemonPartyReferenceSaveError> {
+    for (index, pokemon) in party.iter().enumerate() {
+        validate_pokemon(&format!("{path}[{index}]"), pokemon)
+            .map_err(PokemonPartyReferenceSaveError::Pokemon)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum MapReferenceSaveError {
+    #[error("saved {path} {map_name} is missing from compiled pack maps")]
+    MissingMap { path: String, map_name: String },
+    #[error("saved {path} {map_name} does not match compiled map id {compiled_id}")]
+    MapIdMismatch {
+        path: String,
+        map_name: String,
+        compiled_id: String,
+    },
+    #[error("saved {path} {warp_index} is missing from compiled map {map_name} warps")]
+    MissingWarp {
+        path: String,
+        map_name: String,
+        warp_index: u16,
+    },
+    #[error("saved {path} {object_id} is missing from compiled map {map_name} objects")]
+    MissingObject {
+        path: String,
+        map_name: String,
+        object_id: String,
+    },
+}
+
+pub fn validate_saved_map_reference(
+    path: &str,
+    map_name: &str,
+    compiled_map_id: Option<&str>,
+) -> Result<(), MapReferenceSaveError> {
+    let Some(compiled_id) = compiled_map_id else {
+        return Err(MapReferenceSaveError::MissingMap {
+            path: path.to_string(),
+            map_name: map_name.to_string(),
+        });
+    };
+    if compiled_id != map_name {
+        return Err(MapReferenceSaveError::MapIdMismatch {
+            path: path.to_string(),
+            map_name: map_name.to_string(),
+            compiled_id: compiled_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_saved_warp_reference(
+    path: &str,
+    map_name: &str,
+    warp_index: u16,
+    compiled_map_id: Option<&str>,
+    warp_exists: impl FnOnce(u16) -> bool,
+) -> Result<(), MapReferenceSaveError> {
+    validate_saved_map_reference(path, map_name, compiled_map_id)?;
+    if warp_exists(warp_index) {
+        Ok(())
+    } else {
+        Err(MapReferenceSaveError::MissingWarp {
+            path: path.to_string(),
+            map_name: map_name.to_string(),
+            warp_index,
+        })
+    }
+}
+
+pub fn validate_saved_map_object_reference(
+    path: &str,
+    map_name: &str,
+    object_id: &str,
+    object_exists: impl FnOnce(&str) -> bool,
+) -> Result<(), MapReferenceSaveError> {
+    if object_exists(object_id) {
+        Ok(())
+    } else {
+        Err(MapReferenceSaveError::MissingObject {
+            path: path.to_string(),
+            map_name: map_name.to_string(),
+            object_id: object_id.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum OverworldReferenceSaveError {
+    #[error("saved overworld.active.map_name {map_name} is missing from compiled pack maps")]
+    MissingMap { map_name: String },
+    #[error(
+        "saved overworld.active tile ({x}, {y}) is outside compiled map {map_name} dimensions {width}x{height}"
+    )]
+    TileOutOfBounds {
+        map_name: String,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    },
+}
+
+pub fn validate_saved_overworld_references(
+    overworld: &OverworldMemory,
+    map_dimensions: impl FnOnce(&str) -> Option<(u16, u16)>,
+) -> Result<(), OverworldReferenceSaveError> {
+    let OverworldMemory::Active { map_name, tile, .. } = overworld else {
+        return Ok(());
+    };
+    let Some((width, height)) = map_dimensions(map_name) else {
+        return Err(OverworldReferenceSaveError::MissingMap {
+            map_name: map_name.clone(),
+        });
+    };
+    if tile.x < 0
+        || tile.y < 0
+        || u16::try_from(tile.x).map_or(true, |x| x >= width)
+        || u16::try_from(tile.y).map_or(true, |y| y >= height)
+    {
+        Err(OverworldReferenceSaveError::TileOutOfBounds {
+            map_name: map_name.clone(),
+            x: tile.x,
+            y: tile.y,
+            width,
+            height,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum BlockOverrideSaveError {
+    #[error("saved map_block_overrides {map_name} is missing from compiled pack maps")]
+    MissingMap { map_name: String },
+    #[error(
+        "saved map_block_overrides {map_name} references missing compiled tileset {tileset_name}"
+    )]
+    MissingTileset {
+        map_name: String,
+        tileset_name: String,
+    },
+    #[error(
+        "saved map_block_overrides {map_name} coordinate ({x}, {y}) is outside compiled map dimensions {width}x{height}"
+    )]
+    CoordinateOutOfBounds {
+        map_name: String,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    },
+    #[error(
+        "saved map_block_overrides {map_name} coordinate ({x}, {y}) block {block_id:#04x} is missing from compiled tileset {tileset_name} collision data"
+    )]
+    MissingMetatile {
+        map_name: String,
+        x: u16,
+        y: u16,
+        block_id: u16,
+        tileset_name: String,
+    },
+}
+
+pub fn validate_saved_block_overrides(
+    map_name: &str,
+    overrides: &BTreeMap<(u16, u16), u16>,
+    map_metadata: impl FnOnce(&str) -> Option<(u16, u16, String)>,
+    tileset_exists: impl FnOnce(&str) -> bool,
+    mut metatile_exists: impl FnMut(&str, u16) -> bool,
+) -> Result<(), BlockOverrideSaveError> {
+    let Some((width, height, tileset_name)) = map_metadata(map_name) else {
+        return Err(BlockOverrideSaveError::MissingMap {
+            map_name: map_name.to_string(),
+        });
+    };
+    if !tileset_exists(&tileset_name) {
+        return Err(BlockOverrideSaveError::MissingTileset {
+            map_name: map_name.to_string(),
+            tileset_name,
+        });
+    }
+    for ((x, y), block_id) in overrides {
+        if *x >= width || *y >= height {
+            return Err(BlockOverrideSaveError::CoordinateOutOfBounds {
+                map_name: map_name.to_string(),
+                x: *x,
+                y: *y,
+                width,
+                height,
+            });
+        }
+        if !metatile_exists(&tileset_name, *block_id) {
+            return Err(BlockOverrideSaveError::MissingMetatile {
+                map_name: map_name.to_string(),
+                x: *x,
+                y: *y,
+                block_id: *block_id,
+                tileset_name,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ObjectOverrideSaveError {
+    #[error("saved map_object_overrides {map_name} is missing from compiled pack maps")]
+    MissingMap { map_name: String },
+    #[error("saved {path} {object_id} is missing from compiled map {map_name} object events")]
+    MissingObject {
+        path: String,
+        map_name: String,
+        object_id: String,
+    },
+    #[error(
+        "saved map_object_overrides.objects {map_name}:{object_id} coordinate ({x}, {y}) is outside compiled map dimensions {width}x{height}"
+    )]
+    CoordinateOutOfBounds {
+        map_name: String,
+        object_id: String,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    },
+}
+
+pub fn validate_saved_object_overrides(
+    map_name: &str,
+    memory: &OverworldObjectMapMemory,
+    map_dimensions: impl FnOnce(&str) -> Option<(u16, u16)>,
+    mut object_exists: impl FnMut(&str) -> bool,
+) -> Result<(), ObjectOverrideSaveError> {
+    let Some((width, height)) = map_dimensions(map_name) else {
+        return Err(ObjectOverrideSaveError::MissingMap {
+            map_name: map_name.to_string(),
+        });
+    };
+    for (object_id, object_memory) in &memory.objects {
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.objects",
+            object_id,
+            &mut object_exists,
+        )?;
+        if object_memory.x >= width || object_memory.y >= height {
+            return Err(ObjectOverrideSaveError::CoordinateOutOfBounds {
+                map_name: map_name.to_string(),
+                object_id: object_id.clone(),
+                x: object_memory.x,
+                y: object_memory.y,
+                width,
+                height,
+            });
+        }
+    }
+    for object_id in &memory.hidden_object_identifiers {
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.hidden_object_identifiers",
+            object_id,
+            &mut object_exists,
+        )?;
+    }
+    if let Some(object_id) = &memory.last_talked_object_identifier {
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.last_talked_object_identifier",
+            object_id,
+            &mut object_exists,
+        )?;
+    }
+    if let Some(following) = &memory.following {
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.following.leader_object_id",
+            &following.leader_object_id,
+            &mut object_exists,
+        )?;
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.following.follower_object_id",
+            &following.follower_object_id,
+            &mut object_exists,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_object_override_object(
+    map_name: &str,
+    path: &str,
+    object_id: &str,
+    object_exists: &mut impl FnMut(&str) -> bool,
+) -> Result<(), ObjectOverrideSaveError> {
+    if object_exists(object_id) {
+        Ok(())
+    } else {
+        Err(ObjectOverrideSaveError::MissingObject {
+            path: path.to_string(),
+            map_name: map_name.to_string(),
+            object_id: object_id.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum CatalogReferenceSaveError {
+    #[error("saved {path} {value} is missing from compiled pack {catalog}")]
+    Missing {
+        path: String,
+        value: String,
+        catalog: String,
+    },
+}
+
+pub fn validate_saved_catalog_reference(
+    path: &str,
+    value: &str,
+    catalog: &str,
+    exists: impl FnOnce(&str) -> bool,
+) -> Result<(), CatalogReferenceSaveError> {
+    if exists(value) {
+        Ok(())
+    } else {
+        Err(CatalogReferenceSaveError::Missing {
+            path: path.to_string(),
+            value: value.to_string(),
+            catalog: catalog.to_string(),
+        })
+    }
+}
+
+pub fn validate_saved_optional_catalog_reference(
+    path: &str,
+    value: &str,
+    catalog: &str,
+    exists: impl FnOnce(&str) -> bool,
+) -> Result<(), CatalogReferenceSaveError> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        validate_saved_catalog_reference(path, value, catalog, exists)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ExactCatalogReferenceSaveError {
+    #[error("saved {path} {value} is missing from compiled pack {catalog}")]
+    Missing {
+        path: String,
+        value: String,
+        catalog: String,
+    },
+    #[error("saved {path} {value} does not match compiled {compiled_field} {compiled_value}")]
+    Mismatch {
+        path: String,
+        value: String,
+        compiled_field: String,
+        compiled_value: String,
+    },
+}
+
+pub fn validate_saved_exact_catalog_reference(
+    path: &str,
+    value: &str,
+    catalog: &str,
+    compiled_field: &str,
+    compiled_value: Option<String>,
+) -> Result<(), ExactCatalogReferenceSaveError> {
+    let Some(compiled_value) = compiled_value else {
+        return Err(ExactCatalogReferenceSaveError::Missing {
+            path: path.to_string(),
+            value: value.to_string(),
+            catalog: catalog.to_string(),
+        });
+    };
+    if compiled_value == value {
+        Ok(())
+    } else {
+        Err(ExactCatalogReferenceSaveError::Mismatch {
+            path: path.to_string(),
+            value: value.to_string(),
+            compiled_field: compiled_field.to_string(),
+            compiled_value,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum AudioReferenceSaveError {
+    #[error("saved {path} {audio_id} is missing from compiled pack audio")]
+    MissingAudio { path: String, audio_id: String },
+    #[error("saved {path} {audio_id} is compiled as {actual_kind}, expected {expected_kind}")]
+    KindMismatch {
+        path: String,
+        audio_id: String,
+        actual_kind: String,
+        expected_kind: String,
+    },
+}
+
+pub fn validate_saved_audio_reference(
+    path: &str,
+    audio_id: &str,
+    expected_kind: &str,
+    compiled_kind: Option<&str>,
+) -> Result<(), AudioReferenceSaveError> {
+    let Some(actual_kind) = compiled_kind else {
+        return Err(AudioReferenceSaveError::MissingAudio {
+            path: path.to_string(),
+            audio_id: audio_id.to_string(),
+        });
+    };
+    if actual_kind == expected_kind {
+        Ok(())
+    } else {
+        Err(AudioReferenceSaveError::KindMismatch {
+            path: path.to_string(),
+            audio_id: audio_id.to_string(),
+            actual_kind: actual_kind.to_string(),
+            expected_kind: expected_kind.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum StorageReferenceSaveError {
+    #[error("{0}")]
+    Pokemon(String),
+}
+
+pub fn validate_saved_storage_references(
+    storage: &PokemonStorage,
+    mut validate_pokemon: impl FnMut(&str, &Pokemon) -> Result<(), String>,
+) -> Result<(), StorageReferenceSaveError> {
+    for (index, pokemon) in storage.party.pokemon.iter().enumerate() {
+        if let Some(pokemon) = pokemon {
+            validate_pokemon(&format!("storage.party[{index}]"), pokemon)
+                .map_err(StorageReferenceSaveError::Pokemon)?;
+        }
+    }
+    for (box_index, pc_box) in storage.pc_boxes.iter().enumerate() {
+        for (slot_index, pokemon) in pc_box.pokemon.iter().enumerate() {
+            if let Some(pokemon) = pokemon {
+                validate_pokemon(
+                    &format!("storage.pc_boxes[{box_index}][{slot_index}]"),
+                    pokemon,
+                )
+                .map_err(StorageReferenceSaveError::Pokemon)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum BugContestReferenceSaveError {
+    #[error("{0}")]
+    Pokemon(String),
+    #[error("saved {path} {species} is missing from compiled pack pokemon")]
+    MissingSpecies { path: String, species: String },
+    #[error(
+        "saved bug_contest.selected_contestant_flags {flag} is missing from compiled pack event flags"
+    )]
+    MissingContestantFlag { flag: String },
+}
+
+pub fn validate_saved_bug_contest_references(
+    bug_contest: &BugContestState,
+    mut validate_pokemon: impl FnMut(&str, &Pokemon) -> Result<(), String>,
+    mut species_exists: impl FnMut(&str) -> bool,
+    mut event_flag_exists: impl FnMut(&str) -> bool,
+) -> Result<(), BugContestReferenceSaveError> {
+    for (index, pokemon) in bug_contest.party_backup.iter().enumerate() {
+        validate_pokemon(&format!("bug_contest.party_backup[{index}]"), pokemon)
+            .map_err(BugContestReferenceSaveError::Pokemon)?;
+    }
+    if let Some(species) = &bug_contest.second_party_species {
+        if !species_exists(species) {
+            return Err(BugContestReferenceSaveError::MissingSpecies {
+                path: "bug_contest.second_party_species".to_string(),
+                species: species.clone(),
+            });
+        }
+    }
+    if let Some(pokemon) = &bug_contest.caught_mon {
+        validate_pokemon("bug_contest.caught_mon", pokemon)
+            .map_err(BugContestReferenceSaveError::Pokemon)?;
+    }
+    if let Some(species) = &bug_contest.caught_species {
+        if !species_exists(species) {
+            return Err(BugContestReferenceSaveError::MissingSpecies {
+                path: "bug_contest.caught_species".to_string(),
+                species: species.clone(),
+            });
+        }
+    }
+    for flag in &bug_contest.selected_contestant_flags {
+        if !event_flag_exists(flag) {
+            return Err(BugContestReferenceSaveError::MissingContestantFlag { flag: flag.clone() });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum DayCareReferenceSaveError {
+    #[error("{0}")]
+    Pokemon(String),
+    #[error(
+        "saved day_care.last_interaction.pokemon {species} is missing from compiled pack pokemon"
+    )]
+    MissingInteractionSpecies { species: String },
+}
+
+pub fn validate_saved_day_care_references(
+    day_care: &DayCareState,
+    mut validate_pokemon: impl FnMut(&str, &Pokemon) -> Result<(), String>,
+    mut species_exists: impl FnMut(&str) -> bool,
+) -> Result<(), DayCareReferenceSaveError> {
+    if let Some(pokemon) = &day_care.man.pokemon {
+        validate_pokemon("day_care.man.pokemon", pokemon)
+            .map_err(DayCareReferenceSaveError::Pokemon)?;
+    }
+    if let Some(pokemon) = &day_care.lady.pokemon {
+        validate_pokemon("day_care.lady.pokemon", pokemon)
+            .map_err(DayCareReferenceSaveError::Pokemon)?;
+    }
+    if let Some(interaction) = &day_care.last_interaction {
+        if let Some(species) = &interaction.pokemon {
+            if !species_exists(species) {
+                return Err(DayCareReferenceSaveError::MissingInteractionSpecies {
+                    species: species.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_saved_trainer_enemy_pokemon_identity(
+    trainer_id: &str,
+    index: usize,
+    saved: &Pokemon,
+    expected: &Pokemon,
+) -> Result<(), TrainerEnemyPartySaveError> {
+    if saved.species.id != expected.species.id {
+        return Err(TrainerEnemyPartySaveError::SpeciesMismatch {
+            trainer_id: trainer_id.to_string(),
+            index,
+            saved_species: saved.species.id.clone(),
+            expected_species: expected.species.id.clone(),
+        });
+    }
+    if saved.level != expected.level {
+        return Err(TrainerEnemyPartySaveError::LevelMismatch {
+            trainer_id: trainer_id.to_string(),
+            index,
+            saved_level: saved.level,
+            expected_level: expected.level,
+        });
+    }
+    if saved.dvs != expected.dvs {
+        return Err(TrainerEnemyPartySaveError::DvMismatch {
+            trainer_id: trainer_id.to_string(),
+            index,
+        });
+    }
+    if saved.original_trainer_name != expected.original_trainer_name
+        || saved.original_trainer_id != expected.original_trainer_id
+    {
+        return Err(TrainerEnemyPartySaveError::OriginalTrainerMismatch {
+            trainer_id: trainer_id.to_string(),
+            index,
+        });
+    }
+    if saved.moves.len() != expected.moves.len() {
+        return Err(TrainerEnemyPartySaveError::MoveLengthMismatch {
+            trainer_id: trainer_id.to_string(),
+            index,
+            saved_len: saved.moves.len(),
+            expected_len: expected.moves.len(),
+        });
+    }
+    for (move_index, (saved_move, expected_move)) in
+        saved.moves.iter().zip(expected.moves.iter()).enumerate()
+    {
+        if saved_move.name != expected_move.name || saved_move.pp_ups != expected_move.pp_ups {
+            return Err(TrainerEnemyPartySaveError::MoveMismatch {
+                trainer_id: trainer_id.to_string(),
+                index,
+                move_index,
+                saved_move: saved_move.name.clone(),
+                saved_pp_ups: saved_move.pp_ups,
+                expected_move: expected_move.name.clone(),
+                expected_pp_ups: expected_move.pp_ups,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_saved_money_runtime_routine(
+    path: &str,
+    event: &ScriptMoneyRuntimeEvent,
+) -> Result<(), ScriptMoneyRuntimeRoutineError> {
+    let Some(expected) = money_runtime_routine_kind(&event.source_script) else {
+        return Err(ScriptMoneyRuntimeRoutineError::UnknownRoutine {
+            path: path.to_string(),
+            routine: event.source_script.clone(),
+        });
+    };
+    if event.kind != expected {
+        return Err(ScriptMoneyRuntimeRoutineError::KindMismatch {
+            path: path.to_string(),
+            routine: event.source_script.clone(),
+            actual: event.kind,
+            expected,
+        });
+    }
+    Ok(())
+}
+
+fn money_runtime_routine_kind(routine: &str) -> Option<ScriptMoneyRuntimeKind> {
+    match routine {
+        "PlaceMoneyTopRight" => Some(ScriptMoneyRuntimeKind::PlaceMoneyTopRight),
+        "DisplayMoneyAndCoinBalance" => Some(ScriptMoneyRuntimeKind::DisplayMoneyAndCoinBalance),
+        "DisplayCoinCaseBalance" => Some(ScriptMoneyRuntimeKind::DisplayCoinCaseBalance),
+        _ => None,
+    }
 }
 
 fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Result<(), String> {
@@ -2126,6 +4512,247 @@ fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Re
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptMapRuntimeCommandError {
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has incomplete destination"
+    )]
+    IncompleteDestination {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has unexpected map payload"
+    )]
+    UnexpectedMapPayload {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has unexpected facing or map_setup"
+    )]
+    UnexpectedWarpPayload {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error("saved {path} {source_script}:{command_index} command {command} is missing target_map")]
+    MissingTargetMap {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error("saved {path} {source_script}:{command_index} command {command} is missing tile")]
+    MissingTile {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error("saved {path} {source_script}:{command_index} command {command} is missing facing")]
+    MissingFacing {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+}
+
+pub fn saved_map_runtime_event_command_args(
+    path: &str,
+    event: &ScriptMapRuntimeEvent,
+) -> Result<Option<Vec<String>>, ScriptMapRuntimeCommandError> {
+    match event.command.as_str() {
+        "warp" => {
+            if event.facing.is_some() || event.map_setup.is_some() {
+                return Err(map_command_error(
+                    path,
+                    event,
+                    ScriptMapRuntimeCommandErrorKind::UnexpectedWarpPayload,
+                ));
+            }
+            match (&event.target_map, event.tile) {
+                (Some(target_map), Some(tile)) => Ok(Some(vec![
+                    target_map.clone(),
+                    tile.x.to_string(),
+                    tile.y.to_string(),
+                ])),
+                (None, None) => Ok(Some(vec![
+                    "NONE".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                ])),
+                _ => Err(map_command_error(
+                    path,
+                    event,
+                    ScriptMapRuntimeCommandErrorKind::IncompleteDestination,
+                )),
+            }
+        }
+        "warpfacing" => {
+            if event.map_setup.is_some() {
+                return Err(map_command_error(
+                    path,
+                    event,
+                    ScriptMapRuntimeCommandErrorKind::UnexpectedWarpPayload,
+                ));
+            }
+            let target_map = event.target_map.clone().ok_or_else(|| {
+                map_command_error(
+                    path,
+                    event,
+                    ScriptMapRuntimeCommandErrorKind::MissingTargetMap,
+                )
+            })?;
+            let tile = event.tile.ok_or_else(|| {
+                map_command_error(path, event, ScriptMapRuntimeCommandErrorKind::MissingTile)
+            })?;
+            let facing = event.facing.ok_or_else(|| {
+                map_command_error(path, event, ScriptMapRuntimeCommandErrorKind::MissingFacing)
+            })?;
+            Ok(Some(vec![
+                target_map,
+                tile.x.to_string(),
+                tile.y.to_string(),
+                direction_script_token(facing).to_string(),
+            ]))
+        }
+        "newloadmap" | "reanchormap" => Ok(Some(saved_optional_map_setup_arg(
+            event.map_setup.as_deref(),
+        ))),
+        "warpcheck" | "reloadmap" | "reloadmappart" | "reloadmapafterbattle" | "refreshmap" => {
+            if event.target_map.is_some()
+                || event.tile.is_some()
+                || event.facing.is_some()
+                || event.map_setup.is_some()
+            {
+                Err(map_command_error(
+                    path,
+                    event,
+                    ScriptMapRuntimeCommandErrorKind::UnexpectedMapPayload,
+                ))
+            } else {
+                Ok(Some(Vec::new()))
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+enum ScriptMapRuntimeCommandErrorKind {
+    IncompleteDestination,
+    UnexpectedMapPayload,
+    UnexpectedWarpPayload,
+    MissingTargetMap,
+    MissingTile,
+    MissingFacing,
+}
+
+fn map_command_error(
+    path: &str,
+    event: &ScriptMapRuntimeEvent,
+    kind: ScriptMapRuntimeCommandErrorKind,
+) -> ScriptMapRuntimeCommandError {
+    match kind {
+        ScriptMapRuntimeCommandErrorKind::IncompleteDestination => {
+            ScriptMapRuntimeCommandError::IncompleteDestination {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptMapRuntimeCommandErrorKind::UnexpectedMapPayload => {
+            ScriptMapRuntimeCommandError::UnexpectedMapPayload {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptMapRuntimeCommandErrorKind::UnexpectedWarpPayload => {
+            ScriptMapRuntimeCommandError::UnexpectedWarpPayload {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptMapRuntimeCommandErrorKind::MissingTargetMap => {
+            ScriptMapRuntimeCommandError::MissingTargetMap {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptMapRuntimeCommandErrorKind::MissingTile => {
+            ScriptMapRuntimeCommandError::MissingTile {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+        ScriptMapRuntimeCommandErrorKind::MissingFacing => {
+            ScriptMapRuntimeCommandError::MissingFacing {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            }
+        }
+    }
+}
+
+fn saved_optional_map_setup_arg(map_setup: Option<&str>) -> Vec<String> {
+    map_setup.iter().map(|value| (*value).to_string()).collect()
+}
+
+pub fn saved_map_load_command_payload(load: &ScriptMapLoadRequest) -> (&str, Vec<String>) {
+    (
+        &load.command,
+        saved_optional_map_setup_arg(load.map_setup.as_deref()),
+    )
+}
+
+pub fn saved_map_refresh_command_payload(refresh: &ScriptMapRefreshRequest) -> (&str, Vec<String>) {
+    (
+        &refresh.command,
+        saved_optional_map_setup_arg(refresh.map_setup.as_deref()),
+    )
+}
+
+pub fn saved_script_warp_command_payload(warp: &ScriptWarpRequest) -> (&'static str, Vec<String>) {
+    let mut args = vec![
+        warp.target_map.clone(),
+        warp.tile.x.to_string(),
+        warp.tile.y.to_string(),
+    ];
+    if let Some(facing) = warp.facing {
+        args.push(direction_script_token(facing).to_string());
+        ("warpfacing", args)
+    } else {
+        ("warp", args)
+    }
+}
+
+fn direction_script_token(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Down => "DOWN",
+        Direction::Up => "UP",
+        Direction::Left => "LEFT",
+        Direction::Right => "RIGHT",
+    }
+}
+
 fn validate_pending_map_load_payload(load: &ScriptMapLoadRequest) -> Result<(), String> {
     validate_map_load_command_payload("pending_map_load", &load.command, load.map_setup.as_deref())
 }
@@ -2202,6 +4829,72 @@ fn validate_control_event_payload(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptControlRuntimeCommandError {
+    #[error(
+        "saved {path} {source_script}:{command_index} continued control event has unexpected target_script"
+    )]
+    UnexpectedContinueTarget {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} end control event has unexpected target_script"
+    )]
+    UnexpectedEndTarget {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+    #[error("saved {path} {source_script}:{command_index} control event is missing target_script")]
+    MissingTarget {
+        path: String,
+        source_script: String,
+        command_index: usize,
+    },
+}
+
+pub fn validate_saved_control_runtime_event_shape(
+    path: &str,
+    event: &ScriptControlRuntimeEvent,
+) -> Result<(), ScriptControlRuntimeCommandError> {
+    match event.kind {
+        ScriptControlRuntimeKind::Continue => {
+            if event.target_script.is_some() {
+                return Err(ScriptControlRuntimeCommandError::UnexpectedContinueTarget {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+        ScriptControlRuntimeKind::Jump
+        | ScriptControlRuntimeKind::Call
+        | ScriptControlRuntimeKind::Defer
+        | ScriptControlRuntimeKind::StandardJump => {
+            if event.target_script.is_none() {
+                return Err(ScriptControlRuntimeCommandError::MissingTarget {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+        ScriptControlRuntimeKind::End => {
+            if event.target_script.is_some() {
+                return Err(ScriptControlRuntimeCommandError::UnexpectedEndTarget {
+                    path: path.to_string(),
+                    source_script: event.source_script.clone(),
+                    command_index: event.command_index,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_return_frame_payload(index: usize, frame: &ScriptReturnFrame) -> Result<(), String> {
     if frame.next_command_index == 0 {
         return Err(format!(
@@ -2216,6 +4909,32 @@ fn validate_script_end_state(end: &ScriptEndState) -> Result<(), String> {
         return Err("script_ended cannot be both callback and just_battled_guard".to_string());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptEndCommandError {
+    #[error(
+        "saved script_runtime.script_ended.source_script {source_script}:{command_index} cannot be both callback and just_battled_guard"
+    )]
+    CallbackAndJustBattledGuard {
+        source_script: String,
+        command_index: usize,
+    },
+}
+
+pub fn saved_script_end_command(
+    end: &ScriptEndState,
+) -> Result<&'static str, ScriptEndCommandError> {
+    match (end.callback, end.just_battled_guard) {
+        (false, false) => Ok("end"),
+        (true, false) => Ok("endcallback"),
+        (false, true) => Ok("endifjustbattled"),
+        (true, true) => Err(ScriptEndCommandError::CallbackAndJustBattledGuard {
+            source_script: end.source_script.clone(),
+            command_index: end.command_index,
+        }),
+    }
 }
 
 fn validate_variable_write_payload(
@@ -2288,6 +5007,13 @@ fn validate_queued_command_payload(
         }
     }
     Ok(())
+}
+
+pub fn saved_queued_command_args(command: &ScriptRuntimeQueuedCommand) -> Vec<String> {
+    match &command.bank {
+        Some(bank) => vec![bank.clone(), command.target.clone()],
+        None => vec![command.target.clone()],
+    }
 }
 
 fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> Result<(), String> {
@@ -2452,6 +5178,136 @@ fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> 
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptTextRuntimeCommandError {
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has kind {actual:?}, expected {expected:?}"
+    )]
+    KindMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+        actual: ScriptTextRuntimeKind,
+        expected: ScriptTextRuntimeKind,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has face_player {actual}, expected {expected}"
+    )]
+    FacePlayerMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+        actual: bool,
+        expected: bool,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has closes_text {actual}, expected {expected}"
+    )]
+    ClosesTextMismatch {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+        actual: bool,
+        expected: bool,
+    },
+    #[error("saved {path} {source_script}:{command_index} command {command} is missing text_label")]
+    MissingTextLabel {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} has unexpected text_label"
+    )]
+    UnexpectedTextLabel {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+}
+
+pub fn saved_text_runtime_event_command_args(
+    path: &str,
+    event: &ScriptTextRuntimeEvent,
+) -> Result<Option<Vec<String>>, ScriptTextRuntimeCommandError> {
+    let Some((expected_kind, expected_face_player, expected_closes_text, needs_label)) =
+        text_runtime_command_shape(&event.command)
+    else {
+        return Ok(None);
+    };
+    if event.kind != expected_kind {
+        return Err(ScriptTextRuntimeCommandError::KindMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+            actual: event.kind,
+            expected: expected_kind,
+        });
+    }
+    if event.face_player != expected_face_player {
+        return Err(ScriptTextRuntimeCommandError::FacePlayerMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+            actual: event.face_player,
+            expected: expected_face_player,
+        });
+    }
+    if event.closes_text != expected_closes_text {
+        return Err(ScriptTextRuntimeCommandError::ClosesTextMismatch {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+            actual: event.closes_text,
+            expected: expected_closes_text,
+        });
+    }
+    if needs_label {
+        let Some(text_label) = &event.text_label else {
+            return Err(ScriptTextRuntimeCommandError::MissingTextLabel {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+            });
+        };
+        Ok(Some(vec![text_label.clone()]))
+    } else if event.text_label.is_some() {
+        Err(ScriptTextRuntimeCommandError::UnexpectedTextLabel {
+            path: path.to_string(),
+            source_script: event.source_script.clone(),
+            command_index: event.command_index,
+            command: event.command.clone(),
+        })
+    } else {
+        Ok(Some(Vec::new()))
+    }
+}
+
+fn text_runtime_command_shape(command: &str) -> Option<(ScriptTextRuntimeKind, bool, bool, bool)> {
+    match command {
+        "opentext" => Some((ScriptTextRuntimeKind::Open, false, false, false)),
+        "closetext" => Some((ScriptTextRuntimeKind::Close, false, false, false)),
+        "promptbutton" | "waitbutton" => {
+            Some((ScriptTextRuntimeKind::WaitButton, false, false, false))
+        }
+        "yesorno" => Some((ScriptTextRuntimeKind::YesNo, false, false, false)),
+        "writetext" => Some((ScriptTextRuntimeKind::Write, false, false, true)),
+        "jumptext" => Some((ScriptTextRuntimeKind::Write, false, true, true)),
+        "jumptextfaceplayer" => Some((ScriptTextRuntimeKind::Write, true, true, true)),
+        _ => None,
+    }
+}
+
 fn validate_pending_text_wait_command(command: &str) -> Result<(), String> {
     if matches!(
         command,
@@ -2462,6 +5318,42 @@ fn validate_pending_text_wait_command(command: &str) -> Result<(), String> {
         Err(format!(
             "pending_text_wait.command {command} is not a saved text wait command"
         ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum ScriptTextWaitCommandError {
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} requires pending_text_label"
+    )]
+    MissingPendingTextLabel {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+    },
+}
+
+pub fn saved_pending_text_wait_command_args(
+    path: &str,
+    wait: &ScriptTextWait,
+    pending_text_label: Option<&str>,
+) -> Result<Option<Vec<String>>, ScriptTextWaitCommandError> {
+    match wait.command.as_str() {
+        "promptbutton" | "waitbutton" => Ok(Some(Vec::new())),
+        "jumptext" | "jumptextfaceplayer" => {
+            let Some(text_label) = pending_text_label else {
+                return Err(ScriptTextWaitCommandError::MissingPendingTextLabel {
+                    path: path.to_string(),
+                    source_script: wait.source_script.clone(),
+                    command_index: wait.command_index,
+                    command: wait.command.clone(),
+                });
+            };
+            Ok(Some(vec![text_label.to_string()]))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -2503,11 +5395,15 @@ fn validate_inches_field(field: &str, value: u8) -> Result<(), String> {
 }
 
 fn validate_script_runtime_token(field: &str, value: &str) -> Result<(), String> {
-    if is_exact_script_runtime_token(value) {
-        Ok(())
-    } else {
-        Err(format!("{field} has invalid token '{value}'"))
+    if !is_exact_script_runtime_token(value) {
+        return Err(format!("{field} has invalid token '{value}'"));
     }
+    if has_reserved_runtime_token_prefix(value) {
+        return Err(format!(
+            "{field} token '{value}' uses reserved runtime payload prefix"
+        ));
+    }
+    Ok(())
 }
 
 fn is_exact_script_runtime_token(value: &str) -> bool {
@@ -2518,9 +5414,15 @@ fn is_exact_script_runtime_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn has_reserved_runtime_token_prefix(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    lowered.starts_with("fallback") || lowered.starts_with("legacy")
+}
+
 fn is_exact_script_runtime_label(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_runtime_token_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
@@ -2611,7 +5513,7 @@ pub struct ScriptAudioRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptAudioRuntimeKind {
     Music,
     SoundEffect,
@@ -2642,7 +5544,7 @@ pub struct ScriptGraphicsRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptGraphicsRuntimeKind {
     ScreenFade,
     ClearBgPalettesBufferScreen,
@@ -2679,14 +5581,14 @@ pub struct ScriptScreenFade {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptFadeColor {
     White,
     Black,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptFadeDirection {
     Out,
     In,
@@ -2704,7 +5606,7 @@ pub struct ScriptMoneyRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMoneyRuntimeKind {
     PlaceMoneyTopRight,
     DisplayMoneyAndCoinBalance,
@@ -2725,7 +5627,7 @@ pub struct ScriptMapRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMapRuntimeKind {
     NoWarp,
     Warp,
@@ -2775,7 +5677,7 @@ pub struct ScriptTextRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptTextRuntimeKind {
     Open,
     Close,
@@ -2809,7 +5711,7 @@ pub struct ScriptControlRuntimeEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptControlRuntimeKind {
     Continue,
     Jump,
@@ -2906,6 +5808,9 @@ impl GameState {
         self.time
             .validate_saved_state()
             .map_err(|error| format!("invalid saved time: {error}"))?;
+        self.unused_two_day_timer
+            .validate_saved_state()
+            .map_err(|error| format!("invalid saved unused two-day timer: {error}"))?;
         let projected_party = PartyState::from_storage(&self.storage);
         if self.party != projected_party {
             return Err("saved party projection does not match authoritative storage".to_string());
@@ -3058,6 +5963,19 @@ impl GameState {
             "dig_warp_map_name",
             self.dig_warp_map_name.as_deref(),
         )?;
+        match (&self.dig_warp_map_name, self.dig_warp_index) {
+            (Some(map_name), None) => {
+                return Err(format!(
+                    "dig_warp_map_name {map_name} cannot be saved without dig_warp_index"
+                ));
+            }
+            (None, Some(index)) => {
+                return Err(format!(
+                    "dig_warp_index {index} cannot be saved without dig_warp_map_name"
+                ));
+            }
+            _ => {}
+        }
         validate_optional_script_runtime_token(
             "pending_special_battle_type",
             self.pending_special_battle_type.as_deref(),
@@ -3103,6 +6021,63 @@ impl GameState {
     pub fn sync_party_from_storage(&mut self) {
         self.party = PartyState::from_storage(&self.storage);
     }
+
+    pub fn tick_repel_step_after_movement(&mut self) -> Option<String> {
+        if self.repel_steps_remaining == 0 {
+            return None;
+        }
+        self.repel_steps_remaining -= 1;
+        if self.repel_steps_remaining == 0 {
+            return self.active_repel_item.take();
+        }
+        None
+    }
+
+    pub fn commit_rng_seed(&mut self, rng_seed_after: u32) -> RngSeedCommit {
+        let commit = RngSeedCommit {
+            rng_seed_before: self.rng_seed,
+            rng_seed_after,
+        };
+        self.rng_seed = rng_seed_after;
+        commit
+    }
+
+    pub fn require_no_active_battle(&self) -> Result<(), GameStateBattleError> {
+        match &self.battle {
+            BattleMemory::Inactive => Ok(()),
+            BattleMemory::Wild { .. } => Err(GameStateBattleError::ActiveBattle {
+                battle_kind: "wild".to_string(),
+            }),
+            BattleMemory::StaticWild { .. } => Err(GameStateBattleError::ActiveBattle {
+                battle_kind: "static_wild".to_string(),
+            }),
+            BattleMemory::Trainer { trainer_id, .. } => {
+                Err(GameStateBattleError::ActiveTrainerBattle {
+                    trainer_id: trainer_id.clone(),
+                })
+            }
+        }
+    }
+
+    pub fn apply_joypad_mask(&mut self, mask: u8) -> Result<GameEvent, GameStateFrameError> {
+        validate_joypad_mask(mask)?;
+        Ok(self.joypad.apply_mask(mask))
+    }
+
+    pub fn apply_command(
+        &mut self,
+        command: GameCommand,
+    ) -> Result<Vec<GameEvent>, GameStateFrameError> {
+        match command {
+            GameCommand::Joypad { mask } => Ok(vec![self.apply_joypad_mask(mask)?]),
+            GameCommand::AdvanceFrame => {
+                let frame = self.try_advance_frame()?;
+                Ok(vec![GameEvent::FrameAdvanced { frame: frame.0 }])
+            }
+            GameCommand::OpenMenu => Ok(vec![GameEvent::MenuOpened]),
+            GameCommand::CloseMenu => Ok(vec![GameEvent::MenuClosed]),
+        }
+    }
 }
 
 fn validate_saved_player_name(player_name: &str) -> Result<(), String> {
@@ -3122,9 +6097,23 @@ fn validate_saved_player_name(player_name: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum GameStateFrameError {
     #[error("game state frame cursor overflowed at frame {frame}")]
     FrameCursorOverflow { frame: u64 },
+    #[error("joypad mask {mask:#010b} has conflicting direction buttons")]
+    ConflictingJoypadDirections { mask: u8 },
+}
+
+fn validate_joypad_mask(mask: u8) -> Result<(), GameStateFrameError> {
+    let directions = [B_PAD_RIGHT, B_PAD_LEFT, B_PAD_UP, B_PAD_DOWN]
+        .into_iter()
+        .filter(|direction| mask & *direction != 0)
+        .count();
+    if directions > 1 {
+        return Err(GameStateFrameError::ConflictingJoypadDirections { mask });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3135,11 +6124,25 @@ pub struct EventFlagMemory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum EventFlagError {
     #[error("empty flag name")]
     EmptyFlagName,
     #[error("invalid flag name {flag_name}")]
     InvalidFlagName { flag_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum EventFlagSaveError {
+    #[error("saved {path} {flag_name} is an engine flag, not an event flag")]
+    EngineFlagSavedAsEventFlag { path: String, flag_name: String },
+    #[error("saved {path} {flag_name} is not an engine flag")]
+    EventFlagSavedAsEngineFlag { path: String, flag_name: String },
+    #[error("saved {path} {flag_name} is missing from compiled pack event flags")]
+    MissingEventFlag { path: String, flag_name: String },
+    #[error("saved {path} {flag_name} is missing from compiled pack engine flags")]
+    MissingEngineFlag { path: String, flag_name: String },
 }
 
 impl EventFlagMemory {
@@ -3210,6 +6213,66 @@ impl EventFlagMemory {
     }
 }
 
+pub fn validate_saved_flag_references<F, G>(
+    flags: &EventFlagMemory,
+    event_flag_exists: F,
+    engine_flag_exists: G,
+) -> Result<(), EventFlagSaveError>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&str) -> bool,
+{
+    for flag_name in flags.event_flags.keys() {
+        validate_saved_event_flag_reference("flags.event_flags", flag_name, &event_flag_exists)?;
+    }
+    for flag_name in flags.engine_flags.keys() {
+        validate_saved_engine_flag_reference("flags.engine_flags", flag_name, &engine_flag_exists)?;
+    }
+    Ok(())
+}
+
+pub fn validate_saved_event_flag_reference(
+    path: &str,
+    flag_name: &str,
+    event_flag_exists: impl FnOnce(&str) -> bool,
+) -> Result<(), EventFlagSaveError> {
+    if is_engine_flag_name(flag_name) {
+        return Err(EventFlagSaveError::EngineFlagSavedAsEventFlag {
+            path: path.to_string(),
+            flag_name: flag_name.to_string(),
+        });
+    }
+    if event_flag_exists(flag_name) {
+        Ok(())
+    } else {
+        Err(EventFlagSaveError::MissingEventFlag {
+            path: path.to_string(),
+            flag_name: flag_name.to_string(),
+        })
+    }
+}
+
+pub fn validate_saved_engine_flag_reference(
+    path: &str,
+    flag_name: &str,
+    engine_flag_exists: impl FnOnce(&str) -> bool,
+) -> Result<(), EventFlagSaveError> {
+    if !is_engine_flag_name(flag_name) {
+        return Err(EventFlagSaveError::EventFlagSavedAsEngineFlag {
+            path: path.to_string(),
+            flag_name: flag_name.to_string(),
+        });
+    }
+    if engine_flag_exists(flag_name) {
+        Ok(())
+    } else {
+        Err(EventFlagSaveError::MissingEngineFlag {
+            path: path.to_string(),
+            flag_name: flag_name.to_string(),
+        })
+    }
+}
+
 pub fn is_engine_flag_name(flag_name: &str) -> bool {
     flag_name.starts_with("ENGINE_") || flag_name.starts_with("STATUSFLAGS_")
 }
@@ -3227,9 +6290,10 @@ fn validate_flag_name(flag_name: &str) -> Result<&str, EventFlagError> {
 }
 
 fn is_exact_flag_name(flag_name: &str) -> bool {
-    flag_name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    !has_reserved_runtime_token_prefix(flag_name)
+        && flag_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3251,6 +6315,7 @@ pub struct SceneStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum SceneError {
     #[error("missing scene table for map {map_name}")]
     MissingSceneTable { map_name: String },
@@ -3269,6 +6334,42 @@ pub enum SceneError {
     },
     #[error("empty scene table for map {map_name}")]
     EmptySceneTable { map_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum SceneSaveError {
+    #[error("saved scenes.scene_name is empty while current map {map_name} has a saved scene")]
+    EmptyCurrentSceneWithSavedMapScene { map_name: String },
+    #[error("saved scenes.scene_name requires scenes.current_map_name")]
+    CurrentSceneMissingMap,
+    #[error("saved {path} {map_name} is missing from compiled pack maps")]
+    MissingMap {
+        path: &'static str,
+        map_name: String,
+    },
+    #[error("saved {path} {map_name}:{scene_name} is missing from compiled map scenes")]
+    MissingScene {
+        path: &'static str,
+        map_name: String,
+        scene_name: String,
+    },
+    #[error("saved {path} {map_name}:{scene_name} is missing saved scene index")]
+    MissingSceneIndex {
+        path: &'static str,
+        map_name: String,
+        scene_name: String,
+    },
+    #[error(
+        "saved {path} {map_name}:{scene_name} index {saved_index} does not match compiled scene index {compiled_index}"
+    )]
+    SceneIndexMismatch {
+        path: &'static str,
+        map_name: String,
+        scene_name: String,
+        saved_index: usize,
+        compiled_index: usize,
+    },
 }
 
 impl SceneMemory {
@@ -3407,6 +6508,98 @@ impl SceneMemory {
     }
 }
 
+pub fn validate_saved_scene_references<F, G>(
+    scenes: &SceneMemory,
+    map_exists: F,
+    scene_index: G,
+) -> Result<(), SceneSaveError>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&str, &str) -> Option<usize>,
+{
+    if !scenes.current_map_name.is_empty() {
+        if !map_exists(&scenes.current_map_name) {
+            return Err(SceneSaveError::MissingMap {
+                path: "scenes.current_map_name",
+                map_name: scenes.current_map_name.clone(),
+            });
+        }
+        if scenes.scene_name.is_empty() {
+            if scenes.map_scenes.contains_key(&scenes.current_map_name) {
+                return Err(SceneSaveError::EmptyCurrentSceneWithSavedMapScene {
+                    map_name: scenes.current_map_name.clone(),
+                });
+            }
+        } else {
+            validate_saved_scene_entry(
+                "scenes.current",
+                &scenes.current_map_name,
+                &scenes.scene_name,
+                scenes
+                    .map_scene_indices
+                    .get(&scenes.current_map_name)
+                    .copied(),
+                &scene_index,
+            )?;
+        }
+    } else if !scenes.scene_name.is_empty() {
+        return Err(SceneSaveError::CurrentSceneMissingMap);
+    }
+
+    for (map_name, scene_name) in &scenes.map_scenes {
+        if !map_exists(map_name) {
+            return Err(SceneSaveError::MissingMap {
+                path: "scenes.map_scenes",
+                map_name: map_name.clone(),
+            });
+        }
+        validate_saved_scene_entry(
+            "scenes.map_scenes",
+            map_name,
+            scene_name,
+            scenes.map_scene_indices.get(map_name).copied(),
+            &scene_index,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_saved_scene_entry<F>(
+    path: &'static str,
+    map_name: &str,
+    scene_name: &str,
+    saved_index: Option<usize>,
+    scene_index: &F,
+) -> Result<(), SceneSaveError>
+where
+    F: Fn(&str, &str) -> Option<usize>,
+{
+    let Some(compiled_index) = scene_index(map_name, scene_name) else {
+        return Err(SceneSaveError::MissingScene {
+            path,
+            map_name: map_name.to_string(),
+            scene_name: scene_name.to_string(),
+        });
+    };
+    let Some(saved_index) = saved_index else {
+        return Err(SceneSaveError::MissingSceneIndex {
+            path,
+            map_name: map_name.to_string(),
+            scene_name: scene_name.to_string(),
+        });
+    };
+    if saved_index != compiled_index {
+        return Err(SceneSaveError::SceneIndexMismatch {
+            path,
+            map_name: map_name.to_string(),
+            scene_name: scene_name.to_string(),
+            saved_index,
+            compiled_index,
+        });
+    }
+    Ok(())
+}
+
 fn validate_scene_token(value: &str) -> Result<(), String> {
     if is_exact_scene_token(value) {
         Ok(())
@@ -3418,6 +6611,7 @@ fn validate_scene_token(value: &str) -> Result<(), String> {
 fn is_exact_scene_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_runtime_token_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -3452,7 +6646,7 @@ impl Default for Options {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TextSpeed {
     Fast,
     Mid,
@@ -3460,35 +6654,35 @@ pub enum TextSpeed {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BattleScene {
     On,
     Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BattleStyle {
     Shift,
     Set,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Sound {
     Mono,
     Stereo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MenuAccount {
     On,
     Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrintOption {
     Normal,
     Lightest,
@@ -3498,7 +6692,7 @@ pub enum PrintOption {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FrameType {
     Frame1,
     Frame2,
@@ -3555,7 +6749,7 @@ pub struct LinkBattleStats {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FishingRodState {
     #[default]
     Idle,
@@ -3604,19 +6798,58 @@ pub struct JoypadMemory {
     pub h_joy_last: u8,
 }
 
+impl JoypadMemory {
+    pub fn apply_mask(&mut self, mask: u8) -> GameEvent {
+        let previous = self.h_joypad_down;
+        let pressed = (mask ^ previous) & mask;
+        let released = (mask ^ previous) & previous;
+        self.h_joypad_released = released;
+        self.h_joypad_pressed = pressed;
+        self.h_joypad_down = mask;
+        self.h_joypad_sum |= pressed;
+        self.h_joy_released = released;
+        self.h_joy_pressed = pressed;
+        self.h_joy_down = mask;
+        self.h_joy_last = previous;
+        GameEvent::JoypadChanged {
+            pressed,
+            down: mask,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GameCommand {
     Joypad { mask: u8 },
+    AdvanceFrame,
     OpenMenu,
     CloseMenu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GameEvent {
     FrameAdvanced { frame: u64 },
     JoypadChanged { pressed: u8, down: u8 },
+    MenuOpened,
+    MenuClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RngSeedCommit {
+    pub rng_seed_before: u32,
+    pub rng_seed_after: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum GameStateBattleError {
+    #[error("active {battle_kind} battle")]
+    ActiveBattle { battle_kind: String },
+    #[error("active trainer battle {trainer_id}")]
+    ActiveTrainerBattle { trainer_id: String },
 }
 
 #[cfg(test)]
@@ -3654,6 +6887,10 @@ mod tests {
         assert_eq!(state.player_palette_id, 0);
         assert_eq!(state.step_events, StepEventCounters::default());
         assert_eq!(state.time, TimeState::default());
+        assert_eq!(
+            state.unused_two_day_timer,
+            UnusedTwoDayTimerState::default()
+        );
         assert!(!state.lucky_number_show_flag);
         assert_eq!(state.lucky_number_day, None);
         assert_eq!(state.lucky_id_number, 0);
@@ -3688,6 +6925,19 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("active_repel_item has invalid token 'SUPER REPEL'".to_string())
+        );
+
+        state = GameState {
+            active_repel_item: Some("fallback_repel".to_string()),
+            repel_steps_remaining: 10,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "active_repel_item token 'fallback_repel' uses reserved runtime payload prefix"
+                    .to_string()
+            )
         );
 
         state = GameState {
@@ -3758,6 +7008,27 @@ mod tests {
         );
 
         state = GameState::default();
+        state.unused_two_day_timer.active = true;
+        state.unused_two_day_timer.remaining_days = 3;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved unused two-day timer: remaining_days 3 exceeds the two-day timer length"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.unused_two_day_timer.remaining_days = 1;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "invalid saved unused two-day timer: inactive timer must have remaining_days 0 and start_day 0"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
         state.player_palette_id = 8;
         assert_eq!(
             state.validate_saved_state(),
@@ -3777,6 +7048,25 @@ mod tests {
             state.validate_saved_state(),
             Err("active_repel_item REPEL cannot be saved with zero repel steps".to_string())
         );
+
+        state = GameState::default();
+        state.dig_warp_map_name = Some("AzaleaTown".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("dig_warp_map_name AzaleaTown cannot be saved without dig_warp_index".to_string())
+        );
+
+        state = GameState::default();
+        state.dig_warp_index = Some(2);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("dig_warp_index 2 cannot be saved without dig_warp_map_name".to_string())
+        );
+
+        state = GameState::default();
+        state.dig_warp_map_name = Some("AzaleaTown".to_string());
+        state.dig_warp_index = Some(2);
+        assert_eq!(state.validate_saved_state(), Ok(()));
 
         state = GameState::default();
         state.link_session.active_room = Some("Trade Center".to_string());
@@ -3801,6 +7091,18 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("map_block_overrides map has invalid token 'Route 29'".to_string())
+        );
+
+        state = GameState::default();
+        state
+            .map_block_overrides
+            .insert("fallbackRoute29".to_string(), BTreeMap::new());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_block_overrides map token 'fallbackRoute29' uses reserved runtime payload prefix"
+                    .to_string()
+            )
         );
 
         state = GameState::default();
@@ -4195,6 +7497,26 @@ mod tests {
         );
 
         state = GameState::default();
+        state.mobile_link.mode = Some("legacy_mobile".to_string());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "mobile_link.mode token 'legacy_mobile' uses reserved runtime payload prefix"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
+        state.mobile_link.adapter_status = "fallback_ready".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "mobile_link.adapter_status token 'fallback_ready' uses reserved runtime payload prefix"
+                    .to_string()
+            )
+        );
+
+        state = GameState::default();
         state.mobile_link.login_password = "EIGHTEEN-CHARS!!!!!".to_string();
         assert_eq!(
             state.validate_saved_state(),
@@ -4202,6 +7524,13 @@ mod tests {
                 "mobile_link.login_password length 18 exceeds Crystal mobile password limit 17"
                     .to_string()
             )
+        );
+
+        state = GameState::default();
+        state.mobile_link.login_password = " PASSWORD".to_string();
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("mobile_link.login_password must be exact text".to_string())
         );
 
         state = GameState::default();
@@ -4242,7 +7571,21 @@ mod tests {
         state = GameState::default();
         state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
             streak: 7,
-            outcome: "WIN".to_string(),
+            outcome: "draw".to_string(),
+            day: 1,
+        });
+        assert_eq!(
+	            state.validate_saved_state(),
+	            Err(
+	                "mobile_link.leaderboard[0].outcome draw is not a saved mobile Battle Tower outcome"
+	                    .to_string()
+	            )
+	        );
+
+        state = GameState::default();
+        state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
+            streak: 7,
+            outcome: "win".to_string(),
             day: 7,
         });
         assert_eq!(
@@ -4253,7 +7596,7 @@ mod tests {
         state = GameState::default();
         state.mobile_link.leaderboard.push(MobileBattleTowerRecord {
             streak: 7,
-            outcome: "WIN".to_string(),
+            outcome: "loss".to_string(),
             day: 1,
         });
         assert_eq!(
@@ -4412,6 +7755,760 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("overworld.active.map_name has invalid token 'Route 29'".to_string())
+        );
+
+        let inactive_state = GameState::default();
+        assert_eq!(
+            validate_saved_last_talked_object_reference(
+                &inactive_state,
+                "ROUTE29_YOUNGSTER1",
+                |_| true,
+                |_, _| true,
+            ),
+            Err(LastTalkedObjectSaveError::InactiveOverworld {
+                object_id: "ROUTE29_YOUNGSTER1".to_string(),
+            })
+        );
+
+        let active_state = GameState {
+            overworld: OverworldMemory::Active {
+                map_name: "Route29".to_string(),
+                tile: TilePosition::new(1, 2),
+                facing: Direction::Down,
+                mode: MovementMode::Normal,
+            },
+            ..GameState::default()
+        };
+        assert_eq!(
+            validate_saved_last_talked_object_reference(
+                &active_state,
+                "ROUTE29_YOUNGSTER1",
+                |_| false,
+                |_, _| true,
+            ),
+            Err(LastTalkedObjectSaveError::MissingMap {
+                map_name: "Route29".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_last_talked_object_reference(
+                &active_state,
+                "ROUTE29_YOUNGSTER1",
+                |_| true,
+                |_, _| false,
+            ),
+            Err(LastTalkedObjectSaveError::MissingObject {
+                map_name: "Route29".to_string(),
+                object_id: "ROUTE29_YOUNGSTER1".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_last_talked_object_reference(
+                &active_state,
+                "ROUTE29_YOUNGSTER1",
+                |map_name| map_name == "Route29",
+                |map_name, object_id| {
+                    map_name == "Route29" && object_id == "ROUTE29_YOUNGSTER1"
+                },
+            ),
+            Ok(())
+        );
+
+        let script_body = serde_json::json!([
+            { "command": "jumptext", "args": ["Route29Text"] },
+            { "command": "end" }
+        ]);
+        assert_eq!(
+            validate_saved_compiled_script_command_reference(
+                &script_body,
+                "script_runtime.effects[0].source_script",
+                "Route29Script",
+                2,
+            ),
+            Err(ScriptCommandReferenceError::CommandIndexOutOfBounds {
+                path: "script_runtime.effects[0].source_script".to_string(),
+                script_label: "Route29Script".to_string(),
+                command_index: 2,
+                command_count: 2,
+            })
+        );
+        assert_eq!(
+            validate_saved_compiled_script_command_name_reference(
+                &script_body,
+                "script_runtime.effects[0].source_script",
+                "Route29Script",
+                0,
+                "writetext",
+            ),
+            Err(ScriptCommandReferenceError::CommandMismatch {
+                path: "script_runtime.effects[0].source_script".to_string(),
+                script_label: "Route29Script".to_string(),
+                command_index: 0,
+                saved_command: "writetext".to_string(),
+                compiled_command: "jumptext".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_compiled_script_command_payload_reference(
+                &script_body,
+                "script_runtime.effects[0].source_script",
+                "Route29Script",
+                0,
+                "jumptext",
+                &["OtherText".to_string()],
+            ),
+            Err(ScriptCommandReferenceError::ArgsMismatch {
+                path: "script_runtime.effects[0].source_script".to_string(),
+                script_label: "Route29Script".to_string(),
+                command_index: 0,
+                saved_args: vec!["OtherText".to_string()],
+                compiled_args: vec!["Route29Text".to_string()],
+            })
+        );
+        assert_eq!(
+            validate_saved_compiled_script_command_payload_reference(
+                &script_body,
+                "script_runtime.effects[0].source_script",
+                "Route29Script",
+                0,
+                "jumptext",
+                &["Route29Text".to_string()],
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_compiled_script_return_reference(
+                &script_body,
+                "script_runtime.call_stack[0].source_script",
+                "Route29Script",
+                2,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_compiled_script_return_reference(
+                &script_body,
+                "script_runtime.call_stack[0].source_script",
+                "Route29Script",
+                3,
+            ),
+            Err(ScriptCommandReferenceError::CommandIndexOutOfBounds {
+                path: "script_runtime.call_stack[0].source_script".to_string(),
+                script_label: "Route29Script".to_string(),
+                command_index: 3,
+                command_count: 2,
+            })
+        );
+
+        let mut trainer_species = crate::models::PokemonSpecies::new_for_tests(
+            "PIDGEY",
+            crate::models::BaseStats::new(40, 45, 40, 56, 35, 35),
+        );
+        trainer_species.int_id = 16;
+        let mut expected_enemy =
+            Pokemon::new_for_tests(trainer_species.clone(), 9, crate::models::Dv::default());
+        expected_enemy.original_trainer_name = "FALKNER".to_string();
+        expected_enemy.original_trainer_id = 1001;
+        expected_enemy.moves = vec![crate::models::pokemon::LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 35,
+            pp_ups: 0,
+        }];
+        let saved_enemy = expected_enemy.clone();
+        assert_eq!(
+            validate_saved_trainer_enemy_party_identity(
+                "FALKNER1",
+                &[],
+                &saved_enemy,
+                &[expected_enemy.clone()],
+            ),
+            Err(TrainerEnemyPartySaveError::PartyLengthMismatch {
+                trainer_id: "FALKNER1".to_string(),
+                saved_len: 0,
+                expected_len: 1,
+            })
+        );
+        let mut wrong_species = saved_enemy.clone();
+        wrong_species.species.id = "SPEAROW".to_string();
+        assert_eq!(
+            validate_saved_trainer_enemy_party_identity(
+                "FALKNER1",
+                &[wrong_species],
+                &saved_enemy,
+                &[expected_enemy.clone()],
+            ),
+            Err(TrainerEnemyPartySaveError::SpeciesMismatch {
+                trainer_id: "FALKNER1".to_string(),
+                index: 0,
+                saved_species: "SPEAROW".to_string(),
+                expected_species: "PIDGEY".to_string(),
+            })
+        );
+        let mut active_enemy = saved_enemy.clone();
+        active_enemy.level = 10;
+        assert_eq!(
+            validate_saved_trainer_enemy_party_identity(
+                "FALKNER1",
+                &[saved_enemy.clone()],
+                &active_enemy,
+                &[expected_enemy.clone()],
+            ),
+            Err(TrainerEnemyPartySaveError::ActiveEnemyMissingFromParty {
+                trainer_id: "FALKNER1".to_string(),
+                species: "PIDGEY".to_string(),
+                level: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_trainer_enemy_party_identity(
+                "FALKNER1",
+                &[saved_enemy.clone()],
+                &saved_enemy,
+                &[expected_enemy],
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_pokemon_reference(
+                "battle.trainer.enemy_pokemon",
+                &saved_enemy,
+                |species| {
+                    if species == "PIDGEY" {
+                        Some(trainer_species.clone())
+                    } else {
+                        None
+                    }
+                },
+                |_| true,
+                |_| true,
+                |move_name| {
+                    if move_name == "TACKLE" {
+                        Some(("TACKLE".to_string(), 35))
+                    } else {
+                        None
+                    }
+                },
+            ),
+            Ok(())
+        );
+        let mut stale_species = saved_enemy.clone();
+        stale_species.species.base_stats.hp += 1;
+        assert_eq!(
+            validate_saved_pokemon_reference(
+                "battle.trainer.enemy_pokemon",
+                &stale_species,
+                |_| Some(trainer_species.clone()),
+                |_| true,
+                |_| true,
+                |_| Some(("TACKLE".to_string(), 35)),
+            ),
+            Err(PokemonReferenceSaveError::SpeciesMismatch {
+                path: "battle.trainer.enemy_pokemon".to_string(),
+                species: "PIDGEY".to_string(),
+            })
+        );
+        let mut held_item = saved_enemy.clone();
+        held_item.item = Some("BERRY".to_string());
+        assert_eq!(
+            validate_saved_pokemon_reference(
+                "battle.trainer.enemy_pokemon",
+                &held_item,
+                |_| Some(trainer_species.clone()),
+                |_| false,
+                |_| true,
+                |_| Some(("TACKLE".to_string(), 35)),
+            ),
+            Err(PokemonReferenceSaveError::MissingItem {
+                path: "battle.trainer.enemy_pokemon".to_string(),
+                item_id: "BERRY".to_string(),
+            })
+        );
+        let mut bad_status = saved_enemy.clone();
+        bad_status.status = Some("BRN".to_string());
+        assert_eq!(
+            validate_saved_pokemon_reference(
+                "battle.trainer.enemy_pokemon",
+                &bad_status,
+                |_| Some(trainer_species.clone()),
+                |_| true,
+                |_| false,
+                |_| Some(("TACKLE".to_string(), 35)),
+            ),
+            Err(PokemonReferenceSaveError::MissingStatus {
+                path: "battle.trainer.enemy_pokemon".to_string(),
+                status: "BRN".to_string(),
+            })
+        );
+        let mut pp_overflow = saved_enemy.clone();
+        pp_overflow.moves[0].current_pp = 40;
+        assert_eq!(
+            validate_saved_pokemon_reference(
+                "battle.trainer.enemy_pokemon",
+                &pp_overflow,
+                |_| Some(trainer_species.clone()),
+                |_| true,
+                |_| true,
+                |_| Some(("TACKLE".to_string(), 35)),
+            ),
+            Err(PokemonReferenceSaveError::MovePpOverflow {
+                path: "battle.trainer.enemy_pokemon".to_string(),
+                index: 0,
+                move_name: "TACKLE".to_string(),
+                current_pp: 40,
+                max_pp: 35,
+            })
+        );
+        assert_eq!(
+            validate_saved_pokemon_party_references(
+                "battle.trainer.enemy_party",
+                &[saved_enemy.clone()],
+                |path, _| Err(format!("bad pokemon at {path}")),
+            ),
+            Err(PokemonPartyReferenceSaveError::Pokemon(
+                "bad pokemon at battle.trainer.enemy_party[0]".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_saved_map_reference("overworld.active.map_name", "Route29", None),
+            Err(MapReferenceSaveError::MissingMap {
+                path: "overworld.active.map_name".to_string(),
+                map_name: "Route29".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_map_reference("overworld.active.map_name", "Route29", Some("Route30"),),
+            Err(MapReferenceSaveError::MapIdMismatch {
+                path: "overworld.active.map_name".to_string(),
+                map_name: "Route29".to_string(),
+                compiled_id: "Route30".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_warp_reference("dig_warp_index", "Route29", 2, Some("Route29"), |_| {
+                false
+            }),
+            Err(MapReferenceSaveError::MissingWarp {
+                path: "dig_warp_index".to_string(),
+                map_name: "Route29".to_string(),
+                warp_index: 2,
+            })
+        );
+        assert_eq!(
+            validate_saved_map_object_reference(
+                "map_object_overrides.hidden",
+                "Route29",
+                "ROUTE29_YOUNGSTER1",
+                |_| false,
+            ),
+            Err(MapReferenceSaveError::MissingObject {
+                path: "map_object_overrides.hidden".to_string(),
+                map_name: "Route29".to_string(),
+                object_id: "ROUTE29_YOUNGSTER1".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_catalog_reference(
+                "script_runtime.last_special_routine",
+                "UnknownRoutine",
+                "special routines",
+                |_| false,
+            ),
+            Err(CatalogReferenceSaveError::Missing {
+                path: "script_runtime.last_special_routine".to_string(),
+                value: "UnknownRoutine".to_string(),
+                catalog: "special routines".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_optional_catalog_reference(
+                "battle.trainer.seen_text",
+                "",
+                "text",
+                |_| { false }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_optional_catalog_reference(
+                "battle.trainer.seen_text",
+                "UnknownText",
+                "text",
+                |_| false,
+            ),
+            Err(CatalogReferenceSaveError::Missing {
+                path: "battle.trainer.seen_text".to_string(),
+                value: "UnknownText".to_string(),
+                catalog: "text".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_exact_catalog_reference(
+                "bag.items",
+                "POTION",
+                "items",
+                "item script_name",
+                None,
+            ),
+            Err(ExactCatalogReferenceSaveError::Missing {
+                path: "bag.items".to_string(),
+                value: "POTION".to_string(),
+                catalog: "items".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_exact_catalog_reference(
+                "bag.items",
+                "POTION",
+                "items",
+                "item script_name",
+                Some("DIFFERENT_SCRIPT_NAME".to_string()),
+            ),
+            Err(ExactCatalogReferenceSaveError::Mismatch {
+                path: "bag.items".to_string(),
+                value: "POTION".to_string(),
+                compiled_field: "item script_name".to_string(),
+                compiled_value: "DIFFERENT_SCRIPT_NAME".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_audio_reference(
+                "script_runtime.current_music",
+                "MUSIC_ROUTE_29",
+                "Music",
+                None
+            ),
+            Err(AudioReferenceSaveError::MissingAudio {
+                path: "script_runtime.current_music".to_string(),
+                audio_id: "MUSIC_ROUTE_29".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_audio_reference(
+                "script_runtime.current_music",
+                "SFX_TACKLE",
+                "Music",
+                Some("SoundEffect"),
+            ),
+            Err(AudioReferenceSaveError::KindMismatch {
+                path: "script_runtime.current_music".to_string(),
+                audio_id: "SFX_TACKLE".to_string(),
+                actual_kind: "SoundEffect".to_string(),
+                expected_kind: "Music".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_overworld_references(
+                &OverworldMemory::Active {
+                    map_name: "Route29".to_string(),
+                    tile: TilePosition { x: 20, y: 4 },
+                    facing: Direction::Down,
+                    mode: MovementMode::Normal,
+                },
+                |_| Some((20, 10)),
+            ),
+            Err(OverworldReferenceSaveError::TileOutOfBounds {
+                map_name: "Route29".to_string(),
+                x: 20,
+                y: 4,
+                width: 20,
+                height: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_block_overrides(
+                "Route29",
+                &BTreeMap::from([((1, 1), 0x12)]),
+                |_| Some((10, 10, "Overworld".to_string())),
+                |_| true,
+                |_, _| false,
+            ),
+            Err(BlockOverrideSaveError::MissingMetatile {
+                map_name: "Route29".to_string(),
+                x: 1,
+                y: 1,
+                block_id: 0x12,
+                tileset_name: "Overworld".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "Route29",
+                &OverworldObjectMapMemory {
+                    objects: BTreeMap::from([(
+                        "YOUNGSTER".to_string(),
+                        OverworldObjectMemory {
+                            x: 10,
+                            y: 1,
+                            facing: None,
+                        },
+                    )]),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((10, 10)),
+                |_| true,
+            ),
+            Err(ObjectOverrideSaveError::CoordinateOutOfBounds {
+                map_name: "Route29".to_string(),
+                object_id: "YOUNGSTER".to_string(),
+                x: 10,
+                y: 1,
+                width: 10,
+                height: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_warp_reference(
+                "dig_warp_index",
+                "Route29",
+                2,
+                Some("Route29"),
+                |warp| { warp == 2 }
+            ),
+            Ok(())
+        );
+        let mut storage = PokemonStorage::default();
+        storage.party.pokemon[1] = Some(saved_enemy.clone());
+        assert_eq!(
+            validate_saved_storage_references(&storage, |path, _| Err(format!(
+                "bad pokemon at {path}"
+            ))),
+            Err(StorageReferenceSaveError::Pokemon(
+                "bad pokemon at storage.party[1]".to_string()
+            ))
+        );
+
+        let mut contest = BugContestState::default();
+        contest.party_backup.push(saved_enemy.clone());
+        contest.second_party_species = Some("SCYTHER".to_string());
+        contest
+            .selected_contestant_flags
+            .push("EVENT_CONTESTANT".to_string());
+        assert_eq!(
+            validate_saved_bug_contest_references(
+                &contest,
+                |_, _| Ok(()),
+                |species| species == "SCYTHER",
+                |flag| flag == "EVENT_CONTESTANT",
+            ),
+            Ok(())
+        );
+        contest.caught_species = Some("PINSIR".to_string());
+        assert_eq!(
+            validate_saved_bug_contest_references(
+                &contest,
+                |_, _| Ok(()),
+                |species| species == "SCYTHER",
+                |_| true,
+            ),
+            Err(BugContestReferenceSaveError::MissingSpecies {
+                path: "bug_contest.caught_species".to_string(),
+                species: "PINSIR".to_string(),
+            })
+        );
+
+        let mut day_care = DayCareState::default();
+        day_care.man.pokemon = Some(saved_enemy.clone());
+        day_care.last_interaction = Some(DayCareInteractionState {
+            caretaker: "man".to_string(),
+            action: "inspect".to_string(),
+            success: true,
+            pokemon: Some("PIDGEY".to_string()),
+            level: Some(9),
+            reason: None,
+        });
+        assert_eq!(
+            validate_saved_day_care_references(
+                &day_care,
+                |path, _| Err(format!("bad pokemon at {path}")),
+                |_| true,
+            ),
+            Err(DayCareReferenceSaveError::Pokemon(
+                "bad pokemon at day_care.man.pokemon".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_saved_day_care_references(&day_care, |_, _| Ok(()), |_| false),
+            Err(DayCareReferenceSaveError::MissingInteractionSpecies {
+                species: "PIDGEY".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_wild_battle_origin_reference(
+                "BATTLETYPE_FORCEITEM",
+                "Route29",
+                &saved_enemy,
+                |_, _, _| true,
+            ),
+            Err(WildBattleSaveError::BattleTypeMismatch {
+                battle_type: "BATTLETYPE_FORCEITEM".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_wild_battle_origin_reference(
+                "BATTLETYPE_NORMAL",
+                "Route29",
+                &saved_enemy,
+                |_, _, _| false,
+            ),
+            Err(WildBattleSaveError::MissingEncounter {
+                map_name: "Route29".to_string(),
+                species: "PIDGEY".to_string(),
+                level: 9,
+            })
+        );
+        assert_eq!(
+            validate_saved_wild_battle_origin_reference(
+                "BATTLETYPE_NORMAL",
+                "Route29",
+                &saved_enemy,
+                |map_name, species, level| {
+                    map_name == "Route29" && species == "PIDGEY" && level == 9
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_static_wild_battle_origin_reference(
+                "BATTLETYPE_NORMAL",
+                "PIDGEY",
+                9,
+                "Route29StaticBattle",
+                |_, _, _, _| false,
+            ),
+            Err(StaticWildBattleSaveError::MissingScriptedBattle {
+                source_script: "Route29StaticBattle".to_string(),
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                species: "PIDGEY".to_string(),
+                level: 9,
+            })
+        );
+        assert_eq!(
+            validate_saved_static_wild_battle_origin_reference(
+                "BATTLETYPE_NORMAL",
+                "PIDGEY",
+                9,
+                "Route29StaticBattle",
+                |source_script, battle_type, species, level| {
+                    source_script == "Route29StaticBattle"
+                        && battle_type == "BATTLETYPE_NORMAL"
+                        && species == "PIDGEY"
+                        && level == 9
+                },
+            ),
+            Ok(())
+        );
+        let saved_trainer_fields = SavedTrainerBattleFields {
+            battle_type: "BATTLETYPE_TRAINER",
+            trainer_class: "FALKNER",
+            event_flag: "EVENT_BEAT_FALKNER",
+            seen_text: "FalknerSeenText",
+            win_text: "FalknerWinText",
+            loss_text: "FalknerLossText",
+            callback: "FalknerCallback",
+        };
+        let compiled_trainer_fields = SavedTrainerBattleFields {
+            battle_type: "BATTLETYPE_TRAINER",
+            trainer_class: "FALKNER",
+            event_flag: "EVENT_BEAT_FALKNER",
+            seen_text: "FalknerSeenText",
+            win_text: "FalknerWinText",
+            loss_text: "FalknerLossText",
+            callback: "FalknerCallback",
+        };
+        assert_eq!(
+            validate_saved_trainer_battle_request_fields(
+                saved_trainer_fields,
+                compiled_trainer_fields,
+                "FalknerBattleScript",
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_trainer_battle_source_reference("MissingBattleScript", |_| false),
+            Err(TrainerBattleRequestSaveError::MissingSource {
+                source_script: "MissingBattleScript".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_trainer_battle_request_field(
+                "win_text",
+                "WrongWinText",
+                "FalknerWinText",
+                "FalknerBattleScript",
+            ),
+            Err(TrainerBattleRequestSaveError::FieldMismatch {
+                field: "win_text".to_string(),
+                saved: "WrongWinText".to_string(),
+                compiled: "FalknerWinText".to_string(),
+                source_script: "FalknerBattleScript".to_string(),
+            })
+        );
+        let compiled_trainer = Trainer {
+            name: "FALKNER".to_string(),
+            trainer_id: "FALKNER1".to_string(),
+            trainer_class: "FALKNER".to_string(),
+            party: Vec::new(),
+            win_quote: "FalknerWinText".to_string(),
+            lose_quote: "FalknerLossText".to_string(),
+            items: Vec::new(),
+            base_reward: 900,
+            ai_move_flags: 1,
+            ai_item_switch_flags: 2,
+            encounter_music: "MUSIC_HIKER_ENCOUNTER".to_string(),
+            ai_layers: vec!["AI_BASIC".to_string()],
+        };
+        assert_eq!(
+            validate_saved_trainer_metadata(
+                &compiled_trainer,
+                SavedTrainerMetadata {
+                    trainer_class: "FALKNER",
+                    trainer_name: "FALKNER",
+                    ai_move_flags: 1,
+                    ai_item_switch_flags: 2,
+                    ai_layers: &["AI_BASIC".to_string()],
+                    reward: 900,
+                    encounter_music: "MUSIC_HIKER_ENCOUNTER",
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_trainer_metadata(
+                &compiled_trainer,
+                SavedTrainerMetadata {
+                    trainer_class: "BIRD_KEEPER",
+                    trainer_name: "FALKNER",
+                    ai_move_flags: 1,
+                    ai_item_switch_flags: 2,
+                    ai_layers: &["AI_BASIC".to_string()],
+                    reward: 900,
+                    encounter_music: "MUSIC_HIKER_ENCOUNTER",
+                },
+            ),
+            Err(TrainerMetadataSaveError::ClassMismatch {
+                trainer_id: "FALKNER1".to_string(),
+                saved: "BIRD_KEEPER".to_string(),
+                compiled: "FALKNER".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_trainer_metadata(
+                &compiled_trainer,
+                SavedTrainerMetadata {
+                    trainer_class: "FALKNER",
+                    trainer_name: "FALKNER",
+                    ai_move_flags: 1,
+                    ai_item_switch_flags: 2,
+                    ai_layers: &["AI_SMART".to_string()],
+                    reward: 900,
+                    encounter_music: "MUSIC_HIKER_ENCOUNTER",
+                },
+            ),
+            Err(TrainerMetadataSaveError::AiLayersMismatch {
+                trainer_id: "FALKNER1".to_string(),
+                saved: vec!["AI_SMART".to_string()],
+                compiled: vec!["AI_BASIC".to_string()],
+            })
         );
 
         let mut species = crate::models::PokemonSpecies::new_for_tests(
@@ -4796,6 +8893,38 @@ mod tests {
             Err("control_events[0].target_script is required for Jump".to_string())
         );
 
+        let control_event = ScriptControlRuntimeEvent {
+            kind: ScriptControlRuntimeKind::Continue,
+            target_script: Some("TargetScript".to_string()),
+            source_script: "SourceScript".to_string(),
+            command_index: 7,
+        };
+        assert_eq!(
+            validate_saved_control_runtime_event_shape(
+                "script_runtime.control_events[0].source_script",
+                &control_event,
+            ),
+            Err(ScriptControlRuntimeCommandError::UnexpectedContinueTarget {
+                path: "script_runtime.control_events[0].source_script".to_string(),
+                source_script: "SourceScript".to_string(),
+                command_index: 7,
+            })
+        );
+
+        let control_event = ScriptControlRuntimeEvent {
+            kind: ScriptControlRuntimeKind::Call,
+            target_script: Some("TargetScript".to_string()),
+            source_script: "SourceScript".to_string(),
+            command_index: 7,
+        };
+        assert_eq!(
+            validate_saved_control_runtime_event_shape(
+                "script_runtime.control_events[0].source_script",
+                &control_event,
+            ),
+            Ok(())
+        );
+
         runtime = ScriptRuntimeMemory::default();
         runtime.call_stack.push(ScriptReturnFrame {
             source_script: "SourceScript".to_string(),
@@ -4816,6 +8945,23 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("script_ended cannot be both callback and just_battled_guard".to_string())
+        );
+        assert_eq!(
+            saved_script_end_command(runtime.script_ended.as_ref().expect("script end")),
+            Err(ScriptEndCommandError::CallbackAndJustBattledGuard {
+                source_script: "SourceScript".to_string(),
+                command_index: 7,
+            })
+        );
+
+        assert_eq!(
+            saved_script_end_command(&ScriptEndState {
+                callback: true,
+                just_battled_guard: false,
+                source_script: "SourceScript".to_string(),
+                command_index: 7,
+            }),
+            Ok("endcallback")
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5106,6 +9252,28 @@ mod tests {
             )
         );
 
+        let map_load = ScriptMapLoadRequest {
+            command: "newloadmap".to_string(),
+            map_setup: Some("MAPSETUP_WARP".to_string()),
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        };
+        assert_eq!(
+            saved_map_load_command_payload(&map_load),
+            ("newloadmap", vec!["MAPSETUP_WARP".to_string()])
+        );
+
+        let map_refresh = ScriptMapRefreshRequest {
+            command: "reanchormap".to_string(),
+            map_setup: Some("MAPSETUP_CONNECTION".to_string()),
+            source_script: "Route29Script".to_string(),
+            command_index: 1,
+        };
+        assert_eq!(
+            saved_map_refresh_command_payload(&map_refresh),
+            ("reanchormap", vec!["MAPSETUP_CONNECTION".to_string()])
+        );
+
         runtime = ScriptRuntimeMemory::default();
         runtime.shop_events.push(ScriptShopRuntimeEvent {
             mart_type: "MARTTYPE_STANDARD".to_string(),
@@ -5131,6 +9299,23 @@ mod tests {
             runtime.validate(),
             Err("shop_events[0].mart_type MARTTYPE_CUSTOM is not a saved mart type".to_string())
         );
+        let shop_event = ScriptShopRuntimeEvent {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        };
+        assert_eq!(
+            saved_shop_event_command_payload(&shop_event),
+            (
+                "pokemart",
+                vec![
+                    "MARTTYPE_STANDARD".to_string(),
+                    "CHERRYGROVE_MART".to_string(),
+                ],
+            )
+        );
 
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_shop = Some(ScriptShopRequest {
@@ -5145,6 +9330,23 @@ mod tests {
             Err(
                 "pending_shop.mart_id 0 requires a zero-inventory mart type, got MARTTYPE_STANDARD"
                     .to_string()
+            )
+        );
+        let shop_request = ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        };
+        assert_eq!(
+            saved_shop_request_command_payload(&shop_request),
+            (
+                "pokemart",
+                vec![
+                    "MARTTYPE_STANDARD".to_string(),
+                    "CHERRYGROVE_MART".to_string(),
+                ],
             )
         );
 
@@ -5213,6 +9415,10 @@ mod tests {
                 "variable_writes[0].value 7 does not match variables[VAR_BLUECARDBALANCE] 8"
                     .to_string()
             )
+        );
+        assert_eq!(
+            saved_variable_write_command_payload(&runtime.variable_writes[0]),
+            ("writevar", vec!["VAR_BLUECARDBALANCE".to_string()])
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5301,6 +9507,49 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime
+            .numeric_buffer_writes
+            .push(ScriptRuntimeNumericBufferWrite {
+                target_buffer: "STRING_BUFFER_3".to_string(),
+                value: "12".to_string(),
+                width: 3,
+                source_script: "BufferScript".to_string(),
+                command_index: 4,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "numeric_buffer_writes[0].target_buffer STRING_BUFFER_3 is missing from named_buffers"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
+            .named_buffers
+            .insert("STRING_BUFFER_3".to_string(), "13".to_string());
+        runtime
+            .numeric_buffer_writes
+            .push(ScriptRuntimeNumericBufferWrite {
+                target_buffer: "STRING_BUFFER_3".to_string(),
+                value: "12".to_string(),
+                width: 3,
+                source_script: "BufferScript".to_string(),
+                command_index: 4,
+            });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "numeric_buffer_writes[0].value 12 does not match named_buffers[STRING_BUFFER_3] 13"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            saved_numeric_buffer_write_command_payload(&runtime.numeric_buffer_writes[0]),
+            ("getnum", vec!["STRING_BUFFER_3".to_string()])
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime
             .stone_table_entries
             .push(ScriptRuntimeStoneTableEntry {
                 warp: 1,
@@ -5314,6 +9563,70 @@ mod tests {
             Err(
                 "stone_table_entries[0].script has invalid script label '.Stone Script'"
                     .to_string()
+            )
+        );
+        let stone = ScriptRuntimeStoneTableEntry {
+            warp: 5,
+            object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
+            script: "StoneScript".to_string(),
+            source_script: "StoneTableScript".to_string(),
+            command_index: 5,
+        };
+        assert_eq!(
+            saved_stone_table_entry_command_payload(&stone),
+            (
+                "stonetable",
+                vec![
+                    "5".to_string(),
+                    "BLACKTHORNGYM2F_BOULDER1".to_string(),
+                    "StoneScript".to_string(),
+                ],
+            )
+        );
+        let floor = ScriptRuntimeElevatorFloor {
+            floor: "B1F".to_string(),
+            warp: 2,
+            target_map: "GoldenrodDeptStoreB1F".to_string(),
+            source_script: "ElevatorScript".to_string(),
+            command_index: 5,
+        };
+        assert_eq!(
+            saved_elevator_floor_command_payload(&floor),
+            (
+                "elevfloor",
+                vec![
+                    "B1F".to_string(),
+                    "2".to_string(),
+                    "GoldenrodDeptStoreB1F".to_string(),
+                ],
+            )
+        );
+        let description = ScriptRuntimeDecorationDescription {
+            decoration: "DECODESC_LEFT_DOLL".to_string(),
+            source_script: "DecorationScript".to_string(),
+            command_index: 5,
+        };
+        assert_eq!(
+            saved_decoration_description_command_payload(&description),
+            ("describedecoration", vec!["DECODESC_LEFT_DOLL".to_string()],)
+        );
+        let warp = ScriptWarpRequest {
+            target_map: "Route29".to_string(),
+            tile: TilePosition { x: 4, y: 7 },
+            facing: Some(Direction::Right),
+            source_script: "WarpScript".to_string(),
+            command_index: 5,
+        };
+        assert_eq!(
+            saved_script_warp_command_payload(&warp),
+            (
+                "warpfacing",
+                vec![
+                    "Route29".to_string(),
+                    "4".to_string(),
+                    "7".to_string(),
+                    "RIGHT".to_string(),
+                ],
             )
         );
 
@@ -5369,6 +9682,26 @@ mod tests {
             Err("command_queue[0].command macroqueue is not a saved queued command".to_string())
         );
 
+        let queued = ScriptRuntimeQueuedCommand {
+            command: "cmdqueue".to_string(),
+            target: "QueuedTarget".to_string(),
+            bank: Some("BANK1".to_string()),
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        };
+        assert_eq!(
+            saved_queued_command_args(&queued),
+            vec!["BANK1".to_string(), "QueuedTarget".to_string()]
+        );
+        let queued = ScriptRuntimeQueuedCommand {
+            bank: None,
+            ..queued
+        };
+        assert_eq!(
+            saved_queued_command_args(&queued),
+            vec!["QueuedTarget".to_string()]
+        );
+
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_delays.push(ScriptRuntimeDelay {
             command: "delay".to_string(),
@@ -5379,6 +9712,17 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("pending_delays[0].command delay is not a saved delay command".to_string())
+        );
+
+        let delay = ScriptRuntimeDelay {
+            command: "pause".to_string(),
+            frames: 15,
+            source_script: "DelayScript".to_string(),
+            command_index: 7,
+        };
+        assert_eq!(
+            saved_delay_command_payload(&delay),
+            ("pause", vec!["15".to_string()])
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5423,6 +9767,50 @@ mod tests {
             Err(
                 "pending_earthquakes[0].sleep_frames 84 must equal parameter & 0x3f (20)"
                     .to_string()
+            )
+        );
+
+        let earthquake = ScriptRuntimeEarthquake {
+            parameter: 72,
+            shake_frames: 72,
+            sleep_frames: 8,
+            source_script: "EarthquakeScript".to_string(),
+            command_index: 8,
+        };
+        assert_eq!(
+            saved_earthquake_command_payload(&earthquake),
+            ("earthquake", vec!["72".to_string()])
+        );
+
+        let emote = ScriptRuntimeEmote {
+            emote: "EMOTE_SHOCK".to_string(),
+            object: "RuntimeObject".to_string(),
+            duration: 16,
+            source_script: "EmoteScript".to_string(),
+            command_index: 9,
+        };
+        assert_eq!(
+            saved_emote_command_payload(&emote),
+            (
+                "showemote",
+                vec![
+                    "EMOTE_SHOCK".to_string(),
+                    "RuntimeObject".to_string(),
+                    "16".to_string(),
+                ],
+            )
+        );
+        let music_fade = ScriptMusicFade {
+            audio_id: "MUSIC_ROUTE_29".to_string(),
+            fade_frames: 16,
+            source_script: "MusicFadeScript".to_string(),
+            command_index: 8,
+        };
+        assert_eq!(
+            saved_music_fade_command_payload(&music_fade),
+            (
+                "musicfadeout",
+                vec!["MUSIC_ROUTE_29".to_string(), "16".to_string()],
             )
         );
 
@@ -5523,6 +9911,67 @@ mod tests {
             runtime.validate(),
             Err("audio_events[0].audio_id is not valid for WaitForSoundEffect".to_string())
         );
+        let play_music = ScriptAudioRuntimeEvent {
+            command: "playmusic".to_string(),
+            kind: ScriptAudioRuntimeKind::Music,
+            audio_id: Some("MUSIC_ROUTE_29".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        };
+        assert_eq!(
+            saved_audio_runtime_event_command_args("audio", &play_music),
+            Ok(Some(vec!["MUSIC_ROUTE_29".to_string()]))
+        );
+        let fade_music = ScriptAudioRuntimeEvent {
+            command: "musicfadeout".to_string(),
+            kind: ScriptAudioRuntimeKind::FadeMusic,
+            audio_id: Some("MUSIC_NONE".to_string()),
+            fade_frames: Some(2),
+            source_script: "AudioScript".to_string(),
+            command_index: 9,
+        };
+        assert_eq!(
+            saved_audio_runtime_event_command_args("audio", &fade_music),
+            Ok(Some(vec!["MUSIC_NONE".to_string(), "2".to_string()]))
+        );
+        let wait_sfx = ScriptAudioRuntimeEvent {
+            command: "waitsfx".to_string(),
+            kind: ScriptAudioRuntimeKind::WaitForSoundEffect,
+            audio_id: None,
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 10,
+        };
+        assert_eq!(
+            saved_audio_runtime_event_command_args("audio", &wait_sfx),
+            Ok(Some(Vec::new()))
+        );
+        let special_fade = ScriptAudioRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptAudioRuntimeKind::FadeMusic,
+            audio_id: Some("MUSIC_NONE".to_string()),
+            fade_frames: Some(2),
+            source_script: "FadeOutMusic".to_string(),
+            command_index: 0,
+        };
+        assert_eq!(
+            saved_audio_runtime_event_command_args("audio", &special_fade),
+            Ok(None)
+        );
+        let invalid_special = ScriptAudioRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptAudioRuntimeKind::Music,
+            audio_id: None,
+            fade_frames: None,
+            source_script: "HealParty".to_string(),
+            command_index: 0,
+        };
+        assert_eq!(
+            saved_audio_runtime_event_command_args("audio", &invalid_special)
+                .map_err(|error| error.to_string()),
+            Err("saved audio special routine HealParty does not emit audio".to_string())
+        );
 
         runtime = ScriptRuntimeMemory {
             pending_screen_fade: Some(ScriptScreenFade {
@@ -5538,6 +9987,18 @@ mod tests {
             runtime.validate(),
             Err("pending_screen_fade.command_index 1 must be 0".to_string())
         );
+        let pending_fade = runtime.pending_screen_fade.as_ref().unwrap();
+        assert_eq!(
+            validate_saved_pending_screen_fade_shape(
+                "script_runtime.pending_screen_fade.source_script",
+                pending_fade,
+            )
+            .map_err(|error| error.to_string()),
+            Err(
+                "saved script_runtime.pending_screen_fade.source_script FadeOutToWhite:1 screen fade must use command index 0"
+                    .to_string()
+            )
+        );
 
         runtime = ScriptRuntimeMemory {
             pending_screen_fade: Some(ScriptScreenFade {
@@ -5552,6 +10013,94 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("pending_screen_fade.frames 4 must be 8".to_string())
+        );
+
+        assert_eq!(
+            validate_saved_screen_fade_routine(
+                "script_runtime.pending_screen_fade.source_script",
+                "FadeOutToWhite",
+                ScriptFadeColor::Black,
+                ScriptFadeDirection::Out,
+                8,
+            ),
+            Err(ScriptScreenFadeRoutineError::ColorMismatch {
+                path: "script_runtime.pending_screen_fade.source_script".to_string(),
+                routine: "FadeOutToWhite".to_string(),
+                actual: ScriptFadeColor::Black,
+                expected: ScriptFadeColor::White,
+            })
+        );
+        assert_eq!(
+            validate_saved_screen_fade_routine(
+                "script_runtime.graphics_events[0].source_script",
+                "UnknownFadeRoutine",
+                ScriptFadeColor::White,
+                ScriptFadeDirection::Out,
+                8,
+            ),
+            Err(ScriptScreenFadeRoutineError::UnknownRoutine {
+                path: "script_runtime.graphics_events[0].source_script".to_string(),
+                routine: "UnknownFadeRoutine".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_screen_fade_routine(
+                "script_runtime.graphics_events[0].source_script",
+                "FadeInFromBlack",
+                ScriptFadeColor::Black,
+                ScriptFadeDirection::In,
+                8,
+            ),
+            Ok(())
+        );
+        let graphics_fade = ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::ScreenFade,
+            color: Some(ScriptFadeColor::White),
+            direction: Some(ScriptFadeDirection::Out),
+            frames: Some(8),
+            source_script: "FadeOutToWhite".to_string(),
+            command_index: 0,
+        };
+        assert_eq!(
+            validate_saved_graphics_runtime_event_shape(
+                "script_runtime.graphics_events[0].source_script",
+                &graphics_fade,
+            ),
+            Ok(())
+        );
+        let mut invalid_graphics_fade = graphics_fade.clone();
+        invalid_graphics_fade.frames = Some(4);
+        assert_eq!(
+            validate_saved_graphics_runtime_event_shape(
+                "script_runtime.graphics_events[0].source_script",
+                &invalid_graphics_fade,
+            )
+            .map_err(|error| error.to_string()),
+            Err(
+                "saved script_runtime.graphics_events[0].source_script FadeOutToWhite frames 4 does not match 8"
+                    .to_string()
+            )
+        );
+        let clear_tilemap = ScriptGraphicsRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptGraphicsRuntimeKind::ClearTilemap,
+            color: Some(ScriptFadeColor::White),
+            direction: None,
+            frames: None,
+            source_script: "ClearTilemap".to_string(),
+            command_index: 0,
+        };
+        assert_eq!(
+            validate_saved_graphics_runtime_event_shape(
+                "script_runtime.graphics_events[0].source_script",
+                &clear_tilemap,
+            )
+            .map_err(|error| error.to_string()),
+            Err(
+                "saved script_runtime.graphics_events[0].source_script ClearTilemap:0 graphics event has unexpected fade payload"
+                    .to_string()
+            )
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5731,6 +10280,69 @@ mod tests {
             Err("money_events[0].money must be 0 for DisplayCoinCaseBalance".to_string())
         );
 
+        let money_event = ScriptMoneyRuntimeEvent {
+            command: "special".to_string(),
+            kind: ScriptMoneyRuntimeKind::DisplayCoinCaseBalance,
+            money: 0,
+            coins: Some(7),
+            source_script: "DisplayCoinCaseBalance".to_string(),
+            command_index: 0,
+        };
+        assert_eq!(
+            validate_saved_money_runtime_routine(
+                "script_runtime.money_events[0].source_script",
+                &money_event,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_money_runtime_event_shape(
+                "script_runtime.money_events[0].source_script",
+                &money_event,
+            ),
+            Ok(())
+        );
+
+        let mut money_event = money_event;
+        money_event.coins = None;
+        assert_eq!(
+            validate_saved_money_runtime_event_shape(
+                "script_runtime.money_events[0].source_script",
+                &money_event,
+            )
+            .map_err(|error| error.to_string()),
+            Err(
+                "saved script_runtime.money_events[0].source_script DisplayCoinCaseBalance:0 money event is missing coins"
+                    .to_string()
+            )
+        );
+        money_event.coins = Some(7);
+        money_event.source_script = "UnknownMoneyRoutine".to_string();
+        assert_eq!(
+            validate_saved_money_runtime_routine(
+                "script_runtime.money_events[0].source_script",
+                &money_event,
+            ),
+            Err(ScriptMoneyRuntimeRoutineError::UnknownRoutine {
+                path: "script_runtime.money_events[0].source_script".to_string(),
+                routine: "UnknownMoneyRoutine".to_string(),
+            })
+        );
+
+        money_event.source_script = "PlaceMoneyTopRight".to_string();
+        assert_eq!(
+            validate_saved_money_runtime_routine(
+                "script_runtime.money_events[0].source_script",
+                &money_event,
+            ),
+            Err(ScriptMoneyRuntimeRoutineError::KindMismatch {
+                path: "script_runtime.money_events[0].source_script".to_string(),
+                routine: "PlaceMoneyTopRight".to_string(),
+                actual: ScriptMoneyRuntimeKind::DisplayCoinCaseBalance,
+                expected: ScriptMoneyRuntimeKind::PlaceMoneyTopRight,
+            })
+        );
+
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_map_load = Some(ScriptMapLoadRequest {
             command: "reload map".to_string(),
@@ -5741,6 +10353,55 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("pending_map_load.command has invalid token 'reload map'".to_string())
+        );
+
+        let map_event = ScriptMapRuntimeEvent {
+            command: "warpfacing".to_string(),
+            kind: ScriptMapRuntimeKind::Warp,
+            target_map: Some("Route29".to_string()),
+            tile: Some(TilePosition { x: 4, y: 7 }),
+            facing: Some(Direction::Left),
+            map_setup: None,
+            source_script: "MapScript".to_string(),
+            command_index: 11,
+        };
+        assert_eq!(
+            saved_map_runtime_event_command_args(
+                "script_runtime.map_events[0].source_script",
+                &map_event
+            ),
+            Ok(Some(vec![
+                "Route29".to_string(),
+                "4".to_string(),
+                "7".to_string(),
+                "LEFT".to_string(),
+            ]))
+        );
+
+        let mut map_event = map_event;
+        map_event.command = "warp".to_string();
+        map_event.target_map = None;
+        map_event.tile = None;
+        map_event.facing = None;
+        assert_eq!(
+            saved_map_runtime_event_command_args(
+                "script_runtime.map_events[0].source_script",
+                &map_event
+            ),
+            Ok(Some(vec![
+                "NONE".to_string(),
+                "0".to_string(),
+                "0".to_string()
+            ]))
+        );
+
+        map_event.command = "custommapcommand".to_string();
+        assert_eq!(
+            saved_map_runtime_event_command_args(
+                "script_runtime.map_events[0].source_script",
+                &map_event
+            ),
+            Ok(None)
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5801,6 +10462,49 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("text_events[0].face_player must be true for jumptextfaceplayer".to_string())
+        );
+
+        let text_event = ScriptTextRuntimeEvent {
+            command: "jumptextfaceplayer".to_string(),
+            kind: ScriptTextRuntimeKind::Write,
+            text_label: Some("GreetingText".to_string()),
+            face_player: true,
+            closes_text: true,
+            source_script: "TextScript".to_string(),
+            command_index: 12,
+        };
+        assert_eq!(
+            saved_text_runtime_event_command_args(
+                "script_runtime.text_events[0].source_script",
+                &text_event
+            ),
+            Ok(Some(vec!["GreetingText".to_string()]))
+        );
+
+        let mut text_event = text_event;
+        text_event.command = "customtextcommand".to_string();
+        assert_eq!(
+            saved_text_runtime_event_command_args(
+                "script_runtime.text_events[0].source_script",
+                &text_event
+            ),
+            Ok(None)
+        );
+
+        text_event.command = "opentext".to_string();
+        assert_eq!(
+            saved_text_runtime_event_command_args(
+                "script_runtime.text_events[0].source_script",
+                &text_event
+            ),
+            Err(ScriptTextRuntimeCommandError::KindMismatch {
+                path: "script_runtime.text_events[0].source_script".to_string(),
+                source_script: "TextScript".to_string(),
+                command_index: 12,
+                command: "opentext".to_string(),
+                actual: ScriptTextRuntimeKind::Write,
+                expected: ScriptTextRuntimeKind::Open,
+            })
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -5899,6 +10603,33 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("pending_text_wait.command opentext is not a saved text wait command".to_string())
+        );
+
+        let wait = ScriptTextWait {
+            command: "jumptextfaceplayer".to_string(),
+            source_script: "TextWaitScript".to_string(),
+            command_index: 12,
+        };
+        assert_eq!(
+            saved_pending_text_wait_command_args(
+                "script_runtime.pending_text_wait.source_script",
+                &wait,
+                Some("GreetingText"),
+            ),
+            Ok(Some(vec!["GreetingText".to_string()]))
+        );
+        assert_eq!(
+            saved_pending_text_wait_command_args(
+                "script_runtime.pending_text_wait.source_script",
+                &wait,
+                None,
+            ),
+            Err(ScriptTextWaitCommandError::MissingPendingTextLabel {
+                path: "script_runtime.pending_text_wait.source_script".to_string(),
+                source_script: "TextWaitScript".to_string(),
+                command_index: 12,
+                command: "jumptextfaceplayer".to_string(),
+            })
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -6038,6 +10769,136 @@ mod tests {
             runtime_error.contains("unknown field `fallback_script`"),
             "{runtime_error}"
         );
+
+        let link_status_error =
+            serde_json::from_value::<LinkSerialConnectionStatus>(serde_json::json!({
+                "using_external_clock": {
+                    "legacy_clock": "serial"
+                }
+            }))
+            .expect_err("link serial status must not accept legacy payloads")
+            .to_string();
+        assert!(
+            link_status_error.contains("invalid type")
+                || link_status_error.contains("unknown variant"),
+            "{link_status_error}"
+        );
+
+        let battle_memory_error = serde_json::from_value::<BattleMemory>(serde_json::json!({
+            "wild": {
+                "battle_type": "BATTLETYPE_NORMAL",
+                "map_name": "Route29",
+                "enemy_pokemon": null,
+                "enemy_party": [],
+                "fallback_species": "RATTATA"
+            }
+        }))
+        .expect_err("battle memory must not accept fallback species fields")
+        .to_string();
+        assert!(
+            battle_memory_error.contains("unknown field `fallback_species`")
+                || battle_memory_error.contains("invalid type"),
+            "{battle_memory_error}"
+        );
+
+        let overworld_memory_error = serde_json::from_value::<OverworldMemory>(serde_json::json!({
+            "active": {
+                "map_name": "Route29",
+                "tile": { "x": 1, "y": 2 },
+                "facing": "down",
+                "mode": "walking",
+                "fallback_map_name": "NewBarkTown"
+            }
+        }))
+        .expect_err("overworld memory must not accept fallback map fields")
+        .to_string();
+        assert!(
+            overworld_memory_error.contains("unknown field `fallback_map_name`")
+                || overworld_memory_error.contains("invalid type"),
+            "{overworld_memory_error}"
+        );
+
+        let text_speed_error =
+            serde_json::from_str::<TextSpeed>(r#"{"fast":{"legacy_speed":"FAST"}}"#)
+                .expect_err("saved text speed must not accept legacy aliases")
+                .to_string();
+        assert!(
+            text_speed_error.contains("invalid type")
+                || text_speed_error.contains("unknown field `legacy_speed`"),
+            "{text_speed_error}"
+        );
+
+        let runtime_kind_error =
+            serde_json::from_str::<ScriptAudioRuntimeKind>(r#"{"cry":{"fallback_kind":"sfx"}}"#)
+                .expect_err("runtime audio kinds must not accept fallback aliases")
+                .to_string();
+        assert!(
+            runtime_kind_error.contains("invalid type")
+                || runtime_kind_error.contains("unknown field `fallback_kind`"),
+            "{runtime_kind_error}"
+        );
+
+        let frame_error = serde_json::from_value::<GameStateFrameError>(serde_json::json!({
+            "FrameCursorOverflow": {
+                "frame": 99,
+                "legacy_frame": 98
+            }
+        }))
+        .expect_err("frame errors must not accept legacy frame values")
+        .to_string();
+        assert!(
+            frame_error.contains("unknown field `legacy_frame`"),
+            "{frame_error}"
+        );
+
+        let scene_error = serde_json::from_value::<SceneError>(serde_json::json!({
+            "UnknownScene": {
+                "map_name": "NEW_BARK_TOWN",
+                "scene_name": "SCENE_DEFAULT",
+                "fallback_scene": "SCENE_NEVER"
+            }
+        }))
+        .expect_err("scene errors must not accept fallback scenes")
+        .to_string();
+        assert!(
+            scene_error.contains("unknown field `fallback_scene`"),
+            "{scene_error}"
+        );
+
+        let fishing_error =
+            serde_json::from_str::<FishingRodState>(r#"{"waiting":{"fallback_result":0}}"#)
+                .expect_err("fishing rod state must not accept fallback result payloads")
+                .to_string();
+        assert!(
+            fishing_error.contains("invalid type")
+                || fishing_error.contains("unknown field `fallback_result`"),
+            "{fishing_error}"
+        );
+
+        let command_error = serde_json::from_value::<GameCommand>(serde_json::json!({
+            "type": "joypad",
+            "mask": 1,
+            "fallback_mask": 0
+        }))
+        .expect_err("game commands must not accept fallback input masks")
+        .to_string();
+        assert!(
+            command_error.contains("unknown field `fallback_mask`"),
+            "{command_error}"
+        );
+
+        let event_error = serde_json::from_value::<GameEvent>(serde_json::json!({
+            "type": "joypad_changed",
+            "pressed": 1,
+            "down": 1,
+            "legacy_down": 0
+        }))
+        .expect_err("game events must not accept legacy input masks")
+        .to_string();
+        assert!(
+            event_error.contains("unknown field `legacy_down`"),
+            "{event_error}"
+        );
     }
 
     #[test]
@@ -6059,6 +10920,210 @@ mod tests {
 
         assert_eq!(
             state.try_advance_frame(),
+            Err(GameStateFrameError::FrameCursorOverflow { frame: u64::MAX })
+        );
+        assert_eq!(state.frame_counter, u64::MAX);
+    }
+
+    #[test]
+    fn repel_step_counter_expires_without_item_fallback() {
+        let mut state = GameState {
+            repel_steps_remaining: 2,
+            active_repel_item: Some("REPEL".to_string()),
+            ..GameState::default()
+        };
+
+        assert_eq!(state.tick_repel_step_after_movement(), None);
+        assert_eq!(state.repel_steps_remaining, 1);
+        assert_eq!(state.active_repel_item.as_deref(), Some("REPEL"));
+
+        assert_eq!(
+            state.tick_repel_step_after_movement(),
+            Some("REPEL".to_string())
+        );
+        assert_eq!(state.repel_steps_remaining, 0);
+        assert_eq!(state.active_repel_item, None);
+    }
+
+    #[test]
+    fn joypad_memory_tracks_pressed_down_released_without_inference() {
+        let mut state = GameState::default();
+
+        assert_eq!(
+            state.apply_joypad_mask(0b0001_0001),
+            Ok(GameEvent::JoypadChanged {
+                pressed: 0b0001_0001,
+                down: 0b0001_0001,
+            })
+        );
+        assert_eq!(state.joypad.h_joypad_pressed, 0b0001_0001);
+        assert_eq!(state.joypad.h_joypad_down, 0b0001_0001);
+        assert_eq!(state.joypad.h_joypad_released, 0);
+        assert_eq!(state.joypad.h_joypad_sum, 0b0001_0001);
+
+        assert_eq!(
+            state.apply_joypad_mask(0b0010_0001),
+            Ok(GameEvent::JoypadChanged {
+                pressed: 0b0010_0000,
+                down: 0b0010_0001,
+            })
+        );
+        assert_eq!(state.joypad.h_joypad_pressed, 0b0010_0000);
+        assert_eq!(state.joypad.h_joypad_released, 0b0001_0000);
+        assert_eq!(state.joypad.h_joy_last, 0b0001_0001);
+        assert_eq!(state.joypad.h_joypad_sum, 0b0011_0001);
+    }
+
+    #[test]
+    fn rng_seed_commit_records_authoritative_before_after_seed() {
+        let mut state = GameState {
+            rng_seed: 0x1234_5678,
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            state.commit_rng_seed(0xfeed_beef),
+            RngSeedCommit {
+                rng_seed_before: 0x1234_5678,
+                rng_seed_after: 0xfeed_beef,
+            }
+        );
+        assert_eq!(state.rng_seed, 0xfeed_beef);
+    }
+
+    #[test]
+    fn no_active_battle_guard_reports_exact_active_battle_kind() {
+        let species = crate::models::PokemonSpecies::new_for_tests(
+            "CHIKORITA",
+            crate::models::BaseStats::new(45, 49, 49, 45, 65, 65),
+        );
+        let pokemon = Pokemon::new_for_tests(species, 6, crate::models::Dv::default());
+        assert_eq!(GameState::default().require_no_active_battle(), Ok(()));
+
+        let mut wild = GameState::default();
+        wild.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon.clone()],
+        };
+        assert_eq!(
+            wild.require_no_active_battle(),
+            Err(GameStateBattleError::ActiveBattle {
+                battle_kind: "wild".to_string(),
+            })
+        );
+
+        let mut static_wild = GameState::default();
+        static_wild.battle = BattleMemory::StaticWild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            species: "SUDOWOODO".to_string(),
+            level: 30,
+            source_script: "Route36SudowoodoScript".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon.clone()],
+        };
+        assert_eq!(
+            static_wild.require_no_active_battle(),
+            Err(GameStateBattleError::ActiveBattle {
+                battle_kind: "static_wild".to_string(),
+            })
+        );
+
+        let mut trainer = GameState::default();
+        trainer.battle = BattleMemory::Trainer {
+            battle_type: "BATTLETYPE_TRAINER".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_name: "JOEY".to_string(),
+            event_flag: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            seen_text: "YoungsterJoeySeenText".to_string(),
+            win_text: "YoungsterJoeyWinText".to_string(),
+            loss_text: "YoungsterJoeyLossText".to_string(),
+            callback: "TrainerCallback".to_string(),
+            source_script: "Route30YoungsterJoeyScript".to_string(),
+            enemy_pokemon: pokemon.clone(),
+            enemy_party: vec![pokemon],
+            reward: 4,
+            encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+        assert_eq!(
+            trainer.require_no_active_battle(),
+            Err(GameStateBattleError::ActiveTrainerBattle {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn joypad_commands_reject_conflicting_directions_without_mutation() {
+        let mut state = GameState::default();
+
+        assert_eq!(
+            state.apply_joypad_mask(B_PAD_LEFT | B_PAD_RIGHT),
+            Err(GameStateFrameError::ConflictingJoypadDirections {
+                mask: B_PAD_LEFT | B_PAD_RIGHT,
+            })
+        );
+        assert_eq!(state.joypad, JoypadMemory::default());
+
+        assert_eq!(
+            state.apply_command(GameCommand::Joypad {
+                mask: B_PAD_UP | B_PAD_DOWN,
+            }),
+            Err(GameStateFrameError::ConflictingJoypadDirections {
+                mask: B_PAD_UP | B_PAD_DOWN,
+            })
+        );
+        assert_eq!(state.joypad, JoypadMemory::default());
+    }
+
+    #[test]
+    fn game_commands_mutate_state_and_return_explicit_events() {
+        let mut state = GameState::default();
+
+        assert_eq!(
+            state
+                .apply_command(GameCommand::Joypad { mask: 0b0001_0000 })
+                .expect("joypad command"),
+            vec![GameEvent::JoypadChanged {
+                pressed: 0b0001_0000,
+                down: 0b0001_0000,
+            }]
+        );
+        assert_eq!(
+            state
+                .apply_command(GameCommand::AdvanceFrame)
+                .expect("frame command"),
+            vec![GameEvent::FrameAdvanced { frame: 1 }]
+        );
+        assert_eq!(state.frame_counter, 1);
+        assert_eq!(
+            state
+                .apply_command(GameCommand::OpenMenu)
+                .expect("open menu command"),
+            vec![GameEvent::MenuOpened]
+        );
+        assert_eq!(
+            state
+                .apply_command(GameCommand::CloseMenu)
+                .expect("close menu command"),
+            vec![GameEvent::MenuClosed]
+        );
+    }
+
+    #[test]
+    fn advance_frame_command_rejects_overflow_without_mutation() {
+        let mut state = GameState {
+            frame_counter: u64::MAX,
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            state.apply_command(GameCommand::AdvanceFrame),
             Err(GameStateFrameError::FrameCursorOverflow { frame: u64::MAX })
         );
         assert_eq!(state.frame_counter, u64::MAX);
@@ -6198,6 +11263,84 @@ mod tests {
     }
 
     #[test]
+    fn validate_saved_scene_references_rejects_missing_maps_and_scenes() {
+        let mut memory = SceneMemory {
+            current_map_name: "ElmsLab".to_string(),
+            scene_name: "SCENE_ELMSLAB_MEET_ELM".to_string(),
+            ..SceneMemory::default()
+        };
+
+        let error = validate_saved_scene_references(&memory, |_| false, |_, _| None)
+            .expect_err("current scene map must exist in compiled maps");
+        assert_eq!(
+            error,
+            SceneSaveError::MissingMap {
+                path: "scenes.current_map_name",
+                map_name: "ElmsLab".to_string(),
+            }
+        );
+
+        let error = validate_saved_scene_references(&memory, |_| true, |_, _| None)
+            .expect_err("current scene must exist in compiled scene table");
+        assert_eq!(
+            error,
+            SceneSaveError::MissingScene {
+                path: "scenes.current",
+                map_name: "ElmsLab".to_string(),
+                scene_name: "SCENE_ELMSLAB_MEET_ELM".to_string(),
+            }
+        );
+
+        memory = SceneMemory::default();
+        memory
+            .map_scenes
+            .insert("Route29".to_string(), "SCENE_ROUTE29_NOOP".to_string());
+        memory.map_scene_indices.insert("Route29".to_string(), 0);
+        let error = validate_saved_scene_references(&memory, |_| false, |_, _| None)
+            .expect_err("saved map scene map must exist in compiled maps");
+        assert_eq!(
+            error,
+            SceneSaveError::MissingMap {
+                path: "scenes.map_scenes",
+                map_name: "Route29".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_saved_scene_references_checks_saved_index_against_compiled_index() {
+        let mut memory = SceneMemory::default();
+        memory
+            .map_scenes
+            .insert("ElmsLab".to_string(), "SCENE_ELMSLAB_NOOP".to_string());
+
+        let error = validate_saved_scene_references(&memory, |_| true, |_, _| Some(1))
+            .expect_err("saved map scene must carry saved scene index");
+        assert_eq!(
+            error,
+            SceneSaveError::MissingSceneIndex {
+                path: "scenes.map_scenes",
+                map_name: "ElmsLab".to_string(),
+                scene_name: "SCENE_ELMSLAB_NOOP".to_string(),
+            }
+        );
+
+        memory.map_scene_indices.insert("ElmsLab".to_string(), 0);
+        let error = validate_saved_scene_references(&memory, |_| true, |_, _| Some(1))
+            .expect_err("saved scene index must match compiled scene order");
+        assert_eq!(
+            error,
+            SceneSaveError::SceneIndexMismatch {
+                path: "scenes.map_scenes",
+                map_name: "ElmsLab".to_string(),
+                scene_name: "SCENE_ELMSLAB_NOOP".to_string(),
+                saved_index: 0,
+                compiled_index: 1,
+            }
+        );
+    }
+
+    #[test]
     fn event_flags_are_exact_strings_without_case_coercion() {
         let mut flags = EventFlagMemory::default();
         flags
@@ -6232,6 +11375,148 @@ mod tests {
             .clear_script_flag("ENGINE_ZEPHYRBADGE")
             .expect("clear engine flag");
         assert_eq!(flags.is_engine_flag_set("ENGINE_ZEPHYRBADGE"), Ok(false));
+    }
+
+    #[test]
+    fn validate_saved_mystery_gift_references_requires_compiled_items() {
+        let mystery_gift = MysteryGiftState {
+            stored_item: Some("GOLD_LEAF".to_string()),
+            backup_item: Some("SILVER_LEAF".to_string()),
+        };
+
+        let error =
+            validate_saved_mystery_gift_references(&mystery_gift, |item| item == "SILVER_LEAF")
+                .expect_err("stored mystery gift item must exist in compiled items");
+        assert_eq!(
+            error,
+            MysteryGiftSaveError::MissingItem {
+                path: "mystery_gift.stored_item",
+                item_id: "GOLD_LEAF".to_string(),
+            }
+        );
+
+        let error =
+            validate_saved_mystery_gift_references(&mystery_gift, |item| item == "GOLD_LEAF")
+                .expect_err("backup mystery gift item must exist in compiled items");
+        assert_eq!(
+            error,
+            MysteryGiftSaveError::MissingItem {
+                path: "mystery_gift.backup_item",
+                item_id: "SILVER_LEAF".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_saved_link_session_references_requires_compiled_active_room() {
+        let link_session = LinkSessionState {
+            active_room: Some("CableClubTradeCenter".to_string()),
+            ..LinkSessionState::default()
+        };
+
+        let error = validate_saved_link_session_references(&link_session, |_| false)
+            .expect_err("active link room must exist in compiled special routines");
+        assert_eq!(
+            error,
+            LinkSessionSaveError::MissingActiveRoom {
+                room: "CableClubTradeCenter".to_string(),
+            }
+        );
+
+        assert_eq!(
+            validate_saved_link_session_references(&link_session, |room| {
+                room == "CableClubTradeCenter"
+            }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_saved_flag_references_rejects_cross_stored_flags() {
+        let mut flags = EventFlagMemory::default();
+        flags
+            .event_flags
+            .insert("ENGINE_ZEPHYRBADGE".to_string(), true);
+
+        let error = validate_saved_flag_references(&flags, |_| true, |_| true)
+            .expect_err("engine flag cannot be saved in event flag memory");
+        assert_eq!(
+            error,
+            EventFlagSaveError::EngineFlagSavedAsEventFlag {
+                path: "flags.event_flags".to_string(),
+                flag_name: "ENGINE_ZEPHYRBADGE".to_string(),
+            }
+        );
+        assert_eq!(
+            validate_saved_event_flag_reference(
+                "script_runtime.pending_events[0]",
+                "ENGINE_ZEPHYRBADGE",
+                |_| true,
+            ),
+            Err(EventFlagSaveError::EngineFlagSavedAsEventFlag {
+                path: "script_runtime.pending_events[0]".to_string(),
+                flag_name: "ENGINE_ZEPHYRBADGE".to_string(),
+            })
+        );
+
+        flags = EventFlagMemory::default();
+        flags
+            .engine_flags
+            .insert("EVENT_BEAT_YOUNGSTER_JOEY".to_string(), true);
+
+        let error = validate_saved_flag_references(&flags, |_| true, |_| true)
+            .expect_err("event flag cannot be saved in engine flag memory");
+        assert_eq!(
+            error,
+            EventFlagSaveError::EventFlagSavedAsEngineFlag {
+                path: "flags.engine_flags".to_string(),
+                flag_name: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            }
+        );
+        assert_eq!(
+            validate_saved_engine_flag_reference(
+                "script_runtime.pending_events[0]",
+                "EVENT_BEAT_YOUNGSTER_JOEY",
+                |_| true,
+            ),
+            Err(EventFlagSaveError::EventFlagSavedAsEngineFlag {
+                path: "script_runtime.pending_events[0]".to_string(),
+                flag_name: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_saved_flag_references_requires_compiled_declarations() {
+        let mut flags = EventFlagMemory::default();
+        flags
+            .event_flags
+            .insert("EVENT_BEAT_YOUNGSTER_JOEY".to_string(), true);
+
+        let error = validate_saved_flag_references(&flags, |_| false, |_| true)
+            .expect_err("saved event flag must be declared by compiled pack");
+        assert_eq!(
+            error,
+            EventFlagSaveError::MissingEventFlag {
+                path: "flags.event_flags".to_string(),
+                flag_name: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            }
+        );
+
+        flags = EventFlagMemory::default();
+        flags
+            .engine_flags
+            .insert("ENGINE_ZEPHYRBADGE".to_string(), true);
+
+        let error = validate_saved_flag_references(&flags, |_| true, |_| false)
+            .expect_err("saved engine flag must be declared by compiled pack");
+        assert_eq!(
+            error,
+            EventFlagSaveError::MissingEngineFlag {
+                path: "flags.engine_flags".to_string(),
+                flag_name: "ENGINE_ZEPHYRBADGE".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -6291,6 +11576,28 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("invalid saved event flags: invalid flag name ENGINE_ZEPHYRBADGE\n".to_string())
+        );
+    }
+
+    #[test]
+    fn saved_flags_and_scenes_reject_reserved_runtime_prefix_tokens() {
+        let mut flags = EventFlagMemory::default();
+        assert_eq!(
+            flags.set_event_flag("fallback_EVENT_ROUTE_29_POTION", true),
+            Err(EventFlagError::InvalidFlagName {
+                flag_name: "fallback_EVENT_ROUTE_29_POTION".to_string(),
+            })
+        );
+
+        let scenes = SceneMemory {
+            current_map_name: "legacyRoute29".to_string(),
+            ..SceneMemory::default()
+        };
+        assert_eq!(
+            scenes.validate(),
+            Err(SceneError::InvalidMapName {
+                map_name: "legacyRoute29".to_string(),
+            })
         );
     }
 }

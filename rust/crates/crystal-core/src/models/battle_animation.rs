@@ -55,9 +55,15 @@ pub fn battle_animation_catalog_issues(
 fn is_exact_nonempty_battle_animation_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -124,5 +130,26 @@ mod tests {
     #[test]
     fn battle_animation_catalog_issues_allow_empty_table_for_partial_packs() {
         assert!(battle_animation_catalog_issues(&BTreeMap::new(), &[], 12).is_empty());
+    }
+
+    #[test]
+    fn battle_animation_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let animations = [(
+            "fallbackBattleAnim_Tackle".to_string(),
+            vec!["anim_wait 1".to_string()],
+        )]
+        .into_iter()
+        .collect();
+        let animation_table = vec!["legacyBattleAnim_Tackle".to_string()];
+
+        assert_eq!(
+            battle_animation_catalog_issues(&animations, &animation_table, 0),
+            vec![
+                BattleAnimationCatalogIssue::InvalidAnimation {
+                    label: "fallbackBattleAnim_Tackle".to_string(),
+                },
+                BattleAnimationCatalogIssue::InvalidTableEntry { index: 0 },
+            ],
+        );
     }
 }

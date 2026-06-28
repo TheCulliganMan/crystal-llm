@@ -18,9 +18,15 @@ pub fn pc_string_catalog_issues(
 fn is_exact_nonempty_pc_string_key(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -64,6 +70,23 @@ mod tests {
                     key: "PCString_Withdraw".to_string(),
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn pc_string_catalog_issues_reject_reserved_pack_prefix_keys() {
+        let pc_strings = [(
+            "fallback_PCString_Deposit".to_string(),
+            "Deposit.".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            pc_string_catalog_issues(&pc_strings),
+            vec![PcStringCatalogIssue::InvalidString {
+                key: "fallback_PCString_Deposit".to_string(),
+            }],
         );
     }
 }

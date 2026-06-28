@@ -5,8 +5,11 @@ use crate::state::{EventFlagError, GameState, is_engine_flag_name};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptFlagCommand {
+    #[serde(deserialize_with = "required_script_flag_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_script_flag_token")]
     pub flag_id: String,
+    #[serde(deserialize_with = "required_script_flag_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -34,6 +37,7 @@ pub struct ScriptFlagCheckOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptFlagError {
     InvalidCommand { command: String },
     UnknownCommand { command: String },
@@ -41,7 +45,7 @@ pub enum ScriptFlagError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptFlagCommandIssue {
     InvalidCommand,
     UnknownCommand,
@@ -83,6 +87,7 @@ fn is_exact_script_flag_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_flag_token(value: &str) -> bool {
@@ -91,6 +96,40 @@ fn is_exact_script_flag_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_flag_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_flag_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script flag command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_flag_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_flag_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script flag token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn apply_script_flag_mutation(
@@ -224,6 +263,41 @@ mod tests {
     }
 
     #[test]
+    fn script_flag_commands_reject_reserved_pack_prefixes() {
+        assert_eq!(
+            script_flag_command_issues(&command("fallbackset", "EVENT_ROUTE_29_POTION")),
+            vec![ScriptFlagCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_flag_command_issues(&command("setevent", "legacy_event")),
+            vec![ScriptFlagCommandIssue::InvalidFlagId]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackset")),
+            ("flag_id", serde_json::json!("legacy_event")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "setevent",
+                "flag_id": "EVENT_ROUTE_29_POTION",
+                "source_script": "RouteScript",
+                "command_index": 3
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptFlagCommand>(payload)
+                .expect_err("reserved script flag command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script flag"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn event_flag_commands_mutate_exact_event_flags_without_case_coercion() {
         let mut state = GameState::default();
         let set =
@@ -298,6 +372,22 @@ mod tests {
             Err(ScriptFlagError::UnknownCommand {
                 command: "setevent".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn script_flag_serialized_variants_reject_unknown_fallback_fields() {
+        let error = serde_json::from_value::<ScriptFlagError>(serde_json::json!({
+            "UnknownCommand": {
+                "command": "set_event",
+                "normalized_command": "setevent"
+            }
+        }))
+        .expect_err("normalized command must be rejected")
+        .to_string();
+        assert!(
+            error.contains("unknown field `normalized_command`"),
+            "{error}"
         );
     }
 }

@@ -9,8 +9,17 @@ import type { PokedexData } from "@pokecrystal/assets/content/pokedex-data";
 import type { Trainer } from "@pokecrystal/core/core/models/trainer";
 import type { ExportedItem } from "./export-items";
 import type { NpcData } from "./export-npcs";
-import { ensureDir, removeMatchingOutputs, writeJsonToTargets } from "./asm-utils";
-import type { EggMovesData, GrowthRateCurveData, LevelUpLearnsets, LevelUpMovesData } from "./export-data";
+import {
+  ensureDir,
+  removeMatchingOutputs,
+  writeJsonToTargets,
+} from "./asm-utils";
+import type {
+  EggMovesData,
+  GrowthRateCurveData,
+  LevelUpLearnsets,
+  LevelUpMovesData,
+} from "./export-data";
 import type { PokegearLandmarksPayload } from "./export-pokegear-landmarks";
 import type { PlayabilityRules } from "./export-playability";
 import type { ExportedAudioAsset } from "./export-audio-assets";
@@ -34,6 +43,7 @@ const CONTENT_PACK_CATEGORIES = [
   "egg_moves",
   "evolutions",
   "maps",
+  "map_scripts",
   "map_blocks",
   "map_attributes",
   "map_dimensions",
@@ -173,15 +183,15 @@ export type CoreExportPayload = {
   currencyConstants?: CurrencyConstantsPayload;
   pcStrings?: Record<string, string>;
   menuIcons?: Record<string, string>;
-  pokedexEntries?: unknown[];
+  pokedexEntries?: Record<string, unknown>;
   pokemonFrontpicAnimations?: Record<string, unknown>;
   initializeEvents?: unknown;
   storyEventScriptConstants?: unknown;
   phoneContacts?: Record<string, unknown>;
-  permanentPhoneNumbers?: string[];
-  specialPhoneCalls?: string[];
-  npcTrades?: string[];
-  specialRoutines?: string[];
+  permanentPhoneNumbers?: Record<string, Record<string, never>>;
+  specialPhoneCalls?: Record<string, Record<string, never>>;
+  npcTrades?: Record<string, Record<string, never>>;
+  specialRoutines?: Record<string, Record<string, never>>;
   asmText?: Record<string, string>;
   moveNames?: string[];
   battleAnimations?: Record<string, string[]>;
@@ -196,7 +206,7 @@ export type CoreExportPayload = {
   npcData: NpcData;
   pokegearLandmarks: PokegearLandmarksPayload;
   playability?: PlayabilityRules;
-  audioAssets?: ExportedAudioAsset[];
+  audioAssets?: Record<string, ExportedAudioAsset>;
 };
 
 const CORE_PACK_ID = "core-modular";
@@ -205,15 +215,27 @@ const MODULE_PREFIX = "module";
 
 const assertExactFileStem = (value: string): void => {
   if (value.trim() !== value || value.length === 0) {
-    throw new Error(`Content pack file stem must be explicit and untrimmed: ${JSON.stringify(value)}`);
+    throw new Error(
+      `Content pack file stem must be explicit and untrimmed: ${JSON.stringify(value)}`,
+    );
   }
-  if (value.includes("/") || value.includes("\\") || value === "." || value === ".." || value.includes("..")) {
-    throw new Error(`Content pack file stem must be a single exact path segment: ${JSON.stringify(value)}`);
+  if (
+    value.includes("/") ||
+    value.includes("\\") ||
+    value === "." ||
+    value === ".." ||
+    value.includes("..")
+  ) {
+    throw new Error(
+      `Content pack file stem must be a single exact path segment: ${JSON.stringify(value)}`,
+    );
   }
 };
 
 const emptyContentPackFiles = (): ContentPackFiles =>
-  Object.fromEntries(CONTENT_PACK_CATEGORIES.map((category) => [category, []])) as unknown as ContentPackFiles;
+  Object.fromEntries(
+    CONTENT_PACK_CATEGORIES.map((category) => [category, []]),
+  ) as unknown as ContentPackFiles;
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -284,7 +306,7 @@ const GENERATED_PARTY_FIELDS = new Set([
 const partySpeciesInfo = (
   partyEntry: Trainer["party"][number],
   trainerLabel: string,
-  partyIndex: number
+  partyIndex: number,
 ): { speciesId: string } => {
   const source = partyEntry as unknown as Record<string, unknown>;
   const species = source.species;
@@ -292,38 +314,42 @@ const partySpeciesInfo = (
     return { speciesId: species };
   }
   const speciesRecord = asRecord(species) as PokemonSpecies | null;
-  if (speciesRecord && typeof speciesRecord.id === "string" && speciesRecord.id.trim()) {
+  if (
+    speciesRecord &&
+    typeof speciesRecord.id === "string" &&
+    speciesRecord.id.trim()
+  ) {
     return {
       speciesId: speciesRecord.id,
     };
   }
   throw new Error(
-    `Unable to export trainer ${trainerLabel} party[${partyIndex}] because species is not a species id string or Pokemon species record with an id.`
+    `Unable to export trainer ${trainerLabel} party[${partyIndex}] because species is not a species id string or Pokemon species record with an id.`,
   );
 };
 
 const compactTrainerPartyEntry = (
   partyEntry: Trainer["party"][number],
   trainerLabel: string,
-  partyIndex: number
+  partyIndex: number,
 ): Record<string, unknown> => {
   const source = partyEntry as unknown as Record<string, unknown>;
   const { speciesId } = partySpeciesInfo(partyEntry, trainerLabel, partyIndex);
   for (const key of ["item", "moves", "dvs"] as const) {
     if (!Object.prototype.hasOwnProperty.call(source, key)) {
       throw new Error(
-        `Unable to export trainer ${trainerLabel} party[${partyIndex}] because '${key}' must be explicit modpack data.`
+        `Unable to export trainer ${trainerLabel} party[${partyIndex}] because '${key}' must be explicit modpack data.`,
       );
     }
   }
   if (!Array.isArray(source.moves)) {
     throw new Error(
-      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because 'moves' must be an explicit array.`
+      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because 'moves' must be an explicit array.`,
     );
   }
   if (!asRecord(source.dvs)) {
     throw new Error(
-      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because 'dvs' must be an explicit object.`
+      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because 'dvs' must be an explicit object.`,
     );
   }
   const compact: Record<string, unknown> = {
@@ -335,33 +361,46 @@ const compactTrainerPartyEntry = (
   };
 
   for (const [key, value] of Object.entries(source)) {
-    if (key === "species" || key === "level" || key === "item" || key === "moves" || key === "dvs") {
+    if (
+      key === "species" ||
+      key === "level" ||
+      key === "item" ||
+      key === "moves" ||
+      key === "dvs"
+    ) {
       continue;
     }
     if (GENERATED_PARTY_FIELDS.has(key)) {
       continue;
     }
     throw new Error(
-      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because '${key}' is not part of the definitive trainer party schema.`
+      `Unable to export trainer ${trainerLabel} party[${partyIndex}] because '${key}' is not part of the definitive trainer party schema.`,
     );
   }
 
   return compact;
 };
 
-const pokemonSpeciesPackPayload = (pokemon: PokemonSpecies): Omit<PokemonSpecies, "evolutions"> => {
-  const { evolutions: _staleEvolutions, ...speciesPayload } = pokemon as PokemonSpecies & {
-    evolutions?: unknown;
-  };
+const pokemonSpeciesPackPayload = (
+  pokemon: PokemonSpecies,
+): Omit<PokemonSpecies, "evolutions"> => {
+  const { evolutions: _staleEvolutions, ...speciesPayload } =
+    pokemon as PokemonSpecies & {
+      evolutions?: unknown;
+    };
   return speciesPayload;
 };
 
-const compactTrainerForContentPack = (trainer: Trainer): Record<string, unknown> => {
+const compactTrainerForContentPack = (
+  trainer: Trainer,
+): Record<string, unknown> => {
   const trainerLabel = trainer.trainer_id ?? trainer.name ?? "unknown";
   return {
     ...trainer,
     party: Array.isArray(trainer.party)
-      ? trainer.party.map((entry, index) => compactTrainerPartyEntry(entry, trainerLabel, index))
+      ? trainer.party.map((entry, index) =>
+          compactTrainerPartyEntry(entry, trainerLabel, index),
+        )
       : [],
   };
 };
@@ -369,7 +408,7 @@ const compactTrainerForContentPack = (trainer: Trainer): Record<string, unknown>
 const assertNoEmbeddedOwnedRecords = (
   category: ContentPackCategory,
   relativePath: string,
-  payload: unknown
+  payload: unknown,
 ): void => {
   if (category !== "trainers") {
     return;
@@ -386,7 +425,7 @@ const assertNoEmbeddedOwnedRecords = (
         Array.isArray(species.tmhm_learnset))
     ) {
       throw new Error(
-        `Content pack trainer ${relativePath} embeds a Pokemon species object at party[${index}].species. Use the species id string instead.`
+        `Content pack trainer ${relativePath} embeds a Pokemon species object at party[${index}].species. Use the species id string instead.`,
       );
     }
   }
@@ -396,7 +435,7 @@ const writePackEntry = <T>(
   files: string[],
   category: ContentPackCategory,
   stem: string,
-  payload: T
+  payload: T,
 ): string => {
   assertExactFileStem(stem);
   const fileName = `${stem}.json`;
@@ -409,31 +448,87 @@ const writePackEntry = <T>(
 
 const SILENT_MIDI_BYTES = Buffer.from(
   "4d546864000000060000000100604d54726b0000000400ff2f00",
-  "hex"
+  "hex",
 );
 
 const clearGeneratedAudioOutputs = (): void => {
   for (const directory of ["music", "sfx", "cries"]) {
-    fs.rmSync(joinPath(getDataDir(), CORE_PACK_PATH, directory), { recursive: true, force: true });
+    fs.rmSync(joinPath(getDataDir(), CORE_PACK_PATH, directory), {
+      recursive: true,
+      force: true,
+    });
+  }
+};
+
+const assertExactAudioId = (audioId: string): void => {
+  if (
+    !/^(MUSIC|SFX|CRY)_[A-Z0-9_]+$/.test(audioId) ||
+    audioId.includes("FALLBACK") ||
+    audioId.includes("LEGACY")
+  ) {
+    throw new Error(`Audio asset id ${audioId} must be an exact pack audio id`);
+  }
+};
+
+const audioDirectoryForKind = (kind: ExportedAudioAsset["kind"]): string => {
+  switch (kind) {
+    case "music":
+      return "music";
+    case "sound_effect":
+      return "sfx";
+    case "cry":
+      return "cries";
   }
 };
 
 const writeAudioAssetFile = (
   files: string[],
+  audioId: string,
   asset: ExportedAudioAsset,
-  writtenPayloads: Map<string, unknown>
+  writtenPayloads: Map<string, unknown>,
 ): void => {
+  assertExactAudioId(audioId);
+  assertExactAudioId(asset.id);
+  if (asset.source !== "midi") {
+    throw new Error(`Audio asset ${asset.id} must use midi source`);
+  }
+  if (audioId !== asset.id) {
+    throw new Error(
+      `Audio asset key ${audioId} does not match record id ${asset.id}`,
+    );
+  }
   if (!asset.path.endsWith(".mid")) {
-    throw new Error(`Audio asset ${asset.id} must use a .mid file: ${asset.path}`);
+    throw new Error(
+      `Audio asset ${asset.id} must use a .mid file: ${asset.path}`,
+    );
   }
   if (!asset.path.startsWith(`${CORE_PACK_PATH}/`)) {
-    throw new Error(`Audio asset ${asset.id} must live under ${CORE_PACK_PATH}: ${asset.path}`);
+    throw new Error(
+      `Audio asset ${asset.id} must live under ${CORE_PACK_PATH}: ${asset.path}`,
+    );
+  }
+  const pathSegments = asset.path.split("/");
+  const expectedDirectory = audioDirectoryForKind(asset.kind);
+  const actualDirectory = pathSegments.at(-2);
+  if (actualDirectory !== expectedDirectory) {
+    throw new Error(
+      `Audio asset ${asset.id} must live under ${expectedDirectory}: ${asset.path}`,
+    );
+  }
+  const fileName = pathSegments.at(-1) ?? "";
+  const expectedFileName = `${asset.id}.mid`;
+  if (fileName !== expectedFileName) {
+    throw new Error(
+      `Audio asset ${asset.id} path must end with ${expectedFileName}: ${asset.path}`,
+    );
   }
   const absolutePath = joinPath(getDataDir(), asset.path);
   ensureDir(absolutePath.split("/").slice(0, -1).join("/"));
   fs.writeFileSync(absolutePath, SILENT_MIDI_BYTES);
-  files.push(asset.path);
-  writtenPayloads.set(asset.path, asset);
+  const metadataPath = asset.path.replace(/\.mid$/, ".json");
+  writeJsonToTargets(metadataPath, { [asset.id]: asset }, { indent: 2 });
+  files.push(metadataPath);
+  writtenPayloads.set(metadataPath, { [asset.id]: asset });
 };
 
 const collectJsonFiles = (relativeDir: ContentPackCategory): string[] => {
@@ -448,10 +543,15 @@ const collectJsonFiles = (relativeDir: ContentPackCategory): string[] => {
     .map((entry) => `${relativeDir}/${entry}`);
 };
 
-const exactMapNameFromPayload = (relativePath: string, payload: unknown): string => {
+const exactMapNameFromPayload = (
+  relativePath: string,
+  payload: unknown,
+): string => {
   const record = asRecord(payload);
   if (!record) {
-    throw new Error(`Map asset ${relativePath} must be an object keyed by exact map labels.`);
+    throw new Error(
+      `Map asset ${relativePath} must be an object keyed by exact map labels.`,
+    );
   }
   const mapNames = new Set<string>();
   for (const key of Object.keys(record)) {
@@ -461,15 +561,17 @@ const exactMapNameFromPayload = (relativePath: string, payload: unknown): string
     }
   }
   if (mapNames.size !== 1) {
-    throw new Error(`Map asset ${relativePath} must declare one exact map name via _MapScripts or _MapEvents labels.`);
+    throw new Error(
+      `Map asset ${relativePath} must declare one exact map name via _MapScripts or _MapEvents labels.`,
+    );
   }
   return [...mapNames][0];
 };
 
-const writeMapAssetFiles = (
+const writeMapScriptAssetFiles = (
   files: string[],
   sourceRelativeDir: string,
-  writtenPayloads?: Map<string, unknown>
+  writtenPayloads?: Map<string, unknown>,
 ): Map<string, string> => {
   const written = new Map<string, string>();
   const absoluteDir = joinPath(getDataDir(), sourceRelativeDir);
@@ -481,8 +583,10 @@ const writeMapAssetFiles = (
     .filter((fileName) => fileName.endsWith(".json"))
     .sort()) {
     const stem = entry.replace(/\.json$/i, "");
-    const payload = readJsonAssetSync(joinPath(getDataDir(), sourceRelativeDir, entry));
-    const relativePath = writePackEntry(files, "maps", stem, payload);
+    const payload = readJsonAssetSync(
+      joinPath(getDataDir(), sourceRelativeDir, entry),
+    );
+    const relativePath = writePackEntry(files, "map_scripts", stem, payload);
     writtenPayloads?.set(relativePath, payload);
     written.set(exactMapNameFromPayload(relativePath, payload), relativePath);
   }
@@ -491,16 +595,24 @@ const writeMapAssetFiles = (
 
 const writeMapBlockEntries = (
   files: string[],
-  writtenPayloads?: Map<string, unknown>
+  writtenPayloads?: Map<string, unknown>,
 ): Map<string, string> => {
   const written = new Map<string, string>();
-  const raw = readJsonAssetSync<unknown>(joinPath(getDataDir(), "map_blocks.json"));
+  const raw = readJsonAssetSync<unknown>(
+    joinPath(getDataDir(), "map_blocks.json"),
+  );
   if (!isRecord(raw)) {
-    throw new Error("map_blocks.json must be an object of block labels to encoded block data.");
+    throw new Error(
+      "map_blocks.json must be an object of block labels to encoded block data.",
+    );
   }
-  for (const [label, encoded] of Object.entries(raw).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [label, encoded] of Object.entries(raw).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
     if (typeof encoded !== "string") {
-      throw new Error(`map_blocks.json entry '${label}' must be encoded block data.`);
+      throw new Error(
+        `map_blocks.json entry '${label}' must be encoded block data.`,
+      );
     }
     const payload = { [label]: encoded };
     const relativePath = writePackEntry(files, "map_blocks", label, payload);
@@ -510,18 +622,98 @@ const writeMapBlockEntries = (
   return written;
 };
 
+const assertExactTilesetId = (tilesetId: string): void => {
+  if (!/^[a-z0-9_]+$/.test(tilesetId)) {
+    throw new Error(
+      `Tileset id '${tilesetId}' must be an exact lowercase asset id.`,
+    );
+  }
+};
+
+const writeTilesetAssetFiles = (
+  files: string[],
+  mapAttributes: Record<string, unknown>,
+  writtenPayloads?: Map<string, unknown>,
+): void => {
+  const relativeDir = "tilesets";
+  const tilesetIds = Array.from(
+    new Set(
+      Object.values(mapAttributes)
+        .map((attributes) => asRecord(attributes)?.tileset_name)
+        .filter(
+          (tilesetName): tilesetName is string =>
+            typeof tilesetName === "string",
+        ),
+    ),
+  ).sort();
+  if (tilesetIds.length === 0) {
+    return;
+  }
+  const absoluteDir = joinPath(getDataDir(), relativeDir);
+  if (!fs.existsSync(absoluteDir)) {
+    throw new Error("Referenced tilesets require assets/data/tilesets.");
+  }
+  const entries = fs
+    .readdirSync(absoluteDir)
+    .filter((fileName) => fileName.endsWith(".json"))
+    .sort();
+  for (const tilesetId of tilesetIds) {
+    assertExactTilesetId(tilesetId);
+    const collisionFile = `${tilesetId}.json`;
+    const paletteFile = `${tilesetId}_palette_map.json`;
+    if (!entries.includes(collisionFile)) {
+      throw new Error(`Tileset '${tilesetId}' must declare ${collisionFile}.`);
+    }
+    if (!entries.includes(paletteFile)) {
+      throw new Error(`Tileset '${tilesetId}' must declare ${paletteFile}.`);
+    }
+    const collision = readJsonAssetSync(
+      joinPath(getDataDir(), relativeDir, collisionFile),
+    );
+    const paletteMap = readJsonAssetSync(
+      joinPath(getDataDir(), relativeDir, paletteFile),
+    );
+    if (!isRecord(collision)) {
+      throw new Error(
+        `Tileset '${tilesetId}' collision payload must be an object.`,
+      );
+    }
+    if (!Array.isArray(paletteMap)) {
+      throw new Error(
+        `Tileset '${tilesetId}' palette_map payload must be an array.`,
+      );
+    }
+    const payload = {
+      [tilesetId]: {
+        collision,
+        palette_map: paletteMap,
+      },
+    };
+    const relativePath = writePackEntry(files, "tilesets", tilesetId, payload);
+    writtenPayloads?.set(relativePath, payload);
+  }
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
-const requireContentPackFiles = (packId: string, value: unknown): ContentPackFiles => {
+const requireContentPackFiles = (
+  packId: string,
+  value: unknown,
+): ContentPackFiles => {
   if (!isRecord(value)) {
     throw new Error(`Content pack '${packId}' must declare files.`);
   }
   const files = {} as ContentPackFiles;
   for (const category of CONTENT_PACK_CATEGORIES) {
     const entries = value[category];
-    if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
-      throw new Error(`Content pack '${packId}' must declare files.${category} as a string array.`);
+    if (
+      !Array.isArray(entries) ||
+      entries.some((entry) => typeof entry !== "string")
+    ) {
+      throw new Error(
+        `Content pack '${packId}' must declare files.${category} as a string array.`,
+      );
     }
     files[category] = entries;
   }
@@ -546,7 +738,9 @@ const requireContentPack = (value: unknown, index: number): ContentPack => {
     throw new Error(`Content pack '${id}' must declare path.`);
   }
   if (typeof value.compiled !== "string" && value.compiled !== null) {
-    throw new Error(`Content pack '${id}' must declare compiled as a string or null.`);
+    throw new Error(
+      `Content pack '${id}' must declare compiled as a string or null.`,
+    );
   }
   return {
     id,
@@ -578,16 +772,21 @@ const readPreservedPacks = (): ContentPack[] => {
     .map(requireContentPack);
 };
 
-const parentPathFor = (filePath: string, _category: ContentPackCategory): string =>
-  filePath.replace(/\/[^/]+$/, "");
+const parentPathFor = (
+  filePath: string,
+  _category: ContentPackCategory,
+): string => filePath.replace(/\/[^/]+$/, "");
 
 const fileStem = (filePath: string): string =>
-  filePath.split("/").pop()?.replace(/\.[^.]+$/i, "") ?? "unknown";
+  filePath
+    .split("/")
+    .pop()
+    ?.replace(/\.[^.]+$/i, "") ?? "unknown";
 
 const makeModulePack = (
   id: string,
   path: string,
-  files: Partial<ContentPackFiles>
+  files: Partial<ContentPackFiles>,
 ): ContentPack => ({
   id,
   enabled: false,
@@ -601,14 +800,13 @@ const makeModulePack = (
 });
 
 const emptyCompiledCategories = (): Record<ContentPackCategory, unknown[]> =>
-  Object.fromEntries(CONTENT_PACK_CATEGORIES.map((category) => [category, []])) as unknown as Record<
-      ContentPackCategory,
-      unknown[]
-    >;
+  Object.fromEntries(
+    CONTENT_PACK_CATEGORIES.map((category) => [category, []]),
+  ) as unknown as Record<ContentPackCategory, unknown[]>;
 
 const buildCompiledCorePack = (
   files: ContentPackFiles,
-  writtenPayloads: Map<string, unknown>
+  writtenPayloads: Map<string, unknown>,
 ): CompiledContentPack => {
   const categories = emptyCompiledCategories();
   for (const category of CONTENT_PACK_CATEGORIES) {
@@ -637,132 +835,225 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     categoryFiles: string[],
     category: ContentPackCategory,
     stem: string,
-    entryPayload: T
+    entryPayload: T,
   ): string => {
-    const relativePath = writePackEntry(categoryFiles, category, stem, entryPayload);
+    const relativePath = writePackEntry(
+      categoryFiles,
+      category,
+      stem,
+      entryPayload,
+    );
     writtenPayloads.set(relativePath, entryPayload);
     return relativePath;
   };
 
   for (const pokemon of payload.pokemonData) {
-    writeCorePackEntry(files.pokemon, "pokemon", pokemon.id, pokemonSpeciesPackPayload(pokemon));
+    writeCorePackEntry(files.pokemon, "pokemon", pokemon.id, {
+      [pokemon.id]: pokemonSpeciesPackPayload(pokemon),
+    });
   }
   for (const [name, move] of Object.entries(payload.movesData)) {
-    writeCorePackEntry(files.moves, "moves", name, move);
+    writeCorePackEntry(files.moves, "moves", name, { [name]: move });
   }
   if (payload.growthRatesData && payload.growthRatesData.length > 0) {
-    writeCorePackEntry(files.growth_rates, "growth_rates", "growth_rates", payload.growthRatesData);
+    writeCorePackEntry(
+      files.growth_rates,
+      "growth_rates",
+      "growth_rates",
+      Object.fromEntries(
+        payload.growthRatesData.map((curve) => [curve.id, curve]),
+      ),
+    );
   }
   for (const [species, learnset] of Object.entries(payload.learnsetsData)) {
     writeCorePackEntry(files.learnsets, "learnsets", species, {
-      species,
-      learnset,
+      [species]: {
+        species,
+        learnset,
+      },
     });
   }
   for (const [species, moves] of Object.entries(payload.levelUpMovesData)) {
     writeCorePackEntry(files.level_up_moves, "level_up_moves", species, {
-      species,
-      moves,
+      [species]: {
+        species,
+        moves,
+      },
     });
   }
   for (const [species, moves] of Object.entries(payload.eggMovesData)) {
     writeCorePackEntry(files.egg_moves, "egg_moves", species, {
-      species,
-      moves,
+      [species]: {
+        species,
+        moves,
+      },
     });
   }
   for (const evolution of payload.evolutions) {
     const key = evolution.species ?? `species_${files.evolutions.length}`;
-    writeCorePackEntry(files.evolutions, "evolutions", key, evolution);
+    writeCorePackEntry(files.evolutions, "evolutions", key, {
+      [key]: evolution,
+    });
   }
-  const mapPathByName = writeMapAssetFiles(files.maps, "maps", writtenPayloads);
-  const mapBlockPathByLabel = writeMapBlockEntries(files.map_blocks, writtenPayloads);
+  const mapScriptPathByName = writeMapScriptAssetFiles(
+    files.map_scripts,
+    "maps",
+    writtenPayloads,
+  );
+  const mapBlockPathByLabel = writeMapBlockEntries(
+    files.map_blocks,
+    writtenPayloads,
+  );
   const encounterPathByMapName = new Map<string, string>();
   for (const encounter of payload.wildEncounters) {
-    const encounterPath = writeCorePackEntry(files.wild_encounters, "wild_encounters", encounter.map_name, encounter);
+    const encounterPath = writeCorePackEntry(
+      files.wild_encounters,
+      "wild_encounters",
+      encounter.map_name,
+      {
+        [encounter.map_name]: encounter,
+      },
+    );
     encounterPathByMapName.set(encounter.map_name, encounterPath);
   }
   const fieldEncounterPathByMapName = new Map<string, string>();
   for (const encounter of payload.fieldEncounters ?? []) {
-    const encounterPath = writeCorePackEntry(files.field_encounters, "field_encounters", encounter.map_name, encounter);
+    const encounterPath = writeCorePackEntry(
+      files.field_encounters,
+      "field_encounters",
+      encounter.map_name,
+      {
+        [encounter.map_name]: encounter,
+      },
+    );
     fieldEncounterPathByMapName.set(encounter.map_name, encounterPath);
   }
   if (payload.runtimeSpawnPoints) {
-    writeCorePackEntry(files.runtime_spawn_points, "runtime_spawn_points", "spawn_points", payload.runtimeSpawnPoints);
+    writeCorePackEntry(
+      files.runtime_spawn_points,
+      "runtime_spawn_points",
+      "spawn_points",
+      payload.runtimeSpawnPoints,
+    );
   }
   if (payload.runtimeMapMetadata) {
-    writeCorePackEntry(files.runtime_map_metadata, "runtime_map_metadata", "map_metadata", payload.runtimeMapMetadata);
+    writeCorePackEntry(
+      files.runtime_map_metadata,
+      "runtime_map_metadata",
+      "map_metadata",
+      payload.runtimeMapMetadata,
+    );
   }
   if (payload.fleeMons) {
-    writeCorePackEntry(files.flee_mons, "flee_mons", "flee_mons", payload.fleeMons);
+    writeCorePackEntry(
+      files.flee_mons,
+      "flee_mons",
+      "flee_mons",
+      payload.fleeMons,
+    );
   }
   if (payload.roamingPokemon) {
-    writeCorePackEntry(files.roaming_pokemon, "roaming_pokemon", "roaming_pokemon", payload.roamingPokemon);
+    writeCorePackEntry(
+      files.roaming_pokemon,
+      "roaming_pokemon",
+      "roaming_pokemon",
+      payload.roamingPokemon,
+    );
   }
   if (payload.buenaPasswordCategories) {
     writeCorePackEntry(
       files.buena_password_categories,
       "buena_password_categories",
       "buena_password_categories",
-      payload.buenaPasswordCategories
+      payload.buenaPasswordCategories,
     );
   }
   if (payload.buenaPrizes) {
-    writeCorePackEntry(files.buena_prizes, "buena_prizes", "buena_prizes", payload.buenaPrizes);
+    writeCorePackEntry(
+      files.buena_prizes,
+      "buena_prizes",
+      "buena_prizes",
+      payload.buenaPrizes,
+    );
   }
   if (payload.kurtApricornRecipes) {
     writeCorePackEntry(
       files.kurt_apricorn_recipes,
       "kurt_apricorn_recipes",
       "kurt_apricorn_recipes",
-      payload.kurtApricornRecipes
+      payload.kurtApricornRecipes,
     );
   }
   if (payload.shuckieGift) {
-    writeCorePackEntry(files.shuckie_gift, "shuckie_gift", "shuckie_gift", payload.shuckieGift);
+    writeCorePackEntry(
+      files.shuckie_gift,
+      "shuckie_gift",
+      "shuckie_gift",
+      payload.shuckieGift,
+    );
   }
   if (payload.dratiniMoveSets) {
     writeCorePackEntry(
       files.dratini_move_sets,
       "dratini_move_sets",
       "dratini_move_sets",
-      payload.dratiniMoveSets
+      payload.dratiniMoveSets,
     );
   }
   if (payload.bugContestConfig) {
-    writeCorePackEntry(files.bug_contest_config, "bug_contest_config", "bug_contest_config", payload.bugContestConfig);
+    writeCorePackEntry(
+      files.bug_contest_config,
+      "bug_contest_config",
+      "bug_contest_config",
+      payload.bugContestConfig,
+    );
   }
   if (payload.battleTowerRules) {
     writeCorePackEntry(
       files.battle_tower_rules,
       "battle_tower_rules",
       "battle_tower_rules",
-      payload.battleTowerRules
+      payload.battleTowerRules,
     );
   }
   if (payload.oakRatings) {
-    writeCorePackEntry(files.oak_ratings, "oak_ratings", "oak_ratings", payload.oakRatings);
+    writeCorePackEntry(
+      files.oak_ratings,
+      "oak_ratings",
+      "oak_ratings",
+      payload.oakRatings,
+    );
   }
   if (payload.oddEggDefinitions) {
     writeCorePackEntry(
       files.odd_egg_definitions,
       "odd_egg_definitions",
       "odd_egg_definitions",
-      payload.oddEggDefinitions
+      payload.oddEggDefinitions,
     );
   }
   if (payload.magikarpLengths) {
-    writeCorePackEntry(files.magikarp_lengths, "magikarp_lengths", "magikarp_lengths", payload.magikarpLengths);
+    writeCorePackEntry(
+      files.magikarp_lengths,
+      "magikarp_lengths",
+      "magikarp_lengths",
+      payload.magikarpLengths,
+    );
   }
   if (payload.happinessData) {
-    writeCorePackEntry(files.happiness_data, "happiness_data", "happiness_data", payload.happinessData);
+    writeCorePackEntry(
+      files.happiness_data,
+      "happiness_data",
+      "happiness_data",
+      payload.happinessData,
+    );
   }
   if (payload.encounterSlotTables) {
     writeCorePackEntry(
       files.encounter_slot_tables,
       "encounter_slot_tables",
       "encounter_slot_tables",
-      payload.encounterSlotTables
+      payload.encounterSlotTables,
     );
   }
   if (payload.encounterMusicModifiers) {
@@ -770,7 +1061,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       files.encounter_music_modifiers,
       "encounter_music_modifiers",
       "encounter_music_modifiers",
-      payload.encounterMusicModifiers
+      payload.encounterMusicModifiers,
     );
   }
   if (payload.battleStatMultipliers) {
@@ -778,7 +1069,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       files.battle_stat_multipliers,
       "battle_stat_multipliers",
       "battle_stat_multipliers",
-      payload.battleStatMultipliers
+      payload.battleStatMultipliers,
     );
   }
   if (payload.captureWobbleProbabilities) {
@@ -786,59 +1077,117 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       files.capture_wobble_probabilities,
       "capture_wobble_probabilities",
       "capture_wobble_probabilities",
-      payload.captureWobbleProbabilities
+      payload.captureWobbleProbabilities,
     );
   }
   if (payload.captureRules) {
-    writeCorePackEntry(files.capture_rules, "capture_rules", "rules", payload.captureRules);
+    writeCorePackEntry(
+      files.capture_rules,
+      "capture_rules",
+      "rules",
+      payload.captureRules,
+    );
   }
   if (payload.movePriorities) {
-    writeCorePackEntry(files.move_priorities, "move_priorities", "move_priorities", payload.movePriorities);
+    writeCorePackEntry(
+      files.move_priorities,
+      "move_priorities",
+      "move_priorities",
+      payload.movePriorities,
+    );
   }
   if (payload.typeCategories) {
-    writeCorePackEntry(files.type_categories, "type_categories", "type_categories", payload.typeCategories);
+    writeCorePackEntry(
+      files.type_categories,
+      "type_categories",
+      "type_categories",
+      payload.typeCategories,
+    );
   }
   if (payload.typeEffectiveness) {
-    writeCorePackEntry(files.type_effectiveness, "type_effectiveness", "type_effectiveness", payload.typeEffectiveness);
+    writeCorePackEntry(
+      files.type_effectiveness,
+      "type_effectiveness",
+      "type_effectiveness",
+      payload.typeEffectiveness,
+    );
   }
   if (payload.weatherModifiers) {
-    writeCorePackEntry(files.weather_modifiers, "weather_modifiers", "weather_modifiers", payload.weatherModifiers);
+    writeCorePackEntry(
+      files.weather_modifiers,
+      "weather_modifiers",
+      "weather_modifiers",
+      payload.weatherModifiers,
+    );
   }
   if (payload.battleRewardRules) {
-    writeCorePackEntry(files.battle_reward_rules, "battle_reward_rules", "rules", payload.battleRewardRules);
+    writeCorePackEntry(
+      files.battle_reward_rules,
+      "battle_reward_rules",
+      "rules",
+      payload.battleRewardRules,
+    );
   }
   if (payload.battleEscapeRules) {
-    writeCorePackEntry(files.battle_escape_rules, "battle_escape_rules", "rules", payload.battleEscapeRules);
+    writeCorePackEntry(
+      files.battle_escape_rules,
+      "battle_escape_rules",
+      "rules",
+      payload.battleEscapeRules,
+    );
   }
   if (payload.stepEventRules) {
-    writeCorePackEntry(files.step_event_rules, "step_event_rules", "rules", payload.stepEventRules);
+    writeCorePackEntry(
+      files.step_event_rules,
+      "step_event_rules",
+      "rules",
+      payload.stepEventRules,
+    );
   }
   if (payload.fishing) {
     writeCorePackEntry(files.fishing, "fishing", "fishing", payload.fishing);
   }
   if (payload.fieldMoves) {
-    writeCorePackEntry(files.field_moves, "field_moves", "field_moves", payload.fieldMoves);
+    writeCorePackEntry(
+      files.field_moves,
+      "field_moves",
+      "field_moves",
+      payload.fieldMoves,
+    );
   }
   if (payload.fruitTrees && Object.keys(payload.fruitTrees).length > 0) {
-    writeCorePackEntry(files.fruit_trees, "fruit_trees", "fruit_trees", payload.fruitTrees);
+    writeCorePackEntry(
+      files.fruit_trees,
+      "fruit_trees",
+      "fruit_trees",
+      payload.fruitTrees,
+    );
   }
-  for (const audioAsset of payload.audioAssets ?? []) {
-    writeAudioAssetFile(files.audio, audioAsset, writtenPayloads);
+  for (const [audioId, audioAsset] of Object.entries(payload.audioAssets ?? {})) {
+    writeAudioAssetFile(files.audio, audioId, audioAsset, writtenPayloads);
   }
 
   const mapAttributePathByName = new Map<string, string>();
   const mapBlockPathByName = new Map<string, string>();
   const mapDimensionKeyByName = new Map<string, string>();
   for (const [mapName, attributes] of Object.entries(payload.mapAttributes)) {
-    const mapAttributePath = writeCorePackEntry(files.map_attributes, "map_attributes", mapName, {
-      [mapName]: attributes,
-    });
+    const mapAttributePath = writeCorePackEntry(
+      files.map_attributes,
+      "map_attributes",
+      mapName,
+      {
+        [mapName]: attributes,
+      },
+    );
     mapAttributePathByName.set(mapName, mapAttributePath);
     const record = asRecord(attributes);
     if (typeof record?.map_constant === "string") {
       mapDimensionKeyByName.set(mapName, record.map_constant);
     }
-    const blocksLabel = typeof record?.blocks_label === "string" ? record.blocks_label : `${mapName}_Blocks`;
+    const blocksLabel =
+      typeof record?.blocks_label === "string"
+        ? record.blocks_label
+        : `${mapName}_Blocks`;
     const mapBlockPath = mapBlockPathByLabel.get(blocksLabel);
     if (mapBlockPath) {
       mapBlockPathByName.set(mapName, mapBlockPath);
@@ -847,15 +1196,22 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
 
   const mapDimensionPathByName = new Map<string, string>();
   for (const [mapName, dimensions] of Object.entries(payload.mapDimensions)) {
-    const mapDimensionPath = writeCorePackEntry(files.map_dimensions, "map_dimensions", mapName, {
-      [mapName]: dimensions,
-    });
+    const mapDimensionPath = writeCorePackEntry(
+      files.map_dimensions,
+      "map_dimensions",
+      mapName,
+      {
+        [mapName]: dimensions,
+      },
+    );
     mapDimensionPathByName.set(mapName, mapDimensionPath);
   }
 
   const npcPathByName = new Map<string, string>();
   for (const [mapName, entries] of Object.entries(payload.npcData)) {
-    const npcPath = writeCorePackEntry(files.npcs, "npcs", mapName, { [mapName]: entries });
+    const npcPath = writeCorePackEntry(files.npcs, "npcs", mapName, {
+      [mapName]: entries,
+    });
     npcPathByName.set(mapName, npcPath);
   }
 
@@ -863,115 +1219,242 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     if (item.script_name === "$00") {
       continue;
     }
-    writeCorePackEntry(files.items, "items", item.name, item);
+    writeCorePackEntry(files.items, "items", item.script_name, {
+      [item.script_name]: item,
+    });
   }
   if (payload.marts && Object.keys(payload.marts).length > 0) {
     writeCorePackEntry(files.marts, "marts", "marts", payload.marts);
   }
-  if (payload.currencyConstants && Object.keys(payload.currencyConstants).length > 0) {
-    writeCorePackEntry(files.currency_constants, "currency_constants", "constants", payload.currencyConstants);
+  if (
+    payload.currencyConstants &&
+    Object.keys(payload.currencyConstants).length > 0
+  ) {
+    writeCorePackEntry(
+      files.currency_constants,
+      "currency_constants",
+      "constants",
+      payload.currencyConstants,
+    );
   }
   if (payload.pcStrings && Object.keys(payload.pcStrings).length > 0) {
-    writeCorePackEntry(files.pc_strings, "pc_strings", "pc_strings", payload.pcStrings);
+    writeCorePackEntry(
+      files.pc_strings,
+      "pc_strings",
+      "pc_strings",
+      payload.pcStrings,
+    );
   }
   if (payload.menuIcons && Object.keys(payload.menuIcons).length > 0) {
-    writeCorePackEntry(files.menu_icons, "menu_icons", "menu_icons", payload.menuIcons);
+    writeCorePackEntry(
+      files.menu_icons,
+      "menu_icons",
+      "menu_icons",
+      payload.menuIcons,
+    );
   }
   if (payload.phoneContacts && Object.keys(payload.phoneContacts).length > 0) {
-    writeCorePackEntry(files.phone_contacts, "phone_contacts", "contacts", payload.phoneContacts);
+    writeCorePackEntry(
+      files.phone_contacts,
+      "phone_contacts",
+      "contacts",
+      payload.phoneContacts,
+    );
   }
-  if (payload.permanentPhoneNumbers && payload.permanentPhoneNumbers.length > 0) {
+  if (
+    payload.permanentPhoneNumbers &&
+    Object.keys(payload.permanentPhoneNumbers).length > 0
+  ) {
     writeCorePackEntry(
       files.permanent_phone_numbers,
       "permanent_phone_numbers",
       "permanent",
-      payload.permanentPhoneNumbers
+      payload.permanentPhoneNumbers,
     );
   }
-  if (payload.specialPhoneCalls && payload.specialPhoneCalls.length > 0) {
-    writeCorePackEntry(files.special_phone_calls, "special_phone_calls", "calls", payload.specialPhoneCalls);
+  if (
+    payload.specialPhoneCalls &&
+    Object.keys(payload.specialPhoneCalls).length > 0
+  ) {
+    writeCorePackEntry(
+      files.special_phone_calls,
+      "special_phone_calls",
+      "calls",
+      payload.specialPhoneCalls,
+    );
   }
-  if (payload.npcTrades && payload.npcTrades.length > 0) {
-    writeCorePackEntry(files.npc_trades, "npc_trades", "trades", payload.npcTrades);
+  if (payload.npcTrades && Object.keys(payload.npcTrades).length > 0) {
+    writeCorePackEntry(
+      files.npc_trades,
+      "npc_trades",
+      "trades",
+      payload.npcTrades,
+    );
   }
-  if (payload.specialRoutines && payload.specialRoutines.length > 0) {
-    writeCorePackEntry(files.special_routines, "special_routines", "routines", payload.specialRoutines);
+  if (
+    payload.specialRoutines &&
+    Object.keys(payload.specialRoutines).length > 0
+  ) {
+    writeCorePackEntry(
+      files.special_routines,
+      "special_routines",
+      "routines",
+      payload.specialRoutines,
+    );
   }
   if (payload.asmText && Object.keys(payload.asmText).length > 0) {
     writeCorePackEntry(files.asm_text, "asm_text", "texts", payload.asmText);
   }
   if (payload.moveNames && payload.moveNames.length > 0) {
-    writeCorePackEntry(files.move_names, "move_names", "moves", payload.moveNames);
+    writeCorePackEntry(
+      files.move_names,
+      "move_names",
+      "moves",
+      payload.moveNames,
+    );
   }
-  if (payload.battleAnimations && Object.keys(payload.battleAnimations).length > 0) {
-    writeCorePackEntry(files.battle_animations, "battle_animations", "scripts", payload.battleAnimations);
+  if (
+    payload.battleAnimations &&
+    Object.keys(payload.battleAnimations).length > 0
+  ) {
+    writeCorePackEntry(
+      files.battle_animations,
+      "battle_animations",
+      "scripts",
+      payload.battleAnimations,
+    );
   }
   if (payload.battleAnimationTable && payload.battleAnimationTable.length > 0) {
-    writeCorePackEntry(files.battle_animation_table, "battle_animation_table", "table", payload.battleAnimationTable);
+    writeCorePackEntry(
+      files.battle_animation_table,
+      "battle_animation_table",
+      "table",
+      payload.battleAnimationTable,
+    );
   }
   if (payload.battleAnimBundle) {
-    writeCorePackEntry(files.battle_anim_bundle, "battle_anim_bundle", "bundle", payload.battleAnimBundle);
+    writeCorePackEntry(
+      files.battle_anim_bundle,
+      "battle_anim_bundle",
+      "bundle",
+      payload.battleAnimBundle,
+    );
   }
   if (payload.spriteAnimBundle) {
-    writeCorePackEntry(files.sprite_anim_bundle, "sprite_anim_bundle", "bundle", payload.spriteAnimBundle);
+    writeCorePackEntry(
+      files.sprite_anim_bundle,
+      "sprite_anim_bundle",
+      "bundle",
+      payload.spriteAnimBundle,
+    );
   }
-  if (payload.spritePaletteDefaults && Object.keys(payload.spritePaletteDefaults).length > 0) {
-    writeCorePackEntry(files.sprite_palette_defaults, "sprite_palette_defaults", "defaults", payload.spritePaletteDefaults);
+  if (
+    payload.spritePaletteDefaults &&
+    Object.keys(payload.spritePaletteDefaults).length > 0
+  ) {
+    writeCorePackEntry(
+      files.sprite_palette_defaults,
+      "sprite_palette_defaults",
+      "defaults",
+      payload.spritePaletteDefaults,
+    );
   }
-  if (payload.pokegearTownMapPaletteMap && Object.keys(payload.pokegearTownMapPaletteMap).length > 0) {
+  if (
+    payload.pokegearTownMapPaletteMap &&
+    Object.keys(payload.pokegearTownMapPaletteMap).length > 0
+  ) {
     writeCorePackEntry(
       files.pokegear_town_map_palette_map,
       "pokegear_town_map_palette_map",
       "palettes",
-      payload.pokegearTownMapPaletteMap
+      payload.pokegearTownMapPaletteMap,
     );
   }
   if (payload.pokemonCries) {
-    writeCorePackEntry(files.pokemon_cries, "pokemon_cries", "cries", payload.pokemonCries);
-  }
-  for (const trainer of payload.trainers) {
     writeCorePackEntry(
-      files.trainers,
-      "trainers",
-      trainer.trainer_id ?? trainer.name,
-      compactTrainerForContentPack(trainer)
+      files.pokemon_cries,
+      "pokemon_cries",
+      "cries",
+      payload.pokemonCries,
     );
   }
+  for (const trainer of payload.trainers) {
+    const trainerKey = trainer.trainer_id ?? trainer.name;
+    writeCorePackEntry(files.trainers, "trainers", trainerKey, {
+      [trainerKey]: compactTrainerForContentPack(trainer),
+    });
+  }
   for (const entry of payload.pokedex) {
-    writeCorePackEntry(files.pokedex, "pokedex", entry.species, entry);
+    writeCorePackEntry(files.pokedex, "pokedex", entry.species, {
+      [entry.species]: entry,
+    });
   }
-  if (payload.pokedexEntries && payload.pokedexEntries.length > 0) {
-    writeCorePackEntry(files.pokedex_entries, "pokedex_entries", "entries", payload.pokedexEntries);
+  if (
+    payload.pokedexEntries &&
+    Object.keys(payload.pokedexEntries).length > 0
+  ) {
+    writeCorePackEntry(
+      files.pokedex_entries,
+      "pokedex_entries",
+      "entries",
+      payload.pokedexEntries,
+    );
   }
-  if (payload.pokemonFrontpicAnimations && Object.keys(payload.pokemonFrontpicAnimations).length > 0) {
+  if (
+    payload.pokemonFrontpicAnimations &&
+    Object.keys(payload.pokemonFrontpicAnimations).length > 0
+  ) {
     writeCorePackEntry(
       files.pokemon_frontpic_anim,
       "pokemon_frontpic_anim",
       "programs",
-      payload.pokemonFrontpicAnimations
+      payload.pokemonFrontpicAnimations,
     );
   }
   if (payload.initializeEvents) {
-    writeCorePackEntry(files.initialize_events, "initialize_events", "initialize_events", payload.initializeEvents);
+    writeCorePackEntry(
+      files.initialize_events,
+      "initialize_events",
+      "initialize_events",
+      payload.initializeEvents,
+    );
   }
   if (payload.storyEventScriptConstants) {
     writeCorePackEntry(
       files.story_event_script_constants,
       "story_event_script_constants",
       "constants",
-      payload.storyEventScriptConstants
+      payload.storyEventScriptConstants,
     );
   }
-  writeCorePackEntry(files.pokegear_landmarks, "pokegear_landmarks", "landmarks", payload.pokegearLandmarks);
+  writeCorePackEntry(
+    files.pokegear_landmarks,
+    "pokegear_landmarks",
+    "landmarks",
+    payload.pokegearLandmarks,
+  );
   if (payload.playability) {
-    writeCorePackEntry(files.playability, "playability", "core", payload.playability);
+    writeCorePackEntry(
+      files.playability,
+      "playability",
+      "core",
+      payload.playability,
+    );
   }
   files.story_events.push(...collectJsonFiles("story_events"));
   files.phone_scripts.push(...collectJsonFiles("phone_scripts"));
-  files.tilesets.push(...collectJsonFiles("tilesets"));
+  writeTilesetAssetFiles(
+    files.tilesets,
+    payload.mapAttributes,
+    writtenPayloads,
+  );
 
   const compiledPath = "content-packs/core-modular.compiled.json";
-  writeJsonToTargets(compiledPath, buildCompiledCorePack(files, writtenPayloads), { indent: 0 });
+  writeJsonToTargets(
+    compiledPath,
+    buildCompiledCorePack(files, writtenPayloads),
+    { indent: 0 },
+  );
 
   const remainingPacks = readPreservedPacks();
   remainingPacks.push({
@@ -988,12 +1471,16 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     prefix: string;
   }> = [
     { category: "maps", prefix: "map" },
+    { category: "map_scripts", prefix: "map-script" },
     { category: "map_blocks", prefix: "map-block" },
     { category: "runtime_spawn_points", prefix: "runtime-spawn-points" },
     { category: "runtime_map_metadata", prefix: "runtime-map-metadata" },
     { category: "flee_mons", prefix: "flee-mons" },
     { category: "roaming_pokemon", prefix: "roaming-pokemon" },
-    { category: "buena_password_categories", prefix: "buena-password-categories" },
+    {
+      category: "buena_password_categories",
+      prefix: "buena-password-categories",
+    },
     { category: "buena_prizes", prefix: "buena-prizes" },
     { category: "kurt_apricorn_recipes", prefix: "kurt-apricorn-recipes" },
     { category: "shuckie_gift", prefix: "shuckie-gift" },
@@ -1006,7 +1493,10 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "happiness_data", prefix: "happiness-data" },
     { category: "encounter_slot_tables", prefix: "encounter-slot-tables" },
     { category: "battle_stat_multipliers", prefix: "battle-stat-multipliers" },
-    { category: "capture_wobble_probabilities", prefix: "capture-wobble-probabilities" },
+    {
+      category: "capture_wobble_probabilities",
+      prefix: "capture-wobble-probabilities",
+    },
     { category: "capture_rules", prefix: "capture-rules" },
     { category: "move_priorities", prefix: "move-priorities" },
     { category: "type_categories", prefix: "type-categories" },
@@ -1032,7 +1522,10 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "pokedex_entries", prefix: "pokedex-entries" },
     { category: "pokemon_frontpic_anim", prefix: "pokemon-frontpic-anim" },
     { category: "initialize_events", prefix: "initialize-events" },
-    { category: "story_event_script_constants", prefix: "story-event-script-constants" },
+    {
+      category: "story_event_script_constants",
+      prefix: "story-event-script-constants",
+    },
     { category: "pokegear_landmarks", prefix: "pokegear-landmarks" },
     { category: "npcs", prefix: "npc" },
     { category: "story_events", prefix: "story" },
@@ -1049,7 +1542,10 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "battle_anim_bundle", prefix: "battle-anim-bundle" },
     { category: "sprite_anim_bundle", prefix: "sprite-anim-bundle" },
     { category: "sprite_palette_defaults", prefix: "sprite-palette-defaults" },
-    { category: "pokegear_town_map_palette_map", prefix: "pokegear-town-map-palette-map" },
+    {
+      category: "pokegear_town_map_palette_map",
+      prefix: "pokegear-town-map-palette-map",
+    },
     { category: "pokemon_cries", prefix: "pokemon-cries" },
     { category: "audio", prefix: "audio" },
     { category: "tilesets", prefix: "tileset" },
@@ -1060,41 +1556,54 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     for (const filePath of files[category]) {
       const name = fileStem(filePath);
       remainingPacks.push(
-        makeModulePack(`${MODULE_PREFIX}-${prefix}-${name}`, parentPathFor(filePath, category), {
-          [category]: [filePath],
-        })
+        makeModulePack(
+          `${MODULE_PREFIX}-${prefix}-${name}`,
+          parentPathFor(filePath, category),
+          {
+            [category]: [filePath],
+          },
+        ),
       );
     }
   }
 
-  const routeMapNames = new Set([...encounterPathByMapName.keys(), ...fieldEncounterPathByMapName.keys()]);
+  const routeMapNames = new Set([
+    ...encounterPathByMapName.keys(),
+    ...fieldEncounterPathByMapName.keys(),
+  ]);
   for (const mapName of [...routeMapNames].sort((a, b) => a.localeCompare(b))) {
     const routePath = encounterPathByMapName.get(mapName);
     const fieldEncounterPath = fieldEncounterPathByMapName.get(mapName);
     const name = fileStem(routePath ?? fieldEncounterPath ?? mapName);
-    const mapPath = mapPathByName.get(mapName);
+    const mapScriptPath = mapScriptPathByName.get(mapName);
     const mapBlockPath = mapBlockPathByName.get(mapName);
     const mapAttributePath = mapAttributePathByName.get(mapName);
     const mapDimensionKey = mapDimensionKeyByName.get(mapName);
-    const mapDimensionPath = mapDimensionKey ? mapDimensionPathByName.get(mapDimensionKey) : undefined;
+    const mapDimensionPath = mapDimensionKey
+      ? mapDimensionPathByName.get(mapDimensionKey)
+      : undefined;
     const npcPath = npcPathByName.get(mapName);
     const parentPath = routePath
       ? parentPathFor(routePath, "wild_encounters")
       : parentPathFor(fieldEncounterPath!, "field_encounters");
     remainingPacks.push(
       makeModulePack(`${MODULE_PREFIX}-route-${name}`, parentPath, {
-        maps: mapPath ? [mapPath] : [],
+        map_scripts: mapScriptPath ? [mapScriptPath] : [],
         map_blocks: mapBlockPath ? [mapBlockPath] : [],
         map_attributes: mapAttributePath ? [mapAttributePath] : [],
         map_dimensions: mapDimensionPath ? [mapDimensionPath] : [],
         wild_encounters: routePath ? [routePath] : [],
         field_encounters: fieldEncounterPath ? [fieldEncounterPath] : [],
         npcs: npcPath ? [npcPath] : [],
-      })
+      }),
     );
   }
 
   remainingPacks.sort((a, b) => a.id.localeCompare(b.id));
 
-  writeJsonToTargets("content-packs/index.json", { version: 1, packs: remainingPacks }, { indent: 2 });
+  writeJsonToTargets(
+    "content-packs/index.json",
+    { version: 1, packs: remainingPacks },
+    { indent: 2 },
+  );
 }

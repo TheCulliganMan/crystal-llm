@@ -3,16 +3,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::random::Random;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EncounterSurface {
     Grass,
     Water,
     Rock,
 }
 
+impl EncounterSurface {
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Grass => "grass",
+            Self::Water => "water",
+            Self::Rock => "rock",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TimeOfDay {
     Morning,
     Day,
@@ -94,12 +106,15 @@ pub enum EncounterError {
         kind: FieldEncounterKind,
         species: String,
     },
+    #[error("active repel item '{item_id}' requires an explicit lead party level")]
+    ActiveRepelMissingLeadLevel { item_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WildEncounter {
     pub level: u8,
+    #[serde(deserialize_with = "required_encounter_token")]
     pub species: String,
 }
 
@@ -146,8 +161,9 @@ impl<'de> Deserialize<'de> for WildEncounterData {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawWildEncounterData {
+            #[serde(deserialize_with = "required_encounter_token")]
             map_name: String,
-            #[serde(deserialize_with = "required_nullable")]
+            #[serde(deserialize_with = "required_nullable_grass_rates")]
             grass_rates: Option<BTreeMap<String, u8>>,
             #[serde(deserialize_with = "required_nullable")]
             water_rate: Option<u8>,
@@ -168,6 +184,40 @@ impl<'de> Deserialize<'de> for WildEncounterData {
     }
 }
 
+fn required_encounter_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_encounter_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "encounter token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_grass_rates<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<BTreeMap<String, u8>>::deserialize(deserializer)?;
+    if let Some(rates) = &value {
+        if let Some(key) = rates
+            .keys()
+            .find(|key| !is_exact_nonempty_encounter_token(key))
+        {
+            return Err(serde::de::Error::custom(format!(
+                "encounter token must be exact ASCII alphanumeric/underscore, found {key:?}"
+            )));
+        }
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedWildEncounter {
@@ -183,22 +233,53 @@ pub struct EncounterSlotChance {
     pub slot: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EncounterSlotTables {
-    pub grass: Vec<EncounterSlotChance>,
-    pub water: Vec<EncounterSlotChance>,
+    pub tables: BTreeMap<String, Vec<EncounterSlotChance>>,
+}
+
+impl<'de> Deserialize<'de> for EncounterSlotTables {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEncounterSlotTables {
+            tables: BTreeMap<String, Vec<EncounterSlotChance>>,
+        }
+
+        let raw = RawEncounterSlotTables::deserialize(deserializer)?;
+        for surface_id in raw.tables.keys() {
+            if !is_exact_nonempty_encounter_token(surface_id) {
+                return Err(serde::de::Error::custom(format!(
+                    "encounter token must be exact ASCII alphanumeric/underscore, found {surface_id:?}"
+                )));
+            }
+        }
+        Ok(Self { tables: raw.tables })
+    }
 }
 
 impl EncounterSlotTables {
+    pub fn for_crystal(grass: Vec<EncounterSlotChance>, water: Vec<EncounterSlotChance>) -> Self {
+        Self {
+            tables: BTreeMap::from([
+                (EncounterSurface::Grass.as_key().to_string(), grass),
+                (EncounterSurface::Water.as_key().to_string(), water),
+            ]),
+        }
+    }
+
     pub fn table_for_surface(
         &self,
         surface: EncounterSurface,
     ) -> Result<&[EncounterSlotChance], EncounterError> {
-        let table = match surface {
-            EncounterSurface::Water => &self.water,
-            EncounterSurface::Grass | EncounterSurface::Rock => &self.grass,
-        };
+        let table = self
+            .tables
+            .get(surface.as_key())
+            .ok_or(EncounterError::MissingEncounterSlotTable { surface })?;
         if table.is_empty() {
             return Err(EncounterError::MissingEncounterSlotTable { surface });
         }
@@ -208,6 +289,9 @@ impl EncounterSlotTables {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncounterSlotTableIssue {
+    InvalidSurfaceId {
+        surface_id: String,
+    },
     MissingTable {
         surface: EncounterSurface,
     },
@@ -227,16 +311,41 @@ pub enum EncounterSlotTableIssue {
     IncompleteTable {
         surface: EncounterSurface,
     },
+    InvalidCustomThreshold {
+        surface_id: String,
+        threshold: u8,
+    },
+    UnorderedCustomThreshold {
+        surface_id: String,
+        threshold: u8,
+        previous: u8,
+    },
+    DuplicateCustomSlotIndex {
+        surface_id: String,
+        slot: usize,
+    },
+    EmptyCustomTable {
+        surface_id: String,
+    },
+    IncompleteCustomTable {
+        surface_id: String,
+    },
 }
 
 impl EncounterSlotTableIssue {
-    pub fn surface(&self) -> EncounterSurface {
+    pub fn surface(&self) -> Option<EncounterSurface> {
         match self {
             Self::MissingTable { surface }
             | Self::InvalidThreshold { surface, .. }
             | Self::UnorderedThreshold { surface, .. }
             | Self::DuplicateSlotIndex { surface, .. }
-            | Self::IncompleteTable { surface } => *surface,
+            | Self::IncompleteTable { surface } => Some(*surface),
+            Self::InvalidSurfaceId { .. }
+            | Self::InvalidCustomThreshold { .. }
+            | Self::UnorderedCustomThreshold { .. }
+            | Self::DuplicateCustomSlotIndex { .. }
+            | Self::EmptyCustomTable { .. }
+            | Self::IncompleteCustomTable { .. } => None,
         }
     }
 }
@@ -249,9 +358,35 @@ pub fn encounter_slot_table_issues(
         return Vec::new();
     }
     let mut issues = Vec::new();
-    push_encounter_slot_table_issues(EncounterSurface::Grass, &tables.grass, &mut issues);
-    push_encounter_slot_table_issues(EncounterSurface::Water, &tables.water, &mut issues);
+    push_required_encounter_slot_table_issues(EncounterSurface::Grass, tables, &mut issues);
+    push_required_encounter_slot_table_issues(EncounterSurface::Water, tables, &mut issues);
+    for (surface_id, table) in &tables.tables {
+        if surface_id == EncounterSurface::Grass.as_key()
+            || surface_id == EncounterSurface::Water.as_key()
+        {
+            continue;
+        }
+        if !is_exact_nonempty_encounter_token(surface_id) {
+            issues.push(EncounterSlotTableIssue::InvalidSurfaceId {
+                surface_id: surface_id.clone(),
+            });
+            continue;
+        }
+        push_custom_encounter_slot_table_issues(surface_id, table, &mut issues);
+    }
     issues
+}
+
+fn push_required_encounter_slot_table_issues(
+    surface: EncounterSurface,
+    tables: &EncounterSlotTables,
+    issues: &mut Vec<EncounterSlotTableIssue>,
+) {
+    let Some(table) = tables.tables.get(surface.as_key()) else {
+        issues.push(EncounterSlotTableIssue::MissingTable { surface });
+        return;
+    };
+    push_encounter_slot_table_issues(surface, table, issues);
 }
 
 fn push_encounter_slot_table_issues(
@@ -292,25 +427,89 @@ fn push_encounter_slot_table_issues(
     }
 }
 
+fn push_custom_encounter_slot_table_issues(
+    surface_id: &str,
+    table: &[EncounterSlotChance],
+    issues: &mut Vec<EncounterSlotTableIssue>,
+) {
+    if table.is_empty() {
+        issues.push(EncounterSlotTableIssue::EmptyCustomTable {
+            surface_id: surface_id.to_string(),
+        });
+        return;
+    }
+    let mut previous_threshold = 0;
+    let mut slots = BTreeSet::new();
+    for entry in table {
+        if entry.threshold == 0 || entry.threshold > 100 {
+            issues.push(EncounterSlotTableIssue::InvalidCustomThreshold {
+                surface_id: surface_id.to_string(),
+                threshold: entry.threshold,
+            });
+        }
+        if entry.threshold < previous_threshold {
+            issues.push(EncounterSlotTableIssue::UnorderedCustomThreshold {
+                surface_id: surface_id.to_string(),
+                threshold: entry.threshold,
+                previous: previous_threshold,
+            });
+        }
+        previous_threshold = entry.threshold;
+        if !slots.insert(entry.slot) {
+            issues.push(EncounterSlotTableIssue::DuplicateCustomSlotIndex {
+                surface_id: surface_id.to_string(),
+                slot: entry.slot,
+            });
+        }
+    }
+    if previous_threshold != 100 {
+        issues.push(EncounterSlotTableIssue::IncompleteCustomTable {
+            surface_id: surface_id.to_string(),
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncounterMusicModifier {
-    pub music_id: String,
     pub numerator: u8,
     pub denominator: u8,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncounterMusicModifiers {
-    pub modifiers: Vec<EncounterMusicModifier>,
+    pub modifiers: BTreeMap<String, EncounterMusicModifier>,
+}
+
+impl<'de> Deserialize<'de> for EncounterMusicModifiers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEncounterMusicModifiers {
+            modifiers: BTreeMap<String, EncounterMusicModifier>,
+        }
+
+        let raw = RawEncounterMusicModifiers::deserialize(deserializer)?;
+        for music_id in raw.modifiers.keys() {
+            if !is_exact_nonempty_encounter_token(music_id) {
+                return Err(serde::de::Error::custom(format!(
+                    "encounter token must be exact ASCII alphanumeric/underscore, found {music_id:?}"
+                )));
+            }
+        }
+        Ok(Self {
+            modifiers: raw.modifiers,
+        })
+    }
 }
 
 impl EncounterMusicModifiers {
     pub fn modifier_for(&self, music_id: &str) -> Option<&EncounterMusicModifier> {
-        self.modifiers
-            .iter()
-            .find(|modifier| modifier.music_id == music_id)
+        self.modifiers.get(music_id)
     }
 }
 
@@ -320,7 +519,6 @@ pub enum EncounterMusicModifierIssue {
     MissingMusicId { music_id: String },
     InvalidMusicId { music_id: String },
     UnknownMusicId { music_id: String },
-    DuplicateMusicId { music_id: String },
     InvalidRatio { music_id: String },
 }
 
@@ -336,33 +534,23 @@ pub fn encounter_music_modifier_issues(
         return vec![EncounterMusicModifierIssue::MissingTable];
     }
     let mut issues = Vec::new();
-    let mut seen = BTreeSet::new();
-    for modifier in &modifiers.modifiers {
-        let mut exact_music_id = false;
-        if modifier.music_id.is_empty() {
+    for (music_id, modifier) in &modifiers.modifiers {
+        if music_id.is_empty() {
             issues.push(EncounterMusicModifierIssue::MissingMusicId {
-                music_id: modifier.music_id.clone(),
+                music_id: music_id.clone(),
             });
-        } else if !is_exact_nonempty_encounter_token(&modifier.music_id) {
+        } else if !is_exact_nonempty_encounter_token(music_id) {
             issues.push(EncounterMusicModifierIssue::InvalidMusicId {
-                music_id: modifier.music_id.clone(),
+                music_id: music_id.clone(),
             });
-        } else if !music_ids.contains(&modifier.music_id) {
+        } else if !music_ids.contains(music_id) {
             issues.push(EncounterMusicModifierIssue::UnknownMusicId {
-                music_id: modifier.music_id.clone(),
-            });
-            exact_music_id = true;
-        } else {
-            exact_music_id = true;
-        }
-        if exact_music_id && !seen.insert(modifier.music_id.as_str()) {
-            issues.push(EncounterMusicModifierIssue::DuplicateMusicId {
-                music_id: modifier.music_id.clone(),
+                music_id: music_id.clone(),
             });
         }
         if modifier.denominator == 0 {
             issues.push(EncounterMusicModifierIssue::InvalidRatio {
-                music_id: modifier.music_id.clone(),
+                music_id: music_id.clone(),
             });
         }
     }
@@ -373,6 +561,7 @@ pub fn encounter_music_modifier_issues(
 #[serde(deny_unknown_fields)]
 pub struct FieldEncounterEntry {
     pub weight: u8,
+    #[serde(deserialize_with = "required_encounter_token")]
     pub species: String,
     pub level: u8,
 }
@@ -385,10 +574,10 @@ pub struct FieldEncounterTable {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldEncounterData {
     pub map_name: String,
-    pub headbutt: Option<FieldEncounterTable>,
-    pub rock_smash: Option<FieldEncounterTable>,
+    pub tables: BTreeMap<String, FieldEncounterTable>,
 }
 
 impl<'de> Deserialize<'de> for FieldEncounterData {
@@ -396,43 +585,80 @@ impl<'de> Deserialize<'de> for FieldEncounterData {
     where
         D: serde::Deserializer<'de>,
     {
-        fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-            T: Deserialize<'de>,
-        {
-            Option::<T>::deserialize(deserializer)
-        }
-
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawFieldEncounterData {
+            #[serde(deserialize_with = "required_encounter_token")]
             map_name: String,
-            #[serde(deserialize_with = "required_nullable")]
-            headbutt: Option<FieldEncounterTable>,
-            #[serde(deserialize_with = "required_nullable")]
-            rock_smash: Option<FieldEncounterTable>,
+            tables: BTreeMap<String, FieldEncounterTable>,
         }
 
         let raw = RawFieldEncounterData::deserialize(deserializer)?;
+        for kind in raw.tables.keys() {
+            if !is_exact_nonempty_encounter_token(kind) {
+                return Err(serde::de::Error::custom(format!(
+                    "encounter token must be exact ASCII alphanumeric/underscore, found {kind:?}"
+                )));
+            }
+        }
         Ok(Self {
             map_name: raw.map_name,
-            headbutt: raw.headbutt,
-            rock_smash: raw.rock_smash,
+            tables: raw.tables,
         })
     }
 }
 
+impl FieldEncounterData {
+    pub fn for_crystal(
+        map_name: impl Into<String>,
+        headbutt: Option<FieldEncounterTable>,
+        rock_smash: Option<FieldEncounterTable>,
+    ) -> Self {
+        let mut tables = BTreeMap::new();
+        if let Some(headbutt) = headbutt {
+            tables.insert(FieldEncounterKind::Headbutt.as_key().to_string(), headbutt);
+        }
+        if let Some(rock_smash) = rock_smash {
+            tables.insert(
+                FieldEncounterKind::RockSmash.as_key().to_string(),
+                rock_smash,
+            );
+        }
+        Self {
+            map_name: map_name.into(),
+            tables,
+        }
+    }
+
+    pub fn table(&self, kind: FieldEncounterKind) -> Option<&FieldEncounterTable> {
+        self.tables.get(kind.as_key())
+    }
+
+    pub fn table_mut(&mut self, kind: FieldEncounterKind) -> Option<&mut FieldEncounterTable> {
+        self.tables.get_mut(kind.as_key())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FieldEncounterKind {
     Headbutt,
     RockSmash,
 }
 
+impl FieldEncounterKind {
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Headbutt => "headbutt",
+            Self::RockSmash => "rock_smash",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldEncounterRoll {
+    #[serde(deserialize_with = "required_encounter_token")]
     pub map_name: String,
     pub kind: FieldEncounterKind,
     pub target_tile_x: i16,
@@ -525,21 +751,25 @@ pub enum FieldEncounterCatalogIssue {
         map_name: String,
         species_id: String,
     },
+    InvalidKind {
+        map_name: String,
+        kind: String,
+    },
     EmptyBucket {
         map_name: String,
-        kind: &'static str,
+        kind: String,
         bucket: &'static str,
     },
     ZeroWeight {
         map_name: String,
-        kind: &'static str,
+        kind: String,
         bucket: &'static str,
         entry_index: usize,
         species_id: String,
     },
     InvalidWeightTotal {
         map_name: String,
-        kind: &'static str,
+        kind: String,
         bucket: &'static str,
         total_weight: u16,
     },
@@ -634,17 +864,20 @@ fn wild_encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
 fn is_exact_nonempty_encounter_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
+}
+
 fn field_encounter_species(data: &FieldEncounterData) -> BTreeSet<String> {
     let mut species = BTreeSet::new();
-    for table in [data.headbutt.as_ref(), data.rock_smash.as_ref()]
-        .into_iter()
-        .flatten()
-    {
+    for table in data.tables.values() {
         for encounter in table.common.iter().chain(table.rare.iter()) {
             species.insert(encounter.species.clone());
         }
@@ -735,20 +968,38 @@ fn push_field_encounter_table_issues(
     encounters: &FieldEncounterData,
     issues: &mut Vec<FieldEncounterCatalogIssue>,
 ) {
-    if let Some(headbutt) = encounters.headbutt.as_ref() {
+    for kind in encounters.tables.keys() {
+        if !is_exact_nonempty_encounter_token(kind)
+            || (kind != FieldEncounterKind::Headbutt.as_key()
+                && kind != FieldEncounterKind::RockSmash.as_key())
+        {
+            issues.push(FieldEncounterCatalogIssue::InvalidKind {
+                map_name: map_name.to_string(),
+                kind: kind.clone(),
+            });
+        }
+    }
+
+    if let Some(headbutt) = encounters.table(FieldEncounterKind::Headbutt) {
         push_field_encounter_bucket_issues(
             map_name,
-            "headbutt",
+            FieldEncounterKind::Headbutt.as_key(),
             "common",
             &headbutt.common,
             issues,
         );
-        push_field_encounter_bucket_issues(map_name, "headbutt", "rare", &headbutt.rare, issues);
-    }
-    if let Some(rock_smash) = encounters.rock_smash.as_ref() {
         push_field_encounter_bucket_issues(
             map_name,
-            "rock_smash",
+            FieldEncounterKind::Headbutt.as_key(),
+            "rare",
+            &headbutt.rare,
+            issues,
+        );
+    }
+    if let Some(rock_smash) = encounters.table(FieldEncounterKind::RockSmash) {
+        push_field_encounter_bucket_issues(
+            map_name,
+            FieldEncounterKind::RockSmash.as_key(),
             "common",
             &rock_smash.common,
             issues,
@@ -766,7 +1017,7 @@ fn push_field_encounter_bucket_issues(
     if entries.is_empty() {
         issues.push(FieldEncounterCatalogIssue::EmptyBucket {
             map_name: map_name.to_string(),
-            kind,
+            kind: kind.to_string(),
             bucket,
         });
         return;
@@ -776,7 +1027,7 @@ fn push_field_encounter_bucket_issues(
         if entry.weight == 0 {
             issues.push(FieldEncounterCatalogIssue::ZeroWeight {
                 map_name: map_name.to_string(),
-                kind,
+                kind: kind.to_string(),
                 bucket,
                 entry_index,
                 species_id: entry.species.clone(),
@@ -788,7 +1039,7 @@ fn push_field_encounter_bucket_issues(
     if total_weight != 100 {
         issues.push(FieldEncounterCatalogIssue::InvalidWeightTotal {
             map_name: map_name.to_string(),
-            kind,
+            kind: kind.to_string(),
             bucket,
             total_weight,
         });
@@ -857,7 +1108,7 @@ pub fn apply_encounter_music_effect(
     };
     if modifier.denominator == 0 {
         return Err(EncounterError::InvalidEncounterMusicModifier {
-            music_id: modifier.music_id.clone(),
+            music_id: music_id.to_string(),
         });
     }
     Ok(
@@ -1016,6 +1267,30 @@ pub fn select_sweet_scent_encounter(
     })
 }
 
+pub fn roll_sweet_scent_encounter(
+    data: &WildEncounterData,
+    slot_tables: &EncounterSlotTables,
+    surface: EncounterSurface,
+    time: TimeOfDay,
+    tile: crate::world::map::TilePosition,
+    rng: &mut Random,
+) -> Result<crate::world::session::WildEncounterRoll, EncounterError> {
+    require_encounter_table_for_surface(data, surface, time)?;
+    let slot_percent_roll = rng.randrange(100) as u8 + 1;
+    let level_roll = rng.randrange(256) as u8;
+    let mut roll = select_sweet_scent_encounter(
+        data,
+        slot_tables,
+        surface,
+        time,
+        tile,
+        slot_percent_roll,
+        level_roll,
+    )?;
+    roll.rng_seed_after = rng.seed();
+    Ok(roll)
+}
+
 pub fn tree_score(tile_x: i16, tile_y: i16, player_id: u16) -> u8 {
     let value = i32::from(tile_y) * (i32::from(tile_x) + 1) + i32::from(tile_x);
     let coord_score = value.div_euclid(5).rem_euclid(10) as u8;
@@ -1032,13 +1307,12 @@ pub fn select_headbutt_encounter(
     entry_roll: u8,
 ) -> Result<FieldEncounterRoll, EncounterError> {
     let score = tree_score(target_tile_x, target_tile_y, player_id);
-    let table =
-        data.headbutt
-            .as_ref()
-            .ok_or_else(|| EncounterError::MissingFieldEncounterTable {
-                map_name: data.map_name.clone(),
-                kind: FieldEncounterKind::Headbutt,
-            })?;
+    let table = data.table(FieldEncounterKind::Headbutt).ok_or_else(|| {
+        EncounterError::MissingFieldEncounterTable {
+            map_name: data.map_name.clone(),
+            kind: FieldEncounterKind::Headbutt,
+        }
+    })?;
     let entries = match score {
         0 if chance_roll < 8 => Some(("rare", table.rare.as_slice())),
         1..=4 if chance_roll < 5 => Some(("common", table.common.as_slice())),
@@ -1067,6 +1341,25 @@ pub fn select_headbutt_encounter(
     })
 }
 
+pub fn roll_headbutt_encounter(
+    data: &FieldEncounterData,
+    target_tile_x: i16,
+    target_tile_y: i16,
+    player_id: u16,
+    rng: &mut Random,
+) -> Result<FieldEncounterRoll, EncounterError> {
+    let chance_roll = rng.randrange(10) as u8;
+    let entry_roll = rng.randrange(100) as u8;
+    select_headbutt_encounter(
+        data,
+        target_tile_x,
+        target_tile_y,
+        player_id,
+        chance_roll,
+        entry_roll,
+    )
+}
+
 pub fn select_rock_smash_encounter(
     data: &FieldEncounterData,
     target_tile_x: i16,
@@ -1074,13 +1367,12 @@ pub fn select_rock_smash_encounter(
     chance_roll: u8,
     entry_roll: u8,
 ) -> Result<FieldEncounterRoll, EncounterError> {
-    let table =
-        data.rock_smash
-            .as_ref()
-            .ok_or_else(|| EncounterError::MissingFieldEncounterTable {
-                map_name: data.map_name.clone(),
-                kind: FieldEncounterKind::RockSmash,
-            })?;
+    let table = data.table(FieldEncounterKind::RockSmash).ok_or_else(|| {
+        EncounterError::MissingFieldEncounterTable {
+            map_name: data.map_name.clone(),
+            kind: FieldEncounterKind::RockSmash,
+        }
+    })?;
     let resolved = if chance_roll < 4 {
         Some(choose_weighted_field_entry(
             data,
@@ -1102,6 +1394,17 @@ pub fn select_rock_smash_encounter(
         entry_roll: resolved.as_ref().map(|_| entry_roll),
         resolved,
     })
+}
+
+pub fn roll_rock_smash_encounter(
+    data: &FieldEncounterData,
+    target_tile_x: i16,
+    target_tile_y: i16,
+    rng: &mut Random,
+) -> Result<FieldEncounterRoll, EncounterError> {
+    let chance_roll = rng.randrange(10) as u8;
+    let entry_roll = rng.randrange(100) as u8;
+    select_rock_smash_encounter(data, target_tile_x, target_tile_y, chance_roll, entry_roll)
 }
 
 fn choose_weighted_field_entry(
@@ -1195,9 +1498,9 @@ mod tests {
     }
 
     fn field_data() -> FieldEncounterData {
-        FieldEncounterData {
-            map_name: "Route29".to_string(),
-            headbutt: Some(FieldEncounterTable {
+        FieldEncounterData::for_crystal(
+            "Route29",
+            Some(FieldEncounterTable {
                 common: vec![FieldEncounterEntry {
                     weight: 100,
                     species: "HOOTHOOT".to_string(),
@@ -1209,7 +1512,7 @@ mod tests {
                     level: 10,
                 }],
             }),
-            rock_smash: Some(FieldEncounterTable {
+            Some(FieldEncounterTable {
                 common: vec![
                     FieldEncounterEntry {
                         weight: 90,
@@ -1224,12 +1527,12 @@ mod tests {
                 ],
                 rare: Vec::new(),
             }),
-        }
+        )
     }
 
     fn slot_tables() -> EncounterSlotTables {
-        EncounterSlotTables {
-            grass: vec![
+        EncounterSlotTables::for_crystal(
+            vec![
                 EncounterSlotChance {
                     threshold: 30,
                     slot: 0,
@@ -1259,7 +1562,7 @@ mod tests {
                     slot: 6,
                 },
             ],
-            water: vec![
+            vec![
                 EncounterSlotChance {
                     threshold: 60,
                     slot: 0,
@@ -1273,35 +1576,41 @@ mod tests {
                     slot: 2,
                 },
             ],
-        }
+        )
     }
 
     fn music_modifiers() -> EncounterMusicModifiers {
         EncounterMusicModifiers {
-            modifiers: vec![
-                EncounterMusicModifier {
-                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
-                    numerator: 2,
-                    denominator: 1,
-                },
-                EncounterMusicModifier {
-                    music_id: "MUSIC_RUINS_OF_ALPH_RADIO".to_string(),
-                    numerator: 2,
-                    denominator: 1,
-                },
-                EncounterMusicModifier {
-                    music_id: "MUSIC_POKEMON_LULLABY".to_string(),
-                    numerator: 1,
-                    denominator: 2,
-                },
-            ],
+            modifiers: BTreeMap::from([
+                (
+                    "MUSIC_POKEMON_MARCH".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                ),
+                (
+                    "MUSIC_RUINS_OF_ALPH_RADIO".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                ),
+                (
+                    "MUSIC_POKEMON_LULLABY".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                ),
+            ]),
         }
     }
 
     #[test]
     fn encounter_slot_table_issues_validate_exact_threshold_tables() {
-        let tables = EncounterSlotTables {
-            grass: vec![
+        let tables = EncounterSlotTables::for_crystal(
+            vec![
                 EncounterSlotChance {
                     threshold: 60,
                     slot: 0,
@@ -1315,8 +1624,8 @@ mod tests {
                     slot: 1,
                 },
             ],
-            water: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         assert_eq!(
             encounter_slot_table_issues(&tables, true),
@@ -1351,35 +1660,81 @@ mod tests {
     }
 
     #[test]
-    fn encounter_music_modifier_issues_validate_exact_music_ids() {
-        let modifiers = EncounterMusicModifiers {
-            modifiers: vec![
-                EncounterMusicModifier {
-                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
-                    numerator: 2,
-                    denominator: 1,
+    fn encounter_slot_tables_accept_exact_custom_surface_keys_without_ignoring_bad_tables() {
+        let mut tables = EncounterSlotTables::for_crystal(
+            vec![EncounterSlotChance {
+                threshold: 100,
+                slot: 0,
+            }],
+            vec![EncounterSlotChance {
+                threshold: 100,
+                slot: 0,
+            }],
+        );
+        tables.tables.insert(
+            "volcanic_ash".to_string(),
+            vec![
+                EncounterSlotChance {
+                    threshold: 25,
+                    slot: 0,
                 },
-                EncounterMusicModifier {
-                    music_id: "MUSIC POKEMON MARCH".to_string(),
-                    numerator: 1,
-                    denominator: 1,
-                },
-                EncounterMusicModifier {
-                    music_id: "MUSIC POKEMON MARCH".to_string(),
-                    numerator: 1,
-                    denominator: 1,
-                },
-                EncounterMusicModifier {
-                    music_id: "music_pokemon_march".to_string(),
-                    numerator: 1,
-                    denominator: 0,
-                },
-                EncounterMusicModifier {
-                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
-                    numerator: 1,
-                    denominator: 1,
+                EncounterSlotChance {
+                    threshold: 100,
+                    slot: 1,
                 },
             ],
+        );
+
+        assert_eq!(encounter_slot_table_issues(&tables, true), []);
+
+        tables.tables.insert("volcanic ash".to_string(), Vec::new());
+        tables.tables.insert(
+            "deep_cave".to_string(),
+            vec![EncounterSlotChance {
+                threshold: 99,
+                slot: 0,
+            }],
+        );
+
+        assert_eq!(
+            encounter_slot_table_issues(&tables, true),
+            vec![
+                EncounterSlotTableIssue::IncompleteCustomTable {
+                    surface_id: "deep_cave".to_string(),
+                },
+                EncounterSlotTableIssue::InvalidSurfaceId {
+                    surface_id: "volcanic ash".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn encounter_music_modifier_issues_validate_exact_music_ids() {
+        let modifiers = EncounterMusicModifiers {
+            modifiers: BTreeMap::from([
+                (
+                    "MUSIC_POKEMON_MARCH".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 2,
+                        denominator: 1,
+                    },
+                ),
+                (
+                    "MUSIC POKEMON MARCH".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 1,
+                        denominator: 1,
+                    },
+                ),
+                (
+                    "music_pokemon_march".to_string(),
+                    EncounterMusicModifier {
+                        numerator: 1,
+                        denominator: 0,
+                    },
+                ),
+            ]),
         };
         let music_ids = ["MUSIC_POKEMON_MARCH".to_string()].into_iter().collect();
 
@@ -1389,17 +1744,11 @@ mod tests {
                 EncounterMusicModifierIssue::InvalidMusicId {
                     music_id: "MUSIC POKEMON MARCH".to_string(),
                 },
-                EncounterMusicModifierIssue::InvalidMusicId {
-                    music_id: "MUSIC POKEMON MARCH".to_string(),
-                },
                 EncounterMusicModifierIssue::UnknownMusicId {
                     music_id: "music_pokemon_march".to_string(),
                 },
                 EncounterMusicModifierIssue::InvalidRatio {
                     music_id: "music_pokemon_march".to_string(),
-                },
-                EncounterMusicModifierIssue::DuplicateMusicId {
-                    music_id: "MUSIC_POKEMON_MARCH".to_string(),
                 },
             ]
         );
@@ -1534,16 +1883,27 @@ mod tests {
     #[test]
     fn field_encounter_catalog_issues_validate_exact_ids_and_weights() {
         let mut data = field_data();
-        data.headbutt.as_mut().expect("headbutt").common[0].species = " PIDGEY".to_string();
-        data.rock_smash.as_mut().expect("rock smash").common[0].species = "PINE CO".to_string();
-        data.rock_smash.as_mut().expect("rock smash").common[1].species = "pidgey".to_string();
-        data.headbutt.as_mut().expect("headbutt").common[0].weight = 0;
-        data.headbutt.as_mut().expect("headbutt").rare.clear();
-        let invalid_map = FieldEncounterData {
-            map_name: " route_29".to_string(),
-            headbutt: None,
-            rock_smash: None,
-        };
+        data.table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .common[0]
+            .species = " PIDGEY".to_string();
+        data.table_mut(FieldEncounterKind::RockSmash)
+            .expect("rock smash")
+            .common[0]
+            .species = "PINE CO".to_string();
+        data.table_mut(FieldEncounterKind::RockSmash)
+            .expect("rock smash")
+            .common[1]
+            .species = "pidgey".to_string();
+        data.table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .common[0]
+            .weight = 0;
+        data.table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .rare
+            .clear();
+        let invalid_map = FieldEncounterData::for_crystal(" route_29", None, None);
         let encounters = [
             (" route_29".to_string(), invalid_map),
             ("route_29".to_string(), data),
@@ -1578,21 +1938,89 @@ mod tests {
                 },
                 FieldEncounterCatalogIssue::ZeroWeight {
                     map_name: "route_29".to_string(),
-                    kind: "headbutt",
+                    kind: "headbutt".to_string(),
                     bucket: "common",
                     entry_index: 0,
                     species_id: " PIDGEY".to_string(),
                 },
                 FieldEncounterCatalogIssue::InvalidWeightTotal {
                     map_name: "route_29".to_string(),
-                    kind: "headbutt",
+                    kind: "headbutt".to_string(),
                     bucket: "common",
                     total_weight: 0,
                 },
                 FieldEncounterCatalogIssue::EmptyBucket {
                     map_name: "route_29".to_string(),
-                    kind: "headbutt",
+                    kind: "headbutt".to_string(),
                     bucket: "rare",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn encounter_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let mut wild = sample_data();
+        wild.map_name = "fallback_route_29".to_string();
+        wild.grass.as_mut().expect("grass").morning[0].species = "legacy_pidgey".to_string();
+        wild.grass_rates
+            .as_mut()
+            .expect("grass rates")
+            .insert("fallback_morning".to_string(), 30);
+        let wild_encounters = [("fallback_route_29".to_string(), wild)]
+            .into_iter()
+            .collect();
+
+        let wild_species_ids = [
+            "RATTATA".to_string(),
+            "SENTRET".to_string(),
+            "MAGIKARP".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            wild_encounter_catalog_issues(&wild_encounters, &BTreeSet::new(), &wild_species_ids),
+            vec![
+                WildEncounterCatalogIssue::InvalidMap {
+                    map_name: "fallback_route_29".to_string(),
+                },
+                WildEncounterCatalogIssue::InvalidSpecies {
+                    map_name: "fallback_route_29".to_string(),
+                    species_id: "legacy_pidgey".to_string(),
+                },
+                WildEncounterCatalogIssue::InvalidGrassRateTime {
+                    map_name: "fallback_route_29".to_string(),
+                    time_key: "fallback_morning".to_string(),
+                },
+            ]
+        );
+
+        let mut field = field_data();
+        field
+            .table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .common[0]
+            .species = "fallback_hoothoot".to_string();
+        let field_encounters = [("legacy_route_29".to_string(), field)]
+            .into_iter()
+            .collect();
+
+        let field_species_ids = [
+            "PINECO".to_string(),
+            "KRABBY".to_string(),
+            "SHUCKLE".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            field_encounter_catalog_issues(&field_encounters, &BTreeSet::new(), &field_species_ids),
+            vec![
+                FieldEncounterCatalogIssue::InvalidMap {
+                    map_name: "legacy_route_29".to_string(),
+                },
+                FieldEncounterCatalogIssue::InvalidSpecies {
+                    map_name: "legacy_route_29".to_string(),
+                    species_id: "fallback_hoothoot".to_string(),
                 },
             ]
         );
@@ -1796,6 +2224,63 @@ mod tests {
     }
 
     #[test]
+    fn sweet_scent_roll_helper_consumes_runtime_rng_in_core() {
+        let data = sample_data();
+        let tile = crate::world::map::TilePosition::new(4, 6);
+        let mut helper_rng = Random::new(1);
+        let mut explicit_rng = Random::new(1);
+        let slot_percent_roll = explicit_rng.randrange(100) as u8 + 1;
+        let level_roll = explicit_rng.randrange(256) as u8;
+
+        let helper = roll_sweet_scent_encounter(
+            &data,
+            &slot_tables(),
+            EncounterSurface::Grass,
+            TimeOfDay::Morning,
+            tile,
+            &mut helper_rng,
+        )
+        .expect("helper sweet scent");
+        let mut explicit = select_sweet_scent_encounter(
+            &data,
+            &slot_tables(),
+            EncounterSurface::Grass,
+            TimeOfDay::Morning,
+            tile,
+            slot_percent_roll,
+            level_roll,
+        )
+        .expect("explicit sweet scent");
+        explicit.rng_seed_after = explicit_rng.seed();
+
+        assert_eq!(helper, explicit);
+        assert_eq!(helper_rng.seed(), explicit_rng.seed());
+    }
+
+    #[test]
+    fn sweet_scent_roll_helper_rejects_missing_surface_before_rng() {
+        let mut data = sample_data();
+        data.water = None;
+        let mut rng = Random::new(1);
+
+        assert!(matches!(
+            roll_sweet_scent_encounter(
+                &data,
+                &slot_tables(),
+                EncounterSurface::Water,
+                TimeOfDay::Morning,
+                crate::world::map::TilePosition::new(4, 6),
+                &mut rng,
+            ),
+            Err(EncounterError::MissingEncounterTable {
+                map_name,
+                surface: EncounterSurface::Water,
+            }) if map_name == "ROUTE_29"
+        ));
+        assert_eq!(rng.seed(), 1);
+    }
+
+    #[test]
     fn sweet_scent_requires_exact_surface_table() {
         let mut data = sample_data();
         data.water = None;
@@ -1836,7 +2321,10 @@ mod tests {
     #[test]
     fn field_encounter_rejects_malformed_runtime_species() {
         let mut data = field_data();
-        data.headbutt.as_mut().expect("headbutt").rare[0].species = "PIN ECO".to_string();
+        data.table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .rare[0]
+            .species = "PIN ECO".to_string();
 
         assert_eq!(
             select_headbutt_encounter(&data, 0, 2, 0, 2, 54),
@@ -1873,9 +2361,38 @@ mod tests {
     }
 
     #[test]
+    fn field_encounter_roll_helpers_consume_runtime_rng_in_core() {
+        let data = field_data();
+        let mut helper_rng = Random::new(1);
+        let mut explicit_rng = Random::new(1);
+        let chance_roll = explicit_rng.randrange(10) as u8;
+        let entry_roll = explicit_rng.randrange(100) as u8;
+
+        let helper = roll_headbutt_encounter(&data, 0, 2, 0, &mut helper_rng).expect("helper roll");
+        let explicit =
+            select_headbutt_encounter(&data, 0, 2, 0, chance_roll, entry_roll).expect("explicit");
+
+        assert_eq!(helper, explicit);
+        assert_eq!(helper_rng.seed(), explicit_rng.seed());
+
+        let mut helper_rng = Random::new(7);
+        let mut explicit_rng = Random::new(7);
+        let chance_roll = explicit_rng.randrange(10) as u8;
+        let entry_roll = explicit_rng.randrange(100) as u8;
+
+        let helper =
+            roll_rock_smash_encounter(&data, 4, 6, &mut helper_rng).expect("helper rock smash");
+        let explicit = select_rock_smash_encounter(&data, 4, 6, chance_roll, entry_roll)
+            .expect("explicit rock smash");
+
+        assert_eq!(helper, explicit);
+        assert_eq!(helper_rng.seed(), explicit_rng.seed());
+    }
+
+    #[test]
     fn field_encounters_require_modpack_tables_and_selected_buckets() {
         let mut data = field_data();
-        data.headbutt = None;
+        data.tables.remove(FieldEncounterKind::Headbutt.as_key());
         assert!(matches!(
             select_headbutt_encounter(&data, 0, 2, 0, 2, 54),
             Err(EncounterError::MissingFieldEncounterTable {
@@ -1885,7 +2402,10 @@ mod tests {
         ));
 
         let mut data = field_data();
-        data.headbutt.as_mut().expect("headbutt").rare.clear();
+        data.table_mut(FieldEncounterKind::Headbutt)
+            .expect("headbutt")
+            .rare
+            .clear();
         assert!(matches!(
             select_headbutt_encounter(&data, 0, 2, 0, 2, 54),
             Err(EncounterError::EmptyFieldEncounterEntries {
@@ -1896,7 +2416,7 @@ mod tests {
         ));
 
         let mut data = field_data();
-        data.rock_smash = None;
+        data.tables.remove(FieldEncounterKind::RockSmash.as_key());
         assert!(matches!(
             select_rock_smash_encounter(&data, 4, 6, 2, 90),
             Err(EncounterError::MissingFieldEncounterTable {
@@ -1906,7 +2426,10 @@ mod tests {
         ));
 
         let mut data = field_data();
-        data.rock_smash.as_mut().expect("rock smash").common.clear();
+        data.table_mut(FieldEncounterKind::RockSmash)
+            .expect("rock smash")
+            .common
+            .clear();
         assert!(matches!(
             select_rock_smash_encounter(&data, 4, 6, 2, 90),
             Err(EncounterError::EmptyFieldEncounterEntries {
@@ -2035,6 +2558,148 @@ mod tests {
         .to_string();
 
         assert!(error.contains("unknown field `display`"), "{error}");
+    }
+
+    #[test]
+    fn encounter_json_rejects_malformed_pack_tokens_at_deserialization() {
+        let wild_cases = [
+            (
+                "wild map",
+                r#"{
+                  "map_name":"Route 29",
+                  "grass_rates":{"morning":10,"day":10,"night":10},
+                  "water_rate":null,
+                  "grass":{"morning":[],"day":[],"night":[]},
+                  "water":{"morning":[],"day":[],"night":[]}
+                }"#,
+            ),
+            (
+                "wild species",
+                r#"{
+                  "map_name":"Route29",
+                  "grass_rates":{"morning":10,"day":10,"night":10},
+                  "water_rate":null,
+                  "grass":{"morning":[{"level":3,"species":"RAT TATA"}],"day":[],"night":[]},
+                  "water":{"morning":[],"day":[],"night":[]}
+                }"#,
+            ),
+            (
+                "grass rate key",
+                r#"{
+                  "map_name":"Route29",
+                  "grass_rates":{"mor ning":10,"day":10,"night":10},
+                  "water_rate":null,
+                  "grass":{"morning":[],"day":[],"night":[]},
+                  "water":{"morning":[],"day":[],"night":[]}
+                }"#,
+            ),
+        ];
+        for (label, payload) in wild_cases {
+            let error = serde_json::from_str::<WildEncounterData>(payload)
+                .expect_err("malformed wild encounter tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("encounter token must be"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
+
+        let slot_error = serde_json::from_value::<EncounterSlotTables>(serde_json::json!({
+            "tables": {
+                "deep water": [{"threshold": 100, "slot": 0}]
+            }
+        }))
+        .expect_err("malformed encounter slot table keys must fail during JSON load")
+        .to_string();
+        assert!(
+            slot_error.contains("encounter token must be"),
+            "{slot_error}"
+        );
+
+        let music_error = serde_json::from_value::<EncounterMusicModifiers>(serde_json::json!({
+            "modifiers": {
+                "MUSIC ROUTE_29": {"numerator": 1, "denominator": 2}
+            }
+        }))
+        .expect_err("malformed encounter music ids must fail during JSON load")
+        .to_string();
+        assert!(
+            music_error.contains("encounter token must be"),
+            "{music_error}"
+        );
+
+        let field_cases = [
+            (
+                "field map",
+                serde_json::json!({
+                    "map_name": "Route 29",
+                    "tables": {}
+                }),
+            ),
+            (
+                "field kind",
+                serde_json::json!({
+                    "map_name": "Route29",
+                    "tables": {
+                        "head butt": {"common": [], "rare": []}
+                    }
+                }),
+            ),
+            (
+                "field species",
+                serde_json::json!({
+                    "map_name": "Route29",
+                    "tables": {
+                        "headbutt": {
+                            "common": [{"weight": 100, "species": "AIP OM", "level": 10}],
+                            "rare": []
+                        }
+                    }
+                }),
+            ),
+        ];
+        for (label, payload) in field_cases {
+            let error = serde_json::from_value::<FieldEncounterData>(payload)
+                .expect_err("malformed field encounter tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("encounter token must be"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn encounter_discriminants_reject_legacy_alias_payloads() {
+        let surface_error =
+            serde_json::from_str::<EncounterSurface>(r#"{"grass":{"fallback_surface":"land"}}"#)
+                .expect_err("encounter surfaces must not accept object-shaped aliases")
+                .to_string();
+        assert!(
+            surface_error.contains("invalid type")
+                || surface_error.contains("unknown field `fallback_surface`"),
+            "{surface_error}"
+        );
+
+        let time_error = serde_json::from_str::<TimeOfDay>(r#"{"day":{"legacy_time":"DAY"}}"#)
+            .expect_err("encounter times must not accept object-shaped aliases")
+            .to_string();
+        assert!(
+            time_error.contains("invalid type")
+                || time_error.contains("unknown field `legacy_time`"),
+            "{time_error}"
+        );
+
+        let kind_error = serde_json::from_str::<FieldEncounterKind>(
+            r#"{"headbutt":{"normalized_kind":"Headbutt"}}"#,
+        )
+        .expect_err("field encounter kinds must not accept normalized aliases")
+        .to_string();
+        assert!(
+            kind_error.contains("invalid type")
+                || kind_error.contains("unknown field `normalized_kind`"),
+            "{kind_error}"
+        );
     }
 
     #[test]

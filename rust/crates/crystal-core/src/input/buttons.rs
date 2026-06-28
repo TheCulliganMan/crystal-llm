@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::world::map::Direction;
+
 pub const B_PAD_RIGHT: u8 = 1 << 0;
 pub const B_PAD_LEFT: u8 = 1 << 1;
 pub const B_PAD_UP: u8 = 1 << 2;
@@ -10,7 +12,7 @@ pub const B_PAD_SELECT: u8 = 1 << 6;
 pub const B_PAD_START: u8 = 1 << 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GameButton {
     A,
     B,
@@ -84,6 +86,31 @@ pub struct JoypadUpdate {
     pub h_joy_down: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum JoypadDirectionError {
+    #[error("joypad mask {mask:#010b} presses multiple directions")]
+    ConflictingDirections { mask: u8 },
+}
+
+pub fn direction_from_pad_mask(mask: u8) -> Result<Option<Direction>, JoypadDirectionError> {
+    let directions = [
+        (B_PAD_DOWN, Direction::Down),
+        (B_PAD_UP, Direction::Up),
+        (B_PAD_LEFT, Direction::Left),
+        (B_PAD_RIGHT, Direction::Right),
+    ];
+    let mut pressed = directions
+        .into_iter()
+        .filter(|(bit, _)| mask & *bit != 0)
+        .map(|(_, direction)| direction);
+    let first = pressed.next();
+    if pressed.next().is_some() {
+        return Err(JoypadDirectionError::ConflictingDirections { mask });
+    }
+    Ok(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +167,20 @@ mod tests {
         let changed = joypad.update([GameButton::A, GameButton::Right], 0xff);
         assert_eq!(changed.h_joy_pressed, B_PAD_A);
         assert_eq!(changed.h_joy_down, B_PAD_A | B_PAD_RIGHT);
+    }
+
+    #[test]
+    fn game_button_json_rejects_legacy_alias_payloads() {
+        let error = serde_json::from_value::<GameButton>(serde_json::json!({
+            "a": {
+                "legacy_button": "A_BUTTON"
+            }
+        }))
+        .expect_err("buttons must not accept legacy object payloads")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown variant"),
+            "{error}"
+        );
     }
 }

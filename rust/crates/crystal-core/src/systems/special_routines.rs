@@ -5,20 +5,22 @@ use thiserror::Error;
 
 use crate::battle::start::materialize_trainer_party;
 use crate::models::{
-    CaptureStorageLocation, Dv, Item, LearnedMove, MAX_BOX_MONS, Move, Pokemon, PokemonSpecies,
-    TrainerCatalog, create_pokemon_from_known_dvs,
+    CaptureStorageLocation, Dv, Item, LearnedMove, MAX_BOX_MONS, Move, Party, Pokemon,
+    PokemonSpecies, TrainerCatalog, create_pokemon_from_known_dvs, max_move_pp,
 };
 use crate::random::Random;
 use crate::state::{
-    BattleMemory, EventFlagError, GameState, LinkSerialConnectionStatus, MobileBattleTowerRecord,
-    OverworldMemory, RoamingPokemonState, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind,
-    ScriptFadeColor, ScriptFadeDirection, ScriptGraphicsRuntimeEvent, ScriptGraphicsRuntimeKind,
+    BattleMemory, BattleTowerState, BuenasPasswordState, EventFlagError, GameState,
+    LinkSerialConnectionStatus, MagikarpRecordState, MobileBattleTowerRecord, OverworldMemory,
+    RoamingPokemonState, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, ScriptFadeColor,
+    ScriptFadeDirection, ScriptGraphicsRuntimeEvent, ScriptGraphicsRuntimeKind,
     ScriptMapRuntimeEvent, ScriptMapRuntimeKind, ScriptMoneyRuntimeEvent, ScriptMoneyRuntimeKind,
     ScriptMusicFade, ScriptScreenFade, ScriptWarpRequest,
 };
 use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
-use crate::world::encounters::TimeOfDay;
+use crate::systems::phone::PhoneContactCatalog;
+use crate::world::encounters::{TimeOfDay, WildEncounter, WildEncounterData};
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
 
@@ -32,6 +34,7 @@ pub struct SpecialRoutineOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SpecialRoutineEffect {
+    Noop,
     HealParty {
         healed_slots: Vec<usize>,
     },
@@ -110,6 +113,28 @@ pub enum SpecialRoutineEffect {
         species_int_id: u16,
         newly_seen: bool,
     },
+    RandomUnseenWildMon {
+        contact_id: String,
+        map_name: String,
+        species: Option<String>,
+        already_seen: bool,
+        script_value: u8,
+        rng_seed_after: u32,
+    },
+    RandomPhoneWildMon {
+        contact_id: String,
+        map_name: String,
+        time_of_day: TimeOfDay,
+        species: String,
+        rng_seed_after: u32,
+    },
+    RandomPhoneMon {
+        contact_id: String,
+        trainer_id: String,
+        species: String,
+        party_index: usize,
+        rng_seed_after: u32,
+    },
     ActivateFishingSwarm {
         value: u8,
     },
@@ -137,6 +162,12 @@ pub enum SpecialRoutineEffect {
         second: u8,
         day_of_week: u8,
         time_of_day: TimeOfDay,
+    },
+    UnusedCheckUnusedTwoDayTimer {
+        start_day: u8,
+        current_day: u8,
+        elapsed_days: u8,
+        remaining_days: u8,
     },
     SampleKenjiBreakCountdown {
         value: u8,
@@ -456,6 +487,24 @@ pub enum SpecialRoutineEffect {
     CardFlip {
         coins: u16,
     },
+    UnusedMemoryGame {
+        coins: u16,
+    },
+    UnusedFindItemInPcOrBag {
+        item_id: String,
+        found_in_pc: bool,
+        found_in_bag: bool,
+        script_value: u8,
+    },
+    Function11ba38 {
+        selected_party_slot: usize,
+        other_usable_party_mon: bool,
+        script_value: u8,
+    },
+    GameCornerGameUnavailable {
+        game: String,
+        reason: GameCornerUnavailableReason,
+    },
     TrainerHouse {
         wins: u16,
         losses: u16,
@@ -482,11 +531,16 @@ pub struct BattleTowerRecentRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[serde(deny_unknown_fields)]
 pub enum SpecialRoutineError {
     #[error("unsupported exact special routine {routine}")]
     UnsupportedRoutine { routine: String },
     #[error("declared special routine {routine} is inactive in the definitive modpack scripts")]
     InactiveDeclaredRoutine { routine: String },
+    #[error(
+        "saved pending_special_battle_type {battle_type} is not declared by compiled scripted battles or special routines"
+    )]
+    SavedPendingSpecialBattleTypeMissing { battle_type: String },
     #[error(
         "special routine {routine} references unknown move {move_id} in party slot {party_slot}"
     )]
@@ -552,6 +606,8 @@ pub enum SpecialRoutineError {
     UnhandledBattleTowerAction { routine: String, action: String },
     #[error("special routine {routine} mobile password exceeds 17 bytes")]
     MobilePasswordTooLong { routine: String },
+    #[error("special routine {routine} mobile password must be exact text")]
+    InvalidMobilePassword { routine: String },
     #[error("special routine {routine} has invalid mobile battle timer {value}")]
     InvalidMobileBattleTimer { routine: String, value: String },
     #[error("special routine {routine} references invalid day-care caretaker {caretaker}")]
@@ -566,6 +622,18 @@ pub enum SpecialRoutineError {
     InvalidBuenaPasswordCategoryIndex { routine: String, index: usize },
     #[error("special routine {routine} has invalid Buena password option index {index}")]
     InvalidBuenaPasswordOptionIndex { routine: String, index: usize },
+    #[error(
+        "saved buenas_password.category_index {index} is outside compiled Buena password categories"
+    )]
+    SavedBuenaPasswordCategoryIndexOutOfRange { index: usize },
+    #[error(
+        "saved buenas_password.category_index {index} references missing compiled Buena password category {category_id}"
+    )]
+    SavedBuenaPasswordMissingCategory { index: usize, category_id: String },
+    #[error(
+        "saved buenas_password.option_index {index} is outside compiled Buena password category {category_id} options"
+    )]
+    SavedBuenaPasswordOptionIndexOutOfRange { index: usize, category_id: String },
     #[error("special routine {routine} requires Buena prize definitions from the modpack")]
     MissingBuenaPrizeDefinitions { routine: String },
     #[error("special routine {routine} requires Kurt apricorn recipes from the modpack")]
@@ -582,6 +650,30 @@ pub enum SpecialRoutineError {
     MissingBattleTowerRules { routine: String },
     #[error("special routine {routine} has invalid Battle Tower rules: {message}")]
     InvalidBattleTowerRules { routine: String, message: String },
+    #[error("saved active Battle Tower state requires compiled Battle Tower rules")]
+    SavedBattleTowerMissingRules,
+    #[error(
+        "saved battle_tower.level_group {level_group} is outside compiled Battle Tower range {minimum}..={maximum}"
+    )]
+    SavedBattleTowerLevelGroupOutOfRange {
+        level_group: u8,
+        minimum: u8,
+        maximum: u8,
+    },
+    #[error(
+        "saved {field} has {len} entries, compiled Battle Tower challenge_streak_length is {max_len}"
+    )]
+    SavedBattleTowerRecordTooLong {
+        field: String,
+        len: usize,
+        max_len: usize,
+    },
+    #[error("saved battle_tower.selected_party_indexes slot {party_index} has no party Pokemon")]
+    SavedBattleTowerEmptySelectedPartySlot { party_index: usize },
+    #[error("saved battle_tower.selected_party_indexes slot {party_index} is outside saved party")]
+    SavedBattleTowerSelectedPartySlotOutOfRange { party_index: usize },
+    #[error("saved magikarp_record requires compiled Magikarp length definitions")]
+    SavedMagikarpRecordRequiresLengthDefinitions,
     #[error(
         "special routine {routine} has invalid Battle Tower level group {level_group}; expected {minimum}..={maximum}"
     )]
@@ -628,13 +720,45 @@ pub enum SpecialRoutineError {
         trainer_id: String,
         error: String,
     },
+    #[error("special routine {routine} requires VAR_CALLERID from script runtime variables")]
+    MissingCallerId { routine: String },
+    #[error("special routine {routine} references unknown phone contact {contact_id}")]
+    UnknownPhoneContact { routine: String, contact_id: String },
+    #[error("special routine {routine} phone contact {contact_id} has no map constant")]
+    MissingPhoneContactMap { routine: String, contact_id: String },
+    #[error("special routine {routine} phone contact {contact_id} has no trainer label")]
+    MissingPhoneContactTrainer { routine: String, contact_id: String },
+    #[error("special routine {routine} requires wild encounter table for caller map {map_name}")]
+    MissingCallerWildEncounter { routine: String, map_name: String },
+    #[error("special routine {routine} requires grass encounters for caller map {map_name}")]
+    MissingCallerGrassEncounter { routine: String, map_name: String },
+    #[error(
+        "special routine {routine} caller map {map_name} has too few grass encounter slots: expected at least {expected}, found {found}"
+    )]
+    TooFewCallerGrassSlots {
+        routine: String,
+        map_name: String,
+        expected: usize,
+        found: usize,
+    },
+    #[error("special routine {routine} references unknown trainer {trainer_id}")]
+    UnknownTrainer { routine: String, trainer_id: String },
+    #[error("special routine {routine} trainer {trainer_id} has no party Pokemon")]
+    EmptyTrainerParty { routine: String, trainer_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LuckyNumberWinnerSource {
     Party,
     Pc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GameCornerUnavailableReason {
+    NoCoins,
+    MissingCoinCase,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -646,17 +770,19 @@ pub struct SpecialRoutineContext<'a> {
     pub growth_rates: &'a GrowthRateCatalog,
     pub item_catalog: &'a BTreeMap<String, Item>,
     pub runtime_spawn_points: &'a BTreeMap<String, RuntimeSpawnPointRef>,
-    pub roaming_pokemon: &'a [RoamingPokemonDefinition],
-    pub buena_password_categories: &'a [BuenaPasswordCategoryDefinition],
-    pub buena_prizes: &'a [BuenaPrizeDefinition],
-    pub kurt_apricorn_recipes: &'a [KurtApricornRecipe],
+    pub roaming_pokemon: &'a RoamingPokemonDefinitions,
+    pub buena_password_categories: &'a BuenaPasswordCategories,
+    pub buena_prizes: &'a BuenaPrizeDefinitions,
+    pub kurt_apricorn_recipes: &'a KurtApricornRecipes,
     pub shuckie_gift: Option<&'a ShuckieGiftDefinition>,
-    pub dratini_move_sets: &'a [DratiniMoveSetDefinition],
+    pub dratini_move_sets: &'a DratiniMoveSets,
     pub bug_contest_config: Option<&'a BugContestConfig>,
     pub battle_tower_rules: Option<&'a BattleTowerRules>,
     pub magikarp_lengths: &'a [MagikarpLengthEntry],
     pub happiness_data: Option<&'a HappinessData>,
     pub trainer_catalog: &'a TrainerCatalog,
+    pub phone_contacts: &'a PhoneContactCatalog,
+    pub wild_encounters: &'a BTreeMap<String, WildEncounterData>,
     pub odd_egg_definitions: &'a [OddEggDefinition],
     pub oak_ratings: &'a [OakRatingEntry],
 }
@@ -672,6 +798,7 @@ pub struct BugContestConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BugContestConfigIssue {
     MissingParkBalls,
     InvalidTimerSeconds {
@@ -746,7 +873,7 @@ pub fn bug_contest_config_issues(
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BattleTowerRules {
-    pub banned_species: Vec<String>,
+    pub banned_species: BTreeMap<String, BattleTowerBannedSpeciesRule>,
     pub required_party_count: usize,
     pub challenge_streak_length: u8,
     pub minimum_level_group: u8,
@@ -758,7 +885,12 @@ pub struct BattleTowerRules {
     pub egg_failure_text: String,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BattleTowerBannedSpeciesRule {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleTowerFailureTextField {
     PartyCount,
     DuplicateSpecies,
@@ -778,6 +910,7 @@ impl BattleTowerFailureTextField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleTowerRulesIssue {
     MissingRequiredPartyCount,
     MissingChallengeStreakLength,
@@ -788,15 +921,9 @@ pub enum BattleTowerRulesIssue {
         text_id: String,
     },
     InvalidBannedSpecies {
-        index: usize,
-        species_id: String,
-    },
-    DuplicateBannedSpecies {
-        index: usize,
         species_id: String,
     },
     UnknownBannedSpecies {
-        index: usize,
         species_id: String,
     },
 }
@@ -843,29 +970,124 @@ pub fn battle_tower_rules_issues(
             });
         }
     }
-    let mut seen = BTreeSet::new();
-    for (index, species_id) in rules.banned_species.iter().enumerate() {
+    for species_id in rules.banned_species.keys() {
         if !is_exact_nonempty_special_token(species_id) {
             issues.push(BattleTowerRulesIssue::InvalidBannedSpecies {
-                index,
                 species_id: species_id.clone(),
             });
             continue;
         }
-        if !seen.insert(species_id.as_str()) {
-            issues.push(BattleTowerRulesIssue::DuplicateBannedSpecies {
-                index,
-                species_id: species_id.clone(),
-            });
-        }
         if !species_ids.contains(species_id.as_str()) {
             issues.push(BattleTowerRulesIssue::UnknownBannedSpecies {
-                index,
                 species_id: species_id.clone(),
             });
         }
     }
     issues
+}
+
+pub fn is_default_battle_tower_trainer_history(trainer_history: &[u8]) -> bool {
+    trainer_history.len() == 7 && trainer_history.iter().all(|trainer_id| *trainer_id == 0xff)
+}
+
+pub fn saved_battle_tower_state_is_active(tower: &BattleTowerState) -> bool {
+    tower.challenge_state != 0
+        || tower.beaten_trainers != 0
+        || tower.level_group != 0
+        || tower.reward_given
+        || tower.quick_saved
+        || tower.explanation_read
+        || tower.save_file_flags != 0
+        || tower.gs_ball_flag
+        || tower.record_state != 0
+        || tower.record_last_day.is_some()
+        || tower.record_reset_counter != 0
+        || tower.leaderboard_acknowledged
+        || tower.last_rule_failure.is_some()
+        || tower.loaded_trainer_id.is_some()
+        || tower.last_sprite_constant.is_some()
+        || !tower.selected_party_indexes.is_empty()
+        || !tower.mobile_flags.is_empty()
+        || !is_default_battle_tower_trainer_history(&tower.trainer_history)
+        || !tower.record_streaks.is_empty()
+        || !tower.record_outcomes.is_empty()
+        || !tower.record_days.is_empty()
+}
+
+pub fn validate_saved_battle_tower_state(
+    tower: &BattleTowerState,
+    party: &Party,
+    rules: Option<&BattleTowerRules>,
+) -> Result<(), SpecialRoutineError> {
+    if saved_battle_tower_state_is_active(tower) {
+        let rules = rules.ok_or(SpecialRoutineError::SavedBattleTowerMissingRules)?;
+        if tower.level_group != 0
+            && (tower.level_group < rules.minimum_level_group
+                || tower.level_group > rules.maximum_level_group)
+        {
+            return Err(SpecialRoutineError::SavedBattleTowerLevelGroupOutOfRange {
+                level_group: tower.level_group,
+                minimum: rules.minimum_level_group,
+                maximum: rules.maximum_level_group,
+            });
+        }
+        validate_saved_battle_tower_record_len(
+            "battle_tower.trainer_history",
+            tower.trainer_history.len(),
+            rules.challenge_streak_length,
+        )?;
+        validate_saved_battle_tower_record_len(
+            "battle_tower.record_streaks",
+            tower.record_streaks.len(),
+            rules.challenge_streak_length,
+        )?;
+        validate_saved_battle_tower_record_len(
+            "battle_tower.record_outcomes",
+            tower.record_outcomes.len(),
+            rules.challenge_streak_length,
+        )?;
+        validate_saved_battle_tower_record_len(
+            "battle_tower.record_days",
+            tower.record_days.len(),
+            rules.challenge_streak_length,
+        )?;
+    }
+    for party_index in &tower.selected_party_indexes {
+        match party.pokemon.get(*party_index) {
+            Some(Some(_)) => {}
+            Some(None) => {
+                return Err(
+                    SpecialRoutineError::SavedBattleTowerEmptySelectedPartySlot {
+                        party_index: *party_index,
+                    },
+                );
+            }
+            None => {
+                return Err(
+                    SpecialRoutineError::SavedBattleTowerSelectedPartySlotOutOfRange {
+                        party_index: *party_index,
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_saved_battle_tower_record_len(
+    field: &str,
+    len: usize,
+    challenge_streak_length: u8,
+) -> Result<(), SpecialRoutineError> {
+    let max_len = usize::from(challenge_streak_length);
+    if len > max_len {
+        return Err(SpecialRoutineError::SavedBattleTowerRecordTooLong {
+            field: field.to_string(),
+            len,
+            max_len,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -877,6 +1099,7 @@ pub struct OakRatingEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum OakRatingTableIssue {
     InvalidFanfare {
         index: usize,
@@ -955,6 +1178,7 @@ pub struct OddEggDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum OddEggDefinitionIssue {
     InvalidProbabilityTotal {
         total_probability: u32,
@@ -1085,6 +1309,7 @@ pub struct MagikarpLengthEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum MagikarpLengthTableIssue {
     InvalidDivisor {
         index: usize,
@@ -1126,25 +1351,17 @@ pub fn magikarp_length_table_issues(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HappinessData {
-    pub changes: Vec<HappinessChangeEntry>,
-    pub services: Vec<HappinessServiceTable>,
+    pub changes: BTreeMap<u8, HappinessChangeEntry>,
+    pub services: BTreeMap<String, Vec<HappinessServiceOutcome>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HappinessChangeEntry {
     pub code: String,
-    pub change_code: u8,
     pub low: i16,
     pub mid: i16,
     pub high: i16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HappinessServiceTable {
-    pub routine: String,
-    pub outcomes: Vec<HappinessServiceOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1156,16 +1373,15 @@ pub struct HappinessServiceOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum HappinessDataIssue {
     EmptyChanges,
     EmptyChangeCode { change_code: u8 },
     InvalidChangeCode { code: String, change_code: u8 },
     DuplicateChangeCode { code: String, change_code: u8 },
-    DuplicateChangeIndex { change_code: u8 },
     EmptyServices,
     EmptyServiceRoutine { routine: String },
     InvalidServiceRoutine { routine: String },
-    DuplicateService { routine: String },
     EmptyServiceOutcomes { routine: String },
     UnknownServiceChange { routine: String, change_code: u8 },
 }
@@ -1176,28 +1392,22 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
         issues.push(HappinessDataIssue::EmptyChanges);
     }
 
-    let mut change_codes = BTreeSet::new();
     let mut code_names = BTreeSet::new();
-    for entry in &data.changes {
+    for (change_code, entry) in &data.changes {
         if entry.code.trim().is_empty() {
             issues.push(HappinessDataIssue::EmptyChangeCode {
-                change_code: entry.change_code,
+                change_code: *change_code,
             });
         } else if !is_exact_nonempty_special_token(&entry.code) {
             issues.push(HappinessDataIssue::InvalidChangeCode {
                 code: entry.code.clone(),
-                change_code: entry.change_code,
+                change_code: *change_code,
             });
         }
         if !code_names.insert(entry.code.clone()) {
             issues.push(HappinessDataIssue::DuplicateChangeCode {
                 code: entry.code.clone(),
-                change_code: entry.change_code,
-            });
-        }
-        if !change_codes.insert(entry.change_code) {
-            issues.push(HappinessDataIssue::DuplicateChangeIndex {
-                change_code: entry.change_code,
+                change_code: *change_code,
             });
         }
     }
@@ -1205,31 +1415,25 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
     if data.services.is_empty() {
         issues.push(HappinessDataIssue::EmptyServices);
     }
-    let mut service_names = BTreeSet::new();
-    for service in &data.services {
-        if service.routine.trim().is_empty() {
+    for (routine, outcomes) in &data.services {
+        if routine.trim().is_empty() {
             issues.push(HappinessDataIssue::EmptyServiceRoutine {
-                routine: service.routine.clone(),
+                routine: routine.clone(),
             });
-        } else if !is_exact_nonempty_special_token(&service.routine) {
+        } else if !is_exact_nonempty_special_token(routine) {
             issues.push(HappinessDataIssue::InvalidServiceRoutine {
-                routine: service.routine.clone(),
+                routine: routine.clone(),
             });
         }
-        if !service_names.insert(service.routine.clone()) {
-            issues.push(HappinessDataIssue::DuplicateService {
-                routine: service.routine.clone(),
-            });
-        }
-        if service.outcomes.is_empty() {
+        if outcomes.is_empty() {
             issues.push(HappinessDataIssue::EmptyServiceOutcomes {
-                routine: service.routine.clone(),
+                routine: routine.clone(),
             });
         }
-        for outcome in &service.outcomes {
-            if !change_codes.contains(&outcome.change_code) {
+        for outcome in outcomes {
+            if !data.changes.contains_key(&outcome.change_code) {
                 issues.push(HappinessDataIssue::UnknownServiceChange {
-                    routine: service.routine.clone(),
+                    routine: routine.clone(),
                     change_code: outcome.change_code,
                 });
             }
@@ -1239,60 +1443,45 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DratiniMoveSetDefinition {
-    pub mode: u8,
-    pub moves: Vec<String>,
-}
+pub type DratiniMoveSets = BTreeMap<u8, Vec<String>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DratiniMoveSetIssue {
-    DuplicateMode {
-        index: usize,
+    EmptyMoveSet {
         mode: u8,
     },
-    EmptyMoveSet {
-        index: usize,
-    },
     InvalidMove {
-        index: usize,
+        mode: u8,
         move_index: usize,
         move_id: String,
     },
     UnknownMove {
-        index: usize,
+        mode: u8,
         move_index: usize,
         move_id: String,
     },
 }
 
 pub fn dratini_move_set_issues(
-    move_sets: &[DratiniMoveSetDefinition],
+    move_sets: &DratiniMoveSets,
     move_ids: &BTreeSet<String>,
 ) -> Vec<DratiniMoveSetIssue> {
     let mut issues = Vec::new();
-    let mut seen_modes = BTreeSet::new();
-    for (index, move_set) in move_sets.iter().enumerate() {
-        if !seen_modes.insert(move_set.mode) {
-            issues.push(DratiniMoveSetIssue::DuplicateMode {
-                index,
-                mode: move_set.mode,
-            });
+    for (mode, moves) in move_sets {
+        if moves.is_empty() {
+            issues.push(DratiniMoveSetIssue::EmptyMoveSet { mode: *mode });
         }
-        if move_set.moves.is_empty() {
-            issues.push(DratiniMoveSetIssue::EmptyMoveSet { index });
-        }
-        for (move_index, move_id) in move_set.moves.iter().enumerate() {
+        for (move_index, move_id) in moves.iter().enumerate() {
             if !is_exact_nonempty_special_token(move_id) {
                 issues.push(DratiniMoveSetIssue::InvalidMove {
-                    index,
+                    mode: *mode,
                     move_index,
                     move_id: move_id.clone(),
                 });
             } else if !move_ids.contains(move_id.as_str()) {
                 issues.push(DratiniMoveSetIssue::UnknownMove {
-                    index,
+                    mode: *mode,
                     move_index,
                     move_id: move_id.clone(),
                 });
@@ -1305,6 +1494,7 @@ pub fn dratini_move_set_issues(
 fn is_exact_nonempty_special_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -1389,10 +1579,16 @@ pub fn shuckie_gift_issues(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuenaPasswordCategoryDefinition {
-    pub id: String,
     pub category_type: String,
     pub points: u8,
     pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BuenaPasswordCategories {
+    pub order: Vec<String>,
+    pub categories: BTreeMap<String, BuenaPasswordCategoryDefinition>,
 }
 
 pub const BUENA_PASSWORD_CATEGORY_MON: &str = "BUENA_MON";
@@ -1412,111 +1608,114 @@ pub fn is_known_buena_password_category_type(category_type: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuenaPasswordCategoryIssue {
-    DuplicateId {
-        index: usize,
+    EmptyId {
         id: String,
     },
-    EmptyId {
-        index: usize,
-    },
     InvalidId {
-        index: usize,
+        id: String,
+    },
+    UnknownOrderedId {
+        id: String,
+    },
+    DuplicateOrderedId {
         id: String,
     },
     InvalidCategoryType {
-        index: usize,
         id: String,
         category_type: String,
     },
     UnknownCategoryType {
-        index: usize,
         id: String,
         category_type: String,
     },
     InvalidPoints {
-        index: usize,
+        id: String,
     },
     EmptyOptions {
-        index: usize,
+        id: String,
     },
     EmptyOption {
-        index: usize,
+        id: String,
         option_index: usize,
     },
     InvalidOption {
-        index: usize,
+        id: String,
         option_index: usize,
         option: String,
     },
     UnknownSpecies {
-        index: usize,
+        id: String,
         option_index: usize,
         species: String,
     },
     UnknownItem {
-        index: usize,
+        id: String,
         option_index: usize,
         item_id: String,
     },
     UnknownMove {
-        index: usize,
+        id: String,
         option_index: usize,
         move_id: String,
     },
 }
 
 pub fn buena_password_category_issues(
-    categories: &[BuenaPasswordCategoryDefinition],
+    catalog: &BuenaPasswordCategories,
     species_ids: &BTreeSet<String>,
     item_ids: &BTreeSet<String>,
     move_ids: &BTreeSet<String>,
 ) -> Vec<BuenaPasswordCategoryIssue> {
     let mut issues = Vec::new();
-    let mut seen_ids = BTreeSet::new();
-    for (index, category) in categories.iter().enumerate() {
-        if category.id.is_empty() {
-            issues.push(BuenaPasswordCategoryIssue::EmptyId { index });
-        } else if !is_exact_nonempty_special_token(&category.id) {
-            issues.push(BuenaPasswordCategoryIssue::InvalidId {
-                index,
-                id: category.id.clone(),
-            });
-        } else if !seen_ids.insert(category.id.clone()) {
-            issues.push(BuenaPasswordCategoryIssue::DuplicateId {
-                index,
-                id: category.id.clone(),
-            });
+    let mut seen_order = BTreeSet::new();
+    for id in &catalog.order {
+        if id.is_empty() {
+            issues.push(BuenaPasswordCategoryIssue::EmptyId { id: id.clone() });
+        } else if !is_exact_nonempty_special_token(id) {
+            issues.push(BuenaPasswordCategoryIssue::InvalidId { id: id.clone() });
+        } else if !seen_order.insert(id.clone()) {
+            issues.push(BuenaPasswordCategoryIssue::DuplicateOrderedId { id: id.clone() });
+        } else if !catalog.categories.contains_key(id) {
+            issues.push(BuenaPasswordCategoryIssue::UnknownOrderedId { id: id.clone() });
+        }
+    }
+    for (id, category) in &catalog.categories {
+        if id.is_empty() {
+            issues.push(BuenaPasswordCategoryIssue::EmptyId { id: id.clone() });
+        } else if !is_exact_nonempty_special_token(id) {
+            issues.push(BuenaPasswordCategoryIssue::InvalidId { id: id.clone() });
+        }
+        if !seen_order.contains(id) {
+            issues.push(BuenaPasswordCategoryIssue::UnknownOrderedId { id: id.clone() });
         }
         if !is_exact_nonempty_special_token(&category.category_type) {
             issues.push(BuenaPasswordCategoryIssue::InvalidCategoryType {
-                index,
-                id: category.id.clone(),
+                id: id.clone(),
                 category_type: category.category_type.clone(),
             });
         } else if !is_known_buena_password_category_type(&category.category_type) {
             issues.push(BuenaPasswordCategoryIssue::UnknownCategoryType {
-                index,
-                id: category.id.clone(),
+                id: id.clone(),
                 category_type: category.category_type.clone(),
             });
         }
         if category.points == 0 {
-            issues.push(BuenaPasswordCategoryIssue::InvalidPoints { index });
+            issues.push(BuenaPasswordCategoryIssue::InvalidPoints { id: id.clone() });
         }
         if category.options.is_empty() {
-            issues.push(BuenaPasswordCategoryIssue::EmptyOptions { index });
+            issues.push(BuenaPasswordCategoryIssue::EmptyOptions { id: id.clone() });
         }
         for (option_index, option) in category.options.iter().enumerate() {
             if option.is_empty() {
                 issues.push(BuenaPasswordCategoryIssue::EmptyOption {
-                    index,
+                    id: id.clone(),
                     option_index,
                 });
                 continue;
             }
             if !is_exact_nonempty_special_token(option) {
                 issues.push(BuenaPasswordCategoryIssue::InvalidOption {
-                    index,
+                    id: id.clone(),
                     option_index,
                     option: option.clone(),
                 });
@@ -1525,21 +1724,21 @@ pub fn buena_password_category_issues(
             match category.category_type.as_str() {
                 BUENA_PASSWORD_CATEGORY_MON if !species_ids.contains(option) => {
                     issues.push(BuenaPasswordCategoryIssue::UnknownSpecies {
-                        index,
+                        id: id.clone(),
                         option_index,
                         species: option.clone(),
                     });
                 }
                 BUENA_PASSWORD_CATEGORY_ITEM if !item_ids.contains(option) => {
                     issues.push(BuenaPasswordCategoryIssue::UnknownItem {
-                        index,
+                        id: id.clone(),
                         option_index,
                         item_id: option.clone(),
                     });
                 }
                 BUENA_PASSWORD_CATEGORY_MOVE if !move_ids.contains(option) => {
                     issues.push(BuenaPasswordCategoryIssue::UnknownMove {
-                        index,
+                        id: id.clone(),
                         option_index,
                         move_id: option.clone(),
                     });
@@ -1551,109 +1750,89 @@ pub fn buena_password_category_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct KurtApricornRecipe {
-    pub apricorn: String,
-    pub ball: String,
-}
+pub type KurtApricornRecipes = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KurtApricornRecipeIssue {
-    DuplicateApricorn { index: usize, apricorn: String },
-    EmptyApricorn { index: usize },
-    InvalidApricorn { index: usize, apricorn: String },
-    UnknownApricorn { index: usize, apricorn: String },
-    EmptyBall { index: usize },
-    InvalidBall { index: usize, ball: String },
-    UnknownBall { index: usize, ball: String },
+    EmptyApricorn { apricorn: String },
+    InvalidApricorn { apricorn: String },
+    UnknownApricorn { apricorn: String },
+    EmptyBall { apricorn: String },
+    InvalidBall { apricorn: String, ball: String },
+    UnknownBall { apricorn: String, ball: String },
 }
 
 pub fn kurt_apricorn_recipe_issues(
-    recipes: &[KurtApricornRecipe],
+    recipes: &KurtApricornRecipes,
     item_ids: &BTreeSet<String>,
 ) -> Vec<KurtApricornRecipeIssue> {
     let mut issues = Vec::new();
-    let mut seen_apricorns = BTreeSet::new();
-    for (index, recipe) in recipes.iter().enumerate() {
-        if recipe.apricorn.is_empty() {
-            issues.push(KurtApricornRecipeIssue::EmptyApricorn { index });
-        } else if !is_exact_nonempty_special_token(&recipe.apricorn) {
+    for (apricorn, ball) in recipes {
+        if apricorn.is_empty() {
+            issues.push(KurtApricornRecipeIssue::EmptyApricorn {
+                apricorn: apricorn.clone(),
+            });
+        } else if !is_exact_nonempty_special_token(apricorn) {
             issues.push(KurtApricornRecipeIssue::InvalidApricorn {
-                index,
-                apricorn: recipe.apricorn.clone(),
+                apricorn: apricorn.clone(),
             });
-        } else if !item_ids.contains(&recipe.apricorn) {
+        } else if !item_ids.contains(apricorn) {
             issues.push(KurtApricornRecipeIssue::UnknownApricorn {
-                index,
-                apricorn: recipe.apricorn.clone(),
-            });
-        } else if !seen_apricorns.insert(recipe.apricorn.clone()) {
-            issues.push(KurtApricornRecipeIssue::DuplicateApricorn {
-                index,
-                apricorn: recipe.apricorn.clone(),
+                apricorn: apricorn.clone(),
             });
         }
-        if recipe.ball.is_empty() {
-            issues.push(KurtApricornRecipeIssue::EmptyBall { index });
-        } else if !is_exact_nonempty_special_token(&recipe.ball) {
-            issues.push(KurtApricornRecipeIssue::InvalidBall {
-                index,
-                ball: recipe.ball.clone(),
+        if ball.is_empty() {
+            issues.push(KurtApricornRecipeIssue::EmptyBall {
+                apricorn: apricorn.clone(),
             });
-        } else if !item_ids.contains(&recipe.ball) {
+        } else if !is_exact_nonempty_special_token(ball) {
+            issues.push(KurtApricornRecipeIssue::InvalidBall {
+                apricorn: apricorn.clone(),
+                ball: ball.clone(),
+            });
+        } else if !item_ids.contains(ball) {
             issues.push(KurtApricornRecipeIssue::UnknownBall {
-                index,
-                ball: recipe.ball.clone(),
+                apricorn: apricorn.clone(),
+                ball: ball.clone(),
             });
         }
     }
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BuenaPrizeDefinition {
-    pub item_id: String,
-    pub cost: u8,
-}
+pub type BuenaPrizeDefinitions = BTreeMap<String, u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuenaPrizeDefinitionIssue {
-    DuplicateItem { index: usize, item_id: String },
-    EmptyItem { index: usize },
-    InvalidItem { index: usize, item_id: String },
-    UnknownItem { index: usize, item_id: String },
-    InvalidCost { index: usize },
+    EmptyItem { item_id: String },
+    InvalidItem { item_id: String },
+    UnknownItem { item_id: String },
+    InvalidCost { item_id: String },
 }
 
 pub fn buena_prize_definition_issues(
-    prizes: &[BuenaPrizeDefinition],
+    prizes: &BuenaPrizeDefinitions,
     item_ids: &BTreeSet<String>,
 ) -> Vec<BuenaPrizeDefinitionIssue> {
     let mut issues = Vec::new();
-    let mut seen_items = BTreeSet::new();
-    for (index, prize) in prizes.iter().enumerate() {
-        if prize.item_id.is_empty() {
-            issues.push(BuenaPrizeDefinitionIssue::EmptyItem { index });
-        } else if !is_exact_nonempty_special_token(&prize.item_id) {
+    for (item_id, cost) in prizes {
+        if item_id.is_empty() {
+            issues.push(BuenaPrizeDefinitionIssue::EmptyItem {
+                item_id: item_id.clone(),
+            });
+        } else if !is_exact_nonempty_special_token(item_id) {
             issues.push(BuenaPrizeDefinitionIssue::InvalidItem {
-                index,
-                item_id: prize.item_id.clone(),
+                item_id: item_id.clone(),
             });
-        } else if !item_ids.contains(&prize.item_id) {
+        } else if !item_ids.contains(item_id) {
             issues.push(BuenaPrizeDefinitionIssue::UnknownItem {
-                index,
-                item_id: prize.item_id.clone(),
-            });
-        } else if !seen_items.insert(prize.item_id.clone()) {
-            issues.push(BuenaPrizeDefinitionIssue::DuplicateItem {
-                index,
-                item_id: prize.item_id.clone(),
+                item_id: item_id.clone(),
             });
         }
-        if prize.cost == 0 {
-            issues.push(BuenaPrizeDefinitionIssue::InvalidCost { index });
+        if *cost == 0 {
+            issues.push(BuenaPrizeDefinitionIssue::InvalidCost {
+                item_id: item_id.clone(),
+            });
         }
     }
     issues
@@ -1662,48 +1841,44 @@ pub fn buena_prize_definition_issues(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoamingPokemonDefinition {
-    pub species: String,
     pub level: u8,
     pub map_group: u16,
     pub map_number: u16,
 }
 
+pub type RoamingPokemonDefinitions = BTreeMap<String, RoamingPokemonDefinition>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoamingPokemonDefinitionIssue {
-    DuplicateSpecies { index: usize, species: String },
-    EmptySpecies { index: usize },
-    InvalidSpecies { index: usize, species: String },
-    UnknownSpecies { index: usize, species: String },
-    InvalidLevel { index: usize },
+    EmptySpecies { species: String },
+    InvalidSpecies { species: String },
+    UnknownSpecies { species: String },
+    InvalidLevel { species: String },
 }
 
 pub fn roaming_pokemon_definition_issues(
-    definitions: &[RoamingPokemonDefinition],
+    definitions: &RoamingPokemonDefinitions,
     species_ids: &BTreeSet<String>,
 ) -> Vec<RoamingPokemonDefinitionIssue> {
     let mut issues = Vec::new();
-    let mut seen_species = BTreeSet::new();
-    for (index, definition) in definitions.iter().enumerate() {
-        if definition.species.trim().is_empty() {
-            issues.push(RoamingPokemonDefinitionIssue::EmptySpecies { index });
-        } else if !is_exact_nonempty_special_token(&definition.species) {
+    for (species, definition) in definitions {
+        if species.trim().is_empty() {
+            issues.push(RoamingPokemonDefinitionIssue::EmptySpecies {
+                species: species.clone(),
+            });
+        } else if !is_exact_nonempty_special_token(species) {
             issues.push(RoamingPokemonDefinitionIssue::InvalidSpecies {
-                index,
-                species: definition.species.clone(),
+                species: species.clone(),
             });
-        } else if !species_ids.contains(&definition.species) {
+        } else if !species_ids.contains(species) {
             issues.push(RoamingPokemonDefinitionIssue::UnknownSpecies {
-                index,
-                species: definition.species.clone(),
-            });
-        } else if !seen_species.insert(definition.species.clone()) {
-            issues.push(RoamingPokemonDefinitionIssue::DuplicateSpecies {
-                index,
-                species: definition.species.clone(),
+                species: species.clone(),
             });
         }
         if definition.level == 0 {
-            issues.push(RoamingPokemonDefinitionIssue::InvalidLevel { index });
+            issues.push(RoamingPokemonDefinitionIssue::InvalidLevel {
+                species: species.clone(),
+            });
         }
     }
     issues
@@ -1744,6 +1919,12 @@ pub enum RuntimeSpawnPointCatalogIssue {
     InvalidSpawnPoint {
         key: String,
     },
+    DuplicateMapBinding {
+        key: String,
+        existing_key: String,
+        group_id: i16,
+        map_id: i16,
+    },
 }
 
 pub fn runtime_spawn_point_catalog_issues(
@@ -1751,6 +1932,7 @@ pub fn runtime_spawn_point_catalog_issues(
     runtime_map_names: &BTreeMap<String, String>,
 ) -> Vec<RuntimeSpawnPointCatalogIssue> {
     let mut issues = Vec::new();
+    let mut map_bindings = BTreeMap::new();
 
     for (key, spawn) in spawn_points {
         let invalid_spawn_point = !is_exact_nonempty_spawn_token(key)
@@ -1780,6 +1962,18 @@ pub fn runtime_spawn_point_catalog_issues(
                 }),
             }
         }
+        if !invalid_spawn_point {
+            if let Some(existing_key) =
+                map_bindings.insert((spawn.group_id, spawn.map_id), key.clone())
+            {
+                issues.push(RuntimeSpawnPointCatalogIssue::DuplicateMapBinding {
+                    key: key.clone(),
+                    existing_key,
+                    group_id: spawn.group_id,
+                    map_id: spawn.map_id,
+                });
+            }
+        }
     }
 
     issues
@@ -1788,9 +1982,15 @@ pub fn runtime_spawn_point_catalog_issues(
 fn is_exact_nonempty_spawn_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub const EXECUTABLE_SPECIAL_ROUTINES: &[&str] = &[
@@ -1822,6 +2022,7 @@ pub const EXECUTABLE_SPECIAL_ROUTINES: &[&str] = &[
     "InitialSetDSTFlag",
     "InitialClearDSTFlag",
     "UpdateTime",
+    "UnusedCheckUnusedTwoDayTimer",
     "SampleKenjiBreakCountdown",
     "CheckLuckyNumberShowFlag",
     "ResetLuckyNumberShowFlag",
@@ -1877,6 +2078,7 @@ pub const EXECUTABLE_SPECIAL_ROUTINES: &[&str] = &[
     "BankOfMom",
     "SlotMachine",
     "CardFlip",
+    "UnusedMemoryGame",
     "DisplayLinkRecord",
     "TrainerHouse",
     "PhotoStudio",
@@ -1942,16 +2144,17 @@ pub const EXECUTABLE_SPECIAL_ROUTINES: &[&str] = &[
     "Mobile_SelectThreeMons",
     "GiveOddEgg",
     "Menu_ChallengeExplanationCancel",
-];
-
-pub const INACTIVE_DECLARED_SPECIAL_ROUTINES: &[&str] = &[
-    "UnusedCheckUnusedTwoDayTimer",
-    "UnusedFindItemInPCOrBag",
-    "UnusedDummySpecial",
-    "UnusedMemoryGame",
     "RandomUnseenWildMon",
     "RandomPhoneWildMon",
     "RandomPhoneMon",
+    "UnusedDummySpecial",
+    "UnusedBattleTowerDummySpecial1",
+    "UnusedBattleTowerDummySpecial2",
+    "UnusedFindItemInPCOrBag",
+    "Function11ba38",
+];
+
+pub const INACTIVE_DECLARED_SPECIAL_ROUTINES: &[&str] = &[
     "Function11ac3e",
     "TradeCornerHoldMon",
     "Function11b5e8",
@@ -1961,13 +2164,10 @@ pub const INACTIVE_DECLARED_SPECIAL_ROUTINES: &[&str] = &[
     "Function11b93b",
     "Function170114",
     "Function1704e1",
-    "UnusedBattleTowerDummySpecial1",
-    "Function11ba38",
     "Function11c1ab",
     "Function17d2b6",
     "Function17d2ce",
     "Function102142",
-    "UnusedBattleTowerDummySpecial2",
 ];
 
 pub fn is_known_special_routine(routine: &str) -> bool {
@@ -2019,6 +2219,13 @@ pub fn apply_special_routine(
     let empty_items = BTreeMap::new();
     let empty_spawn_points = BTreeMap::new();
     let empty_trainers = TrainerCatalog::default();
+    let empty_roaming_pokemon = BTreeMap::new();
+    let empty_buena_password_categories = BuenaPasswordCategories::default();
+    let empty_buena_prizes = BTreeMap::new();
+    let empty_kurt_apricorn_recipes = BTreeMap::new();
+    let empty_dratini_move_sets = BTreeMap::new();
+    let empty_phone_contacts = PhoneContactCatalog::default();
+    let empty_wild_encounters = BTreeMap::new();
     apply_special_routine_with_context(
         state,
         SpecialRoutineContext {
@@ -2029,17 +2236,19 @@ pub fn apply_special_routine(
             growth_rates: &empty_growth_rates,
             item_catalog: &empty_items,
             runtime_spawn_points: &empty_spawn_points,
-            roaming_pokemon: &[],
-            buena_password_categories: &[],
-            buena_prizes: &[],
-            kurt_apricorn_recipes: &[],
+            roaming_pokemon: &empty_roaming_pokemon,
+            buena_password_categories: &empty_buena_password_categories,
+            buena_prizes: &empty_buena_prizes,
+            kurt_apricorn_recipes: &empty_kurt_apricorn_recipes,
             shuckie_gift: None,
-            dratini_move_sets: &[],
+            dratini_move_sets: &empty_dratini_move_sets,
             bug_contest_config: None,
             battle_tower_rules: None,
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &empty_trainers,
+            phone_contacts: &empty_phone_contacts,
+            wild_encounters: &empty_wild_encounters,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         },
@@ -2085,6 +2294,7 @@ pub fn apply_special_routine_with_context(
         "InitialSetDSTFlag" => initial_set_dst_flag(state, routine),
         "InitialClearDSTFlag" => initial_clear_dst_flag(state, routine),
         "UpdateTime" => update_time(state, routine),
+        "UnusedCheckUnusedTwoDayTimer" => unused_check_unused_two_day_timer(state, routine),
         "SampleKenjiBreakCountdown" => sample_kenji_break_countdown(state, routine),
         "CheckLuckyNumberShowFlag" => check_lucky_number_show_flag(state, routine),
         "ResetLuckyNumberShowFlag" => reset_lucky_number_show_flag(state, routine),
@@ -2200,8 +2410,9 @@ pub fn apply_special_routine_with_context(
         "PokeSeer" => poke_seer(state, routine),
         "MoveTutor" => move_tutor(state, context.move_catalog, routine),
         "BankOfMom" => bank_of_mom(state, routine),
-        "SlotMachine" => slot_machine(state, routine),
-        "CardFlip" => card_flip(state, routine),
+        "SlotMachine" => slot_machine(state, context.item_catalog, routine),
+        "CardFlip" => card_flip(state, context.item_catalog, routine),
+        "UnusedMemoryGame" => unused_memory_game(state, context.item_catalog, routine),
         "DisplayLinkRecord" => display_link_record(state, routine),
         "TrainerHouse" => trainer_house(state, routine),
         "PhotoStudio" => photo_studio(state, routine),
@@ -2316,29 +2527,38 @@ pub fn apply_special_routine_with_context(
         "Menu_ChallengeExplanationCancel" => {
             battle_tower_challenge_explanation_cancel(state, routine)
         }
-        "UnusedCheckUnusedTwoDayTimer"
-        | "UnusedFindItemInPCOrBag"
-        | "UnusedDummySpecial"
-        | "UnusedMemoryGame" => inactive_declared_routine(routine),
-        "RandomUnseenWildMon"
-        | "RandomPhoneWildMon"
-        | "RandomPhoneMon"
-        | "Function11ac3e"
-        | "TradeCornerHoldMon"
-        | "Function11b5e8"
-        | "Function11b7e5"
-        | "Function11b879"
-        | "Function11b920"
-        | "Function11b93b"
-        | "Function170114"
-        | "Function1704e1"
+        "UnusedDummySpecial"
         | "UnusedBattleTowerDummySpecial1"
-        | "Function11ba38"
-        | "Function11c1ab"
-        | "Function17d2b6"
-        | "Function17d2ce"
-        | "Function102142"
-        | "UnusedBattleTowerDummySpecial2" => inactive_declared_routine(routine),
+        | "UnusedBattleTowerDummySpecial2" => noop_special(routine),
+        "UnusedFindItemInPCOrBag" => {
+            unused_find_item_in_pc_or_bag(state, context.item_catalog, routine)
+        }
+        "RandomUnseenWildMon" => random_unseen_wild_mon(
+            state,
+            context.species_catalog,
+            context.phone_contacts,
+            context.wild_encounters,
+            routine,
+        ),
+        "RandomPhoneWildMon" => random_phone_wild_mon(
+            state,
+            context.species_catalog,
+            context.phone_contacts,
+            context.wild_encounters,
+            routine,
+        ),
+        "RandomPhoneMon" => random_phone_mon(
+            state,
+            context.species_catalog,
+            context.phone_contacts,
+            context.trainer_catalog,
+            routine,
+        ),
+        "Function11ba38" => function11ba38(state, routine),
+        "Function11ac3e" | "TradeCornerHoldMon" | "Function11b5e8" | "Function11b7e5"
+        | "Function11b879" | "Function11b920" | "Function11b93b" | "Function170114"
+        | "Function1704e1" | "Function11c1ab" | "Function17d2b6" | "Function17d2ce"
+        | "Function102142" => inactive_declared_routine(routine),
         exact => Err(SpecialRoutineError::UnsupportedRoutine {
             routine: exact.to_string(),
         }),
@@ -2348,6 +2568,13 @@ pub fn apply_special_routine_with_context(
 fn inactive_declared_routine(routine: &str) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     Err(SpecialRoutineError::InactiveDeclaredRoutine {
         routine: routine.to_string(),
+    })
+}
+
+fn noop_special(routine: &str) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::Noop,
     })
 }
 
@@ -2455,12 +2682,8 @@ fn resolve_spawn_point<'a>(
     spawn_points: &'a BTreeMap<String, RuntimeSpawnPointRef>,
     routine: &str,
 ) -> Result<&'a RuntimeSpawnPointRef, SpecialRoutineError> {
-    let group = optional_i16_script_variable(state, routine, "wLastSpawnMapGroup")?.or(
-        optional_i16_script_variable(state, routine, "_last_spawn_map_group")?,
-    );
-    let map_id = optional_i16_script_variable(state, routine, "wLastSpawnMapNumber")?.or(
-        optional_i16_script_variable(state, routine, "_last_spawn_map_number")?,
-    );
+    let group = optional_i16_script_variable(state, routine, "wLastSpawnMapGroup")?;
+    let map_id = optional_i16_script_variable(state, routine, "wLastSpawnMapNumber")?;
     if let (Some(group_id), Some(map_id)) = (group, map_id)
         && let Some(spawn) = spawn_points
             .values()
@@ -2483,12 +2706,16 @@ fn resolve_spawn_point<'a>(
             map_id,
         });
     }
-    spawn_points
-        .get("0")
-        .ok_or_else(|| SpecialRoutineError::UnknownSpawnPoint {
+    if group.is_some() {
+        return Err(SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
-            spawn_identifier: 0,
-        })
+            variable: "wLastSpawnMapNumber".to_string(),
+        });
+    }
+    Err(SpecialRoutineError::MissingScriptValue {
+        routine: routine.to_string(),
+        variable: "wLastSpawnMapGroup".to_string(),
+    })
 }
 
 fn fade_out_music(
@@ -2583,16 +2810,6 @@ fn play_cur_mon_cry(
         .variables
         .get("wCurPartySpecies")
         .cloned()
-        .or_else(|| {
-            state
-                .storage
-                .party
-                .pokemon
-                .iter()
-                .flatten()
-                .next()
-                .map(|pokemon| pokemon.species.id.clone())
-        })
         .ok_or_else(|| SpecialRoutineError::MissingCurrentPartySpecies {
             routine: routine.to_string(),
         })?;
@@ -2973,6 +3190,247 @@ fn unused_set_seen_mon(
     })
 }
 
+fn random_unseen_wild_mon(
+    state: &mut GameState,
+    species_catalog: &BTreeMap<String, PokemonSpecies>,
+    phone_contacts: &PhoneContactCatalog,
+    wild_encounters: &BTreeMap<String, WildEncounterData>,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let (contact_id, map_name, encounters) =
+        caller_grass_encounters(state, phone_contacts, wild_encounters, routine)?;
+    let grass = encounters.grass.as_ref().ok_or_else(|| {
+        SpecialRoutineError::MissingCallerGrassEncounter {
+            routine: routine.to_string(),
+            map_name: map_name.clone(),
+        }
+    })?;
+    let morning = &grass.morning;
+    if morning.len() < 7 {
+        return Err(SpecialRoutineError::TooFewCallerGrassSlots {
+            routine: routine.to_string(),
+            map_name,
+            expected: 7,
+            found: morning.len(),
+        });
+    }
+
+    let mut rng = Random::new(state.rng_seed);
+    let rare_index = loop {
+        let masked = rng.randrange(256) & 0b11;
+        if masked != 0 {
+            break 4 + (masked as usize - 1);
+        }
+    };
+    state.rng_seed = rng.seed();
+
+    let selected = &morning[rare_index];
+    let common = &morning[..4];
+    let is_common = common
+        .iter()
+        .any(|encounter| encounter.species == selected.species);
+    let already_seen = state.pokedex.has_seen(&selected.species);
+    let script_value = if is_common || already_seen { 1 } else { 0 };
+    if script_value == 0 {
+        write_phone_species_buffers(state, species_catalog, routine, selected)?;
+    }
+    state.script_runtime.script_value = Some(script_value.to_string());
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::RandomUnseenWildMon {
+            contact_id,
+            map_name: encounters.map_name.clone(),
+            species: (script_value == 0).then(|| selected.species.clone()),
+            already_seen,
+            script_value,
+            rng_seed_after: state.rng_seed,
+        },
+    })
+}
+
+fn random_phone_wild_mon(
+    state: &mut GameState,
+    species_catalog: &BTreeMap<String, PokemonSpecies>,
+    phone_contacts: &PhoneContactCatalog,
+    wild_encounters: &BTreeMap<String, WildEncounterData>,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let (contact_id, map_name, encounters) =
+        caller_grass_encounters(state, phone_contacts, wild_encounters, routine)?;
+    let time_of_day = state.time.time_of_day;
+    let grass = encounters.grass.as_ref().ok_or_else(|| {
+        SpecialRoutineError::MissingCallerGrassEncounter {
+            routine: routine.to_string(),
+            map_name: map_name.clone(),
+        }
+    })?;
+    let slots = grass.slots(time_of_day);
+    if slots.len() < 4 {
+        return Err(SpecialRoutineError::TooFewCallerGrassSlots {
+            routine: routine.to_string(),
+            map_name,
+            expected: 4,
+            found: slots.len(),
+        });
+    }
+    let mut rng = Random::new(state.rng_seed);
+    let selected = &slots[(rng.randrange(256) & 0b11) as usize];
+    state.rng_seed = rng.seed();
+    write_phone_species_buffers(state, species_catalog, routine, selected)?;
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::RandomPhoneWildMon {
+            contact_id,
+            map_name: encounters.map_name.clone(),
+            time_of_day,
+            species: selected.species.clone(),
+            rng_seed_after: state.rng_seed,
+        },
+    })
+}
+
+fn random_phone_mon(
+    state: &mut GameState,
+    species_catalog: &BTreeMap<String, PokemonSpecies>,
+    phone_contacts: &PhoneContactCatalog,
+    trainer_catalog: &TrainerCatalog,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let (contact_id, contact) = caller_phone_contact(state, phone_contacts, routine)?;
+    let trainer_id = contact.trainer_label.clone().ok_or_else(|| {
+        SpecialRoutineError::MissingPhoneContactTrainer {
+            routine: routine.to_string(),
+            contact_id: contact_id.clone(),
+        }
+    })?;
+    let trainer =
+        trainer_catalog
+            .get(&trainer_id)
+            .ok_or_else(|| SpecialRoutineError::UnknownTrainer {
+                routine: routine.to_string(),
+                trainer_id: trainer_id.clone(),
+            })?;
+    if trainer.party.is_empty() {
+        return Err(SpecialRoutineError::EmptyTrainerParty {
+            routine: routine.to_string(),
+            trainer_id,
+        });
+    }
+
+    let mut rng = Random::new(state.rng_seed);
+    let party_index = loop {
+        let masked = (rng.randrange(256) & 0b111) as usize;
+        if masked < trainer.party.len() {
+            break masked;
+        }
+    };
+    state.rng_seed = rng.seed();
+
+    let selected = &trainer.party[party_index];
+    write_phone_species_id_buffers(state, species_catalog, routine, &selected.species)?;
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::RandomPhoneMon {
+            contact_id,
+            trainer_id: trainer.trainer_id.clone(),
+            species: selected.species.clone(),
+            party_index,
+            rng_seed_after: state.rng_seed,
+        },
+    })
+}
+
+fn caller_grass_encounters<'a>(
+    state: &GameState,
+    phone_contacts: &'a PhoneContactCatalog,
+    wild_encounters: &'a BTreeMap<String, WildEncounterData>,
+    routine: &str,
+) -> Result<(String, String, &'a WildEncounterData), SpecialRoutineError> {
+    let (contact_id, contact) = caller_phone_contact(state, phone_contacts, routine)?;
+    let map_name = contact.map_constant.clone().ok_or_else(|| {
+        SpecialRoutineError::MissingPhoneContactMap {
+            routine: routine.to_string(),
+            contact_id: contact_id.clone(),
+        }
+    })?;
+    let encounters = wild_encounters.get(&map_name).ok_or_else(|| {
+        SpecialRoutineError::MissingCallerWildEncounter {
+            routine: routine.to_string(),
+            map_name: map_name.clone(),
+        }
+    })?;
+    Ok((contact_id, map_name, encounters))
+}
+
+fn caller_phone_contact<'a>(
+    state: &GameState,
+    phone_contacts: &'a PhoneContactCatalog,
+    routine: &str,
+) -> Result<(String, &'a crate::systems::phone::PhoneContactRecord), SpecialRoutineError> {
+    let contact_id = state
+        .script_runtime
+        .variables
+        .get("VAR_CALLERID")
+        .cloned()
+        .ok_or_else(|| SpecialRoutineError::MissingCallerId {
+            routine: routine.to_string(),
+        })?;
+    let contact = phone_contacts.0.get(&contact_id).ok_or_else(|| {
+        SpecialRoutineError::UnknownPhoneContact {
+            routine: routine.to_string(),
+            contact_id: contact_id.clone(),
+        }
+    })?;
+    Ok((contact_id, contact))
+}
+
+fn write_phone_species_buffers(
+    state: &mut GameState,
+    species_catalog: &BTreeMap<String, PokemonSpecies>,
+    routine: &str,
+    encounter: &WildEncounter,
+) -> Result<(), SpecialRoutineError> {
+    let species = required_species_metadata(species_catalog, routine, &encounter.species)?;
+    state
+        .script_runtime
+        .variables
+        .insert("wNamedObjectIndex".to_string(), species.int_id.to_string());
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_1".to_string(), encounter.species.clone());
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_4".to_string(), encounter.species.clone());
+    Ok(())
+}
+
+fn write_phone_species_id_buffers(
+    state: &mut GameState,
+    species_catalog: &BTreeMap<String, PokemonSpecies>,
+    routine: &str,
+    species_id: &str,
+) -> Result<(), SpecialRoutineError> {
+    let species = required_species_metadata(species_catalog, routine, species_id)?;
+    state
+        .script_runtime
+        .variables
+        .insert("wNamedObjectIndex".to_string(), species.int_id.to_string());
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_1".to_string(), species_id.to_string());
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_4".to_string(), species_id.to_string());
+    Ok(())
+}
+
 fn activate_fishing_swarm(
     state: &mut GameState,
     routine: &str,
@@ -3141,6 +3599,34 @@ fn update_time(
             second: state.time.game_time_seconds,
             day_of_week: state.time.day_of_week,
             time_of_day: state.time.time_of_day,
+        },
+    })
+}
+
+fn unused_check_unused_two_day_timer(
+    state: &mut GameState,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    const TIMER_DAYS: u8 = 2;
+    state.time.update_time_registers();
+    let start_day = state.unused_two_day_timer.start_day;
+    let current_day = state.time.current_day;
+    let elapsed_days = current_day.wrapping_sub(start_day);
+    let remaining_days = TIMER_DAYS.saturating_sub(elapsed_days);
+    state.unused_two_day_timer.remaining_days = remaining_days;
+    state.script_runtime.script_value = Some(remaining_days.to_string());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), remaining_days.to_string());
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::UnusedCheckUnusedTwoDayTimer {
+            start_day,
+            current_day,
+            elapsed_days,
+            remaining_days,
         },
     })
 }
@@ -4094,25 +4580,77 @@ fn bank_of_mom(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+enum GameCornerGame {
+    SlotMachine,
+    CardFlip,
+    UnusedMemoryGame,
+}
+
 fn slot_machine(
     state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    coin_game_service(state, routine, true)
+    coin_game_service(state, item_catalog, routine, GameCornerGame::SlotMachine)
 }
 
 fn card_flip(
     state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    coin_game_service(state, routine, false)
+    coin_game_service(state, item_catalog, routine, GameCornerGame::CardFlip)
+}
+
+fn unused_memory_game(
+    state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    coin_game_service(
+        state,
+        item_catalog,
+        routine,
+        GameCornerGame::UnusedMemoryGame,
+    )
 }
 
 fn coin_game_service(
     state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
     routine: &str,
-    slot_machine: bool,
+    game: GameCornerGame,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    const COIN_CASE: &str = "COIN_CASE";
+    let coin_case =
+        item_catalog
+            .get(COIN_CASE)
+            .ok_or_else(|| SpecialRoutineError::UnknownItem {
+                routine: routine.to_string(),
+                item_id: COIN_CASE.to_string(),
+            })?;
+    if state.coins == 0 {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            },
+        });
+    }
+    if !state.bag.has_item(coin_case) {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::MissingCoinCase,
+            },
+        });
+    }
+
     state.script_runtime.active_menu = Some(routine.to_string());
     state
         .script_runtime
@@ -4120,14 +4658,86 @@ fn coin_game_service(
         .insert("_coin_case_balance".to_string(), state.coins.to_string());
     set_script_u32_value(state, u32::from(state.coins));
     state.script_runtime.last_special_routine = Some(routine.to_string());
-    let effect = if slot_machine {
-        SpecialRoutineEffect::SlotMachine { coins: state.coins }
-    } else {
-        SpecialRoutineEffect::CardFlip { coins: state.coins }
+    let effect = match game {
+        GameCornerGame::SlotMachine => SpecialRoutineEffect::SlotMachine { coins: state.coins },
+        GameCornerGame::CardFlip => SpecialRoutineEffect::CardFlip { coins: state.coins },
+        GameCornerGame::UnusedMemoryGame => {
+            SpecialRoutineEffect::UnusedMemoryGame { coins: state.coins }
+        }
     };
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect,
+    })
+}
+
+fn unused_find_item_in_pc_or_bag(
+    state: &mut GameState,
+    item_catalog: &BTreeMap<String, Item>,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let item_id = required_raw_script_value(state, routine)?;
+    let item = item_catalog
+        .get(&item_id)
+        .ok_or_else(|| SpecialRoutineError::UnknownItem {
+            routine: routine.to_string(),
+            item_id: item_id.clone(),
+        })?;
+    let found_in_pc = state.bag.has_pc_item(item);
+    let found_in_bag = if found_in_pc {
+        false
+    } else {
+        state.bag.has_item(item)
+    };
+    let script_value = u8::from(found_in_pc || found_in_bag);
+    state.script_runtime.script_value = Some(script_value.to_string());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), script_value.to_string());
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::UnusedFindItemInPcOrBag {
+            item_id,
+            found_in_pc,
+            found_in_bag,
+            script_value,
+        },
+    })
+}
+
+fn function11ba38(
+    state: &mut GameState,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let selected_party_slot = required_selected_party_slot(state, routine)?;
+    required_party_pokemon(state, routine, selected_party_slot)?;
+    let other_usable_party_mon =
+        state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .enumerate()
+            .any(|(index, pokemon)| {
+                index != selected_party_slot
+                    && pokemon.as_ref().is_some_and(|pokemon| pokemon.hp > 0)
+            });
+    let script_value = u8::from(!other_usable_party_mon);
+    state.script_runtime.script_value = Some(script_value.to_string());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), script_value.to_string());
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::Function11ba38 {
+            selected_party_slot,
+            other_usable_party_mon,
+            script_value,
+        },
     })
 }
 
@@ -4196,20 +4806,14 @@ fn photo_studio(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let selected_slot = optional_usize_script_variable(state, routine, "_party_slot")?;
-    let party_slot = selected_slot.or_else(|| {
-        state
-            .storage
-            .party
-            .pokemon
-            .iter()
-            .position(|slot| slot.is_some())
-    });
-    let species = party_slot.and_then(|slot| {
-        state.storage.party.pokemon[slot]
-            .as_ref()
-            .map(|pokemon| pokemon.species.id.clone())
-    });
+    let party_slot = required_usize_script_variable(state, routine, "_party_slot")?;
+    let species = state
+        .storage
+        .party
+        .pokemon
+        .get(party_slot)
+        .and_then(Option::as_ref)
+        .map(|pokemon| pokemon.species.id.clone());
     state.script_runtime.active_menu = Some(routine.to_string());
     if let Some(species) = &species {
         state.script_runtime.active_pokemon_picture = Some(species.clone());
@@ -4223,7 +4827,7 @@ fn photo_studio(
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::PhotoStudio {
-            party_slot,
+            party_slot: Some(party_slot),
             species,
         },
     })
@@ -4327,11 +4931,8 @@ fn return_shuckie(
         routine: routine.to_string(),
     })?;
 
-    let selection_cancelled = state
-        .script_runtime
-        .variables
-        .get("_selection_cancelled")
-        .is_some_and(|value| value == "1" || value == "true");
+    let selection_cancelled =
+        required_bool_script_variable(state, routine, "_selection_cancelled")?;
     let party_slot = if selection_cancelled {
         0
     } else {
@@ -4387,7 +4988,7 @@ fn return_shuckie(
 fn give_dratini(
     state: &mut GameState,
     move_catalog: &BTreeMap<String, Move>,
-    move_sets: &[DratiniMoveSetDefinition],
+    move_sets: &DratiniMoveSets,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     if move_sets.is_empty() {
@@ -4396,7 +4997,7 @@ fn give_dratini(
         });
     }
     let mode = required_u8_script_value(state, routine)?;
-    let Some(move_set) = move_sets.iter().find(|move_set| move_set.mode == mode) else {
+    let Some(move_names) = move_sets.get(&mode) else {
         set_script_numeric_value(state, mode);
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
@@ -4435,8 +5036,8 @@ fn give_dratini(
         });
     };
 
-    let mut learned = Vec::with_capacity(move_set.moves.len());
-    for move_name in &move_set.moves {
+    let mut learned = Vec::with_capacity(move_names.len());
+    for move_name in move_names {
         let move_data =
             move_catalog
                 .get(move_name)
@@ -4464,7 +5065,7 @@ fn give_dratini(
         effect: SpecialRoutineEffect::GiveDratini {
             party_slot: Some(party_slot),
             mode,
-            move_names: move_set.moves.clone(),
+            move_names: move_names.clone(),
             learned: true,
         },
     })
@@ -4531,7 +5132,7 @@ fn bills_grandfather(
 fn select_apricorn_for_kurt(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
-    recipes: &[KurtApricornRecipe],
+    recipes: &KurtApricornRecipes,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     if recipes.is_empty() {
@@ -4543,13 +5144,7 @@ fn select_apricorn_for_kurt(
         .script_runtime
         .variables
         .get("_kurt_apricorn_type")
-        .cloned()
-        .or_else(|| {
-            recipes
-                .iter()
-                .find(|recipe| bag_quantity_by_id(state, item_catalog, &recipe.apricorn) > 0)
-                .map(|recipe| recipe.apricorn.clone())
-        });
+        .cloned();
     let Some(apricorn) = selected else {
         set_script_bool_value(state, false);
         state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -4561,7 +5156,7 @@ fn select_apricorn_for_kurt(
             },
         });
     };
-    if !recipes.iter().any(|recipe| recipe.apricorn == apricorn) {
+    if !recipes.contains_key(&apricorn) {
         return Err(SpecialRoutineError::UnknownItem {
             routine: routine.to_string(),
             item_id: apricorn,
@@ -4618,7 +5213,7 @@ fn select_apricorn_for_kurt(
 fn init_roam_mons(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
-    definitions: &[RoamingPokemonDefinition],
+    definitions: &RoamingPokemonDefinitions,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     if definitions.is_empty() {
@@ -4627,10 +5222,10 @@ fn init_roam_mons(
         });
     }
     let mut roamers = Vec::with_capacity(definitions.len());
-    for definition in definitions {
-        required_species_metadata(species_catalog, routine, &definition.species)?;
+    for (species, definition) in definitions {
+        required_species_metadata(species_catalog, routine, species)?;
         roamers.push(RoamingPokemonState {
-            species: definition.species.clone(),
+            species: species.clone(),
             level: definition.level,
             map_group: definition.map_group,
             map_number: definition.map_number,
@@ -4750,28 +5345,21 @@ fn unlock_mystery_gift(
 
 fn buenas_password(
     state: &mut GameState,
-    categories: &[BuenaPasswordCategoryDefinition],
+    categories: &BuenaPasswordCategories,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let (category, correct) = ensure_buenas_password(state, categories, routine)?;
+    let (category_id, category, correct) = ensure_buenas_password(state, categories, routine)?;
     let guess = state
         .script_runtime
         .variables
         .get("BUENA_PASSWORD")
-        .cloned()
-        .or_else(|| {
-            state
-                .script_runtime
-                .variables
-                .get("_selected_password")
-                .cloned()
-        });
+        .cloned();
     let matched = guess.as_deref() == Some(correct.as_str());
     set_script_bool_value(state, matched);
     state
         .script_runtime
         .variables
-        .insert("_buena_category".to_string(), category.id.clone());
+        .insert("_buena_category".to_string(), category_id.to_string());
     state.script_runtime.variables.insert(
         "_buena_category_type".to_string(),
         category.category_type.clone(),
@@ -4784,7 +5372,7 @@ fn buenas_password(
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::BuenasPassword {
-            category: category.id.clone(),
+            category: category_id.to_string(),
             category_type: category.category_type.clone(),
             correct,
             guess,
@@ -4797,7 +5385,7 @@ fn buenas_password(
 fn buena_prize(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
-    buena_prizes: &[BuenaPrizeDefinition],
+    buena_prizes: &BuenaPrizeDefinitions,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     if buena_prizes.is_empty() {
@@ -4811,13 +5399,13 @@ fn buena_prize(
             routine: routine.to_string(),
             variable: "_selected_prize_quantity".to_string(),
         })?;
-    let Some(prize) = buena_prizes.iter().find(|prize| prize.item_id == selected) else {
+    let Some(cost) = buena_prizes.get(&selected) else {
         return Err(SpecialRoutineError::UnknownItem {
             routine: routine.to_string(),
             item_id: selected,
         });
     };
-    let points_spent = prize.cost.checked_mul(quantity as u8).ok_or_else(|| {
+    let points_spent = cost.checked_mul(quantity as u8).ok_or_else(|| {
         SpecialRoutineError::InvalidNumericValue {
             routine: routine.to_string(),
             value: quantity.to_string(),
@@ -4829,20 +5417,19 @@ fn buena_prize(
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
             effect: SpecialRoutineEffect::BuenaPrize {
-                item_id: prize.item_id.clone(),
+                item_id: selected.clone(),
                 quantity,
                 points_spent,
                 balance: state.blue_card_balance,
             },
         });
     }
-    let item =
-        item_catalog
-            .get(&prize.item_id)
-            .ok_or_else(|| SpecialRoutineError::UnknownItem {
-                routine: routine.to_string(),
-                item_id: prize.item_id.clone(),
-            })?;
+    let item = item_catalog
+        .get(&selected)
+        .ok_or_else(|| SpecialRoutineError::UnknownItem {
+            routine: routine.to_string(),
+            item_id: selected.clone(),
+        })?;
     let added = state.bag.add_item(item, quantity).map_err(|error| {
         SpecialRoutineError::GiftPokemonBuild {
             routine: routine.to_string(),
@@ -4855,7 +5442,7 @@ fn buena_prize(
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
             effect: SpecialRoutineEffect::BuenaPrize {
-                item_id: prize.item_id.clone(),
+                item_id: selected.clone(),
                 quantity,
                 points_spent,
                 balance: state.blue_card_balance,
@@ -4872,7 +5459,7 @@ fn buena_prize(
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::BuenaPrize {
-            item_id: prize.item_id.clone(),
+            item_id: selected,
             quantity,
             points_spent,
             balance: state.blue_card_balance,
@@ -4910,12 +5497,7 @@ fn check_magikarp_length(
     const TOO_SHORT: u8 = 2;
     const BEAT_RECORD: u8 = 3;
 
-    if state
-        .script_runtime
-        .variables
-        .get("_selection_cancelled")
-        .is_some_and(|value| value == "1" || value == "true")
-    {
+    if required_bool_script_variable(state, routine, "_selection_cancelled")? {
         set_script_numeric_value(state, REFUSED);
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
@@ -4981,6 +5563,21 @@ fn check_magikarp_length(
             result,
         },
     })
+}
+
+pub fn validate_saved_magikarp_record_references(
+    record: &MagikarpRecordState,
+    has_magikarp_lengths: bool,
+) -> Result<(), SpecialRoutineError> {
+    let has_record = record.current_feet != 0
+        || record.current_inches != 0
+        || record.best_feet != 0
+        || record.best_inches != 0
+        || !record.best_owner_name.is_empty();
+    if has_record && !has_magikarp_lengths {
+        return Err(SpecialRoutineError::SavedMagikarpRecordRequiresLengthDefinitions);
+    }
+    Ok(())
 }
 
 fn magikarp_house_sign(
@@ -5901,7 +6498,7 @@ fn battle_tower_action(
                 })?;
             if rules
                 .banned_species
-                .iter()
+                .keys()
                 .any(|species| species.is_empty())
             {
                 return Err(SpecialRoutineError::InvalidBattleTowerRules {
@@ -5914,8 +6511,7 @@ fn battle_tower_action(
             let banned = state.storage.party.pokemon.iter().flatten().any(|pokemon| {
                 rules
                     .banned_species
-                    .iter()
-                    .any(|banned| pokemon.species.id.as_str() == banned.as_str())
+                    .contains_key(pokemon.species.id.as_str())
             });
             (u8::from(banned).to_string(), banned)
         }
@@ -6188,16 +6784,7 @@ fn ask_remember_password(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let remember = optional_bool_script_variable(state, routine, "_yes_no_result")?
-        .or(optional_bool_script_variable(
-            state,
-            routine,
-            "_remember_password",
-        )?)
-        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-            routine: routine.to_string(),
-            variable: "_yes_no_result".to_string(),
-        })?;
+    let remember = required_bool_script_variable(state, routine, "_yes_no_result")?;
     set_script_bool_value(state, remember);
     state.script_runtime.variables.insert(
         "_remember_password".to_string(),
@@ -6328,6 +6915,11 @@ fn record_mobile_handshake(
             routine: routine.to_string(),
         });
     }
+    if password.trim() != password || password.chars().any(char::is_control) {
+        return Err(SpecialRoutineError::InvalidMobilePassword {
+            routine: routine.to_string(),
+        });
+    }
     let raw_timer = required_string_script_variable(state, routine, "_mobile_battle_timer")?;
     let timer = parse_mobile_battle_timer(routine, &raw_timer)?;
     let adapter_status = required_string_script_variable(state, routine, "_mobile_adapter_status")?;
@@ -6393,23 +6985,13 @@ fn parse_selected_party_indexes(
 ) -> Result<Vec<usize>, SpecialRoutineError> {
     let indexes = raw
         .split(',')
-        .map(|part| {
-            part.parse::<usize>()
-                .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-                    routine: routine.to_string(),
-                    value: raw.to_string(),
-                })
-        })
+        .map(|part| parse_exact_usize_token(routine, part, raw))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(indexes)
 }
 
 fn parse_u8_token(routine: &str, raw: &str) -> Result<u8, SpecialRoutineError> {
-    raw.parse::<u8>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw.to_string(),
-        })
+    parse_exact_u8_token(routine, raw, raw)
 }
 
 fn give_odd_egg(
@@ -6769,10 +7351,10 @@ fn bag_quantity_by_id(
 
 fn ensure_buenas_password<'a>(
     state: &mut GameState,
-    categories: &'a [BuenaPasswordCategoryDefinition],
+    categories: &'a BuenaPasswordCategories,
     routine: &str,
-) -> Result<(&'a BuenaPasswordCategoryDefinition, String), SpecialRoutineError> {
-    if categories.is_empty() {
+) -> Result<(&'a str, &'a BuenaPasswordCategoryDefinition, String), SpecialRoutineError> {
+    if categories.order.is_empty() || categories.categories.is_empty() {
         return Err(SpecialRoutineError::MissingBuenaPasswordCategories {
             routine: routine.to_string(),
         });
@@ -6780,8 +7362,19 @@ fn ensure_buenas_password<'a>(
     let current_day = state.time.current_day;
     if !state.buenas_password.generated || state.buenas_password.generation_day != current_day {
         let mut rng = Random::new(state.rng_seed);
-        let category_index = rng.randrange(categories.len() as u32) as usize;
-        let category = &categories[category_index];
+        let category_index = rng.randrange(categories.order.len() as u32) as usize;
+        let Some(category_id) = categories.order.get(category_index) else {
+            return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
+                routine: routine.to_string(),
+                index: category_index,
+            });
+        };
+        let Some(category) = categories.categories.get(category_id) else {
+            return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
+                routine: routine.to_string(),
+                index: category_index,
+            });
+        };
         if category.options.is_empty() {
             return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
                 routine: routine.to_string(),
@@ -6795,7 +7388,13 @@ fn ensure_buenas_password<'a>(
         state.buenas_password.generation_day = current_day;
         state.buenas_password.generated = true;
     }
-    let Some(category) = categories.get(state.buenas_password.category_index) else {
+    let Some(category_id) = categories.order.get(state.buenas_password.category_index) else {
+        return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
+            routine: routine.to_string(),
+            index: state.buenas_password.category_index,
+        });
+    };
+    let Some(category) = categories.categories.get(category_id) else {
         return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
             routine: routine.to_string(),
             index: state.buenas_password.category_index,
@@ -6807,7 +7406,71 @@ fn ensure_buenas_password<'a>(
             index: state.buenas_password.option_index,
         });
     };
-    Ok((category, correct.clone()))
+    Ok((category_id.as_str(), category, correct.clone()))
+}
+
+pub fn validate_saved_buena_password_references(
+    password: &BuenasPasswordState,
+    categories: &BuenaPasswordCategories,
+) -> Result<(), SpecialRoutineError> {
+    if !password.generated {
+        return Ok(());
+    }
+    let Some(category_id) = categories.order.get(password.category_index) else {
+        return Err(
+            SpecialRoutineError::SavedBuenaPasswordCategoryIndexOutOfRange {
+                index: password.category_index,
+            },
+        );
+    };
+    let Some(category) = categories.categories.get(category_id) else {
+        return Err(SpecialRoutineError::SavedBuenaPasswordMissingCategory {
+            index: password.category_index,
+            category_id: category_id.clone(),
+        });
+    };
+    if category.options.get(password.option_index).is_none() {
+        return Err(
+            SpecialRoutineError::SavedBuenaPasswordOptionIndexOutOfRange {
+                index: password.option_index,
+                category_id: category_id.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
+pub fn saved_special_battle_type_builtin_routine(battle_type: &str) -> Option<&'static str> {
+    match battle_type {
+        "BATTLETYPE_TRAINER_HOUSE" => Some("TrainerHouse"),
+        "BATTLETYPE_CELEBI" => Some("CelebiShrineEvent"),
+        _ => None,
+    }
+}
+
+pub fn validate_saved_pending_special_battle_type<F, G>(
+    battle_type: Option<&str>,
+    scripted_battle_type_exists: F,
+    special_routine_exists: G,
+) -> Result<(), SpecialRoutineError>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&str) -> bool,
+{
+    let Some(battle_type) = battle_type else {
+        return Ok(());
+    };
+    if scripted_battle_type_exists(battle_type) {
+        return Ok(());
+    }
+    if saved_special_battle_type_builtin_routine(battle_type)
+        .is_some_and(|routine| special_routine_exists(routine))
+    {
+        return Ok(());
+    }
+    Err(SpecialRoutineError::SavedPendingSpecialBattleTypeMissing {
+        battle_type: battle_type.to_string(),
+    })
 }
 
 fn calculate_magikarp_length(
@@ -7051,8 +7714,8 @@ fn optional_bool_script_variable(
         return Ok(None);
     };
     match raw_value.as_str() {
-        "1" | "true" | "TRUE" => Ok(Some(true)),
-        "0" | "false" | "FALSE" => Ok(Some(false)),
+        "1" => Ok(Some(true)),
+        "0" => Ok(Some(false)),
         exact => Err(SpecialRoutineError::InvalidNumericValue {
             routine: routine.to_string(),
             value: exact.to_string(),
@@ -7079,14 +7742,12 @@ fn happiness_delta(
     happiness: u8,
     routine: &str,
 ) -> Result<i16, SpecialRoutineError> {
-    let entry = happiness_data
-        .changes
-        .iter()
-        .find(|entry| entry.change_code == change_code)
-        .ok_or_else(|| SpecialRoutineError::InvalidHappinessData {
+    let entry = happiness_data.changes.get(&change_code).ok_or_else(|| {
+        SpecialRoutineError::InvalidHappinessData {
             routine: routine.to_string(),
             message: format!("missing change code {change_code}"),
-        })?;
+        }
+    })?;
     if happiness < 100 {
         Ok(entry.low)
     } else if happiness < 200 {
@@ -7122,21 +7783,19 @@ fn happiness_service_outcomes<'a>(
     happiness_data: &'a HappinessData,
     routine: &str,
 ) -> Result<&'a [HappinessServiceOutcome], SpecialRoutineError> {
-    let table = happiness_data
-        .services
-        .iter()
-        .find(|table| table.routine == routine)
-        .ok_or_else(|| SpecialRoutineError::InvalidHappinessData {
+    let table = happiness_data.services.get(routine).ok_or_else(|| {
+        SpecialRoutineError::InvalidHappinessData {
             routine: routine.to_string(),
             message: format!("missing service table for {routine}"),
-        })?;
-    if table.outcomes.is_empty() {
+        }
+    })?;
+    if table.is_empty() {
         return Err(SpecialRoutineError::InvalidHappinessData {
             routine: routine.to_string(),
             message: format!("service table {routine} has no outcomes"),
         });
     }
-    Ok(&table.outcomes)
+    Ok(table)
 }
 
 fn select_happiness_service_outcome(
@@ -7259,12 +7918,7 @@ fn required_u8_script_value(state: &GameState, routine: &str) -> Result<u8, Spec
             routine: routine.to_string(),
             variable: "_value".to_string(),
         })?;
-    raw_value
-        .parse::<u8>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_u8_token(routine, &raw_value, &raw_value)
 }
 
 fn required_string_script_variable(
@@ -7283,18 +7937,96 @@ fn required_string_script_variable(
         })
 }
 
+fn parse_exact_usize_token(
+    routine: &str,
+    token: &str,
+    error_value: &str,
+) -> Result<usize, SpecialRoutineError> {
+    if !is_exact_unsigned_decimal_token(token) {
+        return Err(invalid_numeric_value(routine, error_value));
+    }
+    token
+        .parse::<usize>()
+        .map_err(|_| invalid_numeric_value(routine, error_value))
+}
+
+fn parse_exact_u8_token(
+    routine: &str,
+    token: &str,
+    error_value: &str,
+) -> Result<u8, SpecialRoutineError> {
+    if !is_exact_unsigned_decimal_token(token) {
+        return Err(invalid_numeric_value(routine, error_value));
+    }
+    token
+        .parse::<u8>()
+        .map_err(|_| invalid_numeric_value(routine, error_value))
+}
+
+fn parse_exact_u16_token(
+    routine: &str,
+    token: &str,
+    error_value: &str,
+) -> Result<u16, SpecialRoutineError> {
+    if !is_exact_unsigned_decimal_token(token) {
+        return Err(invalid_numeric_value(routine, error_value));
+    }
+    token
+        .parse::<u16>()
+        .map_err(|_| invalid_numeric_value(routine, error_value))
+}
+
+fn parse_exact_i16_token(
+    routine: &str,
+    token: &str,
+    error_value: &str,
+) -> Result<i16, SpecialRoutineError> {
+    if !is_exact_signed_decimal_token(token) {
+        return Err(invalid_numeric_value(routine, error_value));
+    }
+    token
+        .parse::<i16>()
+        .map_err(|_| invalid_numeric_value(routine, error_value))
+}
+
+fn parse_exact_i64_token(
+    routine: &str,
+    token: &str,
+    error_value: &str,
+) -> Result<i64, SpecialRoutineError> {
+    if !is_exact_signed_decimal_token(token) {
+        return Err(invalid_numeric_value(routine, error_value));
+    }
+    token
+        .parse::<i64>()
+        .map_err(|_| invalid_numeric_value(routine, error_value))
+}
+
+fn is_exact_unsigned_decimal_token(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_exact_signed_decimal_token(token: &str) -> bool {
+    if let Some(digits) = token.strip_prefix('-') {
+        return is_exact_unsigned_decimal_token(digits);
+    }
+    is_exact_unsigned_decimal_token(token)
+}
+
+fn invalid_numeric_value(routine: &str, value: &str) -> SpecialRoutineError {
+    SpecialRoutineError::InvalidNumericValue {
+        routine: routine.to_string(),
+        value: value.to_string(),
+    }
+}
+
 fn required_usize_script_variable(
     state: &GameState,
     routine: &str,
     variable: &str,
 ) -> Result<usize, SpecialRoutineError> {
     let raw_value = required_string_script_variable(state, routine, variable)?;
-    raw_value
-        .parse::<usize>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_usize_token(routine, &raw_value, &raw_value)
 }
 
 fn optional_usize_script_variable(
@@ -7305,13 +8037,7 @@ fn optional_usize_script_variable(
     let Some(raw_value) = state.script_runtime.variables.get(variable).cloned() else {
         return Ok(None);
     };
-    raw_value
-        .parse::<usize>()
-        .map(Some)
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_usize_token(routine, &raw_value, &raw_value).map(Some)
 }
 
 fn required_selected_party_slot(
@@ -7323,19 +8049,13 @@ fn required_selected_party_slot(
         .variables
         .get("_selected_party_index")
         .cloned()
-        .or_else(|| state.script_runtime.variables.get("_party_slot").cloned())
     else {
         return Err(SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
             variable: "_selected_party_index".to_string(),
         });
     };
-    raw_value
-        .parse::<usize>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_usize_token(routine, &raw_value, &raw_value)
 }
 
 fn optional_u8_script_variable(
@@ -7346,13 +8066,7 @@ fn optional_u8_script_variable(
     let Some(raw_value) = state.script_runtime.variables.get(variable).cloned() else {
         return Ok(None);
     };
-    raw_value
-        .parse::<u8>()
-        .map(Some)
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_u8_token(routine, &raw_value, &raw_value).map(Some)
 }
 
 fn required_u8_script_variable(
@@ -7376,13 +8090,7 @@ fn optional_u16_script_variable(
     let Some(raw_value) = state.script_runtime.variables.get(variable).cloned() else {
         return Ok(None);
     };
-    raw_value
-        .parse::<u16>()
-        .map(Some)
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_u16_token(routine, &raw_value, &raw_value).map(Some)
 }
 
 fn required_u16_script_variable(
@@ -7406,13 +8114,7 @@ fn optional_i16_script_variable(
     let Some(raw_value) = state.script_runtime.variables.get(variable).cloned() else {
         return Ok(None);
     };
-    raw_value
-        .parse::<i16>()
-        .map(Some)
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_i16_token(routine, &raw_value, &raw_value).map(Some)
 }
 
 fn required_species_metadata<'a>(
@@ -7433,12 +8135,7 @@ fn required_numeric_script_value(
     routine: &str,
 ) -> Result<i64, SpecialRoutineError> {
     let raw_value = required_raw_script_value(state, routine)?;
-    raw_value
-        .parse::<i64>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw_value,
-        })
+    parse_exact_i64_token(routine, &raw_value, &raw_value)
 }
 
 fn required_raw_script_value(
@@ -7603,10 +8300,6 @@ fn heal_pokemon(
     Ok(())
 }
 
-fn max_move_pp(base_pp: u8, pp_ups: u8) -> u8 {
-    base_pp.saturating_add((base_pp / 5).saturating_mul(pp_ups.min(3)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7615,6 +8308,8 @@ mod tests {
         growth_rate, item_pocket, pokemon_type,
     };
     use crate::systems::experience::{GrowthRateCatalog, crystal_growth_rate_catalog_for_tests};
+    use crate::systems::phone::PhoneContactRecord;
+    use crate::world::encounters::WildEncounterTable;
     use std::sync::LazyLock;
 
     static EMPTY_TEST_LEARNSETS: LazyLock<SpeciesLearnsets> = LazyLock::new(SpeciesLearnsets::new);
@@ -7626,17 +8321,20 @@ mod tests {
         LazyLock::new(BTreeMap::new);
     static EMPTY_TEST_SPAWNS: LazyLock<BTreeMap<String, RuntimeSpawnPointRef>> =
         LazyLock::new(BTreeMap::new);
-    static EMPTY_TEST_ROAMERS: LazyLock<Vec<RoamingPokemonDefinition>> = LazyLock::new(Vec::new);
-    static EMPTY_TEST_BUENA_PASSWORD_CATEGORIES: LazyLock<Vec<BuenaPasswordCategoryDefinition>> =
-        LazyLock::new(Vec::new);
-    static EMPTY_TEST_BUENA_PRIZES: LazyLock<Vec<BuenaPrizeDefinition>> = LazyLock::new(Vec::new);
-    static EMPTY_TEST_KURT_APRICORN_RECIPES: LazyLock<Vec<KurtApricornRecipe>> =
-        LazyLock::new(Vec::new);
-    static EMPTY_TEST_DRATINI_MOVE_SETS: LazyLock<Vec<DratiniMoveSetDefinition>> =
-        LazyLock::new(Vec::new);
+    static EMPTY_TEST_ROAMERS: LazyLock<RoamingPokemonDefinitions> = LazyLock::new(BTreeMap::new);
+    static EMPTY_TEST_BUENA_PASSWORD_CATEGORIES: LazyLock<BuenaPasswordCategories> =
+        LazyLock::new(BuenaPasswordCategories::default);
+    static EMPTY_TEST_BUENA_PRIZES: LazyLock<BuenaPrizeDefinitions> = LazyLock::new(BTreeMap::new);
+    static EMPTY_TEST_KURT_APRICORN_RECIPES: LazyLock<KurtApricornRecipes> =
+        LazyLock::new(BTreeMap::new);
+    static EMPTY_TEST_DRATINI_MOVE_SETS: LazyLock<DratiniMoveSets> = LazyLock::new(BTreeMap::new);
     static EMPTY_TEST_MAGIKARP_LENGTHS: LazyLock<Vec<MagikarpLengthEntry>> =
         LazyLock::new(Vec::new);
     static EMPTY_TEST_TRAINERS: LazyLock<TrainerCatalog> = LazyLock::new(TrainerCatalog::default);
+    static EMPTY_TEST_PHONE_CONTACTS: LazyLock<PhoneContactCatalog> =
+        LazyLock::new(PhoneContactCatalog::default);
+    static EMPTY_TEST_WILD_ENCOUNTERS: LazyLock<BTreeMap<String, WildEncounterData>> =
+        LazyLock::new(BTreeMap::new);
     const MODPACK_SPECIAL_ROUTINES_JSON: &str = include_str!(
         "../../../../../apps/web/assets/data/content-packs/core-modular/special_routines/routines.json"
     );
@@ -7661,6 +8359,7 @@ mod tests {
             special_routine_catalog_issues(&BTreeSet::from([
                 "HealParty".to_string(),
                 "Heal Party".to_string(),
+                "fallbackHealParty".to_string(),
                 "healparty".to_string(),
                 String::new(),
             ])),
@@ -7670,6 +8369,9 @@ mod tests {
                 },
                 SpecialRoutineCatalogIssue::InvalidRoutine {
                     routine: "Heal Party".to_string(),
+                },
+                SpecialRoutineCatalogIssue::InvalidRoutine {
+                    routine: "fallbackHealParty".to_string(),
                 },
                 SpecialRoutineCatalogIssue::UnknownRoutine {
                     routine: "healparty".to_string(),
@@ -7681,102 +8383,83 @@ mod tests {
     #[test]
     fn roaming_pokemon_definition_issues_validate_exact_species_and_level() {
         let species = BTreeSet::from(["RAIKOU".to_string()]);
-        let definitions = vec![
-            RoamingPokemonDefinition {
-                species: String::new(),
-                level: 0,
-                map_group: 1,
-                map_number: 1,
-            },
-            RoamingPokemonDefinition {
-                species: "RAI KOU".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 2,
-            },
-            RoamingPokemonDefinition {
-                species: "raikou".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 3,
-            },
-            RoamingPokemonDefinition {
-                species: "RAIKOU".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 4,
-            },
-            RoamingPokemonDefinition {
-                species: "RAIKOU".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 5,
-            },
-        ];
+        let definitions = BTreeMap::from([
+            (
+                String::new(),
+                RoamingPokemonDefinition {
+                    level: 0,
+                    map_group: 1,
+                    map_number: 1,
+                },
+            ),
+            (
+                "RAI KOU".to_string(),
+                RoamingPokemonDefinition {
+                    level: 40,
+                    map_group: 1,
+                    map_number: 2,
+                },
+            ),
+            (
+                "raikou".to_string(),
+                RoamingPokemonDefinition {
+                    level: 40,
+                    map_group: 1,
+                    map_number: 3,
+                },
+            ),
+            (
+                "RAIKOU".to_string(),
+                RoamingPokemonDefinition {
+                    level: 40,
+                    map_group: 1,
+                    map_number: 4,
+                },
+            ),
+        ]);
 
         assert_eq!(
             roaming_pokemon_definition_issues(&definitions, &species),
             vec![
-                RoamingPokemonDefinitionIssue::EmptySpecies { index: 0 },
-                RoamingPokemonDefinitionIssue::InvalidLevel { index: 0 },
+                RoamingPokemonDefinitionIssue::EmptySpecies {
+                    species: String::new(),
+                },
+                RoamingPokemonDefinitionIssue::InvalidLevel {
+                    species: String::new(),
+                },
                 RoamingPokemonDefinitionIssue::InvalidSpecies {
-                    index: 1,
                     species: "RAI KOU".to_string(),
                 },
                 RoamingPokemonDefinitionIssue::UnknownSpecies {
-                    index: 2,
                     species: "raikou".to_string(),
-                },
-                RoamingPokemonDefinitionIssue::DuplicateSpecies {
-                    index: 4,
-                    species: "RAIKOU".to_string(),
                 },
             ]
         );
     }
-
     #[test]
     fn buena_prize_definition_issues_validate_exact_items_and_cost() {
         let item_ids = BTreeSet::from(["ULTRA_BALL".to_string()]);
-        let prizes = vec![
-            BuenaPrizeDefinition {
-                item_id: String::new(),
-                cost: 0,
-            },
-            BuenaPrizeDefinition {
-                item_id: "ULTRA BALL".to_string(),
-                cost: 2,
-            },
-            BuenaPrizeDefinition {
-                item_id: "ultra_ball".to_string(),
-                cost: 2,
-            },
-            BuenaPrizeDefinition {
-                item_id: "ULTRA_BALL".to_string(),
-                cost: 2,
-            },
-            BuenaPrizeDefinition {
-                item_id: "ULTRA_BALL".to_string(),
-                cost: 3,
-            },
-        ];
+        let prizes = BTreeMap::from([
+            (String::new(), 0),
+            ("ULTRA BALL".to_string(), 2),
+            ("ultra_ball".to_string(), 2),
+            ("ULTRA_BALL".to_string(), 2),
+        ]);
 
         assert_eq!(
             buena_prize_definition_issues(&prizes, &item_ids),
             vec![
-                BuenaPrizeDefinitionIssue::EmptyItem { index: 0 },
-                BuenaPrizeDefinitionIssue::InvalidCost { index: 0 },
+                BuenaPrizeDefinitionIssue::EmptyItem {
+                    item_id: String::new(),
+                },
+                BuenaPrizeDefinitionIssue::InvalidCost {
+                    item_id: String::new(),
+                },
                 BuenaPrizeDefinitionIssue::InvalidItem {
-                    index: 1,
                     item_id: "ULTRA BALL".to_string(),
                 },
                 BuenaPrizeDefinitionIssue::UnknownItem {
-                    index: 2,
                     item_id: "ultra_ball".to_string(),
-                },
-                BuenaPrizeDefinitionIssue::DuplicateItem {
-                    index: 4,
-                    item_id: "ULTRA_BALL".to_string(),
                 },
             ]
         );
@@ -7787,115 +8470,121 @@ mod tests {
         let species_ids = BTreeSet::from(["PIKACHU".to_string()]);
         let item_ids = BTreeSet::from(["POTION".to_string()]);
         let move_ids = BTreeSet::from(["THUNDERBOLT".to_string()]);
-        let categories = vec![
-            BuenaPasswordCategoryDefinition {
-                id: String::new(),
-                category_type: "buena mon".to_string(),
-                points: 0,
-                options: Vec::new(),
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "BUENA MON".to_string(),
-                category_type: BUENA_PASSWORD_CATEGORY_MON.to_string(),
-                points: 1,
-                options: vec![
+        let categories = BuenaPasswordCategories {
+            order: vec![
+                String::new(),
+                "BUENA MON".to_string(),
+                "ITEM".to_string(),
+                "MOVE".to_string(),
+                "UNKNOWN".to_string(),
+            ],
+            categories: BTreeMap::from([
+                (
                     String::new(),
-                    "PIKA CHU".to_string(),
-                    "pikachu".to_string(),
-                    "PIKACHU".to_string(),
-                ],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "ITEM".to_string(),
-                category_type: BUENA_PASSWORD_CATEGORY_ITEM.to_string(),
-                points: 1,
-                options: vec![
-                    "POT ION".to_string(),
-                    "potion".to_string(),
-                    "POTION".to_string(),
-                ],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "MOVE".to_string(),
-                category_type: BUENA_PASSWORD_CATEGORY_MOVE.to_string(),
-                points: 1,
-                options: vec![
-                    "THUNDERBOLT ".to_string(),
-                    "thunderbolt".to_string(),
-                    "THUNDERBOLT".to_string(),
-                ],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "UNKNOWN".to_string(),
-                category_type: "BUENA_UNKNOWN".to_string(),
-                points: 1,
-                options: vec!["TEXT".to_string()],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "MOVE".to_string(),
-                category_type: BUENA_PASSWORD_CATEGORY_STRING.to_string(),
-                points: 1,
-                options: vec!["TEXT".to_string()],
-            },
-        ];
+                    BuenaPasswordCategoryDefinition {
+                        category_type: "buena mon".to_string(),
+                        points: 0,
+                        options: Vec::new(),
+                    },
+                ),
+                (
+                    "BUENA MON".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: BUENA_PASSWORD_CATEGORY_MON.to_string(),
+                        points: 1,
+                        options: vec![
+                            String::new(),
+                            "PIKA CHU".to_string(),
+                            "pikachu".to_string(),
+                            "PIKACHU".to_string(),
+                        ],
+                    },
+                ),
+                (
+                    "ITEM".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: BUENA_PASSWORD_CATEGORY_ITEM.to_string(),
+                        points: 1,
+                        options: vec![
+                            "POT ION".to_string(),
+                            "potion".to_string(),
+                            "POTION".to_string(),
+                        ],
+                    },
+                ),
+                (
+                    "MOVE".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: BUENA_PASSWORD_CATEGORY_MOVE.to_string(),
+                        points: 1,
+                        options: vec![
+                            "THUNDERBOLT ".to_string(),
+                            "thunderbolt".to_string(),
+                            "THUNDERBOLT".to_string(),
+                        ],
+                    },
+                ),
+                (
+                    "UNKNOWN".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: "BUENA_UNKNOWN".to_string(),
+                        points: 1,
+                        options: vec!["TEXT".to_string()],
+                    },
+                ),
+            ]),
+        };
 
         assert_eq!(
             buena_password_category_issues(&categories, &species_ids, &item_ids, &move_ids),
             vec![
-                BuenaPasswordCategoryIssue::EmptyId { index: 0 },
+                BuenaPasswordCategoryIssue::EmptyId { id: String::new() },
                 BuenaPasswordCategoryIssue::InvalidCategoryType {
-                    index: 0,
                     id: String::new(),
                     category_type: "buena mon".to_string(),
                 },
-                BuenaPasswordCategoryIssue::InvalidPoints { index: 0 },
-                BuenaPasswordCategoryIssue::EmptyOptions { index: 0 },
+                BuenaPasswordCategoryIssue::InvalidPoints { id: String::new() },
+                BuenaPasswordCategoryIssue::EmptyOptions { id: String::new() },
                 BuenaPasswordCategoryIssue::InvalidId {
-                    index: 1,
                     id: "BUENA MON".to_string(),
                 },
                 BuenaPasswordCategoryIssue::EmptyOption {
-                    index: 1,
+                    id: "BUENA MON".to_string(),
                     option_index: 0,
                 },
                 BuenaPasswordCategoryIssue::InvalidOption {
-                    index: 1,
+                    id: "BUENA MON".to_string(),
                     option_index: 1,
                     option: "PIKA CHU".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownSpecies {
-                    index: 1,
+                    id: "BUENA MON".to_string(),
                     option_index: 2,
                     species: "pikachu".to_string(),
                 },
                 BuenaPasswordCategoryIssue::InvalidOption {
-                    index: 2,
+                    id: "ITEM".to_string(),
                     option_index: 0,
                     option: "POT ION".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownItem {
-                    index: 2,
+                    id: "ITEM".to_string(),
                     option_index: 1,
                     item_id: "potion".to_string(),
                 },
                 BuenaPasswordCategoryIssue::InvalidOption {
-                    index: 3,
+                    id: "MOVE".to_string(),
                     option_index: 0,
                     option: "THUNDERBOLT ".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownMove {
-                    index: 3,
+                    id: "MOVE".to_string(),
                     option_index: 1,
                     move_id: "thunderbolt".to_string(),
                 },
                 BuenaPasswordCategoryIssue::UnknownCategoryType {
-                    index: 4,
                     id: "UNKNOWN".to_string(),
                     category_type: "BUENA_UNKNOWN".to_string(),
-                },
-                BuenaPasswordCategoryIssue::DuplicateId {
-                    index: 5,
-                    id: "MOVE".to_string(),
                 },
             ]
         );
@@ -7904,53 +8593,35 @@ mod tests {
     #[test]
     fn kurt_apricorn_recipe_issues_validate_exact_items() {
         let item_ids = BTreeSet::from(["BLU_APRICORN".to_string(), "LURE_BALL".to_string()]);
-        let recipes = vec![
-            KurtApricornRecipe {
-                apricorn: String::new(),
-                ball: String::new(),
-            },
-            KurtApricornRecipe {
-                apricorn: "BLU APRICORN".to_string(),
-                ball: "LURE BALL".to_string(),
-            },
-            KurtApricornRecipe {
-                apricorn: "blu_apricorn".to_string(),
-                ball: "lure_ball".to_string(),
-            },
-            KurtApricornRecipe {
-                apricorn: "BLU_APRICORN".to_string(),
-                ball: "LURE_BALL".to_string(),
-            },
-            KurtApricornRecipe {
-                apricorn: "BLU_APRICORN".to_string(),
-                ball: "LURE_BALL".to_string(),
-            },
-        ];
+        let recipes = BTreeMap::from([
+            (String::new(), String::new()),
+            ("BLU APRICORN".to_string(), "LURE BALL".to_string()),
+            ("blu_apricorn".to_string(), "lure_ball".to_string()),
+            ("BLU_APRICORN".to_string(), "LURE_BALL".to_string()),
+        ]);
 
         assert_eq!(
             kurt_apricorn_recipe_issues(&recipes, &item_ids),
             vec![
-                KurtApricornRecipeIssue::EmptyApricorn { index: 0 },
-                KurtApricornRecipeIssue::EmptyBall { index: 0 },
+                KurtApricornRecipeIssue::EmptyApricorn {
+                    apricorn: String::new(),
+                },
+                KurtApricornRecipeIssue::EmptyBall {
+                    apricorn: String::new(),
+                },
                 KurtApricornRecipeIssue::InvalidApricorn {
-                    index: 1,
                     apricorn: "BLU APRICORN".to_string(),
                 },
                 KurtApricornRecipeIssue::InvalidBall {
-                    index: 1,
+                    apricorn: "BLU APRICORN".to_string(),
                     ball: "LURE BALL".to_string(),
                 },
                 KurtApricornRecipeIssue::UnknownApricorn {
-                    index: 2,
                     apricorn: "blu_apricorn".to_string(),
                 },
                 KurtApricornRecipeIssue::UnknownBall {
-                    index: 2,
+                    apricorn: "blu_apricorn".to_string(),
                     ball: "lure_ball".to_string(),
-                },
-                KurtApricornRecipeIssue::DuplicateApricorn {
-                    index: 4,
-                    apricorn: "BLU_APRICORN".to_string(),
                 },
             ]
         );
@@ -8137,6 +8808,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8167,6 +8840,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8198,6 +8873,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8208,7 +8885,7 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         item_catalog: &'a BTreeMap<String, Item>,
-        dratini_move_sets: &'a [DratiniMoveSetDefinition],
+        dratini_move_sets: &'a DratiniMoveSets,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8229,6 +8906,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8260,6 +8939,8 @@ mod tests {
             magikarp_lengths: &EMPTY_TEST_MAGIKARP_LENGTHS,
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8288,6 +8969,8 @@ mod tests {
             magikarp_lengths: &EMPTY_TEST_MAGIKARP_LENGTHS,
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8295,7 +8978,10 @@ mod tests {
 
     fn battle_tower_rules_with_banned_species(banned_species: Vec<String>) -> BattleTowerRules {
         BattleTowerRules {
-            banned_species,
+            banned_species: banned_species
+                .into_iter()
+                .map(|species_id| (species_id, BattleTowerBannedSpeciesRule::default()))
+                .collect(),
             required_party_count: 3,
             challenge_streak_length: 7,
             minimum_level_group: 1,
@@ -8331,6 +9017,8 @@ mod tests {
             magikarp_lengths: &EMPTY_TEST_MAGIKARP_LENGTHS,
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings,
         }
@@ -8361,6 +9049,8 @@ mod tests {
             magikarp_lengths: &EMPTY_TEST_MAGIKARP_LENGTHS,
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions,
             oak_ratings: &[],
         }
@@ -8392,6 +9082,8 @@ mod tests {
             magikarp_lengths,
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8423,6 +9115,8 @@ mod tests {
             magikarp_lengths: &EMPTY_TEST_MAGIKARP_LENGTHS,
             happiness_data: Some(happiness_data),
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8433,7 +9127,7 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         item_catalog: &'a BTreeMap<String, Item>,
-        kurt_apricorn_recipes: &'a [KurtApricornRecipe],
+        kurt_apricorn_recipes: &'a KurtApricornRecipes,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8454,6 +9148,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8464,7 +9160,7 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         item_catalog: &'a BTreeMap<String, Item>,
-        buena_password_categories: &'a [BuenaPasswordCategoryDefinition],
+        buena_password_categories: &'a BuenaPasswordCategories,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8485,6 +9181,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8495,7 +9193,7 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         item_catalog: &'a BTreeMap<String, Item>,
-        buena_prizes: &'a [BuenaPrizeDefinition],
+        buena_prizes: &'a BuenaPrizeDefinitions,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8516,6 +9214,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8526,7 +9226,7 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         item_catalog: &'a BTreeMap<String, Item>,
-        roaming_pokemon: &'a [RoamingPokemonDefinition],
+        roaming_pokemon: &'a RoamingPokemonDefinitions,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8547,6 +9247,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8599,6 +9301,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog: &EMPTY_TEST_TRAINERS,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -8609,6 +9313,8 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         trainer_catalog: &'a TrainerCatalog,
+        phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+        wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -8733,6 +9439,27 @@ mod tests {
             state.script_runtime.last_special_routine.as_deref(),
             Some("PlayCurMonCry")
         );
+
+        let mut missing_current = GameState::default();
+        missing_current
+            .storage
+            .register_capture(pokemon("CHIKORITA"))
+            .expect("store party mon");
+        missing_current.sync_party_from_storage();
+        let before_missing_current = missing_current.clone();
+        let error = apply_special_routine_with_context(
+            &mut missing_current,
+            cry_context(&moves, &cries, &species),
+            "PlayCurMonCry",
+        )
+        .expect_err("current cry must require wCurPartySpecies");
+        assert_eq!(
+            error,
+            SpecialRoutineError::MissingCurrentPartySpecies {
+                routine: "PlayCurMonCry".to_string()
+            }
+        );
+        assert_eq!(missing_current, before_missing_current);
     }
 
     #[test]
@@ -9944,6 +10671,45 @@ mod tests {
     }
 
     #[test]
+    fn unused_two_day_timer_updates_remaining_days_from_start_day() {
+        let mut state = GameState::default();
+        state.unused_two_day_timer.active = true;
+        state.unused_two_day_timer.remaining_days = 2;
+        state.unused_two_day_timer.start_day = 9;
+        state.time.current_day = 10;
+
+        let outcome = apply_special_routine(&mut state, &moves(), "UnusedCheckUnusedTwoDayTimer")
+            .expect("unused two-day timer");
+
+        assert_eq!(
+            outcome.effect,
+            SpecialRoutineEffect::UnusedCheckUnusedTwoDayTimer {
+                start_day: 9,
+                current_day: 10,
+                elapsed_days: 1,
+                remaining_days: 1,
+            }
+        );
+        assert_eq!(state.unused_two_day_timer.remaining_days, 1);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+
+        state.time.current_day = 12;
+        let expired = apply_special_routine(&mut state, &moves(), "UnusedCheckUnusedTwoDayTimer")
+            .expect("expired unused two-day timer");
+        assert_eq!(
+            expired.effect,
+            SpecialRoutineEffect::UnusedCheckUnusedTwoDayTimer {
+                start_day: 9,
+                current_day: 12,
+                elapsed_days: 3,
+                remaining_days: 0,
+            }
+        );
+        assert_eq!(state.unused_two_day_timer.remaining_days, 0);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+    }
+
+    #[test]
     fn sample_kenji_break_countdown_uses_runtime_rng_seed() {
         let mut state = GameState::default();
         state.rng_seed = 1;
@@ -10882,36 +11648,37 @@ mod tests {
     #[test]
     fn happiness_data_issues_validate_exact_change_and_service_tables() {
         let data = HappinessData {
-            changes: vec![
-                HappinessChangeEntry {
-                    code: "HAPPINESS CHANGE".to_string(),
-                    change_code: 1,
-                    low: 1,
-                    mid: 1,
-                    high: 1,
-                },
-                HappinessChangeEntry {
-                    code: String::new(),
-                    change_code: 1,
-                    low: 1,
-                    mid: 1,
-                    high: 1,
-                },
-            ],
-            services: vec![
-                HappinessServiceTable {
-                    routine: String::new(),
-                    outcomes: Vec::new(),
-                },
-                HappinessServiceTable {
-                    routine: "Haircut Brothers".to_string(),
-                    outcomes: vec![HappinessServiceOutcome {
+            changes: BTreeMap::from([
+                (
+                    1,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS CHANGE".to_string(),
+                        low: 1,
+                        mid: 1,
+                        high: 1,
+                    },
+                ),
+                (
+                    2,
+                    HappinessChangeEntry {
+                        code: String::new(),
+                        low: 1,
+                        mid: 1,
+                        high: 1,
+                    },
+                ),
+            ]),
+            services: BTreeMap::from([
+                (String::new(), Vec::new()),
+                (
+                    "Haircut Brothers".to_string(),
+                    vec![HappinessServiceOutcome {
                         roll_weight: 1,
                         script_value: 0,
                         change_code: 9,
                     }],
-                },
-            ],
+                ),
+            ]),
         };
 
         assert_eq!(
@@ -10931,8 +11698,7 @@ mod tests {
                     code: "HAPPINESS CHANGE".to_string(),
                     change_code: 1,
                 },
-                HappinessDataIssue::EmptyChangeCode { change_code: 1 },
-                HappinessDataIssue::DuplicateChangeIndex { change_code: 1 },
+                HappinessDataIssue::EmptyChangeCode { change_code: 2 },
                 HappinessDataIssue::EmptyServiceRoutine {
                     routine: String::new(),
                 },
@@ -11022,11 +11788,13 @@ mod tests {
     #[test]
     fn battle_tower_rules_issues_validate_exact_rules_and_banned_species() {
         let rules = BattleTowerRules {
-            banned_species: vec![
-                "MEWTWO".to_string(),
-                "ME W".to_string(),
-                "MEWTWO".to_string(),
-            ],
+            banned_species: BTreeMap::from([
+                (
+                    "MEWTWO".to_string(),
+                    BattleTowerBannedSpeciesRule::default(),
+                ),
+                ("ME W".to_string(), BattleTowerBannedSpeciesRule::default()),
+            ]),
             required_party_count: 0,
             challenge_streak_length: 0,
             minimum_level_group: 0,
@@ -11055,20 +11823,10 @@ mod tests {
                     text_id: "Duplicate HeldItemText".to_string(),
                 },
                 BattleTowerRulesIssue::UnknownBannedSpecies {
-                    index: 0,
                     species_id: "MEWTWO".to_string(),
                 },
                 BattleTowerRulesIssue::InvalidBannedSpecies {
-                    index: 1,
                     species_id: "ME W".to_string(),
-                },
-                BattleTowerRulesIssue::DuplicateBannedSpecies {
-                    index: 2,
-                    species_id: "MEWTWO".to_string(),
-                },
-                BattleTowerRulesIssue::UnknownBannedSpecies {
-                    index: 2,
-                    species_id: "MEWTWO".to_string(),
                 },
             ],
         );
@@ -11178,52 +11936,45 @@ mod tests {
 
     #[test]
     fn dratini_move_set_issues_validate_exact_move_rows() {
-        let move_sets = vec![
-            DratiniMoveSetDefinition {
-                mode: 0,
-                moves: Vec::new(),
-            },
-            DratiniMoveSetDefinition {
-                mode: 1,
-                moves: vec![
+        let move_sets = BTreeMap::from([
+            (0, Vec::new()),
+            (
+                1,
+                vec![
                     String::new(),
                     "EXTREMESPEED ".to_string(),
                     "EXTREME SPEED".to_string(),
                     "EXTREMESPEED".to_string(),
                 ],
-            },
-            DratiniMoveSetDefinition {
-                mode: 1,
-                moves: vec!["SURF".to_string()],
-            },
-        ];
+            ),
+            (2, vec!["SURF".to_string()]),
+        ]);
         let move_ids = BTreeSet::from(["SURF".to_string()]);
 
         assert_eq!(
             dratini_move_set_issues(&move_sets, &move_ids),
             vec![
-                DratiniMoveSetIssue::EmptyMoveSet { index: 0 },
+                DratiniMoveSetIssue::EmptyMoveSet { mode: 0 },
                 DratiniMoveSetIssue::InvalidMove {
-                    index: 1,
+                    mode: 1,
                     move_index: 0,
                     move_id: String::new(),
                 },
                 DratiniMoveSetIssue::InvalidMove {
-                    index: 1,
+                    mode: 1,
                     move_index: 1,
                     move_id: "EXTREMESPEED ".to_string(),
                 },
                 DratiniMoveSetIssue::InvalidMove {
-                    index: 1,
+                    mode: 1,
                     move_index: 2,
                     move_id: "EXTREME SPEED".to_string(),
                 },
                 DratiniMoveSetIssue::UnknownMove {
-                    index: 1,
+                    mode: 1,
                     move_index: 3,
                     move_id: "EXTREMESPEED".to_string(),
                 },
-                DratiniMoveSetIssue::DuplicateMode { index: 2, mode: 1 },
             ],
         );
     }
@@ -11295,61 +12046,75 @@ mod tests {
         let species_catalog = BTreeMap::new();
         let item_catalog = BTreeMap::new();
         let happiness_data = HappinessData {
-            changes: vec![
-                HappinessChangeEntry {
-                    code: "HAPPINESS_OLDERCUT1".to_string(),
-                    change_code: 9,
-                    low: 1,
-                    mid: 1,
-                    high: 1,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_OLDERCUT2".to_string(),
-                    change_code: 10,
-                    low: 3,
-                    mid: 3,
-                    high: 1,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_OLDERCUT3".to_string(),
-                    change_code: 11,
-                    low: 5,
-                    mid: 5,
-                    high: 2,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_YOUNGCUT1".to_string(),
-                    change_code: 12,
-                    low: 1,
-                    mid: 1,
-                    high: 1,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_YOUNGCUT2".to_string(),
-                    change_code: 13,
-                    low: 3,
-                    mid: 3,
-                    high: 1,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_YOUNGCUT3".to_string(),
-                    change_code: 14,
-                    low: 10,
-                    mid: 10,
-                    high: 4,
-                },
-                HappinessChangeEntry {
-                    code: "HAPPINESS_GROOMING".to_string(),
-                    change_code: 18,
-                    low: 3,
-                    mid: 3,
-                    high: 1,
-                },
-            ],
-            services: vec![
-                HappinessServiceTable {
-                    routine: "OlderHaircutBrother".to_string(),
-                    outcomes: vec![
+            changes: BTreeMap::from([
+                (
+                    9,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_OLDERCUT1".to_string(),
+                        low: 1,
+                        mid: 1,
+                        high: 1,
+                    },
+                ),
+                (
+                    10,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_OLDERCUT2".to_string(),
+                        low: 3,
+                        mid: 3,
+                        high: 1,
+                    },
+                ),
+                (
+                    11,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_OLDERCUT3".to_string(),
+                        low: 5,
+                        mid: 5,
+                        high: 2,
+                    },
+                ),
+                (
+                    12,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_YOUNGCUT1".to_string(),
+                        low: 1,
+                        mid: 1,
+                        high: 1,
+                    },
+                ),
+                (
+                    13,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_YOUNGCUT2".to_string(),
+                        low: 3,
+                        mid: 3,
+                        high: 1,
+                    },
+                ),
+                (
+                    14,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_YOUNGCUT3".to_string(),
+                        low: 10,
+                        mid: 10,
+                        high: 4,
+                    },
+                ),
+                (
+                    18,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_GROOMING".to_string(),
+                        low: 3,
+                        mid: 3,
+                        high: 1,
+                    },
+                ),
+            ]),
+            services: BTreeMap::from([
+                (
+                    "OlderHaircutBrother".to_string(),
+                    vec![
                         HappinessServiceOutcome {
                             roll_weight: 76,
                             script_value: 2,
@@ -11366,10 +12131,10 @@ mod tests {
                             change_code: 11,
                         },
                     ],
-                },
-                HappinessServiceTable {
-                    routine: "YoungerHaircutBrother".to_string(),
-                    outcomes: vec![
+                ),
+                (
+                    "YoungerHaircutBrother".to_string(),
+                    vec![
                         HappinessServiceOutcome {
                             roll_weight: 154,
                             script_value: 2,
@@ -11386,16 +12151,16 @@ mod tests {
                             change_code: 14,
                         },
                     ],
-                },
-                HappinessServiceTable {
-                    routine: "DaisysGrooming".to_string(),
-                    outcomes: vec![HappinessServiceOutcome {
+                ),
+                (
+                    "DaisysGrooming".to_string(),
+                    vec![HappinessServiceOutcome {
                         roll_weight: 255,
                         script_value: 2,
                         change_code: 18,
                     }],
-                },
-            ],
+                ),
+            ]),
         };
 
         let missing = apply_special_routine_with_context(
@@ -11729,12 +12494,32 @@ mod tests {
             Some("345")
         );
 
-        let slot = apply_special_routine(&mut state, &moves(), "SlotMachine").expect("slot");
+        let move_catalog = moves();
+        let coin_case = item_data("COIN_CASE");
+        let item_catalog = BTreeMap::from([("COIN_CASE".to_string(), coin_case.clone())]);
+        state.bag.add_item(&coin_case, 1).expect("add coin case");
+        let context = full_context(
+            &move_catalog,
+            &EMPTY_TEST_SPECIES,
+            &EMPTY_TEST_LEARNSETS,
+            &item_catalog,
+        );
+
+        let slot =
+            apply_special_routine_with_context(&mut state, context, "SlotMachine").expect("slot");
         assert_eq!(slot.effect, SpecialRoutineEffect::SlotMachine { coins: 99 });
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("99"));
 
-        let card = apply_special_routine(&mut state, &moves(), "CardFlip").expect("card");
+        let card =
+            apply_special_routine_with_context(&mut state, context, "CardFlip").expect("card");
         assert_eq!(card.effect, SpecialRoutineEffect::CardFlip { coins: 99 });
+
+        let memory = apply_special_routine_with_context(&mut state, context, "UnusedMemoryGame")
+            .expect("memory game");
+        assert_eq!(
+            memory.effect,
+            SpecialRoutineEffect::UnusedMemoryGame { coins: 99 }
+        );
 
         let link_record =
             apply_special_routine(&mut state, &moves(), "DisplayLinkRecord").expect("link record");
@@ -11762,6 +12547,20 @@ mod tests {
             Some("BATTLETYPE_TRAINER_HOUSE")
         );
 
+        let before_missing_photo_slot = state.clone();
+        let error = apply_special_routine(&mut state, &moves(), "PhotoStudio")
+            .expect_err("photo studio requires an explicit party slot");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "PhotoStudio" && variable == "_party_slot"
+        ));
+        assert_eq!(state, before_missing_photo_slot);
+
+        state
+            .script_runtime
+            .variables
+            .insert("_party_slot".to_string(), "0".to_string());
         let photo = apply_special_routine(&mut state, &moves(), "PhotoStudio").expect("photo");
         assert_eq!(
             photo.effect,
@@ -11785,11 +12584,569 @@ mod tests {
     }
 
     #[test]
+    fn game_corner_games_require_coins_and_coin_case() {
+        let move_catalog = moves();
+        let coin_case = item_data("COIN_CASE");
+        let item_catalog = BTreeMap::from([("COIN_CASE".to_string(), coin_case.clone())]);
+        let context = full_context(
+            &move_catalog,
+            &EMPTY_TEST_SPECIES,
+            &EMPTY_TEST_LEARNSETS,
+            &item_catalog,
+        );
+
+        let mut no_coins = GameState::default();
+        no_coins
+            .bag
+            .add_item(&coin_case, 1)
+            .expect("coin case for no coins");
+        let no_coins_outcome =
+            apply_special_routine_with_context(&mut no_coins, context, "SlotMachine")
+                .expect("no coins is handled by script text");
+        assert_eq!(
+            no_coins_outcome.effect,
+            SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: "SlotMachine".to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            }
+        );
+        assert_eq!(no_coins.script_runtime.active_menu, None);
+
+        let mut no_coin_case = GameState::default();
+        no_coin_case.coins = 10;
+        let missing_case =
+            apply_special_routine_with_context(&mut no_coin_case, context, "CardFlip")
+                .expect("missing coin case is handled by script text");
+        assert_eq!(
+            missing_case.effect,
+            SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: "CardFlip".to_string(),
+                reason: GameCornerUnavailableReason::MissingCoinCase,
+            }
+        );
+        assert_eq!(no_coin_case.script_runtime.active_menu, None);
+    }
+
+    #[test]
+    fn random_phone_wild_mon_uses_caller_map_grass_bucket() {
+        let move_catalog = moves();
+        let species_catalog = species_catalog(&[
+            ("PIDGEY", 16),
+            ("RATTATA", 19),
+            ("SENTRET", 161),
+            ("HOOTHOOT", 163),
+        ]);
+        let phone_contacts = PhoneContactCatalog(BTreeMap::from([(
+            "PHONE_BIRDKEEPER_VANCE".to_string(),
+            PhoneContactRecord {
+                contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                trainer_class: Some("BIRD_KEEPER".to_string()),
+                trainer_label: Some("VANCE1".to_string()),
+                lines: vec!["Vance:".to_string()],
+                primary_label: "VANCE".to_string(),
+                map_constant: Some("ROUTE_44".to_string()),
+                callee_time_mask: 0xff,
+                callee_script: None,
+                caller_time_mask: 0xff,
+                caller_script: None,
+            },
+        )]));
+        let wild_encounters = BTreeMap::from([(
+            "ROUTE_44".to_string(),
+            WildEncounterData {
+                map_name: "ROUTE_44".to_string(),
+                grass_rates: Some(BTreeMap::from([
+                    ("morning".to_string(), 30),
+                    ("day".to_string(), 30),
+                    ("night".to_string(), 30),
+                ])),
+                water_rate: None,
+                grass: Some(WildEncounterTable {
+                    morning: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "PIDGEY".to_string(),
+                        };
+                        4
+                    ],
+                    day: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "PIDGEY".to_string(),
+                        },
+                        WildEncounter {
+                            level: 21,
+                            species: "RATTATA".to_string(),
+                        },
+                        WildEncounter {
+                            level: 22,
+                            species: "SENTRET".to_string(),
+                        },
+                        WildEncounter {
+                            level: 23,
+                            species: "HOOTHOOT".to_string(),
+                        },
+                    ],
+                    night: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "HOOTHOOT".to_string(),
+                        };
+                        4
+                    ],
+                }),
+                water: None,
+            },
+        )]);
+        let mut context = full_context(
+            &move_catalog,
+            &species_catalog,
+            &EMPTY_TEST_LEARNSETS,
+            &EMPTY_TEST_ITEMS,
+        );
+        context.phone_contacts = &phone_contacts;
+        context.wild_encounters = &wild_encounters;
+
+        let mut state = GameState::default();
+        state.time.time_of_day = TimeOfDay::Day;
+        state.rng_seed = 1;
+        state.script_runtime.variables.insert(
+            "VAR_CALLERID".to_string(),
+            "PHONE_BIRDKEEPER_VANCE".to_string(),
+        );
+        let outcome = apply_special_routine_with_context(&mut state, context, "RandomPhoneWildMon")
+            .expect("random phone wild mon");
+
+        assert_eq!(
+            outcome.effect,
+            SpecialRoutineEffect::RandomPhoneWildMon {
+                contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                map_name: "ROUTE_44".to_string(),
+                time_of_day: TimeOfDay::Day,
+                species: "RATTATA".to_string(),
+                rng_seed_after: 58_598,
+            }
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_4")
+                .map(String::as_str),
+            Some("RATTATA")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .variables
+                .get("wNamedObjectIndex")
+                .map(String::as_str),
+            Some("19")
+        );
+    }
+
+    #[test]
+    fn random_unseen_wild_mon_preserves_morning_slot_selection() {
+        let move_catalog = moves();
+        let species_catalog = species_catalog(&[
+            ("PIDGEY", 16),
+            ("RATTATA", 19),
+            ("SENTRET", 161),
+            ("HOOTHOOT", 163),
+            ("LARVITAR", 246),
+            ("PHANPY", 231),
+            ("SKARMORY", 227),
+        ]);
+        let phone_contacts = PhoneContactCatalog(BTreeMap::from([(
+            "PHONE_HIKER_PARRY".to_string(),
+            PhoneContactRecord {
+                contact_id: "PHONE_HIKER_PARRY".to_string(),
+                trainer_class: Some("HIKER".to_string()),
+                trainer_label: Some("PARRY1".to_string()),
+                lines: vec!["Parry:".to_string()],
+                primary_label: "PARRY".to_string(),
+                map_constant: Some("ROUTE_45".to_string()),
+                callee_time_mask: 0xff,
+                callee_script: None,
+                caller_time_mask: 0xff,
+                caller_script: None,
+            },
+        )]));
+        let wild_encounters = BTreeMap::from([(
+            "ROUTE_45".to_string(),
+            WildEncounterData {
+                map_name: "ROUTE_45".to_string(),
+                grass_rates: Some(BTreeMap::from([
+                    ("morning".to_string(), 30),
+                    ("day".to_string(), 30),
+                    ("night".to_string(), 30),
+                ])),
+                water_rate: None,
+                grass: Some(WildEncounterTable {
+                    morning: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "PIDGEY".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "RATTATA".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "SENTRET".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "HOOTHOOT".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "LARVITAR".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "PHANPY".to_string(),
+                        },
+                        WildEncounter {
+                            level: 20,
+                            species: "SKARMORY".to_string(),
+                        },
+                    ],
+                    day: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "PIDGEY".to_string(),
+                        };
+                        7
+                    ],
+                    night: vec![
+                        WildEncounter {
+                            level: 20,
+                            species: "HOOTHOOT".to_string(),
+                        };
+                        7
+                    ],
+                }),
+                water: None,
+            },
+        )]);
+        let mut context = full_context(
+            &move_catalog,
+            &species_catalog,
+            &EMPTY_TEST_LEARNSETS,
+            &EMPTY_TEST_ITEMS,
+        );
+        context.phone_contacts = &phone_contacts;
+        context.wild_encounters = &wild_encounters;
+
+        let mut state = GameState::default();
+        state.time.time_of_day = TimeOfDay::Night;
+        state.rng_seed = 1;
+        state
+            .script_runtime
+            .variables
+            .insert("VAR_CALLERID".to_string(), "PHONE_HIKER_PARRY".to_string());
+        let outcome =
+            apply_special_routine_with_context(&mut state, context, "RandomUnseenWildMon")
+                .expect("random unseen wild mon");
+
+        assert_eq!(
+            outcome.effect,
+            SpecialRoutineEffect::RandomUnseenWildMon {
+                contact_id: "PHONE_HIKER_PARRY".to_string(),
+                map_name: "ROUTE_45".to_string(),
+                species: Some("LARVITAR".to_string()),
+                already_seen: false,
+                script_value: 0,
+                rng_seed_after: 58_598,
+            }
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_1")
+                .map(String::as_str),
+            Some("LARVITAR")
+        );
+    }
+
+    #[test]
+    fn random_phone_wild_mon_requires_exact_caller_context() {
+        let move_catalog = moves();
+        let species_catalog = species_catalog(&[("PIDGEY", 16)]);
+        let state = &mut GameState::default();
+        let error = apply_special_routine_with_context(
+            state,
+            full_context(
+                &move_catalog,
+                &species_catalog,
+                &EMPTY_TEST_LEARNSETS,
+                &EMPTY_TEST_ITEMS,
+            ),
+            "RandomPhoneWildMon",
+        )
+        .expect_err("caller id is required");
+
+        assert_eq!(
+            error,
+            SpecialRoutineError::MissingCallerId {
+                routine: "RandomPhoneWildMon".to_string()
+            }
+        );
+        assert!(state.script_runtime.named_buffers.is_empty());
+    }
+
+    #[test]
+    fn random_phone_mon_uses_exact_caller_trainer_party() {
+        let move_catalog = moves();
+        let species_catalog = species_catalog(&[("PIDGEY", 16), ("FEAROW", 22), ("PIDGEOT", 18)]);
+        let phone_contacts = PhoneContactCatalog(BTreeMap::from([(
+            "PHONE_BIRDKEEPER_VANCE".to_string(),
+            PhoneContactRecord {
+                contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                trainer_class: Some("BIRD_KEEPER".to_string()),
+                trainer_label: Some("VANCE1".to_string()),
+                lines: vec!["Vance:".to_string()],
+                primary_label: "VANCE".to_string(),
+                map_constant: Some("ROUTE_44".to_string()),
+                callee_time_mask: 0xff,
+                callee_script: None,
+                caller_time_mask: 0xff,
+                caller_script: None,
+            },
+        )]));
+        let mut trainer_catalog = TrainerCatalog::default();
+        trainer_catalog
+            .insert(Trainer {
+                name: "VANCE".to_string(),
+                trainer_id: "VANCE1".to_string(),
+                trainer_class: "BIRD_KEEPER".to_string(),
+                party: vec![
+                    TrainerPartyPokemon {
+                        species: "PIDGEY".to_string(),
+                        level: 25,
+                        ..TrainerPartyPokemon::default()
+                    },
+                    TrainerPartyPokemon {
+                        species: "FEAROW".to_string(),
+                        level: 27,
+                        ..TrainerPartyPokemon::default()
+                    },
+                    TrainerPartyPokemon {
+                        species: "PIDGEOT".to_string(),
+                        level: 29,
+                        ..TrainerPartyPokemon::default()
+                    },
+                ],
+                win_quote: "Won".to_string(),
+                lose_quote: "Lost".to_string(),
+                items: Vec::new(),
+                base_reward: 1,
+                ai_move_flags: 0,
+                ai_item_switch_flags: 0,
+                encounter_music: "TRAINER_MUSIC".to_string(),
+                ai_layers: Vec::new(),
+            })
+            .expect("trainer catalog");
+        let mut context = full_context(
+            &move_catalog,
+            &species_catalog,
+            &EMPTY_TEST_LEARNSETS,
+            &EMPTY_TEST_ITEMS,
+        );
+        context.phone_contacts = &phone_contacts;
+        context.trainer_catalog = &trainer_catalog;
+
+        let mut state = GameState::default();
+        state.rng_seed = 1;
+        state.script_runtime.variables.insert(
+            "VAR_CALLERID".to_string(),
+            "PHONE_BIRDKEEPER_VANCE".to_string(),
+        );
+        let outcome = apply_special_routine_with_context(&mut state, context, "RandomPhoneMon")
+            .expect("random phone trainer mon");
+
+        assert_eq!(
+            outcome.effect,
+            SpecialRoutineEffect::RandomPhoneMon {
+                contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                trainer_id: "VANCE1".to_string(),
+                species: "FEAROW".to_string(),
+                party_index: 1,
+                rng_seed_after: 58_598,
+            }
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_4")
+                .map(String::as_str),
+            Some("FEAROW")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .variables
+                .get("wNamedObjectIndex")
+                .map(String::as_str),
+            Some("22")
+        );
+    }
+
+    #[test]
+    fn asm_ret_only_specials_return_noop_without_runtime_mutation() {
+        for routine in [
+            "UnusedDummySpecial",
+            "UnusedBattleTowerDummySpecial1",
+            "UnusedBattleTowerDummySpecial2",
+        ] {
+            let mut state = GameState::default();
+            let before = state.clone();
+
+            let outcome =
+                apply_special_routine(&mut state, &moves(), routine).expect("noop special");
+
+            assert_eq!(outcome.routine, routine);
+            assert_eq!(outcome.effect, SpecialRoutineEffect::Noop);
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn unused_find_item_in_pc_or_bag_checks_pc_before_bag() {
+        let move_catalog = moves();
+        let potion = item_data("POTION");
+        let item_catalog = BTreeMap::from([("POTION".to_string(), potion.clone())]);
+        let context = full_context(
+            &move_catalog,
+            &EMPTY_TEST_SPECIES,
+            &EMPTY_TEST_LEARNSETS,
+            &item_catalog,
+        );
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("POTION".to_string());
+        state.bag.add_item(&potion, 1).expect("add bag potion");
+        state.bag.add_pc_item(&potion, 2).expect("add pc potion");
+
+        let pc_first =
+            apply_special_routine_with_context(&mut state, context, "UnusedFindItemInPCOrBag")
+                .expect("find item");
+
+        assert_eq!(
+            pc_first.effect,
+            SpecialRoutineEffect::UnusedFindItemInPcOrBag {
+                item_id: "POTION".to_string(),
+                found_in_pc: true,
+                found_in_bag: false,
+                script_value: 1,
+            }
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+
+        state.bag.pc_items.clear();
+        state.script_runtime.script_value = Some("POTION".to_string());
+        let bag_fallback =
+            apply_special_routine_with_context(&mut state, context, "UnusedFindItemInPCOrBag")
+                .expect("find bag item");
+
+        assert_eq!(
+            bag_fallback.effect,
+            SpecialRoutineEffect::UnusedFindItemInPcOrBag {
+                item_id: "POTION".to_string(),
+                found_in_pc: false,
+                found_in_bag: true,
+                script_value: 1,
+            }
+        );
+
+        state.bag.items.clear();
+        state.script_runtime.script_value = Some("POTION".to_string());
+        let missing =
+            apply_special_routine_with_context(&mut state, context, "UnusedFindItemInPCOrBag")
+                .expect("missing item handled");
+
+        assert_eq!(
+            missing.effect,
+            SpecialRoutineEffect::UnusedFindItemInPcOrBag {
+                item_id: "POTION".to_string(),
+                found_in_pc: false,
+                found_in_bag: false,
+                script_value: 0,
+            }
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn function11ba38_checks_for_another_usable_party_mon() {
+        let mut state = GameState::default();
+        let selected = pokemon("CHIKORITA");
+        let mut other = pokemon("CYNDAQUIL");
+        other.hp = 12;
+        state
+            .storage
+            .register_capture(selected)
+            .expect("store selected");
+        state.storage.register_capture(other).expect("store other");
+        state.sync_party_from_storage();
+        state
+            .script_runtime
+            .variables
+            .insert("_party_slot".to_string(), "0".to_string());
+        let before_alias = state.clone();
+        let alias_error = apply_special_routine(&mut state, &moves(), "Function11ba38")
+            .expect_err("selected party helper must not accept party slot alias");
+        assert!(matches!(
+            alias_error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "Function11ba38" && variable == "_selected_party_index"
+        ));
+        assert_eq!(state, before_alias);
+        state.script_runtime.variables.remove("_party_slot");
+        state
+            .script_runtime
+            .variables
+            .insert("_selected_party_index".to_string(), "0".to_string());
+
+        let usable = apply_special_routine(&mut state, &moves(), "Function11ba38")
+            .expect("another usable mon");
+
+        assert_eq!(
+            usable.effect,
+            SpecialRoutineEffect::Function11ba38 {
+                selected_party_slot: 0,
+                other_usable_party_mon: true,
+                script_value: 0,
+            }
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+
+        state.storage.party.pokemon[1]
+            .as_mut()
+            .expect("other party mon")
+            .hp = 0;
+        state.sync_party_from_storage();
+        let last_usable =
+            apply_special_routine(&mut state, &moves(), "Function11ba38").expect("last usable mon");
+
+        assert_eq!(
+            last_usable.effect,
+            SpecialRoutineEffect::Function11ba38 {
+                selected_party_slot: 0,
+                other_usable_party_mon: false,
+                script_value: 1,
+            }
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+    }
+
+    #[test]
     fn inactive_declared_specials_reject_without_runtime_mutation() {
         let cases = [
-            "RandomUnseenWildMon",
-            "RandomPhoneWildMon",
-            "RandomPhoneMon",
             "Function11ac3e",
             "TradeCornerHoldMon",
             "Function11b5e8",
@@ -11799,17 +13156,10 @@ mod tests {
             "Function11b93b",
             "Function170114",
             "Function1704e1",
-            "UnusedBattleTowerDummySpecial1",
-            "Function11ba38",
             "Function11c1ab",
             "Function17d2b6",
             "Function17d2ce",
             "Function102142",
-            "UnusedBattleTowerDummySpecial2",
-            "UnusedMemoryGame",
-            "UnusedCheckUnusedTwoDayTimer",
-            "UnusedFindItemInPCOrBag",
-            "UnusedDummySpecial",
         ];
 
         for routine in cases {
@@ -11913,6 +13263,10 @@ mod tests {
             .script_runtime
             .variables
             .insert("_selected_party_index".to_string(), "0".to_string());
+        state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "0".to_string());
         let returned = apply_special_routine_with_context(
             &mut state,
             full_context_with_shuckie_gift(
@@ -11983,26 +13337,26 @@ mod tests {
         let species = BTreeMap::new();
         let learnsets = SpeciesLearnsets::new();
         let items = BTreeMap::new();
-        let dratini_move_sets = vec![
-            DratiniMoveSetDefinition {
-                mode: 0,
-                moves: vec![
+        let dratini_move_sets = BTreeMap::from([
+            (
+                0,
+                vec![
                     "WRAP".to_string(),
                     "THUNDER_WAVE".to_string(),
                     "TWISTER".to_string(),
                     "EXTREMESPEED".to_string(),
                 ],
-            },
-            DratiniMoveSetDefinition {
-                mode: 1,
-                moves: vec![
+            ),
+            (
+                1,
+                vec![
                     "WRAP".to_string(),
                     "LEER".to_string(),
                     "THUNDER_WAVE".to_string(),
                     "TWISTER".to_string(),
                 ],
-            },
-        ];
+            ),
+        ]);
 
         let outcome = apply_special_routine_with_context(
             &mut state,
@@ -12086,10 +13440,7 @@ mod tests {
         let moves = moves();
         let species = BTreeMap::new();
         let learnsets = SpeciesLearnsets::new();
-        let recipes = vec![KurtApricornRecipe {
-            apricorn: "RED_APRICORN".to_string(),
-            ball: "LEVEL_BALL".to_string(),
-        }];
+        let recipes = BTreeMap::from([("RED_APRICORN".to_string(), "LEVEL_BALL".to_string())]);
 
         let outcome = apply_special_routine_with_context(
             &mut state,
@@ -12115,6 +13466,27 @@ mod tests {
             Some("2")
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+
+        let mut unselected = GameState::default();
+        unselected.bag.add_item(&item, 3).expect("add apricorn");
+        unselected
+            .script_runtime
+            .variables
+            .insert("_kurt_apricorn_quantity".to_string(), "2".to_string());
+        let no_selection = apply_special_routine_with_context(
+            &mut unselected,
+            full_context_with_kurt_apricorn_recipes(&moves, &species, &learnsets, &items, &recipes),
+            "SelectApricornForKurt",
+        )
+        .expect("missing apricorn selection is a cancelled selection");
+        assert_eq!(
+            no_selection.effect,
+            SpecialRoutineEffect::SelectApricornForKurt {
+                apricorn: None,
+                quantity: 0
+            }
+        );
+        assert_eq!(unselected.bag.quantity(&item), 3);
     }
 
     #[test]
@@ -12166,10 +13538,7 @@ mod tests {
         let moves = moves();
         let species = BTreeMap::new();
         let learnsets = SpeciesLearnsets::new();
-        let recipes = vec![KurtApricornRecipe {
-            apricorn: "RED_APRICORN".to_string(),
-            ball: "LEVEL_BALL".to_string(),
-        }];
+        let recipes = BTreeMap::from([("RED_APRICORN".to_string(), "LEVEL_BALL".to_string())]);
 
         let error = apply_special_routine_with_context(
             &mut state,
@@ -12222,20 +13591,24 @@ mod tests {
         let species = species_catalog(&[("RAIKOU", 243), ("ENTEI", 244)]);
         let learnsets = SpeciesLearnsets::new();
         let items = BTreeMap::new();
-        let roaming_definitions = vec![
-            RoamingPokemonDefinition {
-                species: "RAIKOU".to_string(),
-                level: 40,
-                map_group: 2,
-                map_number: 5,
-            },
-            RoamingPokemonDefinition {
-                species: "ENTEI".to_string(),
-                level: 40,
-                map_group: 10,
-                map_number: 4,
-            },
-        ];
+        let roaming_definitions = BTreeMap::from([
+            (
+                "RAIKOU".to_string(),
+                RoamingPokemonDefinition {
+                    level: 40,
+                    map_group: 2,
+                    map_number: 5,
+                },
+            ),
+            (
+                "ENTEI".to_string(),
+                RoamingPokemonDefinition {
+                    level: 40,
+                    map_group: 10,
+                    map_number: 4,
+                },
+            ),
+        ]);
         let roamers = apply_special_routine_with_context(
             &mut state,
             full_context_with_roamers(
@@ -12254,18 +13627,18 @@ mod tests {
             state.roaming_pokemon,
             vec![
                 RoamingPokemonState {
-                    species: "RAIKOU".to_string(),
-                    level: 40,
-                    map_group: 2,
-                    map_number: 5,
-                    hp: 0,
-                    dvs: 0
-                },
-                RoamingPokemonState {
                     species: "ENTEI".to_string(),
                     level: 40,
                     map_group: 10,
                     map_number: 4,
+                    hp: 0,
+                    dvs: 0
+                },
+                RoamingPokemonState {
+                    species: "RAIKOU".to_string(),
+                    level: 40,
+                    map_group: 2,
+                    map_number: 5,
                     hp: 0,
                     dvs: 0
                 }
@@ -12402,38 +13775,51 @@ mod tests {
         let species = BTreeMap::new();
         let learnsets = SpeciesLearnsets::new();
         let items = BTreeMap::new();
-        let buena_password_categories = vec![
-            BuenaPasswordCategoryDefinition {
-                id: "JohtoStarters".to_string(),
-                category_type: "BUENA_MON".to_string(),
-                points: 10,
-                options: vec![
-                    "CYNDAQUIL".to_string(),
-                    "TOTODILE".to_string(),
-                    "CHIKORITA".to_string(),
-                ],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "Beverages".to_string(),
-                category_type: "BUENA_ITEM".to_string(),
-                points: 12,
-                options: vec![
-                    "FRESH_WATER".to_string(),
-                    "SODA_POP".to_string(),
-                    "LEMONADE".to_string(),
-                ],
-            },
-            BuenaPasswordCategoryDefinition {
-                id: "HealingItems".to_string(),
-                category_type: "BUENA_ITEM".to_string(),
-                points: 12,
-                options: vec![
-                    "POTION".to_string(),
-                    "ANTIDOTE".to_string(),
-                    "PARLYZ_HEAL".to_string(),
-                ],
-            },
-        ];
+        let buena_password_categories = BuenaPasswordCategories {
+            order: vec![
+                "JohtoStarters".to_string(),
+                "Beverages".to_string(),
+                "HealingItems".to_string(),
+            ],
+            categories: BTreeMap::from([
+                (
+                    "JohtoStarters".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: "BUENA_MON".to_string(),
+                        points: 10,
+                        options: vec![
+                            "CYNDAQUIL".to_string(),
+                            "TOTODILE".to_string(),
+                            "CHIKORITA".to_string(),
+                        ],
+                    },
+                ),
+                (
+                    "Beverages".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: "BUENA_ITEM".to_string(),
+                        points: 12,
+                        options: vec![
+                            "FRESH_WATER".to_string(),
+                            "SODA_POP".to_string(),
+                            "LEMONADE".to_string(),
+                        ],
+                    },
+                ),
+                (
+                    "HealingItems".to_string(),
+                    BuenaPasswordCategoryDefinition {
+                        category_type: "BUENA_ITEM".to_string(),
+                        points: 12,
+                        options: vec![
+                            "POTION".to_string(),
+                            "ANTIDOTE".to_string(),
+                            "PARLYZ_HEAL".to_string(),
+                        ],
+                    },
+                ),
+            ]),
+        };
 
         let first = apply_special_routine_with_context(
             &mut state,
@@ -12460,6 +13846,35 @@ mod tests {
             }
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+
+        let mut aliased_state = GameState::default();
+        aliased_state
+            .script_runtime
+            .variables
+            .insert("_selected_password".to_string(), "TOTODILE".to_string());
+        let aliased = apply_special_routine_with_context(
+            &mut aliased_state,
+            full_context_with_buena_password_categories(
+                &moves,
+                &species,
+                &learnsets,
+                &items,
+                &buena_password_categories,
+            ),
+            "BuenasPassword",
+        )
+        .expect("selected password alias is ignored");
+        assert_eq!(
+            aliased.effect,
+            SpecialRoutineEffect::BuenasPassword {
+                category: "JohtoStarters".to_string(),
+                category_type: "BUENA_MON".to_string(),
+                correct: "TOTODILE".to_string(),
+                guess: None,
+                matched: false,
+                rng_seed_after: 127_215
+            }
+        );
 
         state
             .script_runtime
@@ -12491,10 +13906,7 @@ mod tests {
 
         let item = item_data("RARE_CANDY");
         let items = BTreeMap::from([("RARE_CANDY".to_string(), item.clone())]);
-        let buena_prizes = vec![BuenaPrizeDefinition {
-            item_id: "RARE_CANDY".to_string(),
-            cost: 3,
-        }];
+        let buena_prizes = BTreeMap::from([("RARE_CANDY".to_string(), 3)]);
         state.blue_card_balance = 10;
         state
             .script_runtime
@@ -12679,6 +14091,10 @@ mod tests {
                 divisor: 1,
             },
         ];
+        state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "0".to_string());
 
         let outcome = apply_special_routine_with_context(
             &mut state,
@@ -12750,6 +14166,30 @@ mod tests {
             original_trainer_id: 518,
             got_today_engine_flag: "ENGINE_GOT_SHUCKIE_TODAY".to_string(),
         };
+        let missing_shuckie_cancel = apply_special_routine_with_context(
+            &mut shuckie_state,
+            full_context_with_shuckie_gift(
+                &move_catalog,
+                &species,
+                &learnsets,
+                &items,
+                &shuckie_gift,
+            ),
+            "ReturnShuckie",
+        )
+        .expect_err("missing shuckie cancellation input rejected");
+        assert!(matches!(
+            missing_shuckie_cancel,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "ReturnShuckie" && variable == "_selection_cancelled"
+        ));
+        assert_eq!(shuckie_state, before_shuckie);
+
+        shuckie_state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "0".to_string());
+        let before_shuckie_selection = shuckie_state.clone();
         let shuckie_error = apply_special_routine_with_context(
             &mut shuckie_state,
             full_context_with_shuckie_gift(
@@ -12767,7 +14207,7 @@ mod tests {
             SpecialRoutineError::MissingScriptValue { routine, variable }
                 if routine == "ReturnShuckie" && variable == "_selected_party_index"
         ));
-        assert_eq!(shuckie_state, before_shuckie);
+        assert_eq!(shuckie_state, before_shuckie_selection);
 
         let mut magikarp_state = GameState::default();
         magikarp_state
@@ -12776,6 +14216,21 @@ mod tests {
             .expect("store magikarp");
         magikarp_state.sync_party_from_storage();
         let before_magikarp = magikarp_state.clone();
+        let missing_magikarp_cancel =
+            apply_special_routine(&mut magikarp_state, &moves(), "CheckMagikarpLength")
+                .expect_err("missing magikarp cancellation input rejected");
+        assert!(matches!(
+            missing_magikarp_cancel,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "CheckMagikarpLength" && variable == "_selection_cancelled"
+        ));
+        assert_eq!(magikarp_state, before_magikarp);
+
+        magikarp_state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "0".to_string());
+        let before_magikarp_selection = magikarp_state.clone();
         let magikarp_error =
             apply_special_routine(&mut magikarp_state, &moves(), "CheckMagikarpLength")
                 .expect_err("missing magikarp selection rejected");
@@ -12784,7 +14239,7 @@ mod tests {
             SpecialRoutineError::MissingScriptValue { routine, variable }
                 if routine == "CheckMagikarpLength" && variable == "_selected_party_index"
         ));
-        assert_eq!(magikarp_state, before_magikarp);
+        assert_eq!(magikarp_state, before_magikarp_selection);
     }
 
     #[test]
@@ -13068,6 +14523,10 @@ mod tests {
             .script_runtime
             .variables
             .insert("_selected_party_index".to_string(), "0".to_string());
+        state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "0".to_string());
         let before = state.clone();
 
         let error = apply_special_routine(&mut state, &moves(), "CheckMagikarpLength")
@@ -13266,6 +14725,51 @@ mod tests {
             error,
             SpecialRoutineError::InvalidNumericValue { routine, value }
                 if routine == "CableClubCheckWhichChris" && value == "male"
+        ));
+        assert_eq!(state, before);
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .variables
+            .insert("_yes_no_result".to_string(), "true".to_string());
+        let before = state.clone();
+        let error = apply_special_routine(&mut state, &moves(), "AskRememberPassword")
+            .expect_err("boolean script inputs must not accept string aliases");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::InvalidNumericValue { routine, value }
+                if routine == "AskRememberPassword" && value == "true"
+        ));
+        assert_eq!(state, before);
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .variables
+            .insert("_remember_password".to_string(), "1".to_string());
+        let before = state.clone();
+        let error = apply_special_routine(&mut state, &moves(), "AskRememberPassword")
+            .expect_err("remember password output must not alias yes/no input");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "AskRememberPassword" && variable == "_yes_no_result"
+        ));
+        assert_eq!(state, before);
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .variables
+            .insert("_selection_cancelled".to_string(), "true".to_string());
+        let before = state.clone();
+        let error = apply_special_routine(&mut state, &moves(), "CheckMagikarpLength")
+            .expect_err("selection cancellation must use exact numeric script values");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::InvalidNumericValue { routine, value }
+                if routine == "CheckMagikarpLength" && value == "true"
         ));
         assert_eq!(state, before);
     }
@@ -13937,6 +15441,61 @@ mod tests {
             assert_eq!(state, before);
         }
 
+        let mut aliased_timer = GameState::default();
+        aliased_timer.script_runtime.variables.insert(
+            "_mobile_login_password".to_string(),
+            "SEVENTEEN-CHARS!!".to_string(),
+        );
+        aliased_timer
+            .script_runtime
+            .variables
+            .insert("_mobile_battle_timer".to_string(), "+1,2,3".to_string());
+        aliased_timer
+            .script_runtime
+            .variables
+            .insert("_mobile_adapter_status".to_string(), "ready".to_string());
+        aliased_timer.script_runtime.variables.insert(
+            "_mobile_adapter_secondary_status".to_string(),
+            "standby".to_string(),
+        );
+        let before_aliased_timer = aliased_timer.clone();
+        let timer_error = apply_special_routine(&mut aliased_timer, &moves(), "Function1011f1")
+            .expect_err("aliased mobile timer rejected");
+        assert!(matches!(
+            timer_error,
+            SpecialRoutineError::InvalidNumericValue { routine, value }
+                if routine == "Function1011f1" && value == "+1"
+        ));
+        assert_eq!(aliased_timer, before_aliased_timer);
+
+        let mut padded_password = GameState::default();
+        padded_password.script_runtime.variables.insert(
+            "_mobile_login_password".to_string(),
+            " SEVENTEEN-CHARS!".to_string(),
+        );
+        padded_password
+            .script_runtime
+            .variables
+            .insert("_mobile_battle_timer".to_string(), "1,2,3".to_string());
+        padded_password
+            .script_runtime
+            .variables
+            .insert("_mobile_adapter_status".to_string(), "ready".to_string());
+        padded_password.script_runtime.variables.insert(
+            "_mobile_adapter_secondary_status".to_string(),
+            "standby".to_string(),
+        );
+        let before_padded_password = padded_password.clone();
+        let password_error =
+            apply_special_routine(&mut padded_password, &moves(), "Function1011f1")
+                .expect_err("padded mobile password rejected");
+        assert!(matches!(
+            password_error,
+            SpecialRoutineError::InvalidMobilePassword { routine }
+                if routine == "Function1011f1"
+        ));
+        assert_eq!(padded_password, before_padded_password);
+
         let mut selection = GameState::default();
         selection.battle_tower.selected_party_indexes = vec![9, 8, 7];
         let before_selection = selection.clone();
@@ -13949,6 +15508,21 @@ mod tests {
                 if routine == "Mobile_SelectThreeMons" && variable == "_selected_party_indexes"
         ));
         assert_eq!(selection, before_selection);
+
+        selection
+            .script_runtime
+            .variables
+            .insert("_selected_party_indexes".to_string(), "2,+4,5".to_string());
+        let before_aliased_selection = selection.clone();
+        let selection_alias_error =
+            apply_special_routine(&mut selection, &moves(), "Mobile_SelectThreeMons")
+                .expect_err("aliased selected party indexes rejected");
+        assert!(matches!(
+            selection_alias_error,
+            SpecialRoutineError::InvalidNumericValue { routine, value }
+                if routine == "Mobile_SelectThreeMons" && value == "2,+4,5"
+        ));
+        assert_eq!(selection, before_aliased_selection);
     }
 
     #[test]
@@ -14176,6 +15750,67 @@ mod tests {
                 .map(String::as_str),
             Some("14")
         );
+
+        let mut aliased = GameState::default();
+        aliased
+            .script_runtime
+            .variables
+            .insert("_last_spawn_map_group".to_string(), "23".to_string());
+        aliased
+            .script_runtime
+            .variables
+            .insert("_last_spawn_map_number".to_string(), "9".to_string());
+        let before_aliased = aliased.clone();
+        let error = apply_special_routine_with_context(
+            &mut aliased,
+            spawn_context(&moves(), &spawns),
+            "WarpToSpawnPoint",
+        )
+        .expect_err("underscored spawn aliases are not runtime inputs");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapGroup"
+        ));
+        assert_eq!(aliased, before_aliased);
+
+        let mut missing_group = GameState::default();
+        missing_group
+            .script_runtime
+            .variables
+            .insert("wLastSpawnMapNumber".to_string(), "9".to_string());
+        let before_missing_group = missing_group.clone();
+        let error = apply_special_routine_with_context(
+            &mut missing_group,
+            spawn_context(&moves(), &spawns),
+            "WarpToSpawnPoint",
+        )
+        .expect_err("spawn group is required without saved spawn id");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapGroup"
+        ));
+        assert_eq!(missing_group, before_missing_group);
+
+        let mut missing_map = GameState::default();
+        missing_map
+            .script_runtime
+            .variables
+            .insert("wLastSpawnMapGroup".to_string(), "23".to_string());
+        let before_missing_map = missing_map.clone();
+        let error = apply_special_routine_with_context(
+            &mut missing_map,
+            spawn_context(&moves(), &spawns),
+            "WarpToSpawnPoint",
+        )
+        .expect_err("spawn map is required with spawn group");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapNumber"
+        ));
+        assert_eq!(missing_map, before_missing_map);
     }
 
     #[test]
@@ -14446,6 +16081,16 @@ mod tests {
                     ..spawn_point(3, "ROUTE_29", 1, 3, 5, 6)
                 },
             ),
+            (
+                "4".to_string(),
+                RuntimeSpawnPointRef {
+                    identifier: 4,
+                    map_constant: "ROUTE_29".to_string(),
+                    map_name: "Route29".to_string(),
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    ..spawn_point(4, "ROUTE_29", 1, 2, 7, 8)
+                },
+            ),
         ]
         .into_iter()
         .collect();
@@ -14479,7 +16124,115 @@ mod tests {
                     key: "3 4".to_string(),
                     identifier: 3,
                 },
+                RuntimeSpawnPointCatalogIssue::DuplicateMapBinding {
+                    key: "4".to_string(),
+                    existing_key: "2".to_string(),
+                    group_id: 1,
+                    map_id: 2,
+                },
             ],
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_point_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let spawn_points = [(
+            "fallback_1".to_string(),
+            RuntimeSpawnPointRef {
+                identifier: 1,
+                map_constant: "legacy_ROUTE_29".to_string(),
+                map_name: "Route29".to_string(),
+                group_name: "fallback_GROUP_ROUTE_29".to_string(),
+                ..spawn_point(1, "ROUTE_29", 1, 1, 0, 0)
+            },
+        )]
+        .into_iter()
+        .collect();
+        let runtime_map_names = [("ROUTE_29".to_string(), "Route29".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
+            vec![
+                RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint {
+                    key: "fallback_1".to_string(),
+                },
+                RuntimeSpawnPointCatalogIssue::UnknownMap {
+                    key: "fallback_1".to_string(),
+                    map_constant: "legacy_ROUTE_29".to_string(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn special_routine_issue_json_rejects_unknown_fallback_fields() {
+        let tower_error = serde_json::from_value::<BattleTowerRulesIssue>(serde_json::json!({
+            "InvalidFailureText": {
+                "field": "PartyCount",
+                "text_id": "BattleTowerPartyCountText",
+                "default_text_id": "BattleTowerDefaultText"
+            }
+        }))
+        .expect_err("default battle tower failure text must be rejected")
+        .to_string();
+        assert!(
+            tower_error.contains("unknown field `default_text_id`"),
+            "{tower_error}"
+        );
+
+        let odd_egg_error = serde_json::from_value::<OddEggDefinitionIssue>(serde_json::json!({
+            "UnknownSpecies": {
+                "index": 0,
+                "species_id": "MODMON",
+                "fallback_species_id": "PICHU"
+            }
+        }))
+        .expect_err("fallback odd egg species must be rejected")
+        .to_string();
+        assert!(
+            odd_egg_error.contains("unknown field `fallback_species_id`"),
+            "{odd_egg_error}"
+        );
+
+        let dratini_error = serde_json::from_value::<DratiniMoveSetIssue>(serde_json::json!({
+            "UnknownMove": {
+                "mode": 1,
+                "move_index": 0,
+                "move_id": "MOD_MOVE",
+                "legacy_move_id": "EXTREMESPEED"
+            }
+        }))
+        .expect_err("legacy dratini move must be rejected")
+        .to_string();
+        assert!(
+            dratini_error.contains("unknown field `legacy_move_id`"),
+            "{dratini_error}"
+        );
+
+        let routine_error = serde_json::from_value::<SpecialRoutineError>(serde_json::json!({
+            "UnknownSpecies": {
+                "routine": "SpecialMonCheck",
+                "species": "MODMON",
+                "fallback_species": "PIKACHU"
+            }
+        }))
+        .expect_err("special routine errors must not accept fallback species")
+        .to_string();
+        assert!(
+            routine_error.contains("unknown field `fallback_species`"),
+            "{routine_error}"
+        );
+
+        let source_error =
+            serde_json::from_str::<LuckyNumberWinnerSource>(r#"{"party":{"legacy_box":0}}"#)
+                .expect_err("lucky number sources must not accept legacy aliases")
+                .to_string();
+        assert!(
+            source_error.contains("invalid type")
+                || source_error.contains("unknown field `legacy_box`"),
+            "{source_error}"
         );
     }
 }

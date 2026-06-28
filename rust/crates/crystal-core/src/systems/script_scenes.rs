@@ -6,9 +6,13 @@ use crate::state::{GameState, SceneError, SceneStatus};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptSceneCommand {
+    #[serde(deserialize_with = "required_script_scene_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_scene_token")]
     pub map_id: Option<String>,
+    #[serde(deserialize_with = "required_nullable_script_scene_token")]
     pub scene_id: Option<String>,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -26,6 +30,7 @@ pub struct ScriptSceneOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptSceneError {
     InvalidCommand { command: String },
     UnknownCommand { command: String },
@@ -41,7 +46,7 @@ pub enum ScriptSceneError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptSceneCommandIssue {
     InvalidCommand,
     UnknownCommand,
@@ -251,6 +256,7 @@ fn is_exact_script_scene_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_scene_token(value: &str) -> bool {
@@ -259,6 +265,61 @@ fn is_exact_script_scene_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_scene_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_scene_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script scene command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_scene_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_script_scene_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script scene token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script label token must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -362,6 +423,54 @@ mod tests {
             script_scene_command_issues(&command("resetscene", None, None)),
             vec![ScriptSceneCommandIssue::UnknownCommand]
         );
+    }
+
+    #[test]
+    fn script_scene_commands_reject_reserved_pack_prefixes() {
+        assert_eq!(
+            script_scene_command_issues(&command(
+                "fallbackscene",
+                Some("ROUTE_43"),
+                Some("SCENE_ROUTE43GATE_NOOP"),
+            )),
+            vec![ScriptSceneCommandIssue::InvalidCommand]
+        );
+        assert_eq!(
+            script_scene_command_issues(&command(
+                "setmapscene",
+                Some("legacy_route"),
+                Some("fallback_scene"),
+            )),
+            vec![
+                ScriptSceneCommandIssue::InvalidTargetMap,
+                ScriptSceneCommandIssue::InvalidSceneId,
+            ]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackscene")),
+            ("map_id", serde_json::json!("legacy_route")),
+            ("scene_id", serde_json::json!("fallback_scene")),
+            ("source_script", serde_json::json!("legacy_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "setmapscene",
+                "map_id": "ROUTE_43",
+                "scene_id": "SCENE_ROUTE43GATE_NOOP",
+                "source_script": ".branch@GateScript",
+                "command_index": 4
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptSceneCommand>(payload)
+                .expect_err("reserved script scene command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script scene") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -510,6 +619,23 @@ mod tests {
             Err(ScriptSceneError::InvalidCommand {
                 command: "SetScene".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn script_scene_serialized_variants_reject_unknown_fallback_fields() {
+        let error = serde_json::from_value::<ScriptSceneError>(serde_json::json!({
+            "UnknownSceneToken": {
+                "map_name": "Route43Gate",
+                "scene_id": "SCENE_ROUTE43GATE_NOOP",
+                "fallback_scene_id": "0"
+            }
+        }))
+        .expect_err("fallback scene id must be rejected")
+        .to_string();
+        assert!(
+            error.contains("unknown field `fallback_scene_id`"),
+            "{error}"
         );
     }
 }

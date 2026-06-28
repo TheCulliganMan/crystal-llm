@@ -4,7 +4,7 @@ use super::collision::{PlayerTraversalState, TilesetCollision, can_enter_tile, c
 use super::map::{Direction, OverworldMapData, TilePosition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MovementMode {
     Normal,
     Bike,
@@ -52,7 +52,7 @@ impl PlayerMovementState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StepOutcome {
     Turned {
         facing: Direction,
@@ -74,7 +74,7 @@ pub enum StepOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LedgeJumpOutcome {
     Jumped {
         from: TilePosition,
@@ -374,6 +374,38 @@ mod tests {
         );
         assert_eq!(state.tile, TilePosition::new(0, 0));
         assert_eq!(state.facing, Direction::Right);
+    }
+
+    #[test]
+    fn movement_discriminants_reject_legacy_alias_payloads() {
+        let mode_error = serde_json::from_str::<MovementMode>(r#"{"bike":{"legacy_speed":2}}"#)
+            .expect_err("movement modes must not accept object-shaped aliases")
+            .to_string();
+        assert!(
+            mode_error.contains("invalid type")
+                || mode_error.contains("unknown field `legacy_speed`"),
+            "{mode_error}"
+        );
+
+        let step_error = serde_json::from_str::<StepOutcome>(
+            r#"{"moved":{"from":{"x":0,"y":0},"to":{"x":2,"y":0},"speed_multiplier":1,"fallback_tile":{"x":1,"y":0}}}"#,
+        )
+        .expect_err("step outcomes must not accept fallback movement fields")
+        .to_string();
+        assert!(
+            step_error.contains("unknown field `fallback_tile`"),
+            "{step_error}"
+        );
+
+        let ledge_error = serde_json::from_str::<LedgeJumpOutcome>(
+            r#"{"jumped":{"from":{"x":1,"y":1},"over":{"x":1,"y":3},"to":{"x":1,"y":5},"speed_multiplier":1,"normalized_landing":{"x":1,"y":4}}}"#,
+        )
+        .expect_err("ledge outcomes must not accept normalized landing fields")
+        .to_string();
+        assert!(
+            ledge_error.contains("unknown field `normalized_landing`"),
+            "{ledge_error}"
+        );
     }
 
     #[test]

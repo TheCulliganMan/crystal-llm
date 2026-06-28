@@ -1,13 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
 
+use crate::input::{B_PAD_A, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::map::{BackgroundEvent, CoordEvent, MapConnection, MapEvents, ObjectEvent, WarpEvent};
-use crate::multiplayer::{OverworldPresence, PresenceEntityType, fnv1a32};
+use crate::multiplayer::{
+    MultiplayerMessageError, OverworldPresence, PlayerInputFrame, PresenceEntityType, fnv1a32,
+};
 use crate::random::Random;
-use crate::state::EventFlagMemory;
+use crate::state::{EventFlagMemory, GameState, GameStateFrameError};
 
 use super::collision::{
-    Terrain, TilesetCollision, describe_collision, permissions, sample_collision,
+    Terrain, TilesetCollision, can_jump_ledge, describe_collision, permissions, sample_collision,
 };
 use super::encounters::{
     EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
@@ -70,6 +74,85 @@ pub struct OverworldStepResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OverworldInputAction {
+    Interact(OverworldInteraction),
+    Step(OverworldStepResult),
+    LedgeJump(OverworldLedgeJumpResult),
+    NoInteraction,
+    Idle,
+}
+
+impl OverworldInputAction {
+    pub const fn moves_player(&self) -> bool {
+        matches!(
+            self,
+            Self::Step(OverworldStepResult {
+                outcome: StepOutcome::Moved { .. },
+                ..
+            }) | Self::LedgeJump(OverworldLedgeJumpResult {
+                outcome: LedgeJumpOutcome::Jumped { .. },
+                ..
+            })
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldInputResult {
+    pub frame: u64,
+    pub joypad_mask: u8,
+    pub action: OverworldInputAction,
+    pub coord_event: Option<CoordEventTrigger>,
+    pub connection: Option<ConnectionTrigger>,
+    pub snapshot: OverworldSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldInputEncounterResult {
+    pub input: OverworldInputResult,
+    pub wild_encounter: Option<WildEncounterRoll>,
+    pub expired_repel_item: Option<String>,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OverworldInputError {
+    #[error("overworld input frame {input_frame} does not match session frame {session_frame}")]
+    FrameMismatch {
+        session_frame: u64,
+        input_frame: u64,
+    },
+    #[error("overworld joypad mask {mask:#010b} has conflicting direction buttons")]
+    ConflictingDirections { mask: u8 },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OverworldInputTickError {
+    #[error(transparent)]
+    Input(#[from] OverworldInputError),
+    #[error(transparent)]
+    Encounter(#[from] EncounterError),
+}
+
+fn game_state_frame_error_to_overworld_input(
+    error: GameStateFrameError,
+) -> OverworldInputTickError {
+    match error {
+        GameStateFrameError::ConflictingJoypadDirections { mask } => {
+            OverworldInputTickError::Input(OverworldInputError::ConflictingDirections { mask })
+        }
+        GameStateFrameError::FrameCursorOverflow { frame } => {
+            OverworldInputTickError::Input(OverworldInputError::FrameMismatch {
+                session_frame: frame,
+                input_frame: frame,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldLedgeJumpResult {
     pub outcome: LedgeJumpOutcome,
@@ -77,7 +160,7 @@ pub struct OverworldLedgeJumpResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OverworldInteractionTarget {
     Object {
         object_index: u16,
@@ -115,6 +198,8 @@ pub struct EncounterCheckOptions {
     pub time: TimeOfDay,
     pub music_token: Option<String>,
     pub has_cleanse_tag: bool,
+    pub active_repel_item: Option<String>,
+    pub lead_party_level: Option<u8>,
 }
 
 impl Default for EncounterCheckOptions {
@@ -123,6 +208,8 @@ impl Default for EncounterCheckOptions {
             time: TimeOfDay::Day,
             music_token: None,
             has_cleanse_tag: false,
+            active_repel_item: None,
+            lead_party_level: None,
         }
     }
 }
@@ -141,6 +228,17 @@ pub struct WildEncounterRoll {
     pub resolved: Option<ResolvedWildEncounter>,
     pub repelled_by: Option<String>,
     pub rng_seed_after: u32,
+}
+
+pub fn leading_usable_party_level(state: &GameState) -> Option<u8> {
+    state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .flatten()
+        .find(|pokemon| pokemon.hp > 0)
+        .map(|pokemon| pokemon.level)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,16 +363,16 @@ impl OverworldSession {
         user_id: impl Into<String>,
         player_name: impl Into<String>,
         updated_at_ms: u64,
-    ) -> OverworldPresence {
-        OverworldPresence {
-            user_id: user_id.into(),
-            player_name: player_name.into(),
-            entity_type: PresenceEntityType::Player,
-            map_name: self.map.name.clone(),
-            tile: self.player.tile,
-            direction: self.player.facing,
+    ) -> Result<OverworldPresence, MultiplayerMessageError> {
+        OverworldPresence::new(
+            user_id,
+            player_name,
+            PresenceEntityType::Player,
+            self.map.name.clone(),
+            self.player.tile,
+            self.player.facing,
             updated_at_ms,
-        }
+        )
     }
 
     pub fn step(&mut self, direction: Direction, options: StepOptions) -> StepOutcome {
@@ -490,6 +588,163 @@ impl OverworldSession {
         OverworldStepResult { outcome, warp }
     }
 
+    pub fn apply_input_frame(
+        &mut self,
+        input: &PlayerInputFrame,
+        options: StepOptions,
+        current_scene: Option<&str>,
+    ) -> Result<OverworldInputResult, OverworldInputError> {
+        if input.frame() != self.frame {
+            return Err(OverworldInputError::FrameMismatch {
+                session_frame: self.frame,
+                input_frame: input.frame(),
+            });
+        }
+        self.apply_joypad_mask(input.joypad_mask(), options, current_scene)
+    }
+
+    pub fn apply_input_frame_with_encounter(
+        &mut self,
+        input: &PlayerInputFrame,
+        step_options: StepOptions,
+        current_scene: Option<&str>,
+        encounters: &WildEncounterData,
+        slot_tables: &EncounterSlotTables,
+        music_modifiers: &EncounterMusicModifiers,
+        rng: &mut Random,
+        encounter_options: EncounterCheckOptions,
+    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
+        if input.frame() != self.frame {
+            return Err(OverworldInputTickError::Input(
+                OverworldInputError::FrameMismatch {
+                    session_frame: self.frame,
+                    input_frame: input.frame(),
+                },
+            ));
+        }
+        self.apply_joypad_mask_with_encounter(
+            input.joypad_mask(),
+            step_options,
+            current_scene,
+            encounters,
+            slot_tables,
+            music_modifiers,
+            rng,
+            encounter_options,
+        )
+    }
+
+    pub fn apply_input_frame_with_state_encounter(
+        &mut self,
+        state: &mut GameState,
+        input: &PlayerInputFrame,
+        step_options: StepOptions,
+        current_scene: Option<&str>,
+        encounters: &WildEncounterData,
+        slot_tables: &EncounterSlotTables,
+        music_modifiers: &EncounterMusicModifiers,
+        rng: &mut Random,
+        lead_party_level: Option<u8>,
+        mut encounter_options: EncounterCheckOptions,
+    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
+        state
+            .apply_joypad_mask(input.joypad_mask())
+            .map_err(game_state_frame_error_to_overworld_input)?;
+        encounter_options.active_repel_item = if state.repel_steps_remaining > 0 {
+            state.active_repel_item.clone()
+        } else {
+            None
+        };
+        encounter_options.lead_party_level =
+            lead_party_level.or_else(|| leading_usable_party_level(state));
+        let mut result = self.apply_input_frame_with_encounter(
+            input,
+            step_options,
+            current_scene,
+            encounters,
+            slot_tables,
+            music_modifiers,
+            rng,
+            encounter_options,
+        )?;
+        if result.input.action.moves_player() {
+            result.expired_repel_item = state.tick_repel_step_after_movement();
+        }
+        Ok(result)
+    }
+
+    pub fn apply_joypad_mask(
+        &mut self,
+        joypad_mask: u8,
+        options: StepOptions,
+        current_scene: Option<&str>,
+    ) -> Result<OverworldInputResult, OverworldInputError> {
+        let action = if joypad_mask & B_PAD_A != 0 {
+            self.frame += 1;
+            self.check_interaction(options.stride_tiles)
+                .map(OverworldInputAction::Interact)
+                .unwrap_or(OverworldInputAction::NoInteraction)
+        } else if let Some(direction) = direction_from_joypad_mask(joypad_mask)? {
+            if self.can_jump_ledge_from_input(direction, options) {
+                OverworldInputAction::LedgeJump(self.ledge_jump_and_check_warp(direction, options))
+            } else {
+                OverworldInputAction::Step(self.step_and_check_warp(direction, options))
+            }
+        } else {
+            self.frame += 1;
+            OverworldInputAction::Idle
+        };
+        let coord_event = self.check_coord_event(current_scene, options.stride_tiles);
+        let connection = self.check_connection();
+        Ok(OverworldInputResult {
+            frame: self.frame,
+            joypad_mask,
+            action,
+            coord_event,
+            connection,
+            snapshot: self.snapshot(),
+        })
+    }
+
+    pub fn apply_joypad_mask_with_encounter(
+        &mut self,
+        joypad_mask: u8,
+        step_options: StepOptions,
+        current_scene: Option<&str>,
+        encounters: &WildEncounterData,
+        slot_tables: &EncounterSlotTables,
+        music_modifiers: &EncounterMusicModifiers,
+        rng: &mut Random,
+        encounter_options: EncounterCheckOptions,
+    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
+        let input = self
+            .apply_joypad_mask(joypad_mask, step_options, current_scene)
+            .map_err(OverworldInputTickError::Input)?;
+        let wild_encounter = if input.action.moves_player() {
+            self.check_wild_encounter(
+                encounters,
+                slot_tables,
+                music_modifiers,
+                rng,
+                encounter_options,
+            )
+            .map_err(OverworldInputTickError::Encounter)?
+        } else {
+            None
+        };
+        Ok(OverworldInputEncounterResult {
+            input,
+            wild_encounter,
+            expired_repel_item: None,
+        })
+    }
+
+    fn can_jump_ledge_from_input(&self, direction: Direction, options: StepOptions) -> bool {
+        let stride = options.stride_tiles.max(1);
+        let ledge = move_by_stride(self.player.tile, direction, stride);
+        can_jump_ledge(&self.map, &self.tileset, ledge, direction, stride)
+    }
+
     pub fn ledge_jump_and_check_warp(
         &mut self,
         direction: Direction,
@@ -546,6 +801,7 @@ impl OverworldSession {
             slot_percent_roll,
             level_roll,
         )?;
+        let (resolved, repelled_by) = apply_repel_to_wild_encounter(resolved, &options)?;
         Ok(Some(WildEncounterRoll {
             map_name: self.map.name.clone(),
             tile: self.player.tile,
@@ -556,10 +812,32 @@ impl OverworldSession {
             slot_percent_roll: Some(slot_percent_roll),
             level_roll: Some(level_roll),
             resolved,
-            repelled_by: None,
+            repelled_by,
             rng_seed_after: rng.seed(),
         }))
     }
+}
+
+fn apply_repel_to_wild_encounter(
+    resolved: Option<ResolvedWildEncounter>,
+    options: &EncounterCheckOptions,
+) -> Result<(Option<ResolvedWildEncounter>, Option<String>), EncounterError> {
+    let Some(item_id) = &options.active_repel_item else {
+        return Ok((resolved, None));
+    };
+    let lead_level =
+        options
+            .lead_party_level
+            .ok_or_else(|| EncounterError::ActiveRepelMissingLeadLevel {
+                item_id: item_id.clone(),
+            })?;
+    let Some(encounter) = resolved else {
+        return Ok((None, None));
+    };
+    if encounter.level <= lead_level {
+        return Ok((None, Some(item_id.clone())));
+    }
+    Ok((Some(encounter), None))
 }
 
 pub fn object_event_initial_facing(spritemovedata: &str) -> Option<Direction> {
@@ -633,6 +911,25 @@ fn next_percent_roll(rng: &mut Random) -> u8 {
             return value + 1;
         }
     }
+}
+
+fn direction_from_joypad_mask(mask: u8) -> Result<Option<Direction>, OverworldInputError> {
+    let mut direction = None;
+    for (bit, candidate) in [
+        (B_PAD_RIGHT, Direction::Right),
+        (B_PAD_LEFT, Direction::Left),
+        (B_PAD_UP, Direction::Up),
+        (B_PAD_DOWN, Direction::Down),
+    ] {
+        if mask & bit == 0 {
+            continue;
+        }
+        if direction.is_some() {
+            return Err(OverworldInputError::ConflictingDirections { mask });
+        }
+        direction = Some(candidate);
+    }
+    Ok(direction)
 }
 
 pub fn warp_tile_position(warp: &WarpEvent) -> TilePosition {
@@ -749,6 +1046,8 @@ pub fn is_counter_permission(permission: u8) -> bool {
 mod tests {
     use super::*;
     use crate::map::{BackgroundEvent, CoordEvent, MapAttributes, ObjectEvent};
+    use crate::multiplayer::PlayerInputFrame;
+    use crate::timing::Frame;
     use crate::world::collision::{MetatileCollision, permissions};
     use crate::world::encounters::{WildEncounter, WildEncounterTable};
 
@@ -778,6 +1077,28 @@ mod tests {
             },
             vec![0, 0],
         )
+    }
+
+    #[test]
+    fn overworld_session_discriminants_reject_legacy_alias_payloads() {
+        let action_error =
+            serde_json::from_str::<OverworldInputAction>(r#"{"legacy_idle":{"reason":"wait"}}"#)
+                .expect_err("overworld actions must not accept legacy idle aliases")
+                .to_string();
+        assert!(
+            action_error.contains("unknown variant `legacy_idle`"),
+            "{action_error}"
+        );
+
+        let target_error = serde_json::from_str::<OverworldInteractionTarget>(
+            r#"{"fallback_object":{"object_index":0,"object_identifier":null,"object_type":"npc"}}"#,
+        )
+        .expect_err("interaction targets must not accept fallback target aliases")
+        .to_string();
+        assert!(
+            target_error.contains("unknown variant `fallback_object`"),
+            "{target_error}"
+        );
     }
 
     fn map_with_connections() -> OverworldMapData {
@@ -869,6 +1190,24 @@ mod tests {
         }
     }
 
+    fn ledge_tileset() -> TilesetCollision {
+        TilesetCollision {
+            metatiles: vec![
+                MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                },
+                MetatileCollision {
+                    collision: [
+                        permissions::FLOOR,
+                        permissions::HOP_DOWN,
+                        permissions::HOP_DOWN,
+                        permissions::WALL,
+                    ],
+                },
+            ],
+        }
+    }
+
     fn encounter_data() -> WildEncounterData {
         WildEncounterData {
             map_name: "test".to_string(),
@@ -889,13 +1228,13 @@ mod tests {
     }
 
     fn encounter_slot_tables() -> EncounterSlotTables {
-        EncounterSlotTables {
-            grass: vec![crate::world::encounters::EncounterSlotChance {
+        EncounterSlotTables::for_crystal(
+            vec![crate::world::encounters::EncounterSlotChance {
                 threshold: 100,
                 slot: 0,
             }],
-            water: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     fn encounter_music_modifiers() -> EncounterMusicModifiers {
@@ -968,9 +1307,218 @@ mod tests {
         assert_eq!(snapshot.tile, TilePosition::new(2, 0));
         assert_ne!(session.state_hash(), start_hash);
         assert_eq!(
-            session.presence("u1", "Chris", 123).map_name,
-            "test".to_string()
+            session
+                .presence("u1", "Chris", 123)
+                .expect("presence")
+                .map_name(),
+            "test"
         );
+    }
+
+    #[test]
+    fn input_frame_drives_one_deterministic_field_step() {
+        let mut session = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
+        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
+
+        let result = session
+            .apply_input_frame(
+                &input,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+                None,
+            )
+            .expect("field input");
+
+        assert_eq!(result.frame, 1);
+        assert_eq!(
+            result.action,
+            OverworldInputAction::Step(OverworldStepResult {
+                outcome: StepOutcome::Moved {
+                    from: TilePosition::new(0, 0),
+                    to: TilePosition::new(2, 0),
+                    speed_multiplier: 1,
+                },
+                warp: None,
+            })
+        );
+        assert_eq!(result.snapshot.tile, TilePosition::new(2, 0));
+    }
+
+    #[test]
+    fn input_frame_with_encounter_rolls_after_player_moves() {
+        let mut session = OverworldSession::new(
+            map_with_blocks(2, 1, vec![0, 0]),
+            grass_tileset(),
+            TilePosition::new(0, 0),
+        );
+        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
+        let mut rng = Random::new(1);
+
+        let result = session
+            .apply_input_frame_with_encounter(
+                &input,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+                None,
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions::default(),
+            )
+            .expect("field input encounter");
+
+        assert_eq!(result.input.snapshot.tile, TilePosition::new(2, 0));
+        let roll = result.wild_encounter.expect("wild encounter roll");
+        assert_eq!(roll.tile, TilePosition::new(2, 0));
+        assert_eq!(roll.encounter_roll, 64);
+        assert_eq!(roll.slot_percent_roll, Some(88));
+        assert_eq!(roll.rng_seed_after, rng.seed());
+    }
+
+    #[test]
+    fn input_frame_with_state_encounter_ticks_repel_after_movement() {
+        let mut session = OverworldSession::new(
+            map_with_blocks(2, 1, vec![0, 0]),
+            grass_tileset(),
+            TilePosition::new(0, 0),
+        );
+        let mut state = GameState {
+            repel_steps_remaining: 1,
+            active_repel_item: Some("REPEL".to_string()),
+            ..GameState::default()
+        };
+        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
+        let mut rng = Random::new(1);
+
+        let result = session
+            .apply_input_frame_with_state_encounter(
+                &mut state,
+                &input,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+                None,
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                Some(3),
+                EncounterCheckOptions::default(),
+            )
+            .expect("field input encounter");
+
+        assert_eq!(result.expired_repel_item, Some("REPEL".to_string()));
+        assert_eq!(state.joypad.h_joypad_pressed, B_PAD_RIGHT);
+        assert_eq!(state.joypad.h_joypad_down, B_PAD_RIGHT);
+        assert_eq!(state.repel_steps_remaining, 0);
+        assert_eq!(state.active_repel_item, None);
+        assert_eq!(
+            result.wild_encounter.expect("encounter roll").repelled_by,
+            Some("REPEL".to_string())
+        );
+    }
+
+    #[test]
+    fn input_frame_with_encounter_does_not_consume_rng_when_only_turning() {
+        let mut session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
+        let mut rng = Random::new(1);
+
+        let result = session
+            .apply_input_frame_with_encounter(
+                &input,
+                StepOptions::default(),
+                None,
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions::default(),
+            )
+            .expect("field input encounter");
+
+        assert_eq!(result.wild_encounter, None);
+        assert_eq!(rng.seed(), 1);
+        assert_eq!(
+            result.input.action,
+            OverworldInputAction::Step(OverworldStepResult {
+                outcome: StepOutcome::Turned {
+                    facing: Direction::Right,
+                },
+                warp: None,
+            })
+        );
+    }
+
+    #[test]
+    fn input_frame_jumps_ledge_before_regular_step() {
+        let mut session = OverworldSession::new(
+            map_with_blocks(1, 3, vec![0, 1, 0]),
+            ledge_tileset(),
+            TilePosition::new(0, 0),
+        );
+        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_DOWN).expect("input frame");
+
+        let result = session
+            .apply_input_frame(
+                &input,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+                None,
+            )
+            .expect("field input");
+
+        assert_eq!(
+            result.action,
+            OverworldInputAction::LedgeJump(OverworldLedgeJumpResult {
+                outcome: LedgeJumpOutcome::Jumped {
+                    from: TilePosition::new(0, 0),
+                    over: TilePosition::new(0, 2),
+                    to: TilePosition::new(0, 4),
+                    speed_multiplier: 1,
+                },
+                warp: None,
+            })
+        );
+        assert_eq!(result.snapshot.tile, TilePosition::new(0, 4));
+    }
+
+    #[test]
+    fn joypad_mask_rejects_conflicting_field_directions() {
+        let mut session = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
+
+        let error = session
+            .apply_joypad_mask(B_PAD_LEFT | B_PAD_RIGHT, StepOptions::default(), None)
+            .expect_err("conflicting directions must fail");
+
+        assert_eq!(
+            error,
+            OverworldInputError::ConflictingDirections {
+                mask: B_PAD_LEFT | B_PAD_RIGHT,
+            }
+        );
+        assert_eq!(session.frame, 0);
+    }
+
+    #[test]
+    fn a_button_without_target_records_no_interaction_without_idle_fallback() {
+        let mut session = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
+
+        let result = session
+            .apply_joypad_mask(B_PAD_A, StepOptions::default(), None)
+            .expect("A button frame should apply");
+
+        assert_eq!(result.action, OverworldInputAction::NoInteraction);
+        assert_eq!(result.joypad_mask, B_PAD_A);
+        assert_eq!(result.frame, 1);
     }
 
     #[test]
@@ -1314,6 +1862,59 @@ mod tests {
             "PIDGEY"
         );
         assert_eq!(roll.rng_seed_after, rng.seed());
+    }
+
+    #[test]
+    fn session_repel_suppresses_resolved_weaker_wild_encounter() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut rng = Random::new(1);
+
+        let roll = session
+            .check_wild_encounter(
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions {
+                    active_repel_item: Some("REPEL".to_string()),
+                    lead_party_level: Some(3),
+                    ..EncounterCheckOptions::default()
+                },
+            )
+            .expect("encounter roll")
+            .expect("grass encounter check");
+
+        assert_eq!(roll.resolved, None);
+        assert_eq!(roll.repelled_by, Some("REPEL".to_string()));
+        assert_eq!(roll.encounter_roll, 64);
+        assert_eq!(roll.slot_percent_roll, Some(88));
+        assert_eq!(roll.rng_seed_after, rng.seed());
+    }
+
+    #[test]
+    fn session_active_repel_requires_explicit_lead_party_level() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut rng = Random::new(1);
+
+        let error = session
+            .check_wild_encounter(
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions {
+                    active_repel_item: Some("REPEL".to_string()),
+                    ..EncounterCheckOptions::default()
+                },
+            )
+            .expect_err("active repel must not infer lead level");
+
+        assert_eq!(
+            error,
+            EncounterError::ActiveRepelMissingLeadLevel {
+                item_id: "REPEL".to_string(),
+            }
+        );
     }
 
     #[test]

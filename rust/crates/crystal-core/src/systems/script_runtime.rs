@@ -102,7 +102,7 @@ pub fn story_event_script_constant_issues(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptRuntimeOutcome {
     EffectRecorded {
         command: String,
@@ -118,6 +118,7 @@ pub enum ScriptRuntimeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptRuntimeCommandError {
     #[error("script runtime command name is empty")]
     EmptyCommand,
@@ -149,6 +150,44 @@ pub enum ScriptRuntimeCommandError {
     MissingGameVersion,
     #[error("script runtime command 'pop' cannot pop an empty runtime stack")]
     EmptyStack,
+    #[error("script dispatch has invalid next script '{script}'")]
+    InvalidNextScript { script: String },
+    #[error("script dispatch has invalid last talked object '{object_identifier}'")]
+    InvalidLastTalkedObject { object_identifier: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptDispatchOutcome {
+    pub next_script: String,
+    pub last_talked_object: Option<String>,
+}
+
+pub fn commit_interaction_script_dispatch(
+    state: &mut GameState,
+    session_last_talked_object_identifier: &mut Option<String>,
+    next_script: &str,
+    last_talked_object: Option<&str>,
+) -> Result<ScriptDispatchOutcome, ScriptRuntimeCommandError> {
+    if !is_exact_nonempty_runtime_token(next_script) {
+        return Err(ScriptRuntimeCommandError::InvalidNextScript {
+            script: next_script.to_string(),
+        });
+    }
+    if let Some(object_identifier) = last_talked_object
+        && !is_exact_nonempty_runtime_token(object_identifier)
+    {
+        return Err(ScriptRuntimeCommandError::InvalidLastTalkedObject {
+            object_identifier: object_identifier.to_string(),
+        });
+    }
+    state.script_runtime.next_script = Some(next_script.to_string());
+    state.script_runtime.last_talked_object = last_talked_object.map(str::to_string);
+    *session_last_talked_object_identifier = last_talked_object.map(str::to_string);
+    Ok(ScriptDispatchOutcome {
+        next_script: next_script.to_string(),
+        last_talked_object: last_talked_object.map(str::to_string),
+    })
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +204,7 @@ pub struct ScriptRuntimeReferenceCatalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptRuntimeCommandIssue {
     InvalidCommand {
         error: ScriptRuntimeCommandError,
@@ -235,6 +274,7 @@ pub const SCRIPT_RUNTIME_CURRENT_BANK_TARGET: &str = "BANK(@)";
 fn is_exact_nonempty_runtime_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@' | b'(' | b')')
         })
@@ -243,6 +283,7 @@ fn is_exact_nonempty_runtime_token(value: &str) -> bool {
 fn is_exact_nonempty_runtime_arg_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(
@@ -255,6 +296,7 @@ fn is_exact_nonempty_runtime_arg_token(value: &str) -> bool {
 fn is_exact_nonempty_runtime_pack_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -263,9 +305,15 @@ fn is_exact_nonempty_runtime_pack_id(value: &str) -> bool {
 fn is_exact_nonempty_runtime_label(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn script_runtime_command_issues(
@@ -1045,6 +1093,61 @@ mod tests {
     }
 
     #[test]
+    fn interaction_script_dispatch_commits_state_and_session_target() {
+        let mut state = GameState::default();
+        let mut last_talked_object = None;
+
+        let outcome = commit_interaction_script_dispatch(
+            &mut state,
+            &mut last_talked_object,
+            "Route36SudowoodoScript",
+            Some("ROUTE36_SUDOWOODO"),
+        )
+        .expect("dispatch commits");
+
+        assert_eq!(
+            outcome,
+            ScriptDispatchOutcome {
+                next_script: "Route36SudowoodoScript".to_string(),
+                last_talked_object: Some("ROUTE36_SUDOWOODO".to_string()),
+            }
+        );
+        assert_eq!(
+            state.script_runtime.next_script.as_deref(),
+            Some("Route36SudowoodoScript")
+        );
+        assert_eq!(
+            state.script_runtime.last_talked_object.as_deref(),
+            Some("ROUTE36_SUDOWOODO")
+        );
+        assert_eq!(last_talked_object.as_deref(), Some("ROUTE36_SUDOWOODO"));
+    }
+
+    #[test]
+    fn interaction_script_dispatch_rejects_invalid_tokens_without_mutation() {
+        let mut state = GameState::default();
+        let mut last_talked_object = Some("UNCHANGED_OBJECT".to_string());
+
+        let error = commit_interaction_script_dispatch(
+            &mut state,
+            &mut last_talked_object,
+            "Route36SudowoodoScript",
+            Some("fallback_object"),
+        )
+        .expect_err("invalid object token rejected");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::InvalidLastTalkedObject {
+                object_identifier: "fallback_object".to_string(),
+            }
+        );
+        assert_eq!(state.script_runtime.next_script, None);
+        assert_eq!(state.script_runtime.last_talked_object, None);
+        assert_eq!(last_talked_object.as_deref(), Some("UNCHANGED_OBJECT"));
+    }
+
+    #[test]
     fn exported_runtime_command_arity_table_is_validation_source() {
         let counts = script_runtime_command_arg_counts();
         assert_eq!(counts.get("special"), Some(&1));
@@ -1063,6 +1166,37 @@ mod tests {
                 expected: 0,
                 actual: 1,
             })
+        );
+    }
+
+    #[test]
+    fn command_issues_reject_reserved_runtime_tokens() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            items: BTreeSet::from(["POTION".to_string()]),
+            script_labels: BTreeSet::from(["MainScript".to_string()]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+
+        assert_eq!(
+            validate_script_runtime_command(&command("fallbackspecial", &["HealParty"])),
+            Err(ScriptRuntimeCommandError::PaddedCommand {
+                command: "fallbackspecial".to_string(),
+            })
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("getitemname", &["BUFFER_1", "legacy_POTION"]),
+                &catalog
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidItem {
+                item_id: "legacy_POTION".to_string()
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("callasm", &["fallbackMainScript"]), &catalog),
+            vec![ScriptRuntimeCommandIssue::InvalidTarget {
+                target_label: "fallbackMainScript".to_string()
+            }]
         );
     }
 
@@ -1984,6 +2118,52 @@ mod tests {
                     key: " EVENT_PADDED".to_string(),
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn script_runtime_serialized_variants_reject_unknown_fallback_fields() {
+        let outcome_error = serde_json::from_value::<ScriptRuntimeOutcome>(serde_json::json!({
+            "script_value_set": {
+                "command": "random",
+                "value": "3",
+                "source_script": "RuntimeScript",
+                "command_index": 7,
+                "fallback_value": "0"
+            }
+        }))
+        .expect_err("fallback script value must be rejected")
+        .to_string();
+        assert!(
+            outcome_error.contains("unknown field `fallback_value`"),
+            "{outcome_error}"
+        );
+
+        let command_error =
+            serde_json::from_value::<ScriptRuntimeCommandError>(serde_json::json!({
+                "UnknownCommand": {
+                    "command": "check_version",
+                    "normalized_command": "checkver"
+                }
+            }))
+            .expect_err("normalized command must be rejected")
+            .to_string();
+        assert!(
+            command_error.contains("unknown field `normalized_command`"),
+            "{command_error}"
+        );
+
+        let issue_error = serde_json::from_value::<ScriptRuntimeCommandIssue>(serde_json::json!({
+            "unknown_target": {
+                "target_label": ".Missing",
+                "legacy_target_label": "MissingScript"
+            }
+        }))
+        .expect_err("legacy target label must be rejected")
+        .to_string();
+        assert!(
+            issue_error.contains("unknown field `legacy_target_label`"),
+            "{issue_error}"
         );
     }
 

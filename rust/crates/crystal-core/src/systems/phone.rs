@@ -6,21 +6,48 @@ use crate::state::GameState;
 
 pub const MAX_PHONE_CONTACTS: usize = 10;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct PhoneContactCatalog(pub BTreeMap<String, PhoneContactRecord>);
+
+impl<'de> Deserialize<'de> for PhoneContactCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let contacts = BTreeMap::<String, PhoneContactRecord>::deserialize(deserializer)?;
+        for contact_id in contacts.keys() {
+            if !is_exact_phone_token(contact_id) {
+                return Err(serde::de::Error::custom(format!(
+                    "phone contact catalog entry id '{contact_id}' must be exact ASCII alphanumeric or underscore"
+                )));
+            }
+        }
+        Ok(Self(contacts))
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermanentPhoneNumberRule {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PhoneContactRecord {
+    #[serde(deserialize_with = "required_phone_contact_id")]
     pub contact_id: String,
+    #[serde(deserialize_with = "optional_phone_trainer_class")]
     pub trainer_class: Option<String>,
+    #[serde(deserialize_with = "optional_phone_trainer_label")]
     pub trainer_label: Option<String>,
     pub lines: Vec<String>,
     pub primary_label: String,
+    #[serde(deserialize_with = "optional_phone_map_constant")]
     pub map_constant: Option<String>,
     pub callee_time_mask: u8,
+    #[serde(deserialize_with = "optional_phone_callee_script")]
     pub callee_script: Option<String>,
     pub caller_time_mask: u8,
+    #[serde(deserialize_with = "optional_phone_caller_script")]
     pub caller_script: Option<String>,
 }
 
@@ -40,7 +67,7 @@ pub struct ScriptPhoneInputs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptPhoneOutcome {
     CheckCellNum {
         contact_id: String,
@@ -59,7 +86,7 @@ pub enum ScriptPhoneOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PhoneRegistrationResult {
     Registered,
     AlreadyRegistered,
@@ -68,6 +95,7 @@ pub enum PhoneRegistrationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptPhoneError {
     #[error("invalid script phone command '{command}'")]
     InvalidCommand { command: String },
@@ -163,7 +191,7 @@ pub enum PhoneContactCatalogIssue {
 
 pub fn phone_contact_catalog_issues(
     catalog: &PhoneContactCatalog,
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
     map_constants: &BTreeMap<String, String>,
 ) -> Vec<PhoneContactCatalogIssue> {
     let mut issues = Vec::new();
@@ -252,7 +280,7 @@ pub fn phone_contact_catalog_issues(
             }
         }
     }
-    for contact_id in permanent_phone_numbers {
+    for contact_id in permanent_phone_numbers.keys() {
         if !is_exact_phone_token(contact_id) {
             issues.push(PhoneContactCatalogIssue::InvalidPermanentContact {
                 contact_id: contact_id.clone(),
@@ -278,7 +306,7 @@ pub fn apply_script_phone_command(
     state: &mut GameState,
     command: ScriptPhoneCommand,
     catalog: &PhoneContactCatalog,
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
     inputs: ScriptPhoneInputs,
 ) -> Result<ScriptPhoneOutcome, ScriptPhoneError> {
     validate_script_phone_command(&command, catalog)?;
@@ -344,7 +372,7 @@ pub fn apply_script_phone_command(
 pub fn initialize_permanent_phone_numbers(
     state: &mut GameState,
     catalog: &PhoneContactCatalog,
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
 ) -> Result<Vec<String>, ScriptPhoneError> {
     validate_permanent_phone_numbers(permanent_phone_numbers, catalog)?;
     if permanent_phone_numbers.len() > MAX_PHONE_CONTACTS {
@@ -353,7 +381,7 @@ pub fn initialize_permanent_phone_numbers(
         });
     }
     let mut inserted = Vec::new();
-    for contact_id in permanent_phone_numbers {
+    for contact_id in permanent_phone_numbers.keys() {
         if state
             .script_runtime
             .phone_numbers
@@ -369,20 +397,18 @@ pub fn register_phone_number(
     phone_numbers: &mut BTreeSet<String>,
     contact_id: &str,
     catalog: &PhoneContactCatalog,
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
 ) -> Result<PhoneRegistrationResult, ScriptPhoneError> {
     validate_contact_id("askforphonenumber", contact_id, catalog)?;
     validate_saved_phone_numbers(phone_numbers, catalog)?;
     validate_permanent_phone_numbers(permanent_phone_numbers, catalog)?;
 
-    if phone_numbers.contains(contact_id)
-        || permanent_phone_numbers.iter().any(|id| id == contact_id)
-    {
+    if phone_numbers.contains(contact_id) || permanent_phone_numbers.contains_key(contact_id) {
         return Ok(PhoneRegistrationResult::AlreadyRegistered);
     }
 
     let missing_permanent = permanent_phone_numbers
-        .iter()
+        .keys()
         .filter(|permanent| permanent.as_str() != contact_id)
         .filter(|permanent| !phone_numbers.contains(*permanent))
         .count();
@@ -457,16 +483,17 @@ fn validate_script_phone_command_token(command: &str) -> Result<(), ScriptPhoneE
 fn is_exact_script_phone_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 fn has_phone_number(
     state: &GameState,
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
     contact_id: &str,
 ) -> bool {
     state.script_runtime.phone_numbers.contains(contact_id)
-        || permanent_phone_numbers.iter().any(|id| id == contact_id)
+        || permanent_phone_numbers.contains_key(contact_id)
 }
 
 fn validate_contact_id(
@@ -497,9 +524,77 @@ fn validate_contact_id(
 fn is_exact_phone_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+fn required_phone_contact_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_phone_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "phone contact record contactId '{value}' must be exact ASCII alphanumeric or underscore"
+        )))
+    }
+}
+
+fn optional_phone_trainer_class<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_phone_token(deserializer, "phone contact trainerClass")
+}
+
+fn optional_phone_trainer_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_phone_token(deserializer, "phone contact trainerLabel")
+}
+
+fn optional_phone_map_constant<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_phone_token(deserializer, "phone contact mapConstant")
+}
+
+fn optional_phone_callee_script<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_phone_token(deserializer, "phone contact calleeScript")
+}
+
+fn optional_phone_caller_script<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_phone_token(deserializer, "phone contact callerScript")
+}
+
+fn optional_phone_token<'de, D>(deserializer: D, label: &str) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if !is_exact_phone_token(&token) => Err(serde::de::Error::custom(format!(
+            "{label} '{token}' must be exact ASCII alphanumeric or underscore"
+        ))),
+        other => Ok(other),
+    }
 }
 
 fn validate_saved_phone_numbers(
@@ -522,10 +617,10 @@ fn validate_saved_phone_numbers(
 }
 
 fn validate_permanent_phone_numbers(
-    permanent_phone_numbers: &[String],
+    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
     catalog: &PhoneContactCatalog,
 ) -> Result<(), ScriptPhoneError> {
-    for contact_id in permanent_phone_numbers {
+    for contact_id in permanent_phone_numbers.keys() {
         if !is_exact_phone_token(contact_id) {
             return Err(ScriptPhoneError::InvalidPermanentContact {
                 contact_id: contact_id.clone(),
@@ -584,6 +679,14 @@ mod tests {
         }
     }
 
+    fn permanent_numbers<const N: usize>(
+        ids: [&str; N],
+    ) -> BTreeMap<String, PermanentPhoneNumberRule> {
+        ids.into_iter()
+            .map(|id| (id.to_string(), PermanentPhoneNumberRule::default()))
+            .collect()
+    }
+
     #[test]
     fn phone_contact_catalog_issues_validate_exact_ids_and_map_constants() {
         let mut mismatch = record("PHONE_MISMATCH_RECORD");
@@ -617,7 +720,7 @@ mod tests {
             ("PHONE_INVALID_MAP".to_string(), invalid_map),
             ("PHONE_UNKNOWN_MAP".to_string(), unknown_map),
         ]));
-        let permanent = vec!["PHONE MOM".to_string(), "phone_mom".to_string()];
+        let permanent = permanent_numbers(["PHONE MOM", "phone_mom"]);
         let map_constants = BTreeMap::from([("ELMS_LAB".to_string(), "ElmsLab".to_string())]);
 
         assert_eq!(
@@ -690,6 +793,53 @@ mod tests {
     }
 
     #[test]
+    fn phone_contact_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let mut reserved = record("fallback_phone_mom");
+        reserved.trainer_class = Some("legacy_trainer".to_string());
+        reserved.trainer_label = Some("fallback_label".to_string());
+        reserved.map_constant = Some("legacy_map".to_string());
+        reserved.callee_script = Some("fallback_callee".to_string());
+        reserved.caller_script = Some("legacy_caller".to_string());
+        let catalog = PhoneContactCatalog(BTreeMap::from([(
+            "fallback_phone_mom".to_string(),
+            reserved,
+        )]));
+        let permanent = permanent_numbers(["legacy_phone_mom"]);
+
+        assert_eq!(
+            phone_contact_catalog_issues(&catalog, &permanent, &BTreeMap::new()),
+            vec![
+                PhoneContactCatalogIssue::InvalidContactId {
+                    contact_id: "fallback_phone_mom".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidTrainerClass {
+                    contact_id: "fallback_phone_mom".to_string(),
+                    trainer_class: "legacy_trainer".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidTrainerLabel {
+                    contact_id: "fallback_phone_mom".to_string(),
+                    trainer_label: "fallback_label".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidMapConstant {
+                    contact_id: "fallback_phone_mom".to_string(),
+                    map_constant: "legacy_map".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidCalleeScript {
+                    contact_id: "fallback_phone_mom".to_string(),
+                    callee_script: "fallback_callee".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidCallerScript {
+                    contact_id: "fallback_phone_mom".to_string(),
+                    caller_script: "legacy_caller".to_string(),
+                },
+                PhoneContactCatalogIssue::InvalidPermanentContact {
+                    contact_id: "legacy_phone_mom".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn exported_phone_command_sets_are_exact() {
         assert!(SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&"askforphonenumber"));
         assert!(SCRIPT_PHONE_CHECK_COMMANDS.contains(&"checkcellnum"));
@@ -708,6 +858,8 @@ mod tests {
             command("askforphonenumber", ""),
             command("askforphonenumber", " PHONE_MOM"),
             command("askforphonenumber", "PHONE MOM"),
+            command("fallbackphone", "PHONE_MOM"),
+            command("askforphonenumber", "legacy_phone_mom"),
         ];
 
         assert_eq!(
@@ -764,6 +916,23 @@ mod tests {
                         contact_id: "PHONE MOM".to_string(),
                     },
                 },
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: "PHONE_MOM".to_string(),
+                    error: ScriptPhoneError::InvalidCommand {
+                        command: "fallbackphone".to_string(),
+                    },
+                },
+                ScriptPhoneCommandIssue {
+                    source_script: "PhoneScript".to_string(),
+                    command_index: 8,
+                    contact_id: "legacy_phone_mom".to_string(),
+                    error: ScriptPhoneError::PaddedContact {
+                        command: "askforphonenumber".to_string(),
+                        contact_id: "legacy_phone_mom".to_string(),
+                    },
+                },
             ]
         );
     }
@@ -771,7 +940,7 @@ mod tests {
     #[test]
     fn checkcellnum_sets_exact_numeric_script_value() {
         let mut state = GameState::default();
-        let permanent = vec!["PHONE_MOM".to_string()];
+        let permanent = permanent_numbers(["PHONE_MOM"]);
         let outcome = apply_script_phone_command(
             &mut state,
             command("checkcellnum", "PHONE_MOM"),
@@ -811,7 +980,7 @@ mod tests {
                 &mut state,
                 command("askforphonenumber", "PHONE_JOEY"),
                 &catalog(),
-                &[],
+                &BTreeMap::new(),
                 ScriptPhoneInputs::default(),
             ),
             Err(ScriptPhoneError::MissingPhoneChoice)
@@ -821,7 +990,7 @@ mod tests {
             &mut state,
             command("askforphonenumber", "PHONE_JOEY"),
             &catalog(),
-            &[],
+            &BTreeMap::new(),
             ScriptPhoneInputs {
                 accepted: Some(true),
             },
@@ -844,7 +1013,7 @@ mod tests {
             &mut state,
             command("askforphonenumber", "PHONE_ELM"),
             &catalog(),
-            &[],
+            &BTreeMap::new(),
             ScriptPhoneInputs {
                 accepted: Some(false),
             },
@@ -872,7 +1041,7 @@ mod tests {
                 .phone_numbers
                 .insert(contact_id.to_string());
         }
-        let permanent = vec!["PHONE_MOM".to_string(), "PHONE_ELM".to_string()];
+        let permanent = permanent_numbers(["PHONE_MOM", "PHONE_ELM"]);
         let outcome = apply_script_phone_command(
             &mut state,
             command("askforphonenumber", "PHONE_EXTRA"),
@@ -902,7 +1071,7 @@ mod tests {
         let inserted = initialize_permanent_phone_numbers(
             &mut state,
             &catalog(),
-            &["PHONE_MOM".to_string(), "PHONE_ELM".to_string()],
+            &permanent_numbers(["PHONE_MOM", "PHONE_ELM"]),
         )
         .expect("initialize");
         assert_eq!(inserted, vec!["PHONE_MOM", "PHONE_ELM"]);
@@ -918,7 +1087,7 @@ mod tests {
                 &mut state,
                 command("checkcellnum", "phone_mom"),
                 &catalog(),
-                &[],
+                &BTreeMap::new(),
                 ScriptPhoneInputs::default(),
             ),
             Err(ScriptPhoneError::UnknownContact { .. })
@@ -932,7 +1101,7 @@ mod tests {
                 &mut state,
                 command("checkcellnum", "PHONE_MOM"),
                 &catalog(),
-                &[],
+                &BTreeMap::new(),
                 ScriptPhoneInputs::default(),
             ),
             Err(ScriptPhoneError::UnknownSavedContact { .. })
@@ -947,7 +1116,7 @@ mod tests {
                 &mut state,
                 command("checkcellnum", "PHONE_MOM"),
                 &catalog(),
-                &[],
+                &BTreeMap::new(),
                 ScriptPhoneInputs::default(),
             ),
             Err(ScriptPhoneError::InvalidSavedContact { .. })
@@ -956,7 +1125,7 @@ mod tests {
             initialize_permanent_phone_numbers(
                 &mut GameState::default(),
                 &catalog(),
-                &["PHONE MOM".to_string()],
+                &permanent_numbers(["PHONE MOM"]),
             ),
             Err(ScriptPhoneError::InvalidPermanentContact { .. })
         ));
@@ -981,5 +1150,74 @@ mod tests {
         .to_string();
 
         assert!(error.contains("missing field `lines`"), "{error}");
+
+        let catalog_error = serde_json::from_str::<PhoneContactCatalog>(
+            r#"{"contacts":{"PHONE_MOM":{"contactId":"PHONE_MOM","trainerClass":null,"trainerLabel":null,"lines":["Mom:"],"primaryLabel":"MOM","mapConstant":null,"calleeTimeMask":0,"calleeScript":null,"callerTimeMask":0,"callerScript":null}},"fallback_contact":"PHONE_ELM"}"#,
+        )
+        .expect_err("phone contact catalogs must be the compiler-emitted contact map")
+        .to_string();
+        assert!(
+            catalog_error.contains("invalid type")
+                || catalog_error.contains("invalid value")
+                || catalog_error.contains("unknown field"),
+            "{catalog_error}"
+        );
+
+        let key_error = serde_json::from_str::<PhoneContactCatalog>(
+            r#"{"Phone Elm":{"contactId":"PhoneElm","trainerClass":null,"trainerLabel":null,"lines":["PhoneElm:"],"primaryLabel":"PhoneElm","mapConstant":null,"calleeTimeMask":0,"calleeScript":null,"callerTimeMask":0,"callerScript":null}}"#,
+        )
+        .expect_err("phone contact catalog keys must be exact during JSON load")
+        .to_string();
+        assert!(
+            key_error.contains(
+                "phone contact catalog entry id 'Phone Elm' must be exact ASCII alphanumeric or underscore"
+            ),
+            "{key_error}"
+        );
+
+        let field_error = serde_json::from_str::<PhoneContactRecord>(
+            r#"{"contactId":"PhoneElm","trainerClass":"TRAINER NONE","trainerLabel":null,"lines":["PhoneElm:"],"primaryLabel":"PhoneElm","mapConstant":null,"calleeTimeMask":0,"calleeScript":null,"callerTimeMask":0,"callerScript":null}"#,
+        )
+        .expect_err("phone contact token fields must be exact during JSON load")
+        .to_string();
+        assert!(
+            field_error.contains(
+                "phone contact trainerClass 'TRAINER NONE' must be exact ASCII alphanumeric or underscore"
+            ),
+            "{field_error}"
+        );
+    }
+
+    #[test]
+    fn script_phone_serialized_variants_reject_unknown_fallback_fields() {
+        let outcome_error = serde_json::from_value::<ScriptPhoneOutcome>(serde_json::json!({
+            "check_cell_num": {
+                "contact_id": "PHONE_MOM",
+                "registered": true,
+                "script_value": "TRUE",
+                "source_script": "MomScript",
+                "command_index": 2,
+                "fallback_contact_id": "PHONE_DEFAULT"
+            }
+        }))
+        .expect_err("fallback contact id must be rejected")
+        .to_string();
+        assert!(
+            outcome_error.contains("unknown field `fallback_contact_id`"),
+            "{outcome_error}"
+        );
+
+        let error_error = serde_json::from_value::<ScriptPhoneError>(serde_json::json!({
+            "UnknownCommand": {
+                "command": "phonecall",
+                "normalized_command": "checkcellnum"
+            }
+        }))
+        .expect_err("normalized command must be rejected")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `normalized_command`"),
+            "{error_error}"
+        );
     }
 }

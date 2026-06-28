@@ -16,10 +16,14 @@ import {
   exportHappinessData,
   exportFleeMons,
   exportKurtApricornRecipes,
+  exportMarts,
   exportMagikarpLengths,
+  exportMenuIcons,
   exportMovePriorityTable,
   exportOakRatings,
   exportOddEggDefinitions,
+  exportPcStrings,
+  exportPhoneContacts,
   exportPermanentPhoneNumbers,
   exportRoamingPokemon,
   exportRuntimeAssets,
@@ -40,11 +44,96 @@ const writeFile = (filePath: string, content: string): void => {
   fs.writeFileSync(filePath, content);
 };
 
+const writeTypeConstantsFixture = (): void => {
+  writeFile(
+    path.join(mockDisassemblyRoot, "constants", "type_constants.asm"),
+    [
+      "\tconst_def",
+      "DEF PHYSICAL EQU const_value",
+      "\tconst NORMAL",
+      "\tconst FIGHTING",
+      "\tconst ROCK",
+      "\tconst GHOST",
+      "DEF UNUSED_TYPES EQU const_value",
+      "\tconst_next 19",
+      "\tconst CURSE_TYPE",
+      "DEF UNUSED_TYPES_END EQU const_value",
+      "DEF SPECIAL EQU const_value",
+      "\tconst FIRE",
+      "\tconst GRASS",
+      "\tconst ELECTRIC",
+      "\tconst GROUND",
+      "DEF TYPES_END EQU const_value",
+      "",
+    ].join("\n"),
+  );
+};
+
+const writeBattleStatMultiplierFixtures = (
+  statRows: string[],
+  accuracyRows: string[],
+): void => {
+  writeFile(
+    path.join(mockDisassemblyRoot, "data", "battle", "stat_multipliers.asm"),
+    statRows.join("\n"),
+  );
+  writeFile(
+    path.join(
+      mockDisassemblyRoot,
+      "data",
+      "battle",
+      "accuracy_multipliers.asm",
+    ),
+    accuracyRows.join("\n"),
+  );
+};
+
+const validBattleStatMultiplierRows = (): string[] =>
+  Array.from({ length: 13 }, () => "\tdb 1, 1");
+
+const writeMinimalHappinessFixtures = (probabilityRows: string[]): void => {
+  writeFile(
+    path.join(mockDisassemblyRoot, "constants", "pokemon_data_constants.asm"),
+    [
+      "; ChangeHappiness arguments (see data/events/happiness_changes.asm)",
+      "\tconst_def 1",
+      "\tconst HAPPINESS_OLDERCUT1",
+      "\tconst HAPPINESS_YOUNGCUT1",
+      "\tconst HAPPINESS_GROOMING",
+      "\tDEF NUM_HAPPINESS_CHANGES EQU const_value - 1",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "data", "events", "happiness_changes.asm"),
+    [
+      "HappinessChanges:",
+      "\ttable_width 3, HappinessChanges",
+      "\tdb +1, +1, +1",
+      "\tdb +2, +2, +2",
+      "\tdb +3, +3, +1",
+      "\tassert_table_length NUM_HAPPINESS_CHANGES",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(
+      mockDisassemblyRoot,
+      "data",
+      "events",
+      "happiness_probabilities.asm",
+    ),
+    probabilityRows.join("\n"),
+  );
+};
+
 describe("exportRuntimeAssets", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-runtime-export-"));
+    tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "pokecrystal-runtime-export-"),
+    );
     mockDisassemblyRoot = path.join(tempDir, "vendor");
     mockAssetsRoot = path.join(tempDir, "assets");
 
@@ -64,13 +153,23 @@ describe("exportRuntimeAssets", () => {
         "\tdb MAGNEMITE",
         "\tdb -1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "items", "marts.asm"),
-      ["MartCherrygrove:", "\tdb 2", "\tdb POTION", "\tdb ANTIDOTE", "\tdb -1", ""].join("\n")
+      [
+        "MartCherrygrove:",
+        "\tdb 2",
+        "\tdb POTION",
+        "\tdb ANTIDOTE",
+        "\tdb -1",
+        "",
+      ].join("\n"),
     );
-    writeFile(path.join(mockDisassemblyRoot, "constants", "item_constants.asm"), "");
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "item_constants.asm"),
+      "",
+    );
     writeFile(
       path.join(mockDisassemblyRoot, "constants", "pokemon_constants.asm"),
       [
@@ -80,7 +179,7 @@ describe("exportRuntimeAssets", () => {
         "\tconst UNOWN_A",
         "\tconst EGG",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "constants", "phone_constants.asm"),
@@ -94,11 +193,11 @@ describe("exportRuntimeAssets", () => {
         "\tconst SPECIALCALL_MASTERBALL",
         "\tDEF NUM_SPECIALCALLS EQU const_value - 1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "constants", "npc_trade_constants.asm"),
-      ["\tconst NPC_TRADE_MIKE", "\tconst NPC_TRADE_KYLE", ""].join("\n")
+      ["\tconst NPC_TRADE_MIKE", "\tconst NPC_TRADE_KYLE", ""].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "phone", "phone_contacts.asm"),
@@ -106,26 +205,53 @@ describe("exportRuntimeAssets", () => {
         "\tphone TRAINER_NONE, 0, 0, 0, 0, 0, 0",
         "\tphone TRAINER_NONE, PHONECONTACT_MOM, PLAYERS_HOUSE_1F, ANYTIME, MomPhoneCalleeScript, 0, 0",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
-    writeFile(path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"), "\tdb PHONE_MOM\n\tdb -1\n");
-    writeFile(path.join(mockDisassemblyRoot, "data", "phone", "non_trainer_names.asm"), '.mom: db "MOM:@"\n');
-    writeFile(path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"), "trainerclass TRAINER_NONE\n");
-    writeFile(path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"), "");
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"),
+      "\tdb PHONE_MOM\n\tdb -1\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "non_trainer_names.asm"),
+      '.mom: db "MOM:@"\n',
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      "trainerclass TRAINER_NONE\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      "",
+    );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "events", "special_pointers.asm"),
-      ["SpecialsPointers:", "\tadd_special FadeOutMusic", "\tadd_special HealParty", ""].join("\n")
+      [
+        "SpecialsPointers:",
+        "\tadd_special FadeOutMusic",
+        "\tadd_special HealParty",
+        "",
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "engine", "pokemon", "bills_pc.asm"),
-      'PCString_ChooseaPKMN: db "Choose a <PK><MN>.@"\n'
+      'PCString_ChooseaPKMN: db "Choose a <PK><MN>.@"\n',
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "pokemon", "menu_icons.asm"),
-      ["\tdb ICON_CHIKORITA ; CHIKORITA", "\tdb ICON_HUMANSHAPE ; MR__MIME", ""].join("\n")
+      [
+        "\tdb ICON_CHIKORITA ; CHIKORITA",
+        "\tdb ICON_HUMANSHAPE ; MR__MIME",
+        "",
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "pokemon", "dex_entries", "chikorita.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
       [
         '\tdb "LEAF@"',
         "\tdw 211, 140 ; height, weight",
@@ -134,23 +260,41 @@ describe("exportRuntimeAssets", () => {
         '\tpage "from the leaf"',
         '\tnext "on its head.@"',
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "pokemon", "dex_entries", "mr__mime.asm"),
-      ['\tdb "BARRIER@"', "\tdw 403, 1200 ; height, weight", '\tdb "It mimics@"', ""].join("\n")
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "mr__mime.asm",
+      ),
+      [
+        '\tdb "BARRIER@"',
+        "\tdw 403, 1200 ; height, weight",
+        '\tdb "It mimics@"',
+        "",
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
-      ["\tframe 1, 07", "\tsetrepeat 2", "\tframe 0, 05", "\tdorepeat 1", "\tendanim", ""].join("\n")
+      [
+        "\tframe 1, 07",
+        "\tsetrepeat 2",
+        "\tframe 0, 05",
+        "\tdorepeat 1",
+        "\tendanim",
+        "",
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "gfx", "pokemon", "mr__mime", "anim.asm"),
-      ["\tframe 0, 05", "\tendanim", ""].join("\n")
+      ["\tframe 0, 05", "\tendanim", ""].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "gfx", "pokemon", "unown_a", "anim.asm"),
-      ["\tframe 0, 05", "\tendanim", ""].join("\n")
+      ["\tframe 0, 05", "\tendanim", ""].join("\n"),
     );
   });
 
@@ -162,30 +306,51 @@ describe("exportRuntimeAssets", () => {
     exportRuntimeAssets();
 
     const dataDir = path.join(mockAssetsRoot, "data");
-    const fleeMons = JSON.parse(fs.readFileSync(path.join(dataDir, "flee_mons.json"), "utf8"));
-    const pokedexEntries = JSON.parse(fs.readFileSync(path.join(dataDir, "pokedex_entries.json"), "utf8"));
-    const frontpicAnimations = JSON.parse(fs.readFileSync(path.join(dataDir, "pokemon_frontpic_anim.json"), "utf8"));
-    const phoneContacts = JSON.parse(fs.readFileSync(path.join(dataDir, "phone_contacts.json"), "utf8"));
-    const permanentPhoneNumbers = JSON.parse(fs.readFileSync(path.join(dataDir, "permanent_phone_numbers.json"), "utf8"));
-    const specialPhoneCalls = JSON.parse(fs.readFileSync(path.join(dataDir, "special_phone_calls.json"), "utf8"));
-    const npcTrades = JSON.parse(fs.readFileSync(path.join(dataDir, "npc_trades.json"), "utf8"));
-    const specialRoutines = JSON.parse(fs.readFileSync(path.join(dataDir, "special_routines.json"), "utf8"));
+    const fleeMons = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "flee_mons.json"), "utf8"),
+    );
+    const pokedexEntries = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "pokedex_entries.json"), "utf8"),
+    );
+    const frontpicAnimations = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "pokemon_frontpic_anim.json"), "utf8"),
+    );
+    const phoneContacts = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "phone_contacts.json"), "utf8"),
+    );
+    const permanentPhoneNumbers = JSON.parse(
+      fs.readFileSync(
+        path.join(dataDir, "permanent_phone_numbers.json"),
+        "utf8",
+      ),
+    );
+    const specialPhoneCalls = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "special_phone_calls.json"), "utf8"),
+    );
+    const npcTrades = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "npc_trades.json"), "utf8"),
+    );
+    const specialRoutines = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "special_routines.json"), "utf8"),
+    );
 
     expect(fleeMons).toEqual({
-      always: ["RAIKOU", "ENTEI"],
-      often: ["DELIBIRD"],
-      sometimes: ["MAGNEMITE"],
+      buckets: {
+        always: ["RAIKOU", "ENTEI"],
+        often: ["DELIBIRD"],
+        sometimes: ["MAGNEMITE"],
+      },
     });
-    expect(pokedexEntries[0]).toMatchObject({
+    expect(pokedexEntries.CHIKORITA).toMatchObject({
       species: "CHIKORITA",
       classification: "LEAF",
       pages: ["A sweet aroma @ gently wafts", "from the leaf @ on its head."],
     });
-    expect(pokedexEntries).toContainEqual(
+    expect(pokedexEntries.MR__MIME).toEqual(
       expect.objectContaining({
         species: "MR__MIME",
         classification: "BARRIER",
-      })
+      }),
     );
     expect(frontpicAnimations.CHIKORITA.commands).toEqual([
       { kind: "frame", frame: 1, duration: 7 },
@@ -202,9 +367,13 @@ describe("exportRuntimeAssets", () => {
       { kind: "frame", frame: 0, duration: 5 },
       { kind: "endanim" },
     ]);
-    const menuIcons = JSON.parse(fs.readFileSync(path.join(dataDir, "menu_icons.json"), "utf8"));
+    const menuIcons = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "menu_icons.json"), "utf8"),
+    );
     expect(menuIcons.MR__MIME).toBe("ICON_HUMANSHAPE");
-    const marts = JSON.parse(fs.readFileSync(path.join(dataDir, "marts.json"), "utf8"));
+    const marts = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "marts.json"), "utf8"),
+    );
     expect(marts).toEqual({
       MART_CHERRYGROVE: ["POTION", "ANTIDOTE"],
     });
@@ -215,10 +384,19 @@ describe("exportRuntimeAssets", () => {
       calleeTimeMask: 7,
       calleeScript: "MomPhoneCalleeScript",
     });
-    expect(permanentPhoneNumbers).toEqual(["PHONE_MOM"]);
-    expect(specialPhoneCalls).toEqual(["SPECIALCALL_NONE", "SPECIALCALL_MASTERBALL"]);
-    expect(npcTrades).toEqual(["NPC_TRADE_MIKE", "NPC_TRADE_KYLE"]);
-    expect(specialRoutines).toEqual(["FadeOutMusic", "HealParty"]);
+    expect(permanentPhoneNumbers).toEqual({ PHONE_MOM: {} });
+    expect(specialPhoneCalls).toEqual({
+      SPECIALCALL_NONE: {},
+      SPECIALCALL_MASTERBALL: {},
+    });
+    expect(npcTrades).toEqual({
+      NPC_TRADE_MIKE: {},
+      NPC_TRADE_KYLE: {},
+    });
+    expect(specialRoutines).toEqual({
+      FadeOutMusic: {},
+      HealParty: {},
+    });
     for (const fileName of [
       "flee_mons.json",
       "marts.json",
@@ -241,10 +419,85 @@ describe("exportRuntimeAssets", () => {
   it("fails instead of exporting empty flee tables when required labels are missing", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "data", "wild", "flee_mons.asm"),
-      ["AlwaysFleeMons:", "\tdb RAIKOU", "\tdb -1", ""].join("\n")
+      ["AlwaysFleeMons:", "\tdb RAIKOU", "\tdb -1", ""].join("\n"),
     );
 
-    expect(() => exportFleeMons()).toThrow("Could not parse required OftenFleeMons table");
+    expect(() => exportFleeMons()).toThrow(
+      "Could not parse required OftenFleeMons table",
+    );
+  });
+
+  it("rejects duplicate mart labels before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "marts.asm"),
+      [
+        "MartCherrygrove:",
+        "\tdb 1",
+        "\tdb POTION",
+        "\tdb -1",
+        "MartCherrygrove:",
+        "\tdb 1",
+        "\tdb ANTIDOTE",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportMarts()).toThrow(
+      "Duplicate mart table 'MART_CHERRYGROVE'.",
+    );
+  });
+
+  it("rejects duplicate PC string labels before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "pokemon", "bills_pc.asm"),
+      [
+        'PCString_ChooseaPKMN: db "Choose a <PK><MN>.@"',
+        'PCString_ChooseaPKMN: db "Pick one.@"',
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportPcStrings()).toThrow(
+      "Duplicate PC string 'PCString_ChooseaPKMN'.",
+    );
+  });
+
+  it("rejects empty PC strings before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "pokemon", "bills_pc.asm"),
+      'PCString_ChooseaPKMN: db "@"\n',
+    );
+
+    expect(() => exportPcStrings()).toThrow(
+      "PC string 'PCString_ChooseaPKMN' must be nonempty.",
+    );
+  });
+
+  it("rejects duplicate menu icon species before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "pokemon", "menu_icons.asm"),
+      [
+        "\tdb ICON_CHIKORITA ; CHIKORITA",
+        "\tdb ICON_HUMANSHAPE ; CHIKORITA",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportMenuIcons()).toThrow(
+      "Duplicate menu icon species 'CHIKORITA'.",
+    );
+  });
+
+  it("rejects source-declared EGG menu icons before built-in insertion", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "pokemon", "menu_icons.asm"),
+      ["\tdb ICON_EGG ; EGG", ""].join("\n"),
+    );
+
+    expect(() => exportMenuIcons()).toThrow(
+      "Menu icon table must not declare built-in EGG icon.",
+    );
   });
 
   it("exports roaming Pokemon definitions from InitRoamMons using exact runtime map metadata", () => {
@@ -269,7 +522,7 @@ describe("exportRuntimeAssets", () => {
         "\tld [wRoamMon2MapNumber], a",
         "CheckEncounterRoamMon:",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const roamers = exportRoamingPokemon({
@@ -277,12 +530,120 @@ describe("exportRuntimeAssets", () => {
       ROUTE_37: { groupId: 10, mapId: 4 },
     });
 
-    expect(roamers).toEqual([
-      { species: "RAIKOU", level: 40, mapGroup: 2, mapNumber: 5 },
-      { species: "ENTEI", level: 40, mapGroup: 10, mapNumber: 4 },
-    ]);
+    expect(roamers).toEqual({
+      RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 },
+      ENTEI: { level: 40, mapGroup: 10, mapNumber: 4 },
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "roaming_pokemon.json"), "utf8"))).toEqual(roamers);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "roaming_pokemon.json"), "utf8"),
+      ),
+    ).toEqual(roamers);
+  });
+
+  it("rejects repeated InitRoamMons slot writes before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
+      [
+        "InitRoamMons:",
+        "\tld a, RAIKOU",
+        "\tld [wRoamMon1Species], a",
+        "\tld a, ENTEI",
+        "\tld [wRoamMon1Species], a",
+        "\tld a, 40",
+        "\tld [wRoamMon1Level], a",
+        "\tld a, GROUP_ROUTE_42",
+        "\tld [wRoamMon1MapGroup], a",
+        "\tld a, MAP_ROUTE_42",
+        "\tld [wRoamMon1MapNumber], a",
+        "CheckEncounterRoamMon:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      exportRoamingPokemon({
+        ROUTE_42: { groupId: 2, mapId: 5 },
+      }),
+    ).toThrow("InitRoamMons slot 1 repeats species data.");
+  });
+
+  it("rejects roaming Pokemon levels outside Pokemon range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
+      [
+        "InitRoamMons:",
+        "\tld a, RAIKOU",
+        "\tld [wRoamMon1Species], a",
+        "\tld a, 101",
+        "\tld [wRoamMon1Level], a",
+        "\tld a, GROUP_ROUTE_42",
+        "\tld [wRoamMon1MapGroup], a",
+        "\tld a, MAP_ROUTE_42",
+        "\tld [wRoamMon1MapNumber], a",
+        "CheckEncounterRoamMon:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      exportRoamingPokemon({
+        ROUTE_42: { groupId: 2, mapId: 5 },
+      }),
+    ).toThrow(
+      "Roaming Pokemon RAIKOU level 101 is outside Pokemon level range.",
+    );
+  });
+
+  it("rejects roaming Pokemon map ids outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
+      [
+        "InitRoamMons:",
+        "\tld a, RAIKOU",
+        "\tld [wRoamMon1Species], a",
+        "\tld a, 40",
+        "\tld [wRoamMon1Level], a",
+        "\tld a, GROUP_ROUTE_42",
+        "\tld [wRoamMon1MapGroup], a",
+        "\tld a, MAP_ROUTE_42",
+        "\tld [wRoamMon1MapNumber], a",
+        "CheckEncounterRoamMon:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      exportRoamingPokemon({
+        ROUTE_42: { groupId: 256, mapId: 5 },
+      }),
+    ).toThrow("Roaming Pokemon RAIKOU map group 256 is outside byte range.");
+  });
+
+  it("rejects roaming Pokemon map numbers outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
+      [
+        "InitRoamMons:",
+        "\tld a, RAIKOU",
+        "\tld [wRoamMon1Species], a",
+        "\tld a, 40",
+        "\tld [wRoamMon1Level], a",
+        "\tld a, GROUP_ROUTE_42",
+        "\tld [wRoamMon1MapGroup], a",
+        "\tld a, MAP_ROUTE_42",
+        "\tld [wRoamMon1MapNumber], a",
+        "CheckEncounterRoamMon:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      exportRoamingPokemon({
+        ROUTE_42: { groupId: 2, mapId: 256 },
+      }),
+    ).toThrow("Roaming Pokemon RAIKOU map number 256 is outside byte range.");
   });
 
   it("exports Buena prize definitions from exact ASM item/cost rows", () => {
@@ -295,17 +656,56 @@ describe("exportRuntimeAssets", () => {
         "\tdb RARE_CANDY,   3",
         "\tassert_table_length NUM_BUENA_PRIZES",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const prizes = exportBuenaPrizes();
 
-    expect(prizes).toEqual([
-      { itemId: "ULTRA_BALL", cost: 2 },
-      { itemId: "RARE_CANDY", cost: 3 },
-    ]);
+    expect(prizes).toEqual({
+      ULTRA_BALL: 2,
+      RARE_CANDY: 3,
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "buena_prizes.json"), "utf8"))).toEqual(prizes);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "buena_prizes.json"), "utf8"),
+      ),
+    ).toEqual(prizes);
+  });
+
+  it("rejects duplicate Buena prize items before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "buena_prizes.asm"),
+      [
+        "BuenaPrizeItems:",
+        "\ttable_width 2",
+        "\tdb RARE_CANDY,   3",
+        "\tdb RARE_CANDY,   5",
+        "\tassert_table_length NUM_BUENA_PRIZES",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBuenaPrizes()).toThrow(
+      "Duplicate Buena prize item 'RARE_CANDY'.",
+    );
+  });
+
+  it("rejects Buena prize costs outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "buena_prizes.asm"),
+      [
+        "BuenaPrizeItems:",
+        "\ttable_width 2",
+        "\tdb RARE_CANDY, 256",
+        "\tassert_table_length NUM_BUENA_PRIZES",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBuenaPrizes()).toThrow(
+      "Buena prize cost 256 is outside byte range.",
+    );
   });
 
   it("exports Buena password categories from exact ASM table order and rows", () => {
@@ -317,46 +717,121 @@ describe("exportRuntimeAssets", () => {
         "\tdw .HealingItems",
         "\tdw .RadioStations",
         "\tassert_table_length NUM_PASSWORD_CATEGORIES",
-        '.HealingItems:  db BUENA_ITEM,   12, POTION, ANTIDOTE, PARLYZ_HEAL',
+        ".HealingItems:  db BUENA_ITEM,   12, POTION, ANTIDOTE, PARLYZ_HEAL",
         '.RadioStations: db BUENA_STRING, 13, "#MON Talk@", "#MON Music@", "Lucky Channel@"',
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const categories = exportBuenaPasswordCategories();
 
-    expect(categories).toEqual([
-      {
-        id: "HealingItems",
-        categoryType: "BUENA_ITEM",
-        points: 12,
-        options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"],
+    expect(categories).toEqual({
+      order: ["HealingItems", "RadioStations"],
+      categories: {
+        HealingItems: {
+          categoryType: "BUENA_ITEM",
+          points: 12,
+          options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"],
+        },
+        RadioStations: {
+          categoryType: "BUENA_STRING",
+          points: 13,
+          options: ["#MON Talk", "#MON Music", "Lucky Channel"],
+        },
       },
-      {
-        id: "RadioStations",
-        categoryType: "BUENA_STRING",
-        points: 13,
-        options: ["#MON Talk", "#MON Music", "Lucky Channel"],
-      },
-    ]);
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "buena_password_categories.json"), "utf8"))).toEqual(categories);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(dataDir, "buena_password_categories.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(categories);
+  });
+
+  it("rejects duplicate Buena password category rows before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "radio", "buenas_passwords.asm"),
+      [
+        "BuenasPasswordTable:",
+        "\ttable_width 2",
+        "\tdw .HealingItems",
+        "\tassert_table_length NUM_PASSWORD_CATEGORIES",
+        ".HealingItems: db BUENA_ITEM, 12, POTION, ANTIDOTE, PARLYZ_HEAL",
+        ".HealingItems: db BUENA_ITEM, 13, POTION, ANTIDOTE, PARLYZ_HEAL",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBuenaPasswordCategories()).toThrow(
+      "Duplicate Buena password category 'HealingItems'.",
+    );
+  });
+
+  it("rejects Buena password category points outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "radio", "buenas_passwords.asm"),
+      [
+        "BuenasPasswordTable:",
+        "\ttable_width 2",
+        "\tdw .HealingItems",
+        "\tassert_table_length NUM_PASSWORD_CATEGORIES",
+        ".HealingItems: db BUENA_ITEM, 256, POTION, ANTIDOTE, PARLYZ_HEAL",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBuenaPasswordCategories()).toThrow(
+      "Buena password category HealingItems points 256 is outside byte range.",
+    );
   });
 
   it("exports Kurt apricorn recipes from exact ASM apricorn/ball rows", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "data", "items", "apricorn_balls.asm"),
-      ["ApricornBalls:", "\tdb RED_APRICORN, LEVEL_BALL", "\tdb BLU_APRICORN, LURE_BALL", "\tdb -1", ""].join("\n")
+      [
+        "ApricornBalls:",
+        "\tdb RED_APRICORN, LEVEL_BALL",
+        "\tdb BLU_APRICORN, LURE_BALL",
+        "\tdb -1",
+        "",
+      ].join("\n"),
     );
 
     const recipes = exportKurtApricornRecipes();
 
-    expect(recipes).toEqual([
-      { apricorn: "RED_APRICORN", ball: "LEVEL_BALL" },
-      { apricorn: "BLU_APRICORN", ball: "LURE_BALL" },
-    ]);
+    expect(recipes).toEqual({
+      RED_APRICORN: "LEVEL_BALL",
+      BLU_APRICORN: "LURE_BALL",
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "kurt_apricorn_recipes.json"), "utf8"))).toEqual(recipes);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(dataDir, "kurt_apricorn_recipes.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(recipes);
+  });
+
+  it("rejects duplicate Kurt apricorn recipes before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "apricorn_balls.asm"),
+      [
+        "ApricornBalls:",
+        "\tdb RED_APRICORN, LEVEL_BALL",
+        "\tdb RED_APRICORN, FAST_BALL",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportKurtApricornRecipes()).toThrow(
+      "Duplicate Kurt apricorn recipe 'RED_APRICORN'.",
+    );
   });
 
   it("exports Shuckie gift data from exact ASM labels and stores decimal OT id", () => {
@@ -381,7 +856,7 @@ describe("exportRuntimeAssets", () => {
         "",
         "ReturnShuckie:",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const gift = exportShuckieGift();
@@ -396,7 +871,63 @@ describe("exportRuntimeAssets", () => {
       gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "shuckie_gift.json"), "utf8"))).toEqual(gift);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "shuckie_gift.json"), "utf8"),
+      ),
+    ).toEqual(gift);
+  });
+
+  it("rejects Shuckie gift levels outside Pokemon range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "shuckle.asm"),
+      [
+        "DEF MANIA_OT_ID EQU 00518",
+        "GiveShuckle:",
+        "\tld a, SHUCKLE",
+        "\tld [wCurPartySpecies], a",
+        "\tld a, 101",
+        "\tld [wCurPartyLevel], a",
+        "\tld [hl], BERRY",
+        "\tset DAILYFLAGS1_GOT_SHUCKIE_TODAY_F, [hl]",
+        "SpecialShuckleOT:",
+        '\tdb "MANIA@"',
+        "SpecialShuckleNickname:",
+        '\tdb "SHUCKIE@"',
+        "ReturnShuckie:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportShuckieGift()).toThrow(
+      "Shuckie gift level 101 is outside Pokemon level range.",
+    );
+  });
+
+  it("rejects Shuckie original trainer ids outside word range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "shuckle.asm"),
+      [
+        "DEF MANIA_OT_ID EQU 65536",
+        "GiveShuckle:",
+        "\tld a, SHUCKLE",
+        "\tld [wCurPartySpecies], a",
+        "\tld a, 15",
+        "\tld [wCurPartyLevel], a",
+        "\tld [hl], BERRY",
+        "\tset DAILYFLAGS1_GOT_SHUCKIE_TODAY_F, [hl]",
+        "SpecialShuckleOT:",
+        '\tdb "MANIA@"',
+        "SpecialShuckleNickname:",
+        '\tdb "SHUCKIE@"',
+        "ReturnShuckie:",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportShuckieGift()).toThrow(
+      "Shuckie gift original trainer id 65536 is outside word range.",
+    );
   });
 
   it("exports Dratini move sets from exact zero-terminated ASM movesets", () => {
@@ -417,17 +948,73 @@ describe("exportRuntimeAssets", () => {
         "\tdb TWISTER",
         "\tdb 0",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const moveSets = exportDratiniMoveSets();
 
-    expect(moveSets).toEqual([
-      { mode: 0, moves: ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] },
-      { mode: 1, moves: ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER"] },
-    ]);
+    expect(moveSets).toEqual({
+      "0": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"],
+      "1": ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER"],
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "dratini_move_sets.json"), "utf8"))).toEqual(moveSets);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "dratini_move_sets.json"), "utf8"),
+      ),
+    ).toEqual(moveSets);
+  });
+
+  it("rejects duplicate Dratini moveset modes before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "dratini.asm"),
+      [
+        ".Movesets:",
+        ".Moveset0:",
+        "\tdb WRAP",
+        "\tdb 0",
+        ".Moveset0:",
+        "\tdb LEER",
+        "\tdb 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportDratiniMoveSets()).toThrow(
+      "Duplicate Dratini moveset 0.",
+    );
+  });
+
+  it("rejects empty Dratini movesets before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "dratini.asm"),
+      [".Movesets:", ".Moveset0:", "\tdb 0", ""].join("\n"),
+    );
+
+    expect(() => exportDratiniMoveSets()).toThrow(
+      "Dratini moveset 0 must not be empty.",
+    );
+  });
+
+  it("rejects Dratini movesets exceeding party move limit before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "dratini.asm"),
+      [
+        ".Movesets:",
+        ".Moveset0:",
+        "\tdb WRAP",
+        "\tdb LEER",
+        "\tdb THUNDER_WAVE",
+        "\tdb TWISTER",
+        "\tdb EXTREMESPEED",
+        "\tdb 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportDratiniMoveSets()).toThrow(
+      "Dratini moveset 0 has 5 moves, exceeding party move limit.",
+    );
   });
 
   it("exports Bug-Catching Contest config from exact ASM constants and flag table", () => {
@@ -439,10 +1026,16 @@ describe("exportRuntimeAssets", () => {
         "DEF BUG_CONTEST_SECONDS EQU 0",
         "DEF NUM_BUG_CONTESTANTS EQU 3",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "engine", "events", "bug_contest", "contest_2.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "bug_contest",
+        "contest_2.asm",
+      ),
       [
         "SelectRandomBugContestContestants:",
         ".loop1",
@@ -451,7 +1044,7 @@ describe("exportRuntimeAssets", () => {
         ".loop2",
         "CheckBugContestContestantFlag:",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
@@ -463,7 +1056,7 @@ describe("exportRuntimeAssets", () => {
         "\tdw EVENT_BUG_CATCHING_CONTESTANT_3A",
         "\tassert_table_length NUM_BUG_CONTESTANTS",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const config = exportBugContestConfig();
@@ -480,7 +1073,100 @@ describe("exportRuntimeAssets", () => {
       ],
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "bug_contest_config.json"), "utf8"))).toEqual(config);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "bug_contest_config.json"), "utf8"),
+      ),
+    ).toEqual(config);
+  });
+
+  it("rejects Bug-Catching Contest timer seconds outside clock range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
+      [
+        "DEF BUG_CONTEST_BALLS EQU 20",
+        "DEF BUG_CONTEST_MINUTES EQU 20",
+        "DEF BUG_CONTEST_SECONDS EQU 60",
+        "DEF NUM_BUG_CONTESTANTS EQU 3",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "bug_contest",
+        "contest_2.asm",
+      ),
+      [
+        "SelectRandomBugContestContestants:",
+        ".loop1",
+        "\tld c, 2",
+        ".loop2",
+        "CheckBugContestContestantFlag:",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
+      [
+        "BugCatchingContestantEventFlagTable:",
+        "\tdw EVENT_BUG_CATCHING_CONTESTANT_1A",
+        "\tdw EVENT_BUG_CATCHING_CONTESTANT_2A",
+        "\tdw EVENT_BUG_CATCHING_CONTESTANT_3A",
+        "\tassert_table_length NUM_BUG_CONTESTANTS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBugContestConfig()).toThrow(
+      "Bug-Catching Contest timer seconds 60 is outside clock second range.",
+    );
+  });
+
+  it("rejects Bug-Catching Contest selected count above contestant flags before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
+      [
+        "DEF BUG_CONTEST_BALLS EQU 20",
+        "DEF BUG_CONTEST_MINUTES EQU 20",
+        "DEF BUG_CONTEST_SECONDS EQU 0",
+        "DEF NUM_BUG_CONTESTANTS EQU 2",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "bug_contest",
+        "contest_2.asm",
+      ),
+      [
+        "SelectRandomBugContestContestants:",
+        ".loop1",
+        "\tld c, 3",
+        ".loop2",
+        "CheckBugContestContestantFlag:",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
+      [
+        "BugCatchingContestantEventFlagTable:",
+        "\tdw EVENT_BUG_CATCHING_CONTESTANT_1A",
+        "\tdw EVENT_BUG_CATCHING_CONTESTANT_2A",
+        "\tassert_table_length NUM_BUG_CONTESTANTS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBugContestConfig()).toThrow(
+      "Bug-Catching Contest selected contestant count 3 exceeds contestant flags 2.",
+    );
   });
 
   it("exports Battle Tower banned species from exact ASM ubers check", () => {
@@ -496,11 +1182,15 @@ describe("exportRuntimeAssets", () => {
         "\tconst CELEBI",
         "DEF NUM_POKEMON EQU const_value - 1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "constants", "battle_tower_constants.asm"),
-      ["DEF BATTLETOWER_PARTY_LENGTH EQU 3", "DEF BATTLETOWER_STREAK_LENGTH EQU 7", ""].join("\n")
+      [
+        "DEF BATTLETOWER_PARTY_LENGTH EQU 3",
+        "DEF BATTLETOWER_STREAK_LENGTH EQU 7",
+        "",
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "mobile", "mobile_46.asm"),
@@ -531,10 +1221,16 @@ describe("exportRuntimeAssets", () => {
         '\tdb " L:100@@"',
         '\tdb "CANCEL@@"',
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "engine", "events", "battle_tower", "rules.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "battle_tower",
+        "rules.asm",
+      ),
       [
         "_CheckForBattleTowerRules:",
         "\tld hl, wStringBuffer2",
@@ -550,13 +1246,19 @@ describe("exportRuntimeAssets", () => {
         "\tdw TheMonMustNotHoldTheSameItemsText",
         "\tdw YouCantTakeAnEggText",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const rules = exportBattleTowerRules();
 
     expect(rules).toEqual({
-      bannedSpecies: ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+      bannedSpecies: {
+        MEWTWO: {},
+        MEW: {},
+        LUGIA: {},
+        HO_OH: {},
+        CELEBI: {},
+      },
       requiredPartyCount: 3,
       challengeStreakLength: 7,
       minimumLevelGroup: 1,
@@ -568,7 +1270,129 @@ describe("exportRuntimeAssets", () => {
       eggFailureText: "YouCantTakeAnEggText",
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "battle_tower_rules.json"), "utf8"))).toEqual(rules);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "battle_tower_rules.json"), "utf8"),
+      ),
+    ).toEqual(rules);
+  });
+
+  it("rejects Battle Tower party lengths outside party size range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "pokemon_constants.asm"),
+      [
+        "const_def",
+        "\tconst BULBASAUR",
+        "DEF NUM_POKEMON EQU const_value - 1",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_tower_constants.asm"),
+      [
+        "DEF BATTLETOWER_PARTY_LENGTH EQU 7",
+        "DEF BATTLETOWER_STREAK_LENGTH EQU 7",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "mobile", "mobile_46.asm"),
+      [
+        "BattleTower_UbersCheck:",
+        "\tcp BULBASAUR",
+        "\tjr c, .next",
+        ".uber",
+        "BattleTower_LevelCheck:",
+        "\tld c, 10",
+        "Strings_L10ToL100:",
+        '\tdb " L:10 @@"',
+        '\tdb "CANCEL@@"',
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "battle_tower",
+        "rules.asm",
+      ),
+      [
+        "_CheckForBattleTowerRules:",
+        "\tld [hl], '7'",
+        ".TextPointers:",
+        "\tdw ExcuseMeYoureNotReadyText",
+        "\tdw OnlyThreeMonMayBeEnteredText",
+        "\tdw TheMonMustAllBeDifferentKindsText",
+        "\tdw TheMonMustNotHoldTheSameItemsText",
+        "\tdw YouCantTakeAnEggText",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBattleTowerRules()).toThrow(
+      "Battle Tower party length 7 is outside party size range.",
+    );
+  });
+
+  it("rejects Battle Tower level menu entries outside Pokemon range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "pokemon_constants.asm"),
+      [
+        "const_def",
+        "\tconst BULBASAUR",
+        "\tconst LUGIA",
+        "DEF NUM_POKEMON EQU const_value - 1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_tower_constants.asm"),
+      [
+        "DEF BATTLETOWER_PARTY_LENGTH EQU 3",
+        "DEF BATTLETOWER_STREAK_LENGTH EQU 7",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "mobile", "mobile_46.asm"),
+      [
+        "BattleTower_UbersCheck:",
+        "\tcp LUGIA",
+        "\tjr c, .next",
+        ".uber",
+        "BattleTower_LevelCheck:",
+        "\tld c, 10",
+        "Strings_L10ToL100:",
+        '\tdb " L:110@@"',
+        '\tdb "CANCEL@@"',
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "battle_tower",
+        "rules.asm",
+      ),
+      [
+        "_CheckForBattleTowerRules:",
+        "\tld [hl], '3'",
+        ".TextPointers:",
+        "\tdw ExcuseMeYoureNotReadyText",
+        "\tdw OnlyThreeMonMayBeEnteredText",
+        "\tdw TheMonMustAllBeDifferentKindsText",
+        "\tdw TheMonMustNotHoldTheSameItemsText",
+        "\tdw YouCantTakeAnEggText",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportBattleTowerRules()).toThrow(
+      "Battle Tower level menu entry 110 is outside Pokemon level range.",
+    );
   });
 
   it("exports Oak rating thresholds from exact ASM table", () => {
@@ -580,7 +1404,7 @@ describe("exportRuntimeAssets", () => {
         "\trating  19, SFX_DEX_FANFARE_LESS_THAN_20, OakRating02",
         "\trating 255, SFX_DEX_FANFARE_230_PLUS,     OakRating19",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const ratings = exportOakRatings();
@@ -603,13 +1427,33 @@ describe("exportRuntimeAssets", () => {
       },
     ]);
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "oak_ratings.json"), "utf8"))).toEqual(ratings);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "oak_ratings.json"), "utf8"),
+      ),
+    ).toEqual(ratings);
+  });
+
+  it("rejects Oak rating caught-count limits outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "pokedex_ratings.asm"),
+      [
+        "OakRatings:",
+        "\trating 9, SFX_DEX_FANFARE_LESS_THAN_20, OakRating01",
+        "\trating 256, SFX_DEX_FANFARE_230_PLUS, OakRating19",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOakRatings()).toThrow(
+      "Oak rating caught-count limit 256 is outside byte range.",
+    );
   });
 
   it("exports Odd Egg definitions from exact ASM tables", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
-      ['.Odd:', '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n")
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
@@ -646,7 +1490,7 @@ describe("exportRuntimeAssets", () => {
         '\tdname "EGG", MON_NAME_LENGTH',
         "\tassert_table_length NUM_ODD_EGGS",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const definitions = exportOddEggDefinitions();
@@ -666,7 +1510,214 @@ describe("exportRuntimeAssets", () => {
       },
     ]);
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "odd_egg_definitions.json"), "utf8"))).toEqual(definitions);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "odd_egg_definitions.json"), "utf8"),
+      ),
+    ).toEqual(definitions);
+  });
+
+  it("rejects Odd Egg DVs outside nibble range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 100",
+        "OddEggs:",
+        "\ttable_width NICKNAMED_MON_STRUCT_LENGTH",
+        "\tdb CLEFFA",
+        "\tdb NO_ITEM",
+        "\tdb POUND, CHARM, DIZZY_PUNCH, 0",
+        "\tdw 00768",
+        "\tbigdt 125",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tdn 16, 10, 10, 10",
+        "\tdb 35, 20, 10, 0",
+        "\tdb 20",
+        "\tdb 0, 0, 0",
+        "\tdb 5",
+        "\tdb 0, 0",
+        "\tbigdw 0",
+        "\tbigdw 20",
+        "\tbigdw 7",
+        "\tbigdw 8",
+        "\tbigdw 7",
+        "\tbigdw 10",
+        "\tbigdw 11",
+        '\tdname "EGG", MON_NAME_LENGTH',
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg DV '16' is outside nibble range.",
+    );
+  });
+
+  it("rejects Odd Egg probabilities outside percent range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 101",
+        "OddEggs:",
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg probability 101 is outside percent range.",
+    );
+  });
+
+  it("rejects Odd Egg move lists exceeding party move limit before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 100",
+        "OddEggs:",
+        "\ttable_width NICKNAMED_MON_STRUCT_LENGTH",
+        "\tdb CLEFFA",
+        "\tdb NO_ITEM",
+        "\tdb POUND, CHARM, DIZZY_PUNCH, LEER, TACKLE",
+        "\tdw 00768",
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg move list has 5 moves, exceeding party move limit.",
+    );
+  });
+
+  it("rejects Odd Egg original trainer ids outside word range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 100",
+        "OddEggs:",
+        "\ttable_width NICKNAMED_MON_STRUCT_LENGTH",
+        "\tdb CLEFFA",
+        "\tdb NO_ITEM",
+        "\tdb POUND, CHARM, DIZZY_PUNCH, 0",
+        "\tdw 65536",
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg CLEFFA original trainer id 65536 is outside word range.",
+    );
+  });
+
+  it("rejects Odd Egg hatch cycles outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 100",
+        "OddEggs:",
+        "\ttable_width NICKNAMED_MON_STRUCT_LENGTH",
+        "\tdb CLEFFA",
+        "\tdb NO_ITEM",
+        "\tdb POUND, CHARM, DIZZY_PUNCH, 0",
+        "\tdw 00768",
+        "\tbigdt 125",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tdn 2, 10, 10, 10",
+        "\tdb 35, 20, 10, 0",
+        "\tdb 256",
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg CLEFFA hatch cycles 256 is outside byte range.",
+    );
+  });
+
+  it("rejects Odd Egg levels outside Pokemon range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "odd_egg.asm"),
+      [".Odd:", '\tdname "ODD", MON_NAME_LENGTH + 1', ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "odd_eggs.asm"),
+      [
+        "DEF NUM_ODD_EGGS EQU 1",
+        "OddEggProbabilities:",
+        "\ttable_width 2",
+        "\todd_egg_prob 100",
+        "OddEggs:",
+        "\ttable_width NICKNAMED_MON_STRUCT_LENGTH",
+        "\tdb CLEFFA",
+        "\tdb NO_ITEM",
+        "\tdb POUND, CHARM, DIZZY_PUNCH, 0",
+        "\tdw 00768",
+        "\tbigdt 125",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tbigdw 0",
+        "\tdn 2, 10, 10, 10",
+        "\tdb 35, 20, 10, 0",
+        "\tdb 20",
+        "\tdb 0, 0, 0",
+        "\tdb 101",
+        "\tassert_table_length NUM_ODD_EGGS",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportOddEggDefinitions()).toThrow(
+      "Odd Egg CLEFFA level 101 is outside Pokemon level range.",
+    );
   });
 
   it("exports Magikarp length table from exact ASM dwb rows", () => {
@@ -678,7 +1729,7 @@ describe("exportRuntimeAssets", () => {
         "\tdwb   310, 2",
         "\tdwb  65510, 1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const lengths = exportMagikarpLengths();
@@ -689,7 +1740,33 @@ describe("exportRuntimeAssets", () => {
       { threshold: 65510, divisor: 1 },
     ]);
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "magikarp_lengths.json"), "utf8"))).toEqual(lengths);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "magikarp_lengths.json"), "utf8"),
+      ),
+    ).toEqual(lengths);
+  });
+
+  it("rejects Magikarp length thresholds outside word range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "magikarp_lengths.asm"),
+      ["MagikarpLengths:", "\tdwb 65536, 1", ""].join("\n"),
+    );
+
+    expect(() => exportMagikarpLengths()).toThrow(
+      "Magikarp length threshold 65536 is outside word range.",
+    );
+  });
+
+  it("rejects Magikarp length byte divisors outside divisor range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "magikarp_lengths.asm"),
+      ["MagikarpLengths:", "\tdwb 110, 0", ""].join("\n"),
+    );
+
+    expect(() => exportMagikarpLengths()).toThrow(
+      "Magikarp length divisor 0 is outside byte divisor range.",
+    );
   });
 
   it("exports happiness changes and service probabilities from exact ASM tables", () => {
@@ -710,7 +1787,7 @@ describe("exportRuntimeAssets", () => {
         "\tconst HAPPINESS_GROOMING",
         "\tDEF NUM_HAPPINESS_CHANGES EQU const_value - 1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "events", "happiness_changes.asm"),
@@ -726,10 +1803,15 @@ describe("exportRuntimeAssets", () => {
         "\tdb +3, +3, +1",
         "\tassert_table_length NUM_HAPPINESS_CHANGES",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "events", "happiness_probabilities.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "events",
+        "happiness_probabilities.asm",
+      ),
       [
         "HappinessData_OlderHaircutBrother:",
         "\tdb 30 percent,     2, HAPPINESS_OLDERCUT1",
@@ -742,44 +1824,166 @@ describe("exportRuntimeAssets", () => {
         "HappinessData_DaisysGrooming:",
         "\tdb -1,             2, HAPPINESS_GROOMING",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const data = exportHappinessData();
 
-    expect(data.changes).toEqual([
-      { code: "HAPPINESS_OLDERCUT1", changeCode: 1, low: 1, mid: 1, high: 1 },
-      { code: "HAPPINESS_OLDERCUT2", changeCode: 2, low: 3, mid: 3, high: 1 },
-      { code: "HAPPINESS_OLDERCUT3", changeCode: 3, low: 5, mid: 5, high: 2 },
-      { code: "HAPPINESS_YOUNGCUT1", changeCode: 4, low: 2, mid: 2, high: 2 },
-      { code: "HAPPINESS_YOUNGCUT2", changeCode: 5, low: 4, mid: 4, high: 2 },
-      { code: "HAPPINESS_YOUNGCUT3", changeCode: 6, low: 10, mid: 10, high: 4 },
-      { code: "HAPPINESS_GROOMING", changeCode: 7, low: 3, mid: 3, high: 1 },
-    ]);
-    expect(data.services).toEqual([
-      {
-        routine: "OlderHaircutBrother",
-        outcomes: [
-          { rollWeight: 76, scriptValue: 2, changeCode: 1 },
-          { rollWeight: 128, scriptValue: 3, changeCode: 2 },
-          { rollWeight: 255, scriptValue: 4, changeCode: 3 },
-        ],
-      },
-      {
-        routine: "YoungerHaircutBrother",
-        outcomes: [
-          { rollWeight: 154, scriptValue: 2, changeCode: 4 },
-          { rollWeight: 76, scriptValue: 3, changeCode: 5 },
-          { rollWeight: 255, scriptValue: 4, changeCode: 6 },
-        ],
-      },
-      {
-        routine: "DaisysGrooming",
-        outcomes: [{ rollWeight: 255, scriptValue: 2, changeCode: 7 }],
-      },
-    ]);
+    expect(data.changes).toEqual({
+      "1": { code: "HAPPINESS_OLDERCUT1", low: 1, mid: 1, high: 1 },
+      "2": { code: "HAPPINESS_OLDERCUT2", low: 3, mid: 3, high: 1 },
+      "3": { code: "HAPPINESS_OLDERCUT3", low: 5, mid: 5, high: 2 },
+      "4": { code: "HAPPINESS_YOUNGCUT1", low: 2, mid: 2, high: 2 },
+      "5": { code: "HAPPINESS_YOUNGCUT2", low: 4, mid: 4, high: 2 },
+      "6": { code: "HAPPINESS_YOUNGCUT3", low: 10, mid: 10, high: 4 },
+      "7": { code: "HAPPINESS_GROOMING", low: 3, mid: 3, high: 1 },
+    });
+    expect(data.services).toEqual({
+      OlderHaircutBrother: [
+        { rollWeight: 76, scriptValue: 2, changeCode: 1 },
+        { rollWeight: 128, scriptValue: 3, changeCode: 2 },
+        { rollWeight: 255, scriptValue: 4, changeCode: 3 },
+      ],
+      YoungerHaircutBrother: [
+        { rollWeight: 154, scriptValue: 2, changeCode: 4 },
+        { rollWeight: 76, scriptValue: 3, changeCode: 5 },
+        { rollWeight: 255, scriptValue: 4, changeCode: 6 },
+      ],
+      DaisysGrooming: [{ rollWeight: 255, scriptValue: 2, changeCode: 7 }],
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "happiness_data.json"), "utf8"))).toEqual(data);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "happiness_data.json"), "utf8"),
+      ),
+    ).toEqual(data);
+  });
+
+  it("rejects duplicate happiness probability tables before pack emission", () => {
+    writeMinimalHappinessFixtures([
+      "HappinessData_OlderHaircutBrother:",
+      "\tdb -1, 2, HAPPINESS_OLDERCUT1",
+      "HappinessData_YoungerHaircutBrother:",
+      "\tdb -1, 2, HAPPINESS_YOUNGCUT1",
+      "HappinessData_DaisysGrooming:",
+      "\tdb -1, 2, HAPPINESS_GROOMING",
+      "HappinessData_OlderHaircutBrother:",
+      "\tdb -1, 3, HAPPINESS_OLDERCUT1",
+      "",
+    ]);
+
+    expect(() => exportHappinessData()).toThrow(
+      "Duplicate happiness probability table 'OlderHaircutBrother'.",
+    );
+  });
+
+  it("rejects duplicate happiness change constants before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "pokemon_data_constants.asm"),
+      [
+        "; ChangeHappiness arguments (see data/events/happiness_changes.asm)",
+        "\tconst_def 1",
+        "\tconst HAPPINESS_OLDERCUT1",
+        "\tconst HAPPINESS_OLDERCUT1",
+        "\tconst HAPPINESS_GROOMING",
+        "\tDEF NUM_HAPPINESS_CHANGES EQU const_value - 1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "happiness_changes.asm"),
+      [
+        "HappinessChanges:",
+        "\tdb +1, +1, +1",
+        "\tdb +2, +2, +2",
+        "\tdb +3, +3, +1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "events",
+        "happiness_probabilities.asm",
+      ),
+      [
+        "HappinessData_OlderHaircutBrother:",
+        "\tdb -1, 2, HAPPINESS_OLDERCUT1",
+        "HappinessData_YoungerHaircutBrother:",
+        "\tdb -1, 2, HAPPINESS_OLDERCUT1",
+        "HappinessData_DaisysGrooming:",
+        "\tdb -1, 2, HAPPINESS_GROOMING",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportHappinessData()).toThrow(
+      "Duplicate happiness change constant 'HAPPINESS_OLDERCUT1'.",
+    );
+  });
+
+  it("rejects happiness change signed db values outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "pokemon_data_constants.asm"),
+      [
+        "; ChangeHappiness arguments (see data/events/happiness_changes.asm)",
+        "\tconst_def 1",
+        "\tconst HAPPINESS_OLDERCUT1",
+        "\tconst HAPPINESS_YOUNGCUT1",
+        "\tconst HAPPINESS_GROOMING",
+        "\tDEF NUM_HAPPINESS_CHANGES EQU const_value - 1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "happiness_changes.asm"),
+      [
+        "HappinessChanges:",
+        "\tdb +128, +1, +1",
+        "\tdb +2, +2, +2",
+        "\tdb +3, +3, +1",
+        "\tassert_table_length NUM_HAPPINESS_CHANGES",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "events",
+        "happiness_probabilities.asm",
+      ),
+      [
+        "HappinessData_OlderHaircutBrother:",
+        "\tdb -1, 2, HAPPINESS_OLDERCUT1",
+        "HappinessData_YoungerHaircutBrother:",
+        "\tdb -1, 2, HAPPINESS_YOUNGCUT1",
+        "HappinessData_DaisysGrooming:",
+        "\tdb -1, 2, HAPPINESS_GROOMING",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportHappinessData()).toThrow(
+      "Signed db number '+128' is outside signed byte range",
+    );
+  });
+
+  it("rejects happiness probability script values outside byte range before pack emission", () => {
+    writeMinimalHappinessFixtures([
+      "HappinessData_OlderHaircutBrother:",
+      "\tdb -1, 256, HAPPINESS_OLDERCUT1",
+      "HappinessData_YoungerHaircutBrother:",
+      "\tdb -1, 2, HAPPINESS_YOUNGCUT1",
+      "HappinessData_DaisysGrooming:",
+      "\tdb -1, 2, HAPPINESS_GROOMING",
+      "",
+    ]);
+
+    expect(() => exportHappinessData()).toThrow(
+      "Happiness probability script value 256 is outside byte range.",
+    );
   });
 
   it("exports encounter slot probability tables from exact ASM mon_prob rows", () => {
@@ -804,7 +2008,7 @@ describe("exportRuntimeAssets", () => {
         "\tmon_prob 100, 2 ; 10% chance",
         "\tassert_table_length NUM_WATERMON",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const tables = exportEncounterSlotTables();
@@ -822,7 +2026,84 @@ describe("exportRuntimeAssets", () => {
       ],
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "encounter_slot_tables.json"), "utf8"))).toEqual(tables);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(dataDir, "encounter_slot_tables.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(tables);
+  });
+
+  it("rejects non-increasing encounter slot thresholds before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "wild", "probabilities.asm"),
+      [
+        "GrassMonProbTable:",
+        "\tmon_prob 60, 0",
+        "\tmon_prob 60, 1",
+        "WaterMonProbTable:",
+        "\tmon_prob 100, 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportEncounterSlotTables()).toThrow(
+      "Encounter slot table grass threshold 60 must be greater than 60",
+    );
+  });
+
+  it("rejects repeated encounter slots before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "wild", "probabilities.asm"),
+      [
+        "GrassMonProbTable:",
+        "\tmon_prob 50, 0",
+        "\tmon_prob 100, 0",
+        "WaterMonProbTable:",
+        "\tmon_prob 100, 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportEncounterSlotTables()).toThrow(
+      "Encounter slot table grass repeats slot 0.",
+    );
+  });
+
+  it("rejects encounter slots outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "wild", "probabilities.asm"),
+      [
+        "GrassMonProbTable:",
+        "\tmon_prob 100, 256",
+        "WaterMonProbTable:",
+        "\tmon_prob 100, 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportEncounterSlotTables()).toThrow(
+      "Encounter slot 256 is outside byte range.",
+    );
+  });
+
+  it("rejects encounter slot tables that do not end at 100 before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "wild", "probabilities.asm"),
+      [
+        "GrassMonProbTable:",
+        "\tmon_prob 50, 0",
+        "WaterMonProbTable:",
+        "\tmon_prob 100, 0",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportEncounterSlotTables()).toThrow(
+      "Encounter slot table grass must end at threshold 100, found 50.",
+    );
   });
 
   it("exports battle stat multiplier tables from exact ASM rows", () => {
@@ -844,10 +2125,15 @@ describe("exportRuntimeAssets", () => {
         "\tdb  35,  10",
         "\tdb   4,   1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "battle", "accuracy_multipliers.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "battle",
+        "accuracy_multipliers.asm",
+      ),
       [
         "AccuracyLevelMultipliers:",
         "\tdb  33, 100 ; -6",
@@ -864,25 +2150,64 @@ describe("exportRuntimeAssets", () => {
         "\tdb 133,  50",
         "\tdb   3,   1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const multipliers = exportBattleStatMultipliers();
 
     expect(multipliers.stat[0]).toEqual({ numerator: 25, denominator: 100 });
     expect(multipliers.stat[12]).toEqual({ numerator: 4, denominator: 1 });
-    expect(multipliers.accuracy[0]).toEqual({ numerator: 33, denominator: 100 });
-    expect(multipliers.accuracy[8]).toEqual({ numerator: 166, denominator: 100 });
-    expect(multipliers.accuracy[11]).toEqual({ numerator: 133, denominator: 50 });
+    expect(multipliers.accuracy[0]).toEqual({
+      numerator: 33,
+      denominator: 100,
+    });
+    expect(multipliers.accuracy[8]).toEqual({
+      numerator: 166,
+      denominator: 100,
+    });
+    expect(multipliers.accuracy[11]).toEqual({
+      numerator: 133,
+      denominator: 50,
+    });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "battle_stat_multipliers.json"), "utf8"))).toEqual(
-      multipliers
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(dataDir, "battle_stat_multipliers.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(multipliers);
+  });
+
+  it("rejects battle stat multiplier numerators outside byte range", () => {
+    const rows = validBattleStatMultiplierRows();
+    rows[0] = "\tdb 256, 1";
+    writeBattleStatMultiplierFixtures(rows, validBattleStatMultiplierRows());
+
+    expect(() => exportBattleStatMultipliers()).toThrow(
+      "Battle stat multiplier in data/battle/stat_multipliers.asm has numerator 256 outside byte range",
+    );
+  });
+
+  it("rejects battle stat multiplier denominators outside byte range", () => {
+    const rows = validBattleStatMultiplierRows();
+    rows[0] = "\tdb 1, 256";
+    writeBattleStatMultiplierFixtures(validBattleStatMultiplierRows(), rows);
+
+    expect(() => exportBattleStatMultipliers()).toThrow(
+      "Battle stat multiplier in data/battle/accuracy_multipliers.asm has denominator 256 outside byte range",
     );
   });
 
   it("exports capture wobble probabilities from exact ASM rows", () => {
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "battle", "wobble_probabilities.asm"),
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "battle",
+        "wobble_probabilities.asm",
+      ),
       [
         "WobbleProbabilities:",
         "; catch rate, chance of wobbling / 255",
@@ -891,7 +2216,7 @@ describe("exportRuntimeAssets", () => {
         "\tdb 254, 253",
         "\tdb 255, 255",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const rows = exportCaptureWobbleProbabilities();
@@ -903,8 +2228,45 @@ describe("exportRuntimeAssets", () => {
       { catch_rate: 255, chance: 255 },
     ]);
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "capture_wobble_probabilities.json"), "utf8"))).toEqual(
-      rows
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(dataDir, "capture_wobble_probabilities.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(rows);
+  });
+
+  it("rejects duplicate capture wobble catch rates before pack emission", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "battle",
+        "wobble_probabilities.asm",
+      ),
+      ["WobbleProbabilities:", "\tdb   1,  63", "\tdb   1,  75", ""].join("\n"),
+    );
+
+    expect(() => exportCaptureWobbleProbabilities()).toThrow(
+      "Duplicate capture wobble catch rate 1.",
+    );
+  });
+
+  it("rejects non-increasing capture wobble catch rates before pack emission", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "battle",
+        "wobble_probabilities.asm",
+      ),
+      ["WobbleProbabilities:", "\tdb   2,  75", "\tdb   1,  63", ""].join("\n"),
+    );
+
+    expect(() => exportCaptureWobbleProbabilities()).toThrow(
+      "Capture wobble catch rate 1 must be greater than 2.",
     );
   });
 
@@ -923,28 +2285,76 @@ describe("exportRuntimeAssets", () => {
         "\tdb WEATHER_RAIN, EFFECT_SOLARBEAM, NOT_VERY_EFFECTIVE",
         "\tdb -1 ; end",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const modifiers = exportWeatherModifiers();
 
     expect(modifiers).toEqual({
-      type_modifiers: [
-        { weather: "WEATHER_RAIN", move_type: "WATER", multiplier: { numerator: 3, denominator: 2 } },
-        { weather: "WEATHER_RAIN", move_type: "FIRE", multiplier: { numerator: 1, denominator: 2 } },
-        { weather: "WEATHER_SUN", move_type: "FIRE", multiplier: { numerator: 3, denominator: 2 } },
-        { weather: "WEATHER_SUN", move_type: "WATER", multiplier: { numerator: 1, denominator: 2 } },
-      ],
-      move_effect_modifiers: [
-        {
-          weather: "WEATHER_RAIN",
-          move_effect: "SOLARBEAM",
-          multiplier: { numerator: 1, denominator: 2 },
+      type_modifiers: {
+        WEATHER_RAIN: {
+          WATER: { numerator: 3, denominator: 2 },
+          FIRE: { numerator: 1, denominator: 2 },
         },
-      ],
+        WEATHER_SUN: {
+          FIRE: { numerator: 3, denominator: 2 },
+          WATER: { numerator: 1, denominator: 2 },
+        },
+      },
+      move_effect_modifiers: {
+        WEATHER_RAIN: {
+          SOLARBEAM: { numerator: 1, denominator: 2 },
+        },
+      },
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "weather_modifiers.json"), "utf8"))).toEqual(modifiers);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "weather_modifiers.json"), "utf8"),
+      ),
+    ).toEqual(modifiers);
+  });
+
+  it("rejects duplicate weather type modifier rows before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "battle", "weather_modifiers.asm"),
+      [
+        "WeatherTypeModifiers:",
+        "\tdb WEATHER_RAIN, WATER, MORE_EFFECTIVE",
+        "\tdb WEATHER_RAIN, WATER, NOT_VERY_EFFECTIVE",
+        "\tdb -1",
+        "",
+        "WeatherMoveModifiers:",
+        "\tdb WEATHER_RAIN, EFFECT_SOLARBEAM, NOT_VERY_EFFECTIVE",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportWeatherModifiers()).toThrow(
+      "Duplicate weather type modifier 'WEATHER_RAIN/WATER'.",
+    );
+  });
+
+  it("rejects duplicate weather move-effect modifier rows before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "battle", "weather_modifiers.asm"),
+      [
+        "WeatherTypeModifiers:",
+        "\tdb WEATHER_RAIN, WATER, MORE_EFFECTIVE",
+        "\tdb -1",
+        "",
+        "WeatherMoveModifiers:",
+        "\tdb WEATHER_RAIN, EFFECT_SOLARBEAM, NOT_VERY_EFFECTIVE",
+        "\tdb WEATHER_RAIN, EFFECT_SOLARBEAM, MORE_EFFECTIVE",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportWeatherModifiers()).toThrow(
+      "Duplicate weather move-effect modifier 'WEATHER_RAIN/SOLARBEAM'.",
+    );
   });
 
   it("exports type effectiveness as complete type matrix with exact ASM overrides", () => {
@@ -968,7 +2378,7 @@ describe("exportRuntimeAssets", () => {
         "\tconst GROUND",
         "DEF TYPES_END EQU const_value",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "types", "type_matchups.asm"),
@@ -982,38 +2392,117 @@ describe("exportRuntimeAssets", () => {
         "\tdb FIGHTING,     GHOST,        NO_EFFECT",
         "\tdb -1 ; end",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const table = exportTypeEffectivenessTable();
 
-    expect(table.matchups).toHaveLength(64);
-    expect(table.matchups).toContainEqual({
-      attacker: "NORMAL",
-      defender: "ROCK",
-      multiplier: { numerator: 1, denominator: 2 },
+    expect(
+      Object.values(table.matchups).flatMap((defenders) =>
+        Object.values(defenders),
+      ),
+    ).toHaveLength(64);
+    expect(table.matchups.NORMAL.ROCK).toEqual({
+      numerator: 1,
+      denominator: 2,
     });
-    expect(table.matchups).toContainEqual({
-      attacker: "FIRE",
-      defender: "GRASS",
-      multiplier: { numerator: 2, denominator: 1 },
+    expect(table.matchups.FIRE.GRASS).toEqual({ numerator: 2, denominator: 1 });
+    expect(table.matchups.ELECTRIC.GROUND).toEqual({
+      numerator: 0,
+      denominator: 1,
     });
-    expect(table.matchups).toContainEqual({
-      attacker: "ELECTRIC",
-      defender: "GROUND",
-      multiplier: { numerator: 0, denominator: 1 },
+    expect(table.matchups.NORMAL.NORMAL).toEqual({
+      numerator: 1,
+      denominator: 1,
     });
-    expect(table.matchups).toContainEqual({
-      attacker: "NORMAL",
-      defender: "NORMAL",
-      multiplier: { numerator: 1, denominator: 1 },
+    expect(table.foresight_matchups).toEqual({
+      NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
+      FIGHTING: { GHOST: { numerator: 0, denominator: 1 } },
     });
-    expect(table.foresight_matchups).toEqual([
-      { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
-      { attacker: "FIGHTING", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
-    ]);
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "type_effectiveness.json"), "utf8"))).toEqual(table);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "type_effectiveness.json"), "utf8"),
+      ),
+    ).toEqual(table);
+  });
+
+  it("rejects duplicate normal type effectiveness rows before pack emission", () => {
+    writeTypeConstantsFixture();
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "types", "type_matchups.asm"),
+      [
+        "TypeMatchups:",
+        "\tdb FIRE,         GRASS,        SUPER_EFFECTIVE",
+        "\tdb FIRE,         GRASS,        NOT_VERY_EFFECTIVE",
+        "\tdb -2 ; end (with Foresight)",
+        "\tdb NORMAL,       GHOST,        NO_EFFECT",
+        "\tdb -1 ; end",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportTypeEffectivenessTable()).toThrow(
+      "Duplicate normal type effectiveness matchup 'FIRE/GRASS'.",
+    );
+  });
+
+  it("rejects duplicate Foresight type effectiveness rows before pack emission", () => {
+    writeTypeConstantsFixture();
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "types", "type_matchups.asm"),
+      [
+        "TypeMatchups:",
+        "\tdb FIRE,         GRASS,        SUPER_EFFECTIVE",
+        "\tdb -2 ; end (with Foresight)",
+        "\tdb NORMAL,       GHOST,        NO_EFFECT",
+        "\tdb NORMAL,       GHOST,        NOT_VERY_EFFECTIVE",
+        "\tdb -1 ; end",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportTypeEffectivenessTable()).toThrow(
+      "Duplicate foresight type effectiveness matchup 'NORMAL/GHOST'.",
+    );
+  });
+
+  it("rejects type effectiveness rows with unknown attacker types before pack emission", () => {
+    writeTypeConstantsFixture();
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "types", "type_matchups.asm"),
+      [
+        "TypeMatchups:",
+        "\tdb UNKNOWN_TYPE,  GRASS,        SUPER_EFFECTIVE",
+        "\tdb -2 ; end (with Foresight)",
+        "\tdb NORMAL,        GHOST,        NO_EFFECT",
+        "\tdb -1 ; end",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportTypeEffectivenessTable()).toThrow(
+      "Type effectiveness matchup references unknown attacker type 'UNKNOWN_TYPE'.",
+    );
+  });
+
+  it("rejects type effectiveness rows with unknown defender types before pack emission", () => {
+    writeTypeConstantsFixture();
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "types", "type_matchups.asm"),
+      [
+        "TypeMatchups:",
+        "\tdb FIRE,          UNKNOWN_TYPE, SUPER_EFFECTIVE",
+        "\tdb -2 ; end (with Foresight)",
+        "\tdb NORMAL,        GHOST,        NO_EFFECT",
+        "\tdb -1 ; end",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportTypeEffectivenessTable()).toThrow(
+      "Type effectiveness matchup references unknown defender type 'UNKNOWN_TYPE'.",
+    );
   });
 
   it("exports physical and special type categories from exact ASM constants", () => {
@@ -1037,7 +2526,7 @@ describe("exportRuntimeAssets", () => {
         "\tconst PSYCHIC_TYPE",
         "DEF TYPES_END EQU const_value",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
 
     const categories = exportTypeCategories();
@@ -1047,11 +2536,39 @@ describe("exportRuntimeAssets", () => {
       special: ["FIRE", "WATER", "PSYCHIC_TYPE"],
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "type_categories.json"), "utf8"))).toEqual(categories);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "type_categories.json"), "utf8"),
+      ),
+    ).toEqual(categories);
+  });
+
+  it("rejects duplicate type category constants before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "type_constants.asm"),
+      [
+        "\tconst_def",
+        "DEF PHYSICAL EQU const_value",
+        "\tconst NORMAL",
+        "\tconst FIRE",
+        "DEF UNUSED_TYPES EQU const_value",
+        "DEF SPECIAL EQU const_value",
+        "\tconst FIRE",
+        "DEF TYPES_END EQU const_value",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportTypeCategories()).toThrow(
+      "Duplicate type category constant 'FIRE'.",
+    );
   });
 
   it("exports move priority table from exact ASM rows and Vital Throw rule", () => {
-    writeFile(path.join(mockDisassemblyRoot, "constants", "battle_constants.asm"), "DEF BASE_PRIORITY EQU 1\n");
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_constants.asm"),
+      "DEF BASE_PRIORITY EQU 1\n",
+    );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "moves", "effects_priorities.asm"),
       [
@@ -1061,11 +2578,13 @@ describe("exportRuntimeAssets", () => {
         "\tdb EFFECT_FORCE_SWITCH, 0",
         "\tdb -1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "engine", "battle", "core.asm"),
-      ["GetMovePriority:", "\tcp VITAL_THROW", "\tld a, 0", "\tret z", ""].join("\n")
+      ["GetMovePriority:", "\tcp VITAL_THROW", "\tld a, 0", "\tret z", ""].join(
+        "\n",
+      ),
     );
 
     const priorities = exportMovePriorityTable({
@@ -1076,60 +2595,438 @@ describe("exportRuntimeAssets", () => {
 
     expect(priorities).toEqual({
       base_priority: 1,
-      effect_priorities: [
-        { move_effect: "FORCE_SWITCH", priority: 0 },
-        { move_effect: "NORMAL_HIT", priority: 1 },
-        { move_effect: "PRIORITY_HIT", priority: 2 },
-      ],
+      effect_priorities: {
+        FORCE_SWITCH: 0,
+        NORMAL_HIT: 1,
+        PRIORITY_HIT: 2,
+      },
       move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
     });
     const dataDir = path.join(mockAssetsRoot, "data");
-    expect(JSON.parse(fs.readFileSync(path.join(dataDir, "move_priorities.json"), "utf8"))).toEqual(priorities);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(dataDir, "move_priorities.json"), "utf8"),
+      ),
+    ).toEqual(priorities);
+  });
+
+  it("rejects duplicate move effect priority rows before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_constants.asm"),
+      "DEF BASE_PRIORITY EQU 1\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "moves", "effects_priorities.asm"),
+      [
+        "MoveEffectPriorities:",
+        "\tdb EFFECT_PRIORITY_HIT, 2",
+        "\tdb EFFECT_PRIORITY_HIT, 3",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "battle", "core.asm"),
+      ["GetMovePriority:", "\tcp VITAL_THROW", "\tld a, 0", "\tret z", ""].join(
+        "\n",
+      ),
+    );
+
+    expect(() => exportMovePriorityTable({} as any)).toThrow(
+      "Duplicate move effect priority 'PRIORITY_HIT'.",
+    );
+  });
+
+  it("rejects BASE_PRIORITY values outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_constants.asm"),
+      "DEF BASE_PRIORITY EQU 256\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "moves", "effects_priorities.asm"),
+      [
+        "MoveEffectPriorities:",
+        "\tdb EFFECT_PRIORITY_HIT, 2",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "battle", "core.asm"),
+      ["GetMovePriority:", "\tcp VITAL_THROW", "\tld a, 0", "\tret z", ""].join(
+        "\n",
+      ),
+    );
+
+    expect(() => exportMovePriorityTable({} as any)).toThrow(
+      "BASE_PRIORITY 256 is outside byte range.",
+    );
+  });
+
+  it("rejects move effect priority values outside byte range before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "battle_constants.asm"),
+      "DEF BASE_PRIORITY EQU 1\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "moves", "effects_priorities.asm"),
+      [
+        "MoveEffectPriorities:",
+        "\tdb EFFECT_PRIORITY_HIT, 256",
+        "\tdb -1",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "battle", "core.asm"),
+      ["GetMovePriority:", "\tcp VITAL_THROW", "\tld a, 0", "\tret z", ""].join(
+        "\n",
+      ),
+    );
+
+    expect(() => exportMovePriorityTable({} as any)).toThrow(
+      "Move effect priority 'EFFECT_PRIORITY_HIT' value 256 is outside byte range.",
+    );
   });
 
   it("requires exact lowercase frontpic animation opcodes without case coercion", () => {
-    writeFile(path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"), ["\tFRAME 1, 07", "\tendanim", ""].join("\n"));
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tFRAME 1, 07", "\tendanim", ""].join("\n"),
+    );
 
-    expect(() => exportRuntimeAssets()).toThrow("Unknown frontpic animation opcode 'FRAME'");
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Unknown frontpic animation opcode 'FRAME'",
+    );
   });
 
   it("rejects malformed frontpic animation rows instead of skipping them", () => {
-    writeFile(path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"), ["\tframe 1", "\tendanim", ""].join("\n"));
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe 1", "\tendanim", ""].join("\n"),
+    );
 
-    expect(() => exportRuntimeAssets()).toThrow("Malformed frontpic animation frame row");
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Malformed frontpic animation frame row",
+    );
+  });
+
+  it("rejects frontpic animation numeric operands outside byte range", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe 256, 05", "\tendanim", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation numeric operand '256' is outside byte range",
+    );
+  });
+
+  it("rejects negative frontpic animation numeric operands", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe -1, 05", "\tendanim", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation numeric operand '-1' is outside byte range",
+    );
+  });
+
+  it("rejects frontpic dorepeat commands without setrepeat", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe 0, 05", "\tdorepeat 0", "\tendanim", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation dorepeat requires setrepeat.",
+    );
+  });
+
+  it("rejects frontpic dorepeat targets that are not earlier commands", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tsetrepeat 2", "\tdorepeat 2", "\tendanim", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation dorepeat target 2 does not reference an earlier command.",
+    );
+  });
+
+  it("rejects frontpic setrepeat commands without dorepeat", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tsetrepeat 2", "\tframe 0, 05", "\tendanim", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation setrepeat is missing dorepeat.",
+    );
+  });
+
+  it("rejects zero frontpic setrepeat counts", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tsetrepeat 0", "\tframe 0, 05", "\tdorepeat 0", "\tendanim", ""].join(
+        "\n",
+      ),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation setrepeat count must be nonzero.",
+    );
+  });
+
+  it("rejects frontpic animation programs without endanim", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe 0, 05", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation program is missing endanim.",
+    );
+  });
+
+  it("rejects frontpic animation commands after endanim", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "gfx", "pokemon", "chikorita", "anim.asm"),
+      ["\tframe 0, 05", "\tendanim", "\tframe 1, 05", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Frontpic animation program has commands after endanim.",
+    );
   });
 
   it("rejects unknown Pokedex entry file stems instead of normalizing them", () => {
     writeFile(
-      path.join(mockDisassemblyRoot, "data", "pokemon", "dex_entries", "mr-mime.asm"),
-      ['\tdb "BARRIER@"', "\tdw 403, 1200 ; height, weight", '\tdb "It mimics@"', ""].join("\n")
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "mr-mime.asm",
+      ),
+      [
+        '\tdb "BARRIER@"',
+        "\tdw 403, 1200 ; height, weight",
+        '\tdb "It mimics@"',
+        "",
+      ].join("\n"),
     );
 
-    expect(() => exportRuntimeAssets()).toThrow("Unknown or case-changed runtime species file stem 'mr-mime'");
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Unknown or case-changed runtime species file stem 'mr-mime'",
+    );
+  });
+
+  it("rejects Pokedex entries without text pages before pack emission", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      ['\tdb "LEAF@"', "\tdw 209, 140 ; height, weight", ""].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow("Pokedex entry for CHIKORITA");
+    expect(() => exportRuntimeAssets()).toThrow(
+      "must declare nonempty text pages",
+    );
+  });
+
+  it("rejects Pokedex entries with empty pages before page breaks", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      [
+        '\tdb "LEAF@"',
+        "\tdw 209, 140 ; height, weight",
+        '\tpage "Second page.@"',
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "has an empty text page before page break",
+    );
+  });
+
+  it("rejects malformed Pokedex text rows before pack emission", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      [
+        '\tdb "LEAF@"',
+        "\tdw 209, 140 ; height, weight",
+        '\tbadtext "Leafy.@"',
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Malformed Pokedex entry text row for CHIKORITA",
+    );
+  });
+
+  it("rejects Pokedex entries with empty classifications before pack emission", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      ['\tdb "@"', "\tdw 209, 140 ; height, weight", '\tdb "Leafy.@"', ""].join(
+        "\n",
+      ),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "must declare a nonempty classification",
+    );
+  });
+
+  it("rejects Pokedex entries with height digits outside display range", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      [
+        '\tdb "LEAF@"',
+        "\tdw 1000, 140 ; height, weight",
+        '\tdb "Leafy.@"',
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "has size digits outside supported display range",
+    );
+  });
+
+  it("rejects Pokedex entries with weight digits outside display range", () => {
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "data",
+        "pokemon",
+        "dex_entries",
+        "chikorita.asm",
+      ),
+      [
+        '\tdb "LEAF@"',
+        "\tdw 209, 10000 ; height, weight",
+        '\tdb "Leafy.@"',
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "has size digits outside supported display range",
+    );
+  });
+
+  it("rejects duplicate Pokemon species constants before runtime species maps are built", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "pokemon_constants.asm"),
+      [
+        "\tconst_def 1",
+        "\tconst CHIKORITA",
+        "\tconst CHIKORITA",
+        "\tconst EGG",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Duplicate Pokemon species constant 'CHIKORITA'.",
+    );
   });
 
   it("rejects unknown frontpic animation directories instead of normalizing them", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "gfx", "pokemon", "mr-mime", "anim.asm"),
-      ["\tframe 0, 05", "\tendanim", ""].join("\n")
+      ["\tframe 0, 05", "\tendanim", ""].join("\n"),
     );
 
-    expect(() => exportRuntimeAssets()).toThrow("Unknown or case-changed runtime species file stem 'mr-mime'");
+    expect(() => exportRuntimeAssets()).toThrow(
+      "Unknown or case-changed runtime species file stem 'mr-mime'",
+    );
   });
 
   it("requires permanent phone numbers to resolve to exact declared contacts or trainer labels", () => {
-    writeFile(path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"), "\tdb PHONECONTACT_ELM\n\tdb -1\n");
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"),
+      "\tdb PHONECONTACT_ELM\n\tdb -1\n",
+    );
 
     expect(() => exportPermanentPhoneNumbers()).toThrow(
-      "Permanent phone number 'PHONECONTACT_ELM' does not match a declared phone contact id or trainer label"
+      "Permanent phone number 'PHONECONTACT_ELM' does not match a declared phone contact id or trainer label",
+    );
+  });
+
+  it("rejects duplicate phone contact constants before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "phone_constants.asm"),
+      [
+        "\tconst PHONE_00",
+        "\tconst PHONE_MOM",
+        "\tconst PHONE_MOM",
+        "\tDEF NUM_PHONE_CONTACTS EQU const_value",
+        "; SpecialPhoneCallList indexes (see data/phone/special_calls.asm)",
+        "\tconst_def",
+        "\tconst SPECIALCALL_NONE",
+        "\tDEF NUM_SPECIALCALLS EQU const_value - 1",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => exportPhoneContacts()).toThrow(
+      "Phone contact constant 'PHONE_MOM' is declared more than once.",
+    );
+  });
+
+  it("rejects duplicate non-trainer phone labels before pack emission", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "non_trainer_names.asm"),
+      ['.mom: db "MOM:@"', '.mom: db "MOTHER:@"', ""].join("\n"),
+    );
+
+    expect(() => exportPhoneContacts()).toThrow(
+      "Duplicate non-trainer phone label 'PHONECONTACT_MOM'.",
     );
   });
 
   it("rejects lowercase hex phone sentinels instead of coercing them", () => {
-    writeFile(path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"), "\tdb $ff\n");
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "permanent_numbers.asm"),
+      "\tdb $ff\n",
+    );
 
     expect(() => exportPermanentPhoneNumbers()).toThrow(
-      "Permanent phone number '$ff' does not match a declared phone contact id or trainer label"
+      "Permanent phone number '$ff' does not match a declared phone contact id or trainer label",
     );
   });
 
@@ -1146,7 +3043,7 @@ describe("exportRuntimeAssets", () => {
         "\tconst SPECIALCALL_NONE",
         "\tDEF NUM_SPECIALCALLS EQU const_value - 1",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "phone", "phone_contacts.asm"),
@@ -1155,13 +3052,59 @@ describe("exportRuntimeAssets", () => {
         "\tphone TRAINER_NONE, PHONECONTACT_MOM, PLAYERS_HOUSE_1F, ANYTIME, MomPhoneCalleeScript, 0, 0",
         "\tphone YOUNGSTER, JOEY1, ROUTE_30, ANYTIME, JoeyPhoneCalleeScript, ANYTIME, JoeyPhoneCallerScript",
         "",
-      ].join("\n")
+      ].join("\n"),
     );
-    writeFile(path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"), ["trainerclass TRAINER_NONE", "trainerclass YOUNGSTER", ""].join("\n"));
-    writeFile(path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"), "");
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      ["trainerclass TRAINER_NONE", "trainerclass YOUNGSTER", ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      "",
+    );
 
     expect(() => exportRuntimeAssets()).toThrow(
-      "Phone contact PHONE_JOEY references trainer class 'YOUNGSTER' without an exported class name"
+      "Trainer class id count 1 does not match class name count 0.",
+    );
+  });
+
+  it("rejects duplicate trainer class ids before phone contact export", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      [
+        "trainerclass TRAINER_NONE",
+        "trainerclass YOUNGSTER",
+        "trainerclass YOUNGSTER",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      ['\tli "YOUNGSTER@"', '\tli "YOUNGSTER@"', ""].join("\n"),
+    );
+
+    expect(() => exportPhoneContacts()).toThrow(
+      "Duplicate trainer class id 'YOUNGSTER'.",
+    );
+  });
+
+  it("rejects mismatched trainer class id and name counts before phone contact export", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      [
+        "trainerclass TRAINER_NONE",
+        "trainerclass YOUNGSTER",
+        "trainerclass BUG_CATCHER",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      ['\tli "YOUNGSTER@"', ""].join("\n"),
+    );
+
+    expect(() => exportPhoneContacts()).toThrow(
+      "Trainer class id count 2 does not match class name count 1.",
     );
   });
 });
@@ -1173,7 +3116,11 @@ describe("timeTokenToMask", () => {
     expect(timeTokenToMask("0")).toBe(0);
     expect(timeTokenToMask("8")).toBe(8);
 
-    expect(() => timeTokenToMask("anytime")).toThrow("Unknown phone time mask token 'anytime'");
-    expect(() => timeTokenToMask("MORN|late")).toThrow("Unknown phone time mask token 'late' in 'MORN|late'");
+    expect(() => timeTokenToMask("anytime")).toThrow(
+      "Unknown phone time mask token 'anytime'",
+    );
+    expect(() => timeTokenToMask("MORN|late")).toThrow(
+      "Unknown phone time mask token 'late' in 'MORN|late'",
+    );
   });
 });

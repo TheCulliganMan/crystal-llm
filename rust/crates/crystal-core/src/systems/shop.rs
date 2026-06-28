@@ -37,8 +37,32 @@ pub struct ScriptShopCommand {
     pub command_index: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct MartCatalog(pub BTreeMap<String, Vec<String>>);
+
+impl<'de> Deserialize<'de> for MartCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+        for (mart_id, item_ids) in &values {
+            if !is_exact_shop_token(mart_id) {
+                return Err(serde::de::Error::custom(format!(
+                    "mart id must be exact ASCII alphanumeric/underscore, found {mart_id:?}"
+                )));
+            }
+            for item_id in item_ids {
+                if !is_exact_shop_token(item_id) {
+                    return Err(serde::de::Error::custom(format!(
+                        "mart item id must be exact ASCII alphanumeric/underscore, found {item_id:?}"
+                    )));
+                }
+            }
+        }
+        Ok(Self(values))
+    }
+}
 
 impl MartCatalog {
     pub fn inventory_ids(&self, mart_id: &str) -> Result<&[String], ShopError> {
@@ -117,7 +141,8 @@ pub struct ScriptShopOutcome {
     pub command_index: usize,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ShopError {
     #[error("mart '{mart_id}' was not loaded")]
     UnknownMart { mart_id: String },
@@ -125,6 +150,10 @@ pub enum ShopError {
     UnknownMartItem { mart_id: String, item_id: String },
     #[error("item '{item_id}' was not loaded")]
     UnknownItem { item_id: String },
+    #[error("cannot buy item without an active script shop")]
+    MissingActiveScriptShop,
+    #[error("active script shop {mart_id} does not sell exact item id {item_id}")]
+    ItemNotSoldByActiveScriptShop { mart_id: String, item_id: String },
     #[error("invalid item id '{item_id}'")]
     InvalidItemId { item_id: String },
     #[error("quantity must be positive")]
@@ -151,7 +180,8 @@ pub enum ShopError {
     UnsupportedPocket { pocket: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScriptShopCommandIssue {
     pub source_script: String,
     pub command_index: usize,
@@ -279,15 +309,22 @@ fn validate_script_shop_command_token(command: &str) -> Result<(), ShopError> {
 fn is_exact_script_shop_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
 fn is_exact_shop_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 fn validate_zero_mart(mart_type: &str) -> Result<(), ShopError> {
@@ -334,6 +371,23 @@ pub fn build_buy_menu(
         price: 0,
     });
     Ok(inventory)
+}
+
+pub fn require_active_shop_item(state: &GameState, item_id: &str) -> Result<(), ShopError> {
+    validate_shop_item_id(item_id)?;
+    let shop = state
+        .script_runtime
+        .pending_shop
+        .as_ref()
+        .ok_or(ShopError::MissingActiveScriptShop)?;
+    if shop.inventory.iter().any(|id| id == item_id) {
+        Ok(())
+    } else {
+        Err(ShopError::ItemNotSoldByActiveScriptShop {
+            mart_id: shop.mart_id.clone(),
+            item_id: item_id.to_string(),
+        })
+    }
 }
 
 pub fn max_buy_quantity(state: &GameState, item: &Item) -> u16 {
@@ -489,7 +543,7 @@ pub fn paginate_selection(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectionDirection {
     Up,
     Down,
@@ -602,6 +656,40 @@ mod tests {
     }
 
     #[test]
+    fn shop_issue_json_rejects_unknown_fallback_fields() {
+        let issue_error = serde_json::from_value::<ScriptShopCommandIssue>(serde_json::json!({
+            "source_script": "ShopScript",
+            "command_index": 11,
+            "error": {
+                "UnknownMartItem": {
+                    "mart_id": "MART_CHERRYGROVE",
+                    "item_id": "MOD_BALL",
+                    "fallback_item_id": "POKE_BALL"
+                }
+            }
+        }))
+        .expect_err("shop command issues must not accept fallback inventory items")
+        .to_string();
+        assert!(
+            issue_error.contains("unknown field `fallback_item_id`"),
+            "{issue_error}"
+        );
+
+        let error_error = serde_json::from_value::<ShopError>(serde_json::json!({
+            "UnknownMart": {
+                "mart_id": "MART_UNKNOWN",
+                "legacy_mart_id": "MART_CHERRYGROVE"
+            }
+        }))
+        .expect_err("shop errors must not accept legacy mart ids")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `legacy_mart_id`"),
+            "{error_error}"
+        );
+    }
+
+    #[test]
     fn mart_catalog_issues_reject_empty_ids_invalid_items_and_unknown_exact_items() {
         let catalog = MartCatalog(
             [
@@ -643,6 +731,85 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shop_tokens_reject_reserved_pack_prefixes() {
+        let catalog = MartCatalog(
+            [(
+                "fallback_mart".to_string(),
+                vec!["legacy_potion".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            mart_catalog_issues(&catalog, &items()),
+            vec![
+                MartCatalogIssue::InvalidMartId {
+                    mart_id: "fallback_mart".to_string(),
+                },
+                MartCatalogIssue::InvalidItem {
+                    mart_id: "fallback_mart".to_string(),
+                    item_id: "legacy_potion".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            script_shop_command_issues(
+                &MartCatalog::default(),
+                &[
+                    shop_command_with_command(
+                        "fallbackshop",
+                        "MARTTYPE_STANDARD",
+                        "CHERRYGROVE_MART",
+                    ),
+                    shop_command("legacy_marttype", "CHERRYGROVE_MART"),
+                    shop_command("MARTTYPE_STANDARD", "fallback_mart"),
+                ],
+            )
+            .into_iter()
+            .map(|issue| issue.error)
+            .collect::<Vec<_>>(),
+            vec![
+                ShopError::InvalidCommand {
+                    command: "fallbackshop".to_string(),
+                },
+                ShopError::InvalidMartType {
+                    mart_type: "legacy_marttype".to_string(),
+                },
+                ShopError::InvalidMartId {
+                    mart_id: "fallback_mart".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mart_catalog_json_rejects_wrapper_fallback_objects() {
+        let error = serde_json::from_str::<MartCatalog>(
+            r#"{"marts":{"CHERRYGROVE_MART":["POTION"]},"fallback_mart":"DEFAULT_MART"}"#,
+        )
+        .expect_err("mart catalogs must be the compiler-emitted mart map")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("invalid value"),
+            "{error}"
+        );
+
+        for (label, payload) in [
+            ("mart id", r#"{"CHERRYGROVE MART":["POTION"]}"#),
+            ("item id", r#"{"CHERRYGROVE_MART":["RARE CANDY"]}"#),
+        ] {
+            let error = serde_json::from_str::<MartCatalog>(payload)
+                .expect_err("malformed mart catalog tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("mart") && error.contains("exact ASCII alphanumeric/underscore"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1162,5 +1329,17 @@ mod tests {
             (4, 1)
         );
         assert_eq!(paginate_selection(1, 2, 8, SelectionDirection::Up), (0, 0));
+    }
+
+    #[test]
+    fn selection_direction_json_rejects_legacy_alias_payloads() {
+        let error =
+            serde_json::from_str::<SelectionDirection>(r#"{"down":{"legacy_direction":"next"}}"#)
+                .expect_err("selection directions must not accept object-shaped aliases")
+                .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown field `legacy_direction`"),
+            "{error}"
+        );
     }
 }

@@ -29,6 +29,7 @@ pub struct ScriptBlockChangeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptBlockError {
     OutOfBounds {
         map_name: String,
@@ -230,6 +231,26 @@ mod tests {
             script_block_change_issues(&changes, 3, 2, 0)
                 .iter()
                 .all(|issue| matches!(issue, ScriptBlockChangeIssue::OutOfBounds { .. }))
+        );
+    }
+
+    #[test]
+    fn script_block_error_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<ScriptBlockError>(serde_json::json!({
+            "OutOfBounds": {
+                "map_name": "RUINS_OF_ALPH",
+                "x": 6,
+                "y": 0,
+                "width": 3,
+                "height": 2,
+                "fallback_block_id": 0
+            }
+        }))
+        .expect_err("script block errors must not accept fallback block ids")
+        .to_string();
+        assert!(
+            error.contains("unknown field `fallback_block_id`"),
+            "{error}"
         );
     }
 }

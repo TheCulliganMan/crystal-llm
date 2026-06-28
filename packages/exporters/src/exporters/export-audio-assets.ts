@@ -6,9 +6,7 @@ export type ExportedAudioAsset = {
   id: string;
   path: string;
   kind: "music" | "sound_effect" | "cry";
-  source: "midi" | "pcm";
-  sample_rate_hz: number | null;
-  channels: number | null;
+  source: "midi";
 };
 
 const CORE_AUDIO_ROOT = "content-packs/core-modular";
@@ -127,7 +125,7 @@ function parseExactInteger(value: string, speciesId: string): number {
 export function exportAudioAssets(
   pokemonCries: Record<string, ExportedPokemonCryMetadata>,
   disassemblyRoot = getDisassemblyRoot()
-): ExportedAudioAsset[] {
+): Record<string, ExportedAudioAsset> {
   const musicLabelStems = exportMusicLabelStemsFromAsm(disassemblyRoot);
   const music = exportIndexedAudioPointers(
     disassemblyRoot,
@@ -145,8 +143,6 @@ export function exportAudioAssets(
         path: `${CORE_AUDIO_ROOT}/music/${id}.mid`,
         kind: "music" as const,
         source: "midi" as const,
-        sample_rate_hz: null,
-        channels: null,
       };
     });
 
@@ -164,8 +160,6 @@ export function exportAudioAssets(
       path: `${CORE_AUDIO_ROOT}/sfx/${id}.mid`,
       kind: "sound_effect" as const,
       source: "midi" as const,
-      sample_rate_hz: null,
-      channels: null,
     };
   });
 
@@ -177,9 +171,14 @@ export function exportAudioAssets(
     path: `${CORE_AUDIO_ROOT}/cries/${label}.mid`,
     kind: "cry" as const,
     source: "midi" as const,
-    sample_rate_hz: null,
-    channels: null,
   }));
 
-  return [...music, ...sfx, ...cries];
+  const assets: Record<string, ExportedAudioAsset> = {};
+  for (const asset of [...music, ...sfx, ...cries]) {
+    if (Object.prototype.hasOwnProperty.call(assets, asset.id)) {
+      throw new Error(`duplicate audio asset id ${asset.id}`);
+    }
+    assets[asset.id] = asset;
+  }
+  return assets;
 }

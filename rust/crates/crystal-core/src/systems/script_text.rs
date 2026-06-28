@@ -9,8 +9,11 @@ use crate::state::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextCommand {
+    #[serde(deserialize_with = "required_script_text_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_label_token")]
     pub text_label: Option<String>,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -18,6 +21,7 @@ pub struct ScriptTextCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextBody {
+    #[serde(deserialize_with = "required_script_label_token")]
     pub label: String,
     pub commands: Vec<ScriptTextBodyCommand>,
 }
@@ -25,6 +29,7 @@ pub struct ScriptTextBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextBodyCommand {
+    #[serde(deserialize_with = "required_script_text_command_token")]
     pub command: String,
     pub args: Vec<String>,
     pub command_index: usize,
@@ -33,6 +38,7 @@ pub struct ScriptTextBodyCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMenuDefinition {
+    #[serde(deserialize_with = "required_script_label_token")]
     pub label: String,
     pub commands: Vec<ScriptMenuCommand>,
 }
@@ -40,6 +46,7 @@ pub struct ScriptMenuDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMenuCommand {
+    #[serde(deserialize_with = "required_script_text_command_token")]
     pub command: String,
     pub args: Vec<String>,
     pub command_index: usize,
@@ -109,7 +116,7 @@ pub fn asm_text_catalog_issues(asm_text: &BTreeMap<String, String>) -> Vec<AsmTe
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptTextAction {
     Open {
         source_script: String,
@@ -139,6 +146,7 @@ pub enum ScriptTextAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptTextCommandError {
     #[error("script text command '{command}' is not exact pack syntax")]
     InvalidCommand { command: String },
@@ -545,12 +553,61 @@ fn is_exact_nonempty_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_text_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_text_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_text_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script text command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_label(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script text label must be exact ASCII label syntax, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_label_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_nonempty_label(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script text label must be exact ASCII label syntax, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -595,6 +652,43 @@ mod tests {
             BTreeSet::from([1, 3])
         );
         assert!(!menu_definition_command_arg_counts().contains_key("verticalmenu"));
+    }
+
+    #[test]
+    fn script_text_serialized_variants_reject_unknown_fallback_fields() {
+        let action_error = serde_json::from_value::<ScriptTextAction>(serde_json::json!({
+            "write": {
+                "command": "writetext",
+                "text_label": "GreetingText",
+                "face_player": false,
+                "closes_text": false,
+                "source_script": "TextScript",
+                "command_index": 3,
+                "fallback_text_label": "DefaultText"
+            }
+        }))
+        .expect_err("text actions must not accept fallback text labels");
+        assert!(
+            action_error
+                .to_string()
+                .contains("unknown field `fallback_text_label`"),
+            "{action_error}"
+        );
+
+        let command_error = serde_json::from_value::<ScriptTextCommandError>(serde_json::json!({
+            "UnknownTextLabel": {
+                "command": "writetext",
+                "text_label": "GreetingText",
+                "legacy_text_label": "GREETING_TEXT"
+            }
+        }))
+        .expect_err("text command errors must not accept legacy text labels");
+        assert!(
+            command_error
+                .to_string()
+                .contains("unknown field `legacy_text_label`"),
+            "{command_error}"
+        );
     }
 
     #[test]
@@ -661,6 +755,46 @@ mod tests {
                 command: "jump text".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn script_text_commands_reject_reserved_pack_prefixes() {
+        assert_eq!(
+            script_text_command_issues(&command("fallbacktext", Some("GreetingText")), &labels()),
+            vec![ScriptTextCommandError::InvalidCommand {
+                command: "fallbacktext".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_text_command_issues(&command("writetext", Some("legacy_text")), &labels()),
+            vec![ScriptTextCommandError::InvalidTextLabel {
+                command: "writetext".to_string(),
+                text_label: "legacy_text".to_string(),
+            }]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbacktext")),
+            ("text_label", serde_json::json!("legacy_text")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "writetext",
+                "text_label": "GreetingText",
+                "source_script": ".branch@TextScript",
+                "command_index": 3
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptTextCommand>(payload)
+                .expect_err("reserved script text command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script text"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -862,6 +996,65 @@ mod tests {
         .expect_err("missing menu command args must not default to empty")
         .to_string();
         assert!(error.contains("missing field `args`"), "{error}");
+    }
+
+    #[test]
+    fn script_text_body_and_menu_json_reject_reserved_pack_prefixes() {
+        for (field, value) in [
+            ("label", serde_json::json!("fallback_text")),
+            ("command", serde_json::json!("legacytext")),
+        ] {
+            let mut payload = serde_json::json!({
+                "label": "GreetingText",
+                "commands": [{
+                    "command": "text",
+                    "args": ["Hello there!"],
+                    "command_index": 0
+                }]
+            });
+            if field == "command" {
+                payload["commands"][0]["command"] = value;
+            } else {
+                payload[field] = value;
+            }
+
+            let error = serde_json::from_value::<ScriptTextBody>(payload)
+                .expect_err("reserved script text body tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script text"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("label", serde_json::json!("legacy_menu")),
+            ("command", serde_json::json!("fallbackdb")),
+        ] {
+            let mut payload = serde_json::json!({
+                "label": "ChoiceMenu",
+                "commands": [{
+                    "command": "db",
+                    "args": ["MENU_BACKUP_TILES"],
+                    "command_index": 0
+                }]
+            });
+            if field == "command" {
+                payload["commands"][0]["command"] = value;
+            } else {
+                payload[field] = value;
+            }
+
+            let error = serde_json::from_value::<ScriptMenuDefinition>(payload)
+                .expect_err("reserved script menu tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script text"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

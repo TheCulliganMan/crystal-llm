@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::battle::turn::BattleAction;
-use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
+use crate::input::{
+    B_PAD_A, B_PAD_B, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_SELECT, B_PAD_START, B_PAD_UP,
+};
 use crate::models::{PARTY_SIZE, Party, Pokemon};
-use crate::save::SaveModpackIdentity;
-use crate::state::GameState;
+use crate::save::{SaveModpackIdentity, validate_pack_content_hash};
+use crate::state::{GameCommand, GameEvent, GameState, GameStateFrameError};
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
 
@@ -16,6 +18,11 @@ pub type SessionId = String;
 pub const LINK_PROTOCOL_VERSION: u16 = 1;
 pub const LINK_PREAMBLE_BYTE: u8 = 0x00;
 pub const LINK_PREAMBLE_RESPONSE: u8 = 0x61;
+const LINK_MESSAGE_MAGIC: &[u8; 12] = b"CRYSTALLINK\0";
+const LINK_MESSAGE_VERSION_OFFSET: usize = LINK_MESSAGE_MAGIC.len();
+const LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET: usize = LINK_MESSAGE_VERSION_OFFSET + 2;
+const LINK_MESSAGE_PAYLOAD_HASH_OFFSET: usize = LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET + 4;
+const LINK_MESSAGE_HEADER_LEN: usize = LINK_MESSAGE_PAYLOAD_HASH_OFFSET + 4;
 const BATTLE_MOVE_SLOTS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,22 +81,31 @@ pub struct LinkSessionIdentity {
     protocol_version: u16,
     session_id: SessionId,
     modpack: SaveModpackIdentity,
+    pack_content_hash: String,
 }
 
 impl LinkSessionIdentity {
     pub fn new(
         session_id: impl Into<String>,
         modpack: SaveModpackIdentity,
+        pack_content_hash: impl Into<String>,
     ) -> Result<Self, LinkHandshakeError> {
         modpack
             .validate()
             .map_err(|error| LinkHandshakeError::InvalidModpackIdentity {
                 message: error.to_string(),
             })?;
+        let pack_content_hash = pack_content_hash.into();
+        validate_pack_content_hash(&pack_content_hash).map_err(|error| {
+            LinkHandshakeError::InvalidModpackIdentity {
+                message: error.to_string(),
+            }
+        })?;
         let session = Self {
             protocol_version: LINK_PROTOCOL_VERSION,
             session_id: session_id.into(),
             modpack,
+            pack_content_hash,
         };
         session.validate()?;
         Ok(session)
@@ -109,6 +125,11 @@ impl LinkSessionIdentity {
                 session_id: self.session_id.clone(),
             });
         }
+        if has_reserved_session_id_prefix(&self.session_id) {
+            return Err(LinkHandshakeError::ReservedSessionId {
+                session_id: self.session_id.clone(),
+            });
+        }
         if self.protocol_version != LINK_PROTOCOL_VERSION {
             return Err(LinkHandshakeError::ProtocolVersionMismatch {
                 expected: LINK_PROTOCOL_VERSION,
@@ -119,7 +140,12 @@ impl LinkSessionIdentity {
             .validate()
             .map_err(|error| LinkHandshakeError::InvalidModpackIdentity {
                 message: error.to_string(),
-            })
+            })?;
+        validate_pack_content_hash(&self.pack_content_hash).map_err(|error| {
+            LinkHandshakeError::InvalidModpackIdentity {
+                message: error.to_string(),
+            }
+        })
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -127,11 +153,13 @@ impl LinkSessionIdentity {
         protocol_version: u16,
         session_id: impl Into<String>,
         modpack: SaveModpackIdentity,
+        pack_content_hash: impl Into<String>,
     ) -> Self {
         Self {
             protocol_version,
             session_id: session_id.into(),
             modpack,
+            pack_content_hash: pack_content_hash.into(),
         }
     }
 
@@ -146,6 +174,10 @@ impl LinkSessionIdentity {
     pub fn modpack(&self) -> &SaveModpackIdentity {
         &self.modpack
     }
+
+    pub fn pack_content_hash(&self) -> &str {
+        &self.pack_content_hash
+    }
 }
 
 fn is_exact_session_id(value: &str) -> bool {
@@ -154,6 +186,11 @@ fn is_exact_session_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn has_reserved_session_id_prefix(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    lowered.starts_with("fallback") || lowered.starts_with("legacy")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,10 +204,11 @@ impl LinkHello {
     pub fn new(
         session_id: impl Into<String>,
         modpack: SaveModpackIdentity,
+        pack_content_hash: impl Into<String>,
         player: PlayerIdentity,
     ) -> Result<Self, LinkHandshakeError> {
         let hello = Self {
-            session: LinkSessionIdentity::new(session_id, modpack)?,
+            session: LinkSessionIdentity::new(session_id, modpack, pack_content_hash)?,
             player,
         };
         hello.validate()?;
@@ -215,6 +253,8 @@ pub enum LinkHandshakeError {
     MissingSessionId,
     #[error("link session id {session_id} must be an exact non-empty value")]
     InvalidSessionId { session_id: String },
+    #[error("link session id {session_id} uses reserved runtime session prefix")]
+    ReservedSessionId { session_id: String },
     #[error("link protocol version {actual} does not match expected {expected}")]
     ProtocolVersionMismatch { expected: u16, actual: u16 },
     #[error("link session id {actual} does not match expected {expected}")]
@@ -223,6 +263,8 @@ pub enum LinkHandshakeError {
     ModpackIdMismatch { expected: String, actual: String },
     #[error("link modpack hash {actual} does not match expected {expected}")]
     ModpackHashMismatch { expected: String, actual: String },
+    #[error("link pack content hash {actual} does not match expected {expected}")]
+    PackContentHashMismatch { expected: String, actual: String },
     #[error("link player {player_id} is not in this lobby")]
     UnknownPlayer { player_id: PlayerId },
     #[error("link player id {player_id} is not a valid link identity")]
@@ -250,24 +292,44 @@ pub fn validate_link_hello(
     local: &LinkSessionIdentity,
     remote: &LinkHello,
 ) -> Result<(), LinkHandshakeError> {
-    local.validate()?;
     remote.validate()?;
-    if remote.session().session_id() != local.session_id() {
+    validate_link_session_identity(local, remote.session())
+}
+
+pub fn validate_link_session_identity(
+    expected: &LinkSessionIdentity,
+    actual: &LinkSessionIdentity,
+) -> Result<(), LinkHandshakeError> {
+    expected.validate()?;
+    actual.validate()?;
+    if actual.session_id() != expected.session_id() {
         return Err(LinkHandshakeError::SessionMismatch {
-            expected: local.session_id().to_string(),
-            actual: remote.session().session_id().to_string(),
+            expected: expected.session_id().to_string(),
+            actual: actual.session_id().to_string(),
         });
     }
-    if remote.session().modpack().id() != local.modpack().id() {
+    if actual.modpack().id() != expected.modpack().id() {
         return Err(LinkHandshakeError::ModpackIdMismatch {
-            expected: local.modpack().id().to_string(),
-            actual: remote.session().modpack().id().to_string(),
+            expected: expected.modpack().id().to_string(),
+            actual: actual.modpack().id().to_string(),
         });
     }
-    if remote.session().modpack().hash() != local.modpack().hash() {
+    if actual.modpack().hash() != expected.modpack().hash() {
         return Err(LinkHandshakeError::ModpackHashMismatch {
-            expected: local.modpack().hash().to_string(),
-            actual: remote.session().modpack().hash().to_string(),
+            expected: expected.modpack().hash().to_string(),
+            actual: actual.modpack().hash().to_string(),
+        });
+    }
+    if actual.pack_content_hash() != expected.pack_content_hash() {
+        return Err(LinkHandshakeError::PackContentHashMismatch {
+            expected: expected.pack_content_hash().to_string(),
+            actual: actual.pack_content_hash().to_string(),
+        });
+    }
+    if actual.protocol_version() != expected.protocol_version() {
+        return Err(LinkHandshakeError::ProtocolVersionMismatch {
+            expected: expected.protocol_version(),
+            actual: actual.protocol_version(),
         });
     }
     Ok(())
@@ -361,7 +423,7 @@ impl LinkLobby {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PresenceEntityType {
     Player,
     Ai,
@@ -403,7 +465,7 @@ impl OverworldPresence {
     }
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
-        validate_multiplayer_token("presence user id", &self.user_id)?;
+        validate_multiplayer_user_id("presence user id", &self.user_id)?;
         validate_multiplayer_text("presence player name", &self.player_name)?;
         validate_multiplayer_token("presence map name", &self.map_name)?;
         validate_presence_tile(self.tile)
@@ -464,7 +526,7 @@ impl OverworldPresence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MultiplayerInteractionKind {
     Battle,
     Trade,
@@ -504,12 +566,12 @@ impl MultiplayerInteractionRequest {
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
         validate_multiplayer_token("interaction request id", &self.request_id)?;
-        validate_multiplayer_token("interaction request source user id", &self.from_user_id)?;
+        validate_multiplayer_user_id("interaction request source user id", &self.from_user_id)?;
         validate_multiplayer_text(
             "interaction request source player name",
             &self.from_player_name,
         )?;
-        validate_multiplayer_token("interaction request target user id", &self.to_user_id)?;
+        validate_multiplayer_user_id("interaction request target user id", &self.to_user_id)?;
         validate_distinct_interaction_users(
             "interaction request",
             &self.from_user_id,
@@ -595,8 +657,8 @@ impl MultiplayerInteractionResponse {
 
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
         validate_multiplayer_token("interaction response id", &self.request_id)?;
-        validate_multiplayer_token("interaction response source user id", &self.from_user_id)?;
-        validate_multiplayer_token("interaction response target user id", &self.to_user_id)?;
+        validate_multiplayer_user_id("interaction response source user id", &self.from_user_id)?;
+        validate_multiplayer_user_id("interaction response target user id", &self.to_user_id)?;
         validate_distinct_interaction_users(
             "interaction response",
             &self.from_user_id,
@@ -672,6 +734,24 @@ pub enum MultiplayerMessageError {
     InvalidLinkCableFrame { message: String },
     #[error("{message}")]
     InvalidLockstepFrame { message: String },
+    #[error("{message}")]
+    InvalidCommandChecksumEvent { message: String },
+    #[error("{message}")]
+    InvalidRuntimeCommand { message: String },
+    #[error("link message payload is empty")]
+    EmptyBinaryPayload,
+    #[error("link message payload has invalid magic header")]
+    InvalidBinaryMagic,
+    #[error("link message binary format version {actual} does not match expected {expected}")]
+    BinaryVersionMismatch { expected: u16, actual: u16 },
+    #[error("link message payload length {actual} does not match header length {expected}")]
+    BinaryLengthMismatch { expected: usize, actual: usize },
+    #[error("link message payload hash {actual:08x} does not match expected {expected:08x}")]
+    BinaryHashMismatch { expected: u32, actual: u32 },
+    #[error("failed to encode link message: {0}")]
+    BinaryEncode(String),
+    #[error("failed to decode link message: {0}")]
+    BinaryDecode(String),
 }
 
 fn validate_multiplayer_text(
@@ -704,6 +784,19 @@ fn validate_multiplayer_token(
     Ok(())
 }
 
+fn validate_multiplayer_user_id(
+    field: &'static str,
+    value: &str,
+) -> Result<(), MultiplayerMessageError> {
+    if value.is_empty() {
+        return Err(MultiplayerMessageError::EmptyText { field });
+    }
+    if !is_exact_multiplayer_user_id(value) {
+        return Err(MultiplayerMessageError::InvalidText { field });
+    }
+    Ok(())
+}
+
 fn validate_distinct_interaction_users(
     field: &'static str,
     from_user_id: &str,
@@ -726,12 +819,74 @@ fn validate_presence_tile(tile: TilePosition) -> Result<(), MultiplayerMessageEr
     Ok(())
 }
 
+fn validate_command_checksum_events(events: &[GameEvent]) -> Result<(), MultiplayerMessageError> {
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            GameEvent::FrameAdvanced { frame } if *frame == 0 => {
+                return Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                    message: format!("command checksum event {index} advances to frame 0"),
+                });
+            }
+            GameEvent::FrameAdvanced { .. } | GameEvent::MenuOpened | GameEvent::MenuClosed => {}
+            GameEvent::JoypadChanged { pressed, down } => {
+                validate_command_event_joypad_mask(index, "pressed", *pressed)?;
+                validate_command_event_joypad_mask(index, "down", *down)?;
+                if pressed & !down != 0 {
+                    return Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                        message: format!(
+                            "command checksum event {index} has pressed bits {pressed:#010b} outside down mask {down:#010b}"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_command_event_joypad_mask(
+    index: usize,
+    field: &str,
+    mask: u8,
+) -> Result<(), MultiplayerMessageError> {
+    const VALID_JOYPAD_MASK: u8 = B_PAD_A
+        | B_PAD_B
+        | B_PAD_SELECT
+        | B_PAD_START
+        | B_PAD_RIGHT
+        | B_PAD_LEFT
+        | B_PAD_UP
+        | B_PAD_DOWN;
+    if mask & !VALID_JOYPAD_MASK != 0 {
+        return Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+            message: format!(
+                "command checksum event {index} {field} mask {mask:#010b} contains invalid button bits"
+            ),
+        });
+    }
+    validate_lockstep_joypad_mask(mask).map_err(|error| {
+        MultiplayerMessageError::InvalidCommandChecksumEvent {
+            message: format!("command checksum event {index} {field}: {error}"),
+        }
+    })
+}
+
 fn is_exact_multiplayer_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b':'
         })
+}
+
+fn is_exact_multiplayer_user_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -946,17 +1101,313 @@ impl StateChecksumFrame {
 pub enum StateChecksumError {
     #[error("state checksum player id {player_id} is not a valid link identity")]
     InvalidPlayerIdentity { player_id: PlayerId },
+    #[error("state checksum requires valid saved state: {0}")]
+    InvalidState(String),
     #[error("failed to encode GameState for deterministic checksum: {0}")]
     Encode(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandChecksumResult {
+    pub events: Vec<GameEvent>,
+    pub checksum: StateChecksumFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCommandPayload {
+    schema: String,
+    bytes: Vec<u8>,
+    hash: u32,
+}
+
+impl RuntimeCommandPayload {
+    pub fn new(
+        schema: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<Self, RuntimeCommandFrameError> {
+        let payload = Self {
+            schema: schema.into(),
+            hash: fnv1a32_bytes(&bytes),
+            bytes,
+        };
+        payload.validate()?;
+        Ok(payload)
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(schema: impl Into<String>, bytes: Vec<u8>, hash: u32) -> Self {
+        Self {
+            schema: schema.into(),
+            bytes,
+            hash,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeCommandFrameError> {
+        validate_runtime_command_token("runtime command payload schema", &self.schema)?;
+        if self.bytes.is_empty() {
+            return Err(RuntimeCommandFrameError::EmptyPayload);
+        }
+        let actual = fnv1a32_bytes(&self.bytes);
+        if self.hash != actual {
+            return Err(RuntimeCommandFrameError::PayloadHashMismatch {
+                expected: self.hash,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub const fn hash(&self) -> u32 {
+        self.hash
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCommandFrame {
+    player_id: PlayerId,
+    sequence: u64,
+    payload: RuntimeCommandPayload,
+    expected_state: StateChecksum,
+}
+
+impl RuntimeCommandFrame {
+    pub fn new(
+        player_id: PlayerId,
+        sequence: u64,
+        payload: RuntimeCommandPayload,
+        expected_state: StateChecksum,
+    ) -> Result<Self, RuntimeCommandFrameError> {
+        let frame = Self {
+            player_id,
+            sequence,
+            payload,
+            expected_state,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeCommandFrameError> {
+        if self.player_id == 0 {
+            return Err(RuntimeCommandFrameError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
+        self.payload.validate()?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        player_id: PlayerId,
+        sequence: u64,
+        payload: RuntimeCommandPayload,
+        expected_state: StateChecksum,
+    ) -> Self {
+        Self {
+            player_id,
+            sequence,
+            payload,
+            expected_state,
+        }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub const fn payload(&self) -> &RuntimeCommandPayload {
+        &self.payload
+    }
+
+    pub const fn expected_state(&self) -> &StateChecksum {
+        &self.expected_state
+    }
+
+    pub fn require_expected_state(
+        &self,
+        actual: &StateChecksum,
+    ) -> Result<(), RuntimeCommandFrameError> {
+        if &self.expected_state != actual {
+            return Err(RuntimeCommandFrameError::ExpectedStateMismatch {
+                expected_frame: self.expected_state.frame(),
+                expected_hash: self.expected_state.hash(),
+                actual_frame: actual.frame(),
+                actual_hash: actual.hash(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCommandResultFrame {
+    request: RuntimeCommandFrame,
+    checksum: StateChecksumFrame,
+    result_tag: String,
+}
+
+impl RuntimeCommandResultFrame {
+    pub fn new(
+        request: RuntimeCommandFrame,
+        checksum: StateChecksumFrame,
+        result_tag: impl Into<String>,
+    ) -> Result<Self, RuntimeCommandFrameError> {
+        let frame = Self {
+            request,
+            checksum,
+            result_tag: result_tag.into(),
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeCommandFrameError> {
+        self.request.validate()?;
+        self.checksum
+            .validate()
+            .map_err(|error| RuntimeCommandFrameError::InvalidChecksum {
+                message: error.to_string(),
+            })?;
+        if self.request.player_id() != self.checksum.player_id() {
+            return Err(RuntimeCommandFrameError::PlayerChecksumMismatch {
+                request_player_id: self.request.player_id(),
+                checksum_player_id: self.checksum.player_id(),
+            });
+        }
+        if self.checksum.frame() < self.request.expected_state().frame() {
+            return Err(RuntimeCommandFrameError::ResultBeforeExpectedState {
+                expected_frame: self.request.expected_state().frame(),
+                result_frame: self.checksum.frame(),
+            });
+        }
+        validate_runtime_command_token("runtime command result tag", &self.result_tag)?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        request: RuntimeCommandFrame,
+        checksum: StateChecksumFrame,
+        result_tag: impl Into<String>,
+    ) -> Self {
+        Self {
+            request,
+            checksum,
+            result_tag: result_tag.into(),
+        }
+    }
+
+    pub const fn request(&self) -> &RuntimeCommandFrame {
+        &self.request
+    }
+
+    pub const fn checksum(&self) -> &StateChecksumFrame {
+        &self.checksum
+    }
+
+    pub fn result_tag(&self) -> &str {
+        &self.result_tag
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RuntimeCommandFrameError {
+    #[error("runtime command player id {player_id} is not a valid link identity")]
+    InvalidPlayerIdentity { player_id: PlayerId },
+    #[error("{field} must be exact and non-empty")]
+    InvalidToken { field: &'static str },
+    #[error("runtime command payload must be non-empty")]
+    EmptyPayload,
+    #[error("runtime command payload hash {actual:#010x} does not match declared {expected:#010x}")]
+    PayloadHashMismatch { expected: u32, actual: u32 },
+    #[error("runtime command checksum is invalid: {message}")]
+    InvalidChecksum { message: String },
+    #[error(
+        "runtime command result player {request_player_id} does not match checksum player {checksum_player_id}"
+    )]
+    PlayerChecksumMismatch {
+        request_player_id: PlayerId,
+        checksum_player_id: PlayerId,
+    },
+    #[error(
+        "runtime command expected state frame {expected_frame} hash {expected_hash:#010x} does not match actual frame {actual_frame} hash {actual_hash:#010x}"
+    )]
+    ExpectedStateMismatch {
+        expected_frame: u64,
+        expected_hash: u32,
+        actual_frame: u64,
+        actual_hash: u32,
+    },
+    #[error(
+        "runtime command result frame {result_frame} is before expected state frame {expected_frame}"
+    )]
+    ResultBeforeExpectedState {
+        expected_frame: u64,
+        result_frame: u64,
+    },
+}
+
+fn validate_runtime_command_token(
+    field: &'static str,
+    value: &str,
+) -> Result<(), RuntimeCommandFrameError> {
+    if !is_exact_multiplayer_token(value) {
+        return Err(RuntimeCommandFrameError::InvalidToken { field });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CommandChecksumError {
+    #[error(transparent)]
+    Frame(#[from] GameStateFrameError),
+    #[error(transparent)]
+    Checksum(#[from] StateChecksumError),
+}
+
 pub fn game_state_checksum(state: &GameState) -> Result<StateChecksum, StateChecksumError> {
+    state
+        .validate_saved_state()
+        .map_err(StateChecksumError::InvalidState)?;
     let bytes = bincode::serde::encode_to_vec(state, state_checksum_binary_config())
         .map_err(|error| StateChecksumError::Encode(error.to_string()))?;
     Ok(StateChecksum::new(
         state.frame_counter,
         fnv1a32_bytes(&bytes),
     ))
+}
+
+pub fn apply_command_with_checksum(
+    state: &mut GameState,
+    player_id: PlayerId,
+    command: GameCommand,
+) -> Result<CommandChecksumResult, CommandChecksumError> {
+    if player_id == 0 {
+        return Err(CommandChecksumError::Checksum(
+            StateChecksumError::InvalidPlayerIdentity { player_id },
+        ));
+    }
+    let events = state.apply_command(command)?;
+    let checksum = StateChecksumFrame::from_game_state(player_id, state)?;
+    Ok(CommandChecksumResult { events, checksum })
 }
 
 fn state_checksum_binary_config() -> impl bincode::config::Config {
@@ -1095,6 +1546,7 @@ fn is_exact_state_hash(value: &str) -> bool {
 fn is_exact_multiplayer_item_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':')
@@ -1144,6 +1596,36 @@ pub enum LockstepSyncError {
     NonRosterPlayerInput { frame: u64, player_id: PlayerId },
     #[error("lockstep frame cursor overflowed at frame {frame}")]
     FrameCursorOverflow { frame: u64 },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum InputJournalError {
+    #[error("input journal session violates protocol invariants: {message}")]
+    InvalidSession { message: String },
+    #[error("input journal start checksum is invalid: {message}")]
+    InvalidStartChecksum { message: String },
+    #[error("input journal terminal checksum is invalid: {message}")]
+    InvalidTerminalChecksum { message: String },
+    #[error("input journal terminal checksum frame {actual} does not match expected frame {expected}")]
+    TerminalChecksumFrameMismatch { expected: u64, actual: u64 },
+    #[error("input journal terminal checksum player {player_id} is not in the declared roster")]
+    TerminalChecksumUnknownPlayer { player_id: PlayerId },
+    #[error("input journal frame is invalid: {message}")]
+    InvalidFrame { message: String },
+    #[error("input journal player {player_id} is not in the declared roster")]
+    UnknownPlayer { player_id: PlayerId },
+    #[error("input journal frame {actual} does not match expected frame {expected}")]
+    FrameOutOfOrder { expected: u64, actual: u64 },
+    #[error("input journal frame {frame} is missing player {player_id}")]
+    MissingPlayerInput { frame: u64, player_id: PlayerId },
+    #[error("input journal frame {frame} includes non-roster player {player_id}")]
+    NonRosterPlayerInput { frame: u64, player_id: PlayerId },
+    #[error("input journal frame cursor overflowed at frame {frame}")]
+    FrameCursorOverflow { frame: u64 },
+    #[error("failed to encode input journal for deterministic fingerprint: {message}")]
+    Encode { message: String },
+    #[error("input journal fingerprint {actual} does not match deterministic fingerprint {expected}")]
+    FingerprintMismatch { expected: String, actual: String },
 }
 
 pub type TradeId = String;
@@ -1523,13 +2005,13 @@ pub enum TradeError {
     InvalidPokemon { trade_id: TradeId, message: String },
 }
 
-fn validate_trade_id(trade_id: &TradeId) -> Result<(), TradeError> {
+fn validate_trade_id(trade_id: &str) -> Result<(), TradeError> {
     if trade_id.is_empty() {
         return Err(TradeError::MissingTradeId);
     }
     if !is_exact_trade_id(trade_id) {
         return Err(TradeError::InvalidTradeId {
-            trade_id: trade_id.clone(),
+            trade_id: trade_id.to_string(),
         });
     }
     Ok(())
@@ -1545,9 +2027,15 @@ fn validate_trade_player_identity(player_id: PlayerId) -> Result<(), TradeError>
 fn is_exact_trade_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1629,6 +2117,9 @@ impl LinkClockSyncFrame {
             return Err(LinkCableError::InvalidPlayerIdentity {
                 player_id: self.player_id,
             });
+        }
+        if self.t2 == 0 {
+            return Err(LinkCableError::InvalidClock { clock: self.t2 });
         }
         if self.t0 > self.t1 || self.t1 > self.t2 {
             return Err(LinkCableError::InvalidClockSync {
@@ -1992,16 +2483,12 @@ impl TradeSyncBuffer {
         )
     }
 
-    fn validate_trade_player(
-        &self,
-        trade_id: &TradeId,
-        player_id: PlayerId,
-    ) -> Result<(), TradeError> {
+    fn validate_trade_player(&self, trade_id: &str, player_id: PlayerId) -> Result<(), TradeError> {
         validate_trade_id(trade_id)?;
         if trade_id != self.participants.trade_id() {
             return Err(TradeError::TradeIdMismatch {
                 expected: self.participants.trade_id().to_string(),
-                actual: trade_id.clone(),
+                actual: trade_id.to_string(),
             });
         }
         if !self.participants.contains(player_id) {
@@ -2086,6 +2573,202 @@ impl LockstepFrame {
             .iter()
             .map(|player_id| self.inputs.get(player_id).copied())
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeterministicInputJournal {
+    session: LinkSessionIdentity,
+    players: BTreeSet<PlayerId>,
+    start_checksum: StateChecksumFrame,
+    terminal_checksum: StateChecksumFrame,
+    frames: Vec<LockstepFrame>,
+}
+
+impl DeterministicInputJournal {
+    pub fn new(
+        session: LinkSessionIdentity,
+        players: impl IntoIterator<Item = PlayerId>,
+        start_checksum: StateChecksumFrame,
+        terminal_checksum: StateChecksumFrame,
+        frames: Vec<LockstepFrame>,
+    ) -> Result<Self, InputJournalError> {
+        let journal = Self {
+            session,
+            players: players.into_iter().collect(),
+            start_checksum,
+            terminal_checksum,
+            frames,
+        };
+        journal.validate()?;
+        Ok(journal)
+    }
+
+    pub fn validate(&self) -> Result<(), InputJournalError> {
+        self.session
+            .validate()
+            .map_err(|error| InputJournalError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        self.start_checksum
+            .validate()
+            .map_err(|error| InputJournalError::InvalidStartChecksum {
+                message: error.to_string(),
+            })?;
+        self.terminal_checksum
+            .validate()
+            .map_err(|error| InputJournalError::InvalidTerminalChecksum {
+                message: error.to_string(),
+            })?;
+        if self.players.is_empty() {
+            return Err(InputJournalError::InvalidFrame {
+                message: LockstepSyncError::EmptyRoster.to_string(),
+            });
+        }
+        for player_id in &self.players {
+            if *player_id == 0 {
+                return Err(InputJournalError::InvalidFrame {
+                    message: LockstepSyncError::InvalidPlayerIdentity {
+                        player_id: *player_id,
+                    }
+                    .to_string(),
+                });
+            }
+        }
+        if !self.players.contains(&self.start_checksum.player_id()) {
+            return Err(InputJournalError::UnknownPlayer {
+                player_id: self.start_checksum.player_id(),
+            });
+        }
+        if !self.players.contains(&self.terminal_checksum.player_id()) {
+            return Err(InputJournalError::TerminalChecksumUnknownPlayer {
+                player_id: self.terminal_checksum.player_id(),
+            });
+        }
+        let mut expected_frame = self.start_checksum.frame();
+        for frame in &self.frames {
+            frame
+                .validate_inputs()
+                .map_err(|error| InputJournalError::InvalidFrame {
+                    message: error.to_string(),
+                })?;
+            if frame.frame() != expected_frame {
+                return Err(InputJournalError::FrameOutOfOrder {
+                    expected: expected_frame,
+                    actual: frame.frame(),
+                });
+            }
+            for player_id in &self.players {
+                if !frame.inputs().contains_key(player_id) {
+                    return Err(InputJournalError::MissingPlayerInput {
+                        frame: frame.frame(),
+                        player_id: *player_id,
+                    });
+                }
+            }
+            for player_id in frame.inputs().keys() {
+                if !self.players.contains(player_id) {
+                    return Err(InputJournalError::NonRosterPlayerInput {
+                        frame: frame.frame(),
+                        player_id: *player_id,
+                    });
+                }
+            }
+            expected_frame = expected_frame
+                .checked_add(1)
+                .ok_or(InputJournalError::FrameCursorOverflow {
+                    frame: frame.frame(),
+                })?;
+        }
+        if self.terminal_checksum.frame() != expected_frame {
+            return Err(InputJournalError::TerminalChecksumFrameMismatch {
+                expected: expected_frame,
+                actual: self.terminal_checksum.frame(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn players(&self) -> &BTreeSet<PlayerId> {
+        &self.players
+    }
+
+    pub fn start_checksum(&self) -> &StateChecksumFrame {
+        &self.start_checksum
+    }
+
+    pub fn terminal_checksum(&self) -> &StateChecksumFrame {
+        &self.terminal_checksum
+    }
+
+    pub fn frames(&self) -> &[LockstepFrame] {
+        &self.frames
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, InputJournalError> {
+        self.validate()?;
+        bincode::serde::encode_to_vec(self, link_message_binary_config())
+            .map_err(|error| InputJournalError::Encode {
+                message: error.to_string(),
+            })
+    }
+
+    pub fn fingerprint(&self) -> Result<u32, InputJournalError> {
+        Ok(fnv1a32_bytes(&self.canonical_bytes()?))
+    }
+
+    pub fn fingerprint_hex(&self) -> Result<String, InputJournalError> {
+        Ok(format!("{:08x}", self.fingerprint()?))
+    }
+
+    pub fn into_frames(self) -> Vec<LockstepFrame> {
+        self.frames
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeterministicInputJournalFrame {
+    fingerprint: String,
+    journal: DeterministicInputJournal,
+}
+
+impl DeterministicInputJournalFrame {
+    pub fn new(journal: DeterministicInputJournal) -> Result<Self, InputJournalError> {
+        let fingerprint = journal.fingerprint_hex()?;
+        Ok(Self {
+            fingerprint,
+            journal,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), InputJournalError> {
+        self.journal.validate()?;
+        let expected = self.journal.fingerprint_hex()?;
+        if self.fingerprint != expected {
+            return Err(InputJournalError::FingerprintMismatch {
+                expected,
+                actual: self.fingerprint.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn journal(&self) -> &DeterministicInputJournal {
+        &self.journal
+    }
+
+    pub fn into_journal(self) -> DeterministicInputJournal {
+        self.journal
     }
 }
 
@@ -2182,7 +2865,7 @@ pub struct BattleActionSyncBuffer {
 
 impl BattleActionSyncBuffer {
     pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Result<Self, BattleSyncError> {
-        let players = players.into_iter().collect();
+        let players: BTreeSet<PlayerId> = players.into_iter().collect();
         if players.is_empty() {
             return Err(BattleSyncError::EmptyRoster);
         }
@@ -2248,16 +2931,17 @@ impl BattleActionSyncBuffer {
     }
 
     pub fn is_turn_ready(&self, turn: u64) -> bool {
-        self.actions
-            .get(&turn)
-            .map(|actions| {
-                actions.len() == self.players.len()
-                    && self
-                        .players
-                        .iter()
-                        .all(|player_id| actions.contains_key(player_id))
+        let Some(actions) = self.actions.get(&turn) else {
+            return false;
+        };
+        let Some(state_hashes) = self.state_hashes.get(&turn) else {
+            return false;
+        };
+        actions.len() == self.players.len()
+            && state_hashes.len() == self.players.len()
+            && self.players.iter().all(|player_id| {
+                actions.contains_key(player_id) && state_hashes.contains_key(player_id)
             })
-            .unwrap_or(false)
     }
 
     pub fn turn(&self, turn: u64) -> Option<BattleActionTurn> {
@@ -2316,7 +3000,7 @@ pub struct LockstepBuffer {
 
 impl LockstepBuffer {
     pub fn new(players: impl IntoIterator<Item = PlayerId>) -> Result<Self, LockstepSyncError> {
-        let players = players.into_iter().collect();
+        let players: BTreeSet<PlayerId> = players.into_iter().collect();
         if players.is_empty() {
             return Err(LockstepSyncError::EmptyRoster);
         }
@@ -2658,7 +3342,11 @@ pub enum LinkMessage {
     LinkByte(LinkByteFrame),
     LinkClockSync(LinkClockSyncFrame),
     Input(PlayerInputFrame),
+    InputJournal(DeterministicInputJournalFrame),
     StateHash(StateChecksumFrame),
+    CommandChecksum(CommandChecksumResult),
+    RuntimeCommand(RuntimeCommandFrame),
+    RuntimeCommandResult(RuntimeCommandResultFrame),
     Presence(OverworldPresence),
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
@@ -2714,6 +3402,11 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::InputJournal(journal_frame) => journal_frame.validate().map_err(|error| {
+                MultiplayerMessageError::InvalidLockstepFrame {
+                    message: error.to_string(),
+                }
+            }),
             Self::Presence(presence) => presence.validate(),
             Self::InteractionRequest(request) => request.validate(),
             Self::InteractionResponse(response) => response.validate(),
@@ -2739,8 +3432,113 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::CommandChecksum(result) => {
+                validate_command_checksum_events(&result.events)?;
+                result.checksum.validate().map_err(|error| {
+                    MultiplayerMessageError::InvalidLockstepFrame {
+                        message: error.to_string(),
+                    }
+                })
+            }
+            Self::RuntimeCommand(command) => {
+                command
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
+                        message: error.to_string(),
+                    })
+            }
+            Self::RuntimeCommandResult(result) => {
+                result
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
+                        message: error.to_string(),
+                    })
+            }
         }
     }
+}
+
+pub fn encode_link_message_bytes(
+    message: &LinkMessage,
+) -> Result<Vec<u8>, MultiplayerMessageError> {
+    message.validate()?;
+    let encoded = bincode::serde::encode_to_vec(message, link_message_binary_config())
+        .map_err(|error| MultiplayerMessageError::BinaryEncode(error.to_string()))?;
+    if encoded.len() > u32::MAX as usize {
+        return Err(MultiplayerMessageError::BinaryEncode(
+            "encoded link message exceeds binary payload length field".to_string(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(LINK_MESSAGE_HEADER_LEN + encoded.len());
+    bytes.extend_from_slice(LINK_MESSAGE_MAGIC);
+    bytes.extend_from_slice(&LINK_PROTOCOL_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&fnv1a32_bytes(&encoded).to_be_bytes());
+    bytes.extend_from_slice(&encoded);
+    Ok(bytes)
+}
+
+pub fn decode_link_message_bytes(bytes: &[u8]) -> Result<LinkMessage, MultiplayerMessageError> {
+    if bytes.is_empty() {
+        return Err(MultiplayerMessageError::EmptyBinaryPayload);
+    }
+    if bytes.len() < LINK_MESSAGE_HEADER_LEN
+        || &bytes[..LINK_MESSAGE_MAGIC.len()] != LINK_MESSAGE_MAGIC
+    {
+        return Err(MultiplayerMessageError::InvalidBinaryMagic);
+    }
+    let version = u16::from_be_bytes(
+        bytes[LINK_MESSAGE_VERSION_OFFSET..LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET]
+            .try_into()
+            .expect("version slice length"),
+    );
+    if version != LINK_PROTOCOL_VERSION {
+        return Err(MultiplayerMessageError::BinaryVersionMismatch {
+            expected: LINK_PROTOCOL_VERSION,
+            actual: version,
+        });
+    }
+    let expected_len = u32::from_be_bytes(
+        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET..LINK_MESSAGE_PAYLOAD_HASH_OFFSET]
+            .try_into()
+            .expect("length slice length"),
+    ) as usize;
+    let expected_hash = u32::from_be_bytes(
+        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET..LINK_MESSAGE_HEADER_LEN]
+            .try_into()
+            .expect("hash slice length"),
+    );
+    let payload = &bytes[LINK_MESSAGE_HEADER_LEN..];
+    if payload.len() != expected_len {
+        return Err(MultiplayerMessageError::BinaryLengthMismatch {
+            expected: expected_len,
+            actual: payload.len(),
+        });
+    }
+    let actual_hash = fnv1a32_bytes(payload);
+    if actual_hash != expected_hash {
+        return Err(MultiplayerMessageError::BinaryHashMismatch {
+            expected: expected_hash,
+            actual: actual_hash,
+        });
+    }
+    let (message, consumed): (LinkMessage, usize) =
+        bincode::serde::decode_from_slice(payload, link_message_binary_config())
+            .map_err(|error| MultiplayerMessageError::BinaryDecode(error.to_string()))?;
+    if consumed != payload.len() {
+        return Err(MultiplayerMessageError::BinaryDecode(format!(
+            "decoded {consumed} bytes from {} byte link message payload",
+            payload.len()
+        )));
+    }
+    message.validate()?;
+    Ok(message)
+}
+
+fn link_message_binary_config() -> impl bincode::config::Config {
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
 }
 
 pub fn fnv1a32(input: &str) -> u32 {
@@ -2794,6 +3592,25 @@ mod tests {
         SaveModpackIdentity::new(id, hash).expect("modpack identity")
     }
 
+    fn pack_content_hash() -> &'static str {
+        "01020304"
+    }
+
+    fn session(
+        id: &str,
+        modpack: SaveModpackIdentity,
+    ) -> Result<LinkSessionIdentity, LinkHandshakeError> {
+        LinkSessionIdentity::new(id, modpack, pack_content_hash())
+    }
+
+    fn hello(
+        id: &str,
+        modpack: SaveModpackIdentity,
+        player: PlayerIdentity,
+    ) -> Result<LinkHello, LinkHandshakeError> {
+        LinkHello::new(id, modpack, pack_content_hash(), player)
+    }
+
     fn player(id: PlayerId) -> PlayerIdentity {
         PlayerIdentity::new(id, format!("P{id}")).expect("player")
     }
@@ -2836,6 +3653,119 @@ mod tests {
     }
 
     #[test]
+    fn link_messages_serialize_input_journals_as_transport_neutral_payloads() {
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("session");
+        let journal = DeterministicInputJournal::new(
+            session,
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
+            vec![LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                .expect("lockstep frame")],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let message = LinkMessage::InputJournal(journal_frame.clone());
+
+        let json = serde_json::to_string(&message).expect("serialize journal message");
+
+        assert!(json.contains(r#""type":"input_journal""#));
+        assert!(json.contains(r#""fingerprint":""#));
+        assert!(json.contains(r#""session_id":"session-1""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize journal message"),
+            message
+        );
+    }
+
+    #[test]
+    fn link_messages_round_trip_as_framed_binary_payloads() {
+        let message =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
+        let bytes = encode_link_message_bytes(&message).expect("encode binary link message");
+
+        assert!(bytes.starts_with(LINK_MESSAGE_MAGIC));
+        assert_eq!(
+            decode_link_message_bytes(&bytes).expect("decode binary link message"),
+            message
+        );
+
+        let json = serde_json::to_vec(&message).expect("serialize json link message");
+        assert_eq!(
+            decode_link_message_bytes(&json),
+            Err(MultiplayerMessageError::InvalidBinaryMagic)
+        );
+    }
+
+    #[test]
+    fn binary_link_messages_reject_tampered_headers_and_payloads() {
+        let message = LinkMessage::StateHash(StateChecksumFrame::new(2, Frame(144), 0xaabbccdd));
+        let mut bytes = encode_link_message_bytes(&message).expect("encode binary link message");
+
+        let mut wrong_version = bytes.clone();
+        wrong_version[LINK_MESSAGE_VERSION_OFFSET..LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET]
+            .copy_from_slice(&(LINK_PROTOCOL_VERSION + 1).to_be_bytes());
+        assert_eq!(
+            decode_link_message_bytes(&wrong_version),
+            Err(MultiplayerMessageError::BinaryVersionMismatch {
+                expected: LINK_PROTOCOL_VERSION,
+                actual: LINK_PROTOCOL_VERSION + 1,
+            })
+        );
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(matches!(
+            decode_link_message_bytes(&truncated),
+            Err(MultiplayerMessageError::BinaryLengthMismatch { .. })
+        ));
+
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        assert!(matches!(
+            decode_link_message_bytes(&bytes),
+            Err(MultiplayerMessageError::BinaryHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_messages_validate_decoded_payloads() {
+        let invalid_message = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![GameEvent::JoypadChanged {
+                pressed: B_PAD_A,
+                down: 0,
+            }],
+            checksum: StateChecksumFrame::new(2, Frame(7), 0x1111_1111),
+        });
+        let encoded = bincode::serde::encode_to_vec(&invalid_message, link_message_binary_config())
+            .expect("encode invalid link message for decode test");
+        let mut bytes = Vec::with_capacity(LINK_MESSAGE_HEADER_LEN + encoded.len());
+        bytes.extend_from_slice(LINK_MESSAGE_MAGIC);
+        bytes.extend_from_slice(&LINK_PROTOCOL_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&fnv1a32_bytes(&encoded).to_be_bytes());
+        bytes.extend_from_slice(&encoded);
+
+        assert_eq!(
+            decode_link_message_bytes(&bytes),
+            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                message:
+                    "command checksum event 0 has pressed bits 0b00010000 outside down mask 0b00000000"
+                        .to_string(),
+            })
+        );
+        assert_eq!(
+            encode_link_message_bytes(&invalid_message),
+            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                message:
+                    "command checksum event 0 has pressed bits 0b00010000 outside down mask 0b00000000"
+                        .to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn state_hash_message_carries_exact_player_and_frame_identity() {
         let message = LinkMessage::StateHash(StateChecksumFrame::new(2, Frame(144), 0xaabbccdd));
         let json = serde_json::to_string(&message).expect("serialize state hash");
@@ -2856,6 +3786,87 @@ mod tests {
         assert!(
             missing_player.contains("missing field `player_id`"),
             "{missing_player}"
+        );
+    }
+
+    #[test]
+    fn command_checksum_message_carries_events_and_exact_checksum_identity() {
+        let message = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![crate::state::GameEvent::JoypadChanged {
+                pressed: 0b0001_0000,
+                down: 0b0001_0000,
+            }],
+            checksum: StateChecksumFrame::new(2, Frame(144), 0xaabbccdd),
+        });
+        let json = serde_json::to_string(&message).expect("serialize command checksum");
+        assert_eq!(
+            json,
+            r#"{"type":"command_checksum","events":[{"type":"joypad_changed","pressed":16,"down":16}],"checksum":{"player_id":2,"frame":144,"hash":2864434397}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize command checksum"),
+            message
+        );
+    }
+
+    #[test]
+    fn command_checksum_message_rejects_invalid_checksum_identity() {
+        let message = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: Vec::new(),
+            checksum: StateChecksumFrame::new(0, Frame(7), 0x1111_1111),
+        });
+
+        assert_eq!(
+            message.validate(),
+            Err(MultiplayerMessageError::InvalidLockstepFrame {
+                message: "state checksum player id 0 is not a valid link identity".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn command_checksum_message_rejects_invalid_event_payloads() {
+        let invalid_pressed = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![GameEvent::JoypadChanged {
+                pressed: B_PAD_A,
+                down: 0,
+            }],
+            checksum: StateChecksumFrame::new(2, Frame(7), 0x1111_1111),
+        });
+        assert_eq!(
+            invalid_pressed.validate(),
+            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                message:
+                    "command checksum event 0 has pressed bits 0b00010000 outside down mask 0b00000000"
+                        .to_string(),
+            })
+        );
+
+        let conflicting_directions = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![GameEvent::JoypadChanged {
+                pressed: 0,
+                down: B_PAD_LEFT | B_PAD_RIGHT,
+            }],
+            checksum: StateChecksumFrame::new(2, Frame(7), 0x1111_1111),
+        });
+        assert_eq!(
+            conflicting_directions.validate(),
+            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                message:
+                    "command checksum event 0 down: lockstep input mask 0b00000011 has conflicting direction buttons"
+                        .to_string(),
+            })
+        );
+
+        let frame_zero = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![GameEvent::FrameAdvanced { frame: 0 }],
+            checksum: StateChecksumFrame::new(2, Frame(7), 0x1111_1111),
+        });
+        assert_eq!(
+            frame_zero.validate(),
+            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
+                message: "command checksum event 0 advances to frame 0".to_string(),
+            })
         );
     }
 
@@ -2894,8 +3905,75 @@ mod tests {
     }
 
     #[test]
+    fn game_state_checksum_rejects_malformed_saved_state_without_hashing() {
+        let state = crate::state::GameState {
+            active_repel_item: Some("SUPER REPEL".to_string()),
+            ..crate::state::GameState::default()
+        };
+
+        assert_eq!(
+            game_state_checksum(&state),
+            Err(StateChecksumError::InvalidState(
+                "active_repel_item has invalid token 'SUPER REPEL'".to_string()
+            ))
+        );
+        assert_eq!(
+            StateChecksumFrame::from_game_state(2, &state),
+            Err(StateChecksumError::InvalidState(
+                "active_repel_item has invalid token 'SUPER REPEL'".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn command_checksum_applies_command_and_reports_authoritative_state_hash() {
+        let mut state = crate::state::GameState::default();
+
+        let result = apply_command_with_checksum(
+            &mut state,
+            2,
+            crate::state::GameCommand::Joypad { mask: 0b0001_0000 },
+        )
+        .expect("command checksum");
+
+        assert_eq!(
+            result.events,
+            vec![crate::state::GameEvent::JoypadChanged {
+                pressed: 0b0001_0000,
+                down: 0b0001_0000,
+            }]
+        );
+        assert_eq!(result.checksum.player_id(), 2);
+        assert_eq!(result.checksum.frame(), state.frame_counter);
+        assert_eq!(
+            result.checksum.checksum(),
+            game_state_checksum(&state).expect("checksum")
+        );
+    }
+
+    #[test]
+    fn command_checksum_rejects_invalid_player_before_command_mutation() {
+        let mut state = crate::state::GameState::default();
+
+        let error = apply_command_with_checksum(
+            &mut state,
+            0,
+            crate::state::GameCommand::Joypad { mask: 0b0001_0000 },
+        )
+        .expect_err("invalid player rejected");
+
+        assert_eq!(
+            error,
+            CommandChecksumError::Checksum(StateChecksumError::InvalidPlayerIdentity {
+                player_id: 0
+            })
+        );
+        assert_eq!(state.joypad.h_joypad_down, 0);
+    }
+
+    #[test]
     fn hello_message_carries_protocol_and_exact_modpack_identity() {
-        let hello = LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(1))
+        let hello = hello("session-1", modpack("core-modular", "1234abcd"), player(1))
             .expect("hello");
         let message = LinkMessage::Hello(hello.clone());
         let json = serde_json::to_string(&message).expect("serialize hello");
@@ -2935,7 +4013,8 @@ mod tests {
                     "id": "core-modular",
                     "hash": "1234abcd",
                     "normalized_id": "CORE-MODULAR"
-                }
+                },
+                "pack_content_hash": "01020304"
             },
             "player": {
                 "id": 1,
@@ -2965,19 +4044,46 @@ mod tests {
             missing_hash_error.contains("missing field `state_hash`"),
             "{missing_hash_error}"
         );
+
+        let presence_type_error = serde_json::from_value::<PresenceEntityType>(serde_json::json!({
+            "player": {
+                "legacy_entity_type": "human"
+            }
+        }))
+        .expect_err("presence entity types must not accept legacy aliases")
+        .to_string();
+        assert!(
+            presence_type_error.contains("invalid type")
+                || presence_type_error.contains("unknown variant"),
+            "{presence_type_error}"
+        );
+
+        let interaction_kind_error =
+            serde_json::from_value::<MultiplayerInteractionKind>(serde_json::json!({
+                "battle": {
+                    "fallback_kind": "trade"
+                }
+            }))
+            .expect_err("interaction kinds must not accept fallback aliases")
+            .to_string();
+        assert!(
+            interaction_kind_error.contains("invalid type")
+                || interaction_kind_error.contains("unknown variant"),
+            "{interaction_kind_error}"
+        );
     }
 
     #[test]
     fn link_handshake_requires_exact_session_protocol_and_modpack_identity() {
-        let local = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let local = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("local");
-        let matching = LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+        let matching = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
             .expect("matching");
 
         validate_link_hello(&local, &matching).expect("matching hello");
 
         let wrong_session =
-            LinkHello::new("session-2", modpack("core-modular", "1234abcd"), player(2))
+            hello("session-2", modpack("core-modular", "1234abcd"), player(2))
                 .expect("wrong session");
         assert_eq!(
             validate_link_hello(&local, &wrong_session),
@@ -2988,7 +4094,7 @@ mod tests {
         );
 
         let wrong_hash =
-            LinkHello::new("session-1", modpack("core-modular", "ffffffff"), player(2))
+            hello("session-1", modpack("core-modular", "ffffffff"), player(2))
                 .expect("wrong hash");
         assert_eq!(
             validate_link_hello(&local, &wrong_hash),
@@ -2998,8 +4104,26 @@ mod tests {
             })
         );
 
+        let wrong_content_hash = LinkHello::from_session(
+            LinkSessionIdentity::new(
+                "session-1",
+                modpack("core-modular", "1234abcd"),
+                "ffffffff",
+            )
+            .expect("wrong content hash session"),
+            player(2),
+        )
+        .expect("wrong content hash");
+        assert_eq!(
+            validate_link_hello(&local, &wrong_content_hash),
+            Err(LinkHandshakeError::PackContentHashMismatch {
+                expected: pack_content_hash().to_string(),
+                actual: "ffffffff".to_string(),
+            })
+        );
+
         let case_changed =
-            LinkHello::new("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
+            hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
                 .expect("case changed");
         assert_eq!(
             validate_link_hello(&local, &case_changed),
@@ -3008,13 +4132,55 @@ mod tests {
                 actual: "CORE-MODULAR".to_string(),
             })
         );
+
+        let reserved_pack = SaveModpackIdentity::new("core-modular+fallback-link", "1234abcd")
+            .expect_err("link modpack identities must reject reserved pack id segments");
+        assert!(
+            reserved_pack
+                .to_string()
+                .contains("uses reserved runtime pack prefix"),
+            "{reserved_pack}"
+        );
+    }
+
+    #[test]
+    fn link_session_identity_validation_owns_protocol_and_modpack_comparison() {
+        let local = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("local");
+        let matching = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("matching");
+        validate_link_session_identity(&local, &matching).expect("matching session");
+
+        let protocol_drift = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION + 1,
+            "session-1",
+            modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        assert_eq!(
+            validate_link_session_identity(&local, &protocol_drift),
+            Err(LinkHandshakeError::ProtocolVersionMismatch {
+                expected: LINK_PROTOCOL_VERSION,
+                actual: LINK_PROTOCOL_VERSION + 1,
+            })
+        );
+
+        let other_pack = session("session-1", modpack("other-pack", "1234abcd"))
+            .expect("other pack");
+        assert_eq!(
+            validate_link_session_identity(&local, &other_pack),
+            Err(LinkHandshakeError::ModpackIdMismatch {
+                expected: "core-modular".to_string(),
+                actual: "other-pack".to_string(),
+            })
+        );
     }
 
     #[test]
     fn link_handshake_rejects_empty_player_display_names_without_placeholders() {
         let zero_id_player = PlayerIdentity::new_unchecked_for_tests(0, "P0");
         assert_eq!(
-            LinkHello::new(
+            hello(
                 "session-1",
                 modpack("core-modular", "1234abcd"),
                 zero_id_player,
@@ -3024,7 +4190,7 @@ mod tests {
 
         let empty_player = PlayerIdentity::new_unchecked_for_tests(2, "");
         assert_eq!(
-            LinkHello::new(
+            hello(
                 "session-1",
                 modpack("core-modular", "1234abcd"),
                 empty_player
@@ -3034,7 +4200,7 @@ mod tests {
 
         let padded_player = PlayerIdentity::new_unchecked_for_tests(2, " P2");
         assert_eq!(
-            LinkHello::new(
+            hello(
                 "session-1",
                 modpack("core-modular", "1234abcd"),
                 padded_player
@@ -3047,7 +4213,7 @@ mod tests {
 
         let control_player = PlayerIdentity::new_unchecked_for_tests(2, "P\n2");
         assert_eq!(
-            LinkHello::new(
+            hello(
                 "session-1",
                 modpack("core-modular", "1234abcd"),
                 control_player
@@ -3058,7 +4224,7 @@ mod tests {
             })
         );
 
-        let local = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let local = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("local");
         let bypassed = LinkHello::new_unchecked_for_tests(
             local.clone(),
@@ -3103,30 +4269,38 @@ mod tests {
     fn link_handshake_rejects_malformed_session_ids_without_trimming() {
         let modpack = modpack("core-modular", "1234abcd");
         assert_eq!(
-            LinkSessionIdentity::new("", modpack.clone()).and_then(|session| session.validate()),
+            session("", modpack.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::MissingSessionId)
         );
         assert_eq!(
-            LinkSessionIdentity::new(" session-1", modpack.clone())
+            session(" session-1", modpack.clone())
                 .and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: " session-1".to_string(),
             })
         );
         assert_eq!(
-            LinkSessionIdentity::new("session 1", modpack.clone())
+            session("session 1", modpack.clone())
                 .and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: "session 1".to_string(),
             })
         );
+        assert_eq!(
+            session("fallback-session", modpack.clone())
+                .and_then(|session| session.validate()),
+            Err(LinkHandshakeError::ReservedSessionId {
+                session_id: "fallback-session".to_string(),
+            })
+        );
 
-        let local = LinkSessionIdentity::new("session-1", modpack.clone()).expect("local");
+        let local = session("session-1", modpack.clone()).expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
                 "session-1 ",
                 modpack,
+                pack_content_hash(),
             ),
             player(2),
         );
@@ -3136,17 +4310,34 @@ mod tests {
                 session_id: "session-1 ".to_string(),
             })
         );
+
+        let reserved_remote = LinkHello::new_unchecked_for_tests(
+            LinkSessionIdentity::new_unchecked_for_tests(
+                LINK_PROTOCOL_VERSION,
+                "legacy-session",
+                modpack("core-modular", "1234abcd"),
+                pack_content_hash(),
+            ),
+            player(2),
+        );
+        assert_eq!(
+            validate_link_hello(&local, &reserved_remote),
+            Err(LinkHandshakeError::ReservedSessionId {
+                session_id: "legacy-session".to_string(),
+            })
+        );
     }
 
     #[test]
     fn link_handshake_rejects_protocol_drift() {
-        let local = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let local = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION + 1,
                 "session-1",
                 modpack("core-modular", "1234abcd"),
+                pack_content_hash(),
             ),
             player(2),
         );
@@ -3162,20 +4353,20 @@ mod tests {
 
     #[test]
     fn link_lobby_accepts_matching_hellos_in_player_id_order() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session.clone(), player(3)).expect("lobby");
 
         assert_eq!(
             lobby.accept_hello(
-                LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(1))
+                hello("session-1", modpack("core-modular", "1234abcd"), player(1))
                     .expect("player 1 hello")
             ),
             Ok(AcceptPlayerResult::Added)
         );
         assert_eq!(
             lobby.accept_hello(
-                LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
                     .expect("player 2 hello")
             ),
             Ok(AcceptPlayerResult::Added)
@@ -3188,10 +4379,10 @@ mod tests {
 
     #[test]
     fn link_lobby_duplicate_same_player_is_idempotent() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let hello = LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+        let hello = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
             .expect("hello");
 
         assert_eq!(
@@ -3204,12 +4395,12 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_conflicting_player_identity() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let original = LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+        let original = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
             .expect("original");
-        let conflict = LinkHello::new(
+        let conflict = hello(
             "session-1",
             modpack("core-modular", "1234abcd"),
             PlayerIdentity::new(2, "P02").expect("player"),
@@ -3229,11 +4420,11 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_case_changed_modpack_id_before_roster_insert() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
         let case_changed =
-            LinkHello::new("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
+            hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
                 .expect("case changed");
 
         assert_eq!(
@@ -3248,12 +4439,12 @@ mod tests {
 
     #[test]
     fn link_lobby_creates_lockstep_buffer_for_accepted_roster() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
         lobby
             .accept_hello(
-                LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
                     .expect("hello"),
             )
             .expect("accept");
@@ -3280,7 +4471,7 @@ mod tests {
 
     #[test]
     fn link_lobby_exports_local_hello_for_registered_player_only() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let lobby = LinkLobby::new(session.clone(), player(1)).expect("lobby");
 
@@ -3296,12 +4487,12 @@ mod tests {
 
     #[test]
     fn battle_action_sync_waits_for_roster_and_orders_exact_actions() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
         lobby
             .accept_hello(
-                LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
                     .expect("hello"),
             )
             .expect("accept");
@@ -3643,6 +4834,35 @@ mod tests {
     }
 
     #[test]
+    fn battle_action_sync_requires_exact_hash_roster_for_ready_turns() {
+        let mut sync = BattleActionSyncBuffer::new([1, 2]).expect("battle action buffer");
+        sync.actions.insert(
+            4,
+            BTreeMap::from([
+                (1, BattleAction::Move { slot: 0 }),
+                (2, BattleAction::Move { slot: 1 }),
+            ]),
+        );
+        sync.state_hashes
+            .insert(4, BTreeMap::from([(1, "11111111".to_string())]));
+
+        assert!(!sync.is_turn_ready(4));
+        assert_eq!(sync.turn(4), None);
+
+        sync.state_hashes.insert(
+            4,
+            BTreeMap::from([
+                (1, "11111111".to_string()),
+                (2, "22222222".to_string()),
+                (3, "33333333".to_string()),
+            ]),
+        );
+
+        assert!(!sync.is_turn_ready(4));
+        assert_eq!(sync.turn(4), None);
+    }
+
+    #[test]
     fn battle_action_sync_rejects_empty_rosters() {
         assert_eq!(
             BattleActionSyncBuffer::new(std::iter::empty::<PlayerId>()),
@@ -3680,12 +4900,12 @@ mod tests {
 
     #[test]
     fn trade_sync_swaps_confirmed_party_slots_without_item_id_coercion() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
         lobby
             .accept_hello(
-                LinkHello::new("session-1", modpack("core-modular", "1234abcd"), player(2))
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
                     .expect("hello"),
             )
             .expect("accept");
@@ -3820,7 +5040,7 @@ mod tests {
 
     #[test]
     fn trade_sync_rejects_unknown_players_wrong_trade_ids_and_empty_slots() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let lobby = LinkLobby::new(session, player(1)).expect("lobby");
 
@@ -4046,7 +5266,7 @@ mod tests {
 
     #[test]
     fn link_cable_from_lobby_requires_accepted_players() {
-        let session = LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"))
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
             .expect("session");
         let lobby = LinkLobby::new(session, player(1)).expect("lobby");
 
@@ -4092,6 +5312,11 @@ mod tests {
     #[test]
     fn link_cable_sync_rejects_impossible_clock_ordering() {
         let mut client = LinkCableState::new(2, 1).expect("client");
+        assert_eq!(
+            LinkClockSyncFrame::new(1, 0, 0, 0),
+            Err(LinkCableError::InvalidClock { clock: 0 })
+        );
+
         let invalid = LinkClockSyncFrame::new_unchecked_for_tests(1, 12, 11, 13);
 
         assert_eq!(
@@ -4248,6 +5473,110 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<DeterministicLockstep>(&json).expect("deserialize lockstep"),
             lockstep
+        );
+    }
+
+    #[test]
+    fn deterministic_input_journal_records_pack_bound_contiguous_lockstep_frames() {
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("session");
+        let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
+        let frames = vec![
+            LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+            LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+        ];
+
+        let terminal_checksum = StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee);
+        let journal = DeterministicInputJournal::new(
+            session.clone(),
+            [1, 2],
+            start_checksum.clone(),
+            terminal_checksum.clone(),
+            frames,
+        )
+        .expect("journal");
+
+        assert_eq!(journal.session(), &session);
+        assert_eq!(journal.players(), &BTreeSet::from([1, 2]));
+        assert_eq!(journal.start_checksum(), &start_checksum);
+        assert_eq!(journal.terminal_checksum(), &terminal_checksum);
+        assert_eq!(journal.frames().len(), 2);
+        let canonical_bytes = journal.canonical_bytes().expect("journal bytes");
+        assert_eq!(journal.fingerprint(), Ok(fnv1a32_bytes(&canonical_bytes)));
+        assert_eq!(
+            journal.fingerprint_hex(),
+            Ok(format!("{:08x}", fnv1a32_bytes(&canonical_bytes)))
+        );
+        let json = serde_json::to_string(&journal).expect("serialize journal");
+        assert!(json.contains(r#""session_id":"session-1""#));
+        assert_eq!(
+            serde_json::from_str::<DeterministicInputJournal>(&json)
+                .expect("deserialize journal")
+                .validate(),
+            Ok(())
+        );
+        let journal_frame = DeterministicInputJournalFrame::new(journal.clone()).expect("frame");
+        assert_eq!(
+            journal_frame.fingerprint(),
+            journal.fingerprint_hex().expect("journal fingerprint")
+        );
+        assert_eq!(journal_frame.journal(), &journal);
+        assert_eq!(journal_frame.validate(), Ok(()));
+    }
+
+    #[test]
+    fn deterministic_input_journal_rejects_missing_players_and_frame_gaps() {
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("session");
+        let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
+
+        assert_eq!(
+            DeterministicInputJournal::new(
+                session.clone(),
+                [1, 2],
+                start_checksum.clone(),
+                StateChecksumFrame::new(1, Frame(4), 0xbbcc_ddee),
+                vec![LockstepFrame::new(5, BTreeMap::from([(1, 0), (2, 0)])).expect("frame")]
+            ),
+            Err(InputJournalError::FrameOutOfOrder {
+                expected: 4,
+                actual: 5,
+            })
+        );
+
+        assert_eq!(
+            DeterministicInputJournal::new(
+                session,
+                [1, 2],
+                start_checksum,
+                StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
+                vec![LockstepFrame::new(4, BTreeMap::from([(1, 0)])).expect("frame")]
+            ),
+            Err(InputJournalError::MissingPlayerInput {
+                frame: 4,
+                player_id: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn deterministic_input_journal_requires_explicit_terminal_checksum_frame() {
+        let session = session("session-1", modpack("core-modular", "1234abcd"))
+            .expect("session");
+
+        assert_eq!(
+            DeterministicInputJournal::new(
+                session,
+                [1, 2],
+                StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+                StateChecksumFrame::new(1, Frame(4), 0xbbcc_ddee),
+                vec![LockstepFrame::new(4, BTreeMap::from([(1, 0), (2, 0)]))
+                    .expect("frame")]
+            ),
+            Err(InputJournalError::TerminalChecksumFrameMismatch {
+                expected: 5,
+                actual: 4,
+            })
         );
     }
 
@@ -4632,6 +5961,36 @@ mod tests {
                 y: 12,
             })
         );
+        let namespaced_user = OverworldPresence::new_unchecked_for_tests(
+            "link:u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            namespaced_user.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "presence user id",
+            })
+        );
+        let reserved_user = OverworldPresence::new_unchecked_for_tests(
+            "fallback-user",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        );
+        assert_eq!(
+            reserved_user.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "presence user id",
+            })
+        );
 
         let request = MultiplayerInteractionRequest::new_unchecked_for_tests(
             "",
@@ -4659,6 +6018,20 @@ mod tests {
             malformed_request.validate(),
             Err(MultiplayerMessageError::InvalidText {
                 field: "interaction request id",
+            })
+        );
+        let namespaced_target = MultiplayerInteractionRequest::new_unchecked_for_tests(
+            "request-1",
+            "u1",
+            "CHRIS",
+            "link:u2",
+            MultiplayerInteractionKind::Trade,
+            1234,
+        );
+        assert_eq!(
+            namespaced_target.validate(),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "interaction request target user id",
             })
         );
         let self_request = MultiplayerInteractionRequest::new_unchecked_for_tests(

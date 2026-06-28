@@ -256,12 +256,19 @@ pub fn evolution_table_issues(
 fn is_exact_nonempty_evolution_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct EvolutionTable(pub BTreeMap<String, Vec<EvolutionEntry>>);
 
 impl EvolutionTable {
@@ -999,6 +1006,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn evolution_table_issues_reject_reserved_pack_prefix_tokens() {
+        let species_ids = ["CHIKORITA".to_string(), "BAYLEEF".to_string()]
+            .into_iter()
+            .collect();
+        let item_ids = BTreeSet::new();
+        let table = EvolutionTable(
+            [(
+                "fallback_chikorita".to_string(),
+                vec![
+                    EvolutionEntry::level("legacy_bayleef", 16),
+                    EvolutionEntry::item("BAYLEEF", "fallback_stone"),
+                    EvolutionEntry {
+                        method: "legacy_method".to_string(),
+                        species: "BAYLEEF".to_string(),
+                        level: None,
+                        item: None,
+                        held_item: None,
+                        happiness: None,
+                        stat_ratio: None,
+                    },
+                ],
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            evolution_table_issues(&table, &species_ids, &item_ids),
+            vec![
+                EvolutionTableIssue::MissingSpeciesEvolutions {
+                    species_id: "BAYLEEF".to_string(),
+                },
+                EvolutionTableIssue::MissingSpeciesEvolutions {
+                    species_id: "CHIKORITA".to_string(),
+                },
+                EvolutionTableIssue::InvalidSourceSpecies {
+                    species_id: "fallback_chikorita".to_string(),
+                },
+                EvolutionTableIssue::InvalidTargetSpecies {
+                    source_species_id: "fallback_chikorita".to_string(),
+                    target_species_id: "legacy_bayleef".to_string(),
+                },
+                EvolutionTableIssue::InvalidItem {
+                    source_species_id: "fallback_chikorita".to_string(),
+                    item_id: "fallback_stone".to_string(),
+                },
+                EvolutionTableIssue::InvalidMethod {
+                    source_species_id: "fallback_chikorita".to_string(),
+                    method: "legacy_method".to_string(),
+                },
+            ]
+        );
+    }
+
     fn context<'a>(
         species: &'a BTreeMap<String, PokemonSpecies>,
         moves: &'a BTreeMap<String, Move>,
@@ -1258,6 +1320,25 @@ mod tests {
     }
 
     #[test]
+    fn evolution_rejects_reserved_target_species_before_mutation() {
+        let species_map = BTreeMap::new();
+        let moves = BTreeMap::new();
+        let learnsets = SpeciesLearnsets::new();
+        let entry = EvolutionEntry::level("fallback_ivysaur", 16);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut pokemon = pokemon("BULBASAUR", 16);
+
+        assert_eq!(
+            evolve_pokemon(&mut pokemon, &entry, &context, false),
+            Err(EvolutionError::InvalidSpeciesId {
+                species_id: "fallback_ivysaur".to_string(),
+            })
+        );
+        assert_eq!(pokemon.species.id, "BULBASAUR");
+        assert!(pokemon.moves.is_empty());
+    }
+
+    #[test]
     fn evolution_rejects_malformed_learned_move_before_mutation() {
         let species_map: BTreeMap<_, _> = [("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60))]
             .into_iter()
@@ -1357,6 +1438,16 @@ mod tests {
             .expect_err("missing level must not deserialize as None")
             .to_string();
         assert!(error.contains("missing field `level`"), "{error}");
+
+        let table_error = serde_json::from_str::<EvolutionTable>(
+            r#"{"entries":{"CHIKORITA":[]},"fallback_entries":{}}"#,
+        )
+        .expect_err("evolution tables must be the compiler-emitted species map")
+        .to_string();
+        assert!(
+            table_error.contains("invalid type") || table_error.contains("invalid value"),
+            "{table_error}"
+        );
     }
 
     #[test]

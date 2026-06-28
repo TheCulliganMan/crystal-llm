@@ -6,15 +6,19 @@ use crate::world::encounters::TimeOfDay;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptVariableCommand {
+    #[serde(deserialize_with = "required_script_variable_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_variable_target_token")]
     pub target: Option<String>,
+    #[serde(deserialize_with = "required_script_variable_value_token_vec")]
     pub value_tokens: Vec<String>,
+    #[serde(deserialize_with = "required_script_variable_target_token")]
     pub source_script: String,
     pub command_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptVariableOutcome {
     SetAccumulator {
         value: String,
@@ -42,6 +46,7 @@ pub enum ScriptVariableOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptVariableCommandError {
     #[error("unknown script variable command '{command}'")]
     UnknownCommand { command: String },
@@ -216,6 +221,11 @@ pub fn apply_script_variable_command(
 pub fn validate_script_variable_command(
     command: &ScriptVariableCommand,
 ) -> Result<(), ScriptVariableCommandError> {
+    if !is_exact_script_variable_command_token(&command.command) {
+        return Err(ScriptVariableCommandError::UnknownCommand {
+            command: command.command.clone(),
+        });
+    }
     match command.command.as_str() {
         "setval" => {
             reject_target(command)?;
@@ -340,10 +350,89 @@ fn is_exact_script_variable_target_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_variable_value_token(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value && value.bytes().all(|byte| byte.is_ascii_graphic())
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_variable_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_variable_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_variable_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script variable command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_variable_target_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_variable_target_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script variable target must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_variable_target_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_script_variable_target_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script variable target must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_script_variable_value_token_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if let Some(token) = values
+        .iter()
+        .find(|token| !is_exact_script_variable_value_token(token))
+    {
+        Err(serde::de::Error::custom(format!(
+            "script variable value token must be exact visible ASCII, found {token:?}"
+        )))
+    } else {
+        Ok(values)
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -499,6 +588,55 @@ mod tests {
     }
 
     #[test]
+    fn rejects_reserved_variable_tokens_without_pack_fallbacks() {
+        assert!(matches!(
+            validate_script_variable_command(&command(
+                "loadvar",
+                Some("fallback_variable"),
+                &["PHONE_BIRDKEEPER_VANCE"]
+            )),
+            Err(ScriptVariableCommandError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
+            validate_script_variable_command(&command(
+                "loadvar",
+                Some("VAR_CALLERID"),
+                &["legacy_phone"]
+            )),
+            Err(ScriptVariableCommandError::InvalidValueToken { .. })
+        ));
+        assert!(matches!(
+            validate_script_variable_command(&command("fallbackset", None, &["TRUE"])),
+            Err(ScriptVariableCommandError::UnknownCommand { .. })
+        ));
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackset")),
+            ("target", serde_json::json!("legacy_target")),
+            ("value_tokens", serde_json::json!(["fallback_value"])),
+            ("source_script", serde_json::json!("legacy_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "loadvar",
+                "target": "VAR_CALLERID",
+                "value_tokens": ["PHONE_BIRDKEEPER_VANCE"],
+                "source_script": "VarScript",
+                "command_index": 5
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptVariableCommand>(payload)
+                .expect_err("reserved script variable command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script variable"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn script_variable_command_issues_preserve_exact_source_positions() {
         let commands = vec![
             command("checktime", None, &["night"]),
@@ -568,6 +706,39 @@ mod tests {
                     },
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn script_variable_serialized_variants_reject_unknown_fallback_fields() {
+        let outcome_error = serde_json::from_value::<ScriptVariableOutcome>(serde_json::json!({
+            "load_variable": {
+                "variable": "VAR_CALLERID",
+                "value": "PHONE_BIRDKEEPER_VANCE",
+                "source_script": "VarScript",
+                "command_index": 5,
+                "fallback_value": "PHONE_NONE"
+            }
+        }))
+        .expect_err("fallback variable value must be rejected")
+        .to_string();
+        assert!(
+            outcome_error.contains("unknown field `fallback_value`"),
+            "{outcome_error}"
+        );
+
+        let error_error = serde_json::from_value::<ScriptVariableCommandError>(serde_json::json!({
+            "InvalidTarget": {
+                "command": "loadvar",
+                "target": "VAR CALLERID",
+                "normalized_target": "VAR_CALLERID"
+            }
+        }))
+        .expect_err("normalized target must be rejected")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `normalized_target`"),
+            "{error_error}"
         );
     }
 }

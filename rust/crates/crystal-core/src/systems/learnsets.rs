@@ -5,8 +5,23 @@ use thiserror::Error;
 
 use crate::models::PokemonSpecies;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LearnsetEntry(pub u8, pub String);
+
+impl<'de> Deserialize<'de> for LearnsetEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (level, move_id) = <(u8, String)>::deserialize(deserializer)?;
+        validate_learnset_runtime_token(&move_id).map_err(|_| {
+            serde::de::Error::custom(format!(
+                "learnset move id must be exact ASCII alphanumeric/underscore, found {move_id:?}"
+            ))
+        })?;
+        Ok(Self(level, move_id))
+    }
+}
 
 pub type SpeciesLearnsets = BTreeMap<String, Vec<LearnsetEntry>>;
 
@@ -106,9 +121,15 @@ pub fn learnset_catalog_issues(
 fn is_exact_nonempty_learnset_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn level_up_moves_for_species<'a>(
@@ -288,6 +309,44 @@ mod tests {
     }
 
     #[test]
+    fn learnset_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let mut chikorita = species("CHIKORITA");
+        chikorita.item1 = Some("fallback_berry".to_string());
+        chikorita.tmhm_learnset = vec!["legacy_cut".to_string()];
+        let species = [("CHIKORITA".to_string(), chikorita)].into_iter().collect();
+        let learnsets = [(
+            "fallback_chikorita".to_string(),
+            vec![LearnsetEntry(1, "legacy_tackle".to_string())],
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            learnset_catalog_issues(&species, &learnsets, &BTreeSet::new(), &BTreeSet::new()),
+            vec![
+                LearnsetCatalogIssue::MissingSpeciesLearnset {
+                    species_id: "CHIKORITA".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidSpeciesHeldItem {
+                    species_id: "CHIKORITA".to_string(),
+                    item_id: "fallback_berry".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidTmHmMove {
+                    species_id: "CHIKORITA".to_string(),
+                    move_id: "legacy_cut".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidLearnsetSpecies {
+                    species_id: "fallback_chikorita".to_string(),
+                },
+                LearnsetCatalogIssue::InvalidLevelMove {
+                    species_id: "fallback_chikorita".to_string(),
+                    move_id: "legacy_tackle".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn default_moves_follow_typescript_slot_replacement_behavior() {
         let learnsets: SpeciesLearnsets = [(
             "TESTMON".to_string(),
@@ -352,6 +411,34 @@ mod tests {
             Err(LearnsetError::InvalidSpecies {
                 species_id: "TEST MON".to_string(),
             })
+        );
+
+        assert_eq!(
+            level_up_moves_for_species(&learnsets, "fallback_testmon"),
+            Err(LearnsetError::InvalidSpecies {
+                species_id: "fallback_testmon".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn learnset_entry_json_rejects_wrapper_fallback_objects() {
+        let error = serde_json::from_str::<LearnsetEntry>(
+            r#"{"level":1,"move":"TACKLE","fallback_move":"POUND"}"#,
+        )
+        .expect_err("learnset entries must remain tuple data emitted by the pack compiler")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("invalid length"),
+            "{error}"
+        );
+
+        let error = serde_json::from_str::<LearnsetEntry>(r#"[1,"RAZOR LEAF"]"#)
+            .expect_err("learnset move ids must be exact during JSON load")
+            .to_string();
+        assert!(
+            error.contains("learnset move id must be exact ASCII alphanumeric/underscore"),
+            "{error}"
         );
     }
 

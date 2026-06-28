@@ -6,6 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrowthRateCurve {
+    #[serde(deserialize_with = "required_growth_rate_token")]
     pub id: String,
     pub numerator: i32,
     pub denominator: i32,
@@ -17,6 +18,7 @@ pub struct GrowthRateCurve {
 pub type GrowthRateCatalog = BTreeMap<String, GrowthRateCurve>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ExperienceError {
     #[error("invalid growth-rate id '{growth_rate}'")]
     InvalidGrowthRate { growth_rate: String },
@@ -32,7 +34,7 @@ pub enum ExperienceError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrowthRateCatalogIssue {
     InvalidCatalogId {
         growth_rate: String,
@@ -108,9 +110,29 @@ pub fn calculate_experience(
 fn is_exact_growth_rate_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+fn required_growth_rate_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_growth_rate_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "growth-rate id must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +299,80 @@ mod tests {
                     growth_rate: "GROWTH_ZERO".to_string()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn growth_rate_tokens_reject_reserved_pack_prefixes() {
+        let mut catalog = crystal_growth_rate_catalog_for_tests();
+        catalog.insert(
+            "fallback_growth_fast".to_string(),
+            GrowthRateCurve {
+                id: "fallback_growth_fast".to_string(),
+                numerator: 1,
+                denominator: 1,
+                quadratic: 0,
+                linear: 0,
+                constant: 0,
+            },
+        );
+
+        assert_eq!(
+            growth_rate_catalog_issues(&catalog),
+            vec![GrowthRateCatalogIssue::InvalidCatalogId {
+                growth_rate: "fallback_growth_fast".to_string(),
+            }]
+        );
+        assert_eq!(
+            calculate_experience(&catalog, "legacy_growth_fast", 5),
+            Err(ExperienceError::InvalidGrowthRate {
+                growth_rate: "legacy_growth_fast".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn experience_json_rejects_legacy_alias_payloads() {
+        let curve_error = serde_json::from_value::<GrowthRateCurve>(serde_json::json!({
+            "id": "GROWTH FAST",
+            "numerator": 1,
+            "denominator": 1,
+            "quadratic": 0,
+            "linear": 0,
+            "constant": 0
+        }))
+        .expect_err("growth-rate curve ids must be exact during JSON load")
+        .to_string();
+        assert!(
+            curve_error.contains("growth-rate id must be exact ASCII alphanumeric/underscore"),
+            "{curve_error}"
+        );
+
+        let issue_error = serde_json::from_value::<GrowthRateCatalogIssue>(serde_json::json!({
+            "mismatched_curve_id": {
+                "growth_rate": "GROWTH_FAST",
+                "declared_id": "GROWTH_MEDIUM_FAST",
+                "fallback_growth_rate": "FAST"
+            }
+        }))
+        .expect_err("growth-rate issues must not accept fallback aliases")
+        .to_string();
+        assert!(
+            issue_error.contains("unknown field `fallback_growth_rate`"),
+            "{issue_error}"
+        );
+
+        let error_error = serde_json::from_value::<ExperienceError>(serde_json::json!({
+            "MissingGrowthRate": {
+                "growth_rate": "GROWTH_FAST",
+                "legacy_growth_rate": "FAST"
+            }
+        }))
+        .expect_err("experience errors must not accept legacy aliases")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `legacy_growth_rate`"),
+            "{error_error}"
         );
     }
 }

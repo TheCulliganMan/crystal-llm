@@ -215,6 +215,7 @@ impl PokemonStorage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum CaptureStorageLocation {
     Party { slot: usize },
     Pc { box_index: usize, slot: usize },
@@ -333,5 +334,19 @@ mod tests {
 
         assert!(!storage.has_capture_space());
         assert!(storage.register_capture(pokemon("EXTRA", 999)).is_err());
+    }
+
+    #[test]
+    fn capture_storage_location_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<CaptureStorageLocation>(serde_json::json!({
+            "Pc": {
+                "box_index": 0,
+                "slot": 1,
+                "fallback_slot": 0
+            }
+        }))
+        .expect_err("capture storage locations must not accept fallback slots")
+        .to_string();
+        assert!(error.contains("unknown field `fallback_slot`"), "{error}");
     }
 }

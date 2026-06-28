@@ -25,6 +25,7 @@ impl Default for BattleEscapeRules {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleEscapeRulesIssue {
     Missing,
     MissingPlayerSpeedMultiplier,
@@ -70,6 +71,7 @@ pub struct BattleEscapeAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BattleEscapeError {
     MissingStat { side: EscapeSide, stat: Stat },
     MissingStatStage { side: EscapeSide, stat: Stat },
@@ -78,7 +80,7 @@ pub enum BattleEscapeError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EscapeSide {
     Player,
     Enemy,
@@ -127,6 +129,11 @@ pub fn escape_chance(
     attempts_before: u8,
     rules: &BattleEscapeRules,
 ) -> Result<u16, BattleEscapeError> {
+    if rules.player_speed_multiplier == 0 {
+        return Err(BattleEscapeError::InvalidRules {
+            message: "player_speed_multiplier must be nonzero".to_string(),
+        });
+    }
     if rules.enemy_speed_divisor == 0 {
         return Err(BattleEscapeError::InvalidRules {
             message: "enemy_speed_divisor must be nonzero".to_string(),
@@ -363,6 +370,52 @@ mod tests {
             Err(BattleEscapeError::InvalidRules {
                 message: "enemy_speed_divisor must be nonzero".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn escape_rejects_missing_player_speed_multiplier_without_zero_chance_fallback() {
+        let player = pokemon("GEODUDE", 20);
+        let enemy = pokemon("RATTATA", 120);
+        let mut rng = Random::new(1);
+        let mut rules = escape_rules();
+        rules.player_speed_multiplier = 0;
+
+        assert_eq!(
+            attempt_wild_battle_escape(&player, &enemy, &stat_multipliers(), &rules, 0, &mut rng),
+            Err(BattleEscapeError::InvalidRules {
+                message: "player_speed_multiplier must be nonzero".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn battle_escape_serialized_variants_reject_unknown_fallback_fields() {
+        let issue_error = serde_json::from_value::<BattleEscapeRulesIssue>(serde_json::json!({
+            "InvalidRngRollValues": {
+                "rng_roll_values": 0,
+                "default_rng_roll_values": 256
+            }
+        }))
+        .expect_err("default rng roll values must be rejected")
+        .to_string();
+        assert!(
+            issue_error.contains("unknown field `default_rng_roll_values`"),
+            "{issue_error}"
+        );
+
+        let escape_error = serde_json::from_value::<BattleEscapeError>(serde_json::json!({
+            "MissingStat": {
+                "side": "player",
+                "stat": "Speed",
+                "fallback_stat": "Speed"
+            }
+        }))
+        .expect_err("fallback stat must be rejected")
+        .to_string();
+        assert!(
+            escape_error.contains("unknown field `fallback_stat`"),
+            "{escape_error}"
         );
     }
 }

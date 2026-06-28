@@ -7,7 +7,7 @@ export type ExportedFishingSlot = {
   threshold: number;
   species: string | null;
   level: number;
-  time_group: number | null;
+  time_group: string | null;
 };
 
 export type ExportedRodTable = {
@@ -33,16 +33,11 @@ export type ExportedFishingSwarmRule = {
   swarm_group: string;
 };
 
-export type ExportedFishingRodItemRule = {
-  item_id: string;
-  rod: string;
-};
-
 export type ExportedFishingCatalog = {
   groups: Record<string, ExportedFishingGroup>;
-  time_groups: ExportedTimeFishEntry[];
-  swarm_rules: ExportedFishingSwarmRule[];
-  rod_items: ExportedFishingRodItemRule[];
+  time_groups: Record<string, ExportedTimeFishEntry>;
+  swarm_rules: Record<string, ExportedFishingSwarmRule>;
+  rod_items: Record<string, string>;
 };
 
 const ROD_IDS = ["OLD_ROD", "GOOD_ROD", "SUPER_ROD"] as const;
@@ -93,7 +88,9 @@ const parseFishGroupRows = (content: string): RawGroupRow[] => {
   const rows: RawGroupRow[] = [];
   for (const rawLine of content.split(/\r?\n/)) {
     const line = stripComment(rawLine);
-    const match = line.match(/^fishgroup\s+(.+?),\s*(\.[A-Za-z0-9_]+),\s*(\.[A-Za-z0-9_]+),\s*(\.[A-Za-z0-9_]+)$/);
+    const match = line.match(
+      /^fishgroup\s+(.+?),\s*(\.[A-Za-z0-9_]+),\s*(\.[A-Za-z0-9_]+),\s*(\.[A-Za-z0-9_]+)$/,
+    );
     if (!match) continue;
     rows.push({
       biteThreshold: parseThreshold(match[1]),
@@ -142,7 +139,7 @@ const parseRodTables = (content: string): Map<string, ExportedRodTable> => {
         threshold: parseThreshold(timeMatch[1]),
         species: null,
         level: 0,
-        time_group: Number(timeMatch[2]),
+        time_group: `TIME_GROUP_${Number(timeMatch[2])}`,
       });
       continue;
     }
@@ -160,8 +157,10 @@ const parseRodTables = (content: string): Map<string, ExportedRodTable> => {
   return labels;
 };
 
-const parseTimeFishGroups = (content: string): ExportedTimeFishEntry[] => {
-  const entries: ExportedTimeFishEntry[] = [];
+const parseTimeFishGroups = (
+  content: string,
+): Record<string, ExportedTimeFishEntry> => {
+  const entries: Record<string, ExportedTimeFishEntry> = {};
   let inSection = false;
   for (const rawLine of content.split(/\r?\n/)) {
     const line = stripComment(rawLine);
@@ -170,24 +169,29 @@ const parseTimeFishGroups = (content: string): ExportedTimeFishEntry[] => {
       continue;
     }
     if (!inSection || line.length === 0) continue;
-    const match = line.match(/^db\s+([A-Z0-9_]+),\s*(\d+),\s*([A-Z0-9_]+),\s*(\d+)$/);
+    const match = line.match(
+      /^db\s+([A-Z0-9_]+),\s*(\d+),\s*([A-Z0-9_]+),\s*(\d+)$/,
+    );
     if (!match) {
       throw new Error(`Unsupported TimeFishGroups row '${line}'.`);
     }
-    entries.push({
+    entries[`TIME_GROUP_${Object.keys(entries).length}`] = {
       day_species: match[1],
       day_level: Number(match[2]),
       night_species: match[3],
       night_level: Number(match[4]),
-    });
+    };
   }
-  if (entries.length === 0) {
+  if (Object.keys(entries).length === 0) {
     throw new Error("No TimeFishGroups entries found.");
   }
   return entries;
 };
 
-const parseConstDefValues = (content: string, prefix: string): Map<string, number> => {
+const parseConstDefValues = (
+  content: string,
+  prefix: string,
+): Map<string, number> => {
   const values = new Map<string, number>();
   let current = 0;
   let inConstDef = false;
@@ -243,27 +247,39 @@ const parseDailyFlagBit = (content: string): number => {
       break;
     }
   }
-  throw new Error("Could not parse DAILYFLAGS1_FISH_SWARM_F from ram_constants.asm.");
+  throw new Error(
+    "Could not parse DAILYFLAGS1_FISH_SWARM_F from ram_constants.asm.",
+  );
 };
 
-const parseFishingSwarmRules = (root: string): ExportedFishingSwarmRule[] => {
+const parseFishingSwarmRules = (
+  root: string,
+): Record<string, ExportedFishingSwarmRule> => {
   const fishEngine = fs
     .readFileSync(path.join(root, "engine", "events", "fish.asm"), "utf8")
     .split(/\r?\n/)
     .map(stripComment);
-  const scriptConstants = fs.readFileSync(path.join(root, "constants", "script_constants.asm"), "utf8");
-  const ramConstants = fs.readFileSync(path.join(root, "constants", "ram_constants.asm"), "utf8");
+  const scriptConstants = fs.readFileSync(
+    path.join(root, "constants", "script_constants.asm"),
+    "utf8",
+  );
+  const ramConstants = fs.readFileSync(
+    path.join(root, "constants", "ram_constants.asm"),
+    "utf8",
+  );
   const swarmValues = parseConstDefValues(scriptConstants, "FISHSWARM_");
   const dailyFlagBit = parseDailyFlagBit(ramConstants);
   const branchBaseGroups = new Map<string, string>();
   for (let index = 0; index < fishEngine.length - 1; index += 1) {
     const cpMatch = fishEngine[index].match(/^cp\s+(FISHGROUP_[A-Z0-9_]+)$/);
-    const branchMatch = fishEngine[index + 1].match(/^jr z,\s*\.([A-Za-z0-9_]+)$/);
+    const branchMatch = fishEngine[index + 1].match(
+      /^jr z,\s*\.([A-Za-z0-9_]+)$/,
+    );
     if (cpMatch && branchMatch) {
       branchBaseGroups.set(branchMatch[1], cpMatch[1]);
     }
   }
-  const rules: ExportedFishingSwarmRule[] = [];
+  const rules: Record<string, ExportedFishingSwarmRule> = {};
   for (const [label, baseGroup] of branchBaseGroups) {
     const labelIndex = fishEngine.indexOf(`.${label}`);
     if (labelIndex < 0) {
@@ -277,34 +293,50 @@ const parseFishingSwarmRules = (root: string): ExportedFishingSwarmRule[] => {
       .map((line) => line.match(/^ld d,\s*(FISHGROUP_[A-Z0-9_]+)$/)?.[1])
       .find(Boolean);
     if (!swarmConstant || !targetGroup) {
-      throw new Error(`Fishing swarm branch .${label} does not declare an exact swarm and group.`);
+      throw new Error(
+        `Fishing swarm branch .${label} does not declare an exact swarm and group.`,
+      );
     }
     const swarm = swarmValues.get(swarmConstant);
     if (swarm === undefined) {
-      throw new Error(`Fishing swarm branch .${label} references unknown ${swarmConstant}.`);
+      throw new Error(
+        `Fishing swarm branch .${label} references unknown ${swarmConstant}.`,
+      );
     }
-    rules.push({
+    rules[`SWARM_RULE_${Object.keys(rules).length}`] = {
       daily_flag_bit: dailyFlagBit,
       swarm,
       base_group: baseGroup,
       swarm_group: targetGroup,
-    });
+    };
   }
-  if (rules.length === 0) {
-    throw new Error("No fishing swarm rules were exported from engine/events/fish.asm.");
+  if (Object.keys(rules).length === 0) {
+    throw new Error(
+      "No fishing swarm rules were exported from engine/events/fish.asm.",
+    );
   }
   return rules;
 };
 
-const parseFishingRodItemRules = (root: string): ExportedFishingRodItemRule[] => {
+const parseFishingRodItemRules = (root: string): Record<string, string> => {
   const rawLines = fs
-    .readFileSync(path.join(root, "engine", "items", "item_effects.asm"), "utf8")
+    .readFileSync(
+      path.join(root, "engine", "items", "item_effects.asm"),
+      "utf8",
+    )
     .split(/\r?\n/);
   const lines = rawLines.map(stripComment);
   const itemLabels = new Map<string, string>();
   for (const rawLine of rawLines) {
-    const match = rawLine.trim().match(/^dw\s+([A-Za-z0-9_]+)\s+;\s+([A-Z0-9_]+)$/);
+    const match = rawLine
+      .trim()
+      .match(/^dw\s+([A-Za-z0-9_]+)\s+;\s+([A-Z0-9_]+)$/);
     if (match) {
+      if (itemLabels.has(match[2])) {
+        throw new Error(
+          `Fishing rod item ${match[2]} is declared more than once.`,
+        );
+      }
       itemLabels.set(match[2], match[1]);
     }
   }
@@ -313,24 +345,30 @@ const parseFishingRodItemRules = (root: string): ExportedFishingRodItemRule[] =>
     const label = lines[index].match(/^([A-Za-z0-9_]+):$/)?.[1];
     if (!label) continue;
     const block = lines.slice(index + 1, index + 5);
-    const rodIndex = block.map((line) => line.match(/^ld e,\s*\$(\d+)$/)?.[1]).find(Boolean);
+    const rodIndex = block
+      .map((line) => line.match(/^ld e,\s*\$(\d+)$/)?.[1])
+      .find(Boolean);
     const jumpsToUseRod = block.some((line) => line === "jr UseRod");
     if (rodIndex === undefined || !jumpsToUseRod) continue;
     const rod = ROD_IDS[Number(rodIndex)];
     if (!rod) {
-      throw new Error(`Fishing rod effect ${label} loads unsupported rod index ${rodIndex}.`);
+      throw new Error(
+        `Fishing rod effect ${label} loads unsupported rod index ${rodIndex}.`,
+      );
     }
     labelRods.set(label, rod);
   }
-  const rules: ExportedFishingRodItemRule[] = [];
+  const rules: Record<string, string> = {};
   for (const [itemId, label] of itemLabels) {
     const rod = labelRods.get(label);
     if (rod) {
-      rules.push({ item_id: itemId, rod });
+      rules[itemId] = rod;
     }
   }
-  if (rules.length !== ROD_IDS.length) {
-    throw new Error(`Expected ${ROD_IDS.length} fishing rod item rules, exported ${rules.length}.`);
+  if (Object.keys(rules).length !== ROD_IDS.length) {
+    throw new Error(
+      `Expected ${ROD_IDS.length} fishing rod item rules, exported ${Object.keys(rules).length}.`,
+    );
   }
   return rules;
 };
@@ -338,12 +376,20 @@ const parseFishingRodItemRules = (root: string): ExportedFishingRodItemRule[] =>
 export function exportFishing(): ExportedFishingCatalog {
   const root = getDisassemblyRoot();
   const constants = parseFishGroupConstants(
-    fs.readFileSync(path.join(root, "constants", "map_data_constants.asm"), "utf8")
+    fs.readFileSync(
+      path.join(root, "constants", "map_data_constants.asm"),
+      "utf8",
+    ),
   );
-  const fishContent = fs.readFileSync(path.join(root, "data", "wild", "fish.asm"), "utf8");
+  const fishContent = fs.readFileSync(
+    path.join(root, "data", "wild", "fish.asm"),
+    "utf8",
+  );
   const groupRows = parseFishGroupRows(fishContent);
   if (constants.length !== groupRows.length) {
-    throw new Error(`Fishing group constant count ${constants.length} does not match fish table rows ${groupRows.length}.`);
+    throw new Error(
+      `Fishing group constant count ${constants.length} does not match fish table rows ${groupRows.length}.`,
+    );
   }
   const rodTables = parseRodTables(fishContent);
   const groups: Record<string, ExportedFishingGroup> = {};
@@ -357,7 +403,9 @@ export function exportFishing(): ExportedFishingCatalog {
       const label = row.labels[rodIndex];
       const table = rodTables.get(label);
       if (!table) {
-        throw new Error(`Fishing group ${constants[index]} references missing table ${label}.`);
+        throw new Error(
+          `Fishing group ${constants[index]} references missing table ${label}.`,
+        );
       }
       group.rod_tables[ROD_IDS[rodIndex]] = table;
     }

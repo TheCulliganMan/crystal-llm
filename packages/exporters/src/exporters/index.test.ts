@@ -33,8 +33,8 @@ const mockExportFishing = jest.fn(() => {
 const mockExportFieldMoves = jest.fn(() => {
   mockCalls.push("exportFieldMoves");
   return {
-    cut: { move_id: "CUT", badge: { region: "johto", index: 1 }, target_collisions: [], replacements: [] },
-    whirlpool: { move_id: "WHIRLPOOL", badge: { region: "johto", index: 6 }, target_collisions: [], replacements: [] },
+    cut: { move_id: "CUT", badge: { region: "johto", index: 1 }, target_collisions: [], replacements: {} },
+    whirlpool: { move_id: "WHIRLPOOL", badge: { region: "johto", index: 6 }, target_collisions: [], replacements: {} },
     strength: { move_id: "STRENGTH", badge: { region: "johto", index: 2 }, engine_flag: "ENGINE_STRENGTH_ACTIVE" },
     flash: { move_id: "FLASH", badge: { region: "johto", index: 0 }, engine_flag: "STATUSFLAGS_FLASH" },
     surf: { move_id: "SURF", badge: { region: "johto", index: 3 }, blocked_collisions: [], target_collisions: [] },
@@ -141,34 +141,41 @@ const mockExportBattleAnimations = jest.fn(() => {
 const mockExportRuntimeAssets = jest.fn(() => {
   mockCalls.push("exportRuntimeAssets");
   return {
-    fleeMons: { always: ["RAIKOU"], often: [], sometimes: [] },
+    fleeMons: { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
     pcStrings: { PCString_ChooseaPKMN: "Choose a PKMN." },
     menuIcons: { CHIKORITA: "ICON_CHIKORITA" },
-    pokedexEntries: [{ species: "CHIKORITA", classification: "LEAF", heightDigits: 211, weightDigits: 140, pages: [] }],
+    pokedexEntries: {
+      CHIKORITA: { species: "CHIKORITA", classification: "LEAF", heightDigits: 211, weightDigits: 140, pages: [] },
+    },
     pokemonFrontpicAnimations: { CHIKORITA: { commands: [{ kind: "endanim" }] } },
     marts: { MART_CHERRYGROVE: ["POTION"] },
     phoneContacts: { PHONE_MOM: { contactId: "PHONE_MOM" } },
-    permanentPhoneNumbers: ["PHONE_MOM"],
-    specialPhoneCalls: ["SPECIALCALL_NONE"],
-    npcTrades: ["NPC_TRADE_MIKE"],
-    specialRoutines: ["FadeOutMusic"],
+    permanentPhoneNumbers: { PHONE_MOM: {} },
+    specialPhoneCalls: { SPECIALCALL_NONE: {} },
+    npcTrades: { NPC_TRADE_MIKE: {} },
+    specialRoutines: { FadeOutMusic: {} },
   };
 });
 const mockExportRoamingPokemon = jest.fn(() => {
   mockCalls.push("exportRoamingPokemon");
-  return [{ species: "RAIKOU", level: 40, mapGroup: 2, mapNumber: 5 }];
+  return { RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 } };
 });
 const mockExportBuenaPasswordCategories = jest.fn(() => {
   mockCalls.push("exportBuenaPasswordCategories");
-  return [{ id: "HealingItems", categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] }];
+  return {
+    order: ["HealingItems"],
+    categories: {
+      HealingItems: { categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] },
+    },
+  };
 });
 const mockExportBuenaPrizes = jest.fn(() => {
   mockCalls.push("exportBuenaPrizes");
-  return [{ itemId: "RARE_CANDY", cost: 3 }];
+  return { RARE_CANDY: 3 };
 });
 const mockExportKurtApricornRecipes = jest.fn(() => {
   mockCalls.push("exportKurtApricornRecipes");
-  return [{ apricorn: "RED_APRICORN", ball: "LEVEL_BALL" }];
+  return { RED_APRICORN: "LEVEL_BALL" };
 });
 const mockExportShuckieGift = jest.fn(() => {
   mockCalls.push("exportShuckieGift");
@@ -184,7 +191,7 @@ const mockExportShuckieGift = jest.fn(() => {
 });
 const mockExportDratiniMoveSets = jest.fn(() => {
   mockCalls.push("exportDratiniMoveSets");
-  return [{ mode: 0, moves: ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] }];
+  return { "0": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] };
 });
 const mockExportBugContestConfig = jest.fn(() => {
   mockCalls.push("exportBugContestConfig");
@@ -199,7 +206,7 @@ const mockExportBugContestConfig = jest.fn(() => {
 const mockExportBattleTowerRules = jest.fn(() => {
   mockCalls.push("exportBattleTowerRules");
   return {
-    bannedSpecies: ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+    bannedSpecies: { MEWTWO: {}, MEW: {}, LUGIA: {}, HO_OH: {}, CELEBI: {} },
     requiredPartyCount: 3,
     challengeStreakLength: 7,
     minimumLevelGroup: 1,
@@ -245,13 +252,10 @@ const mockExportMagikarpLengths = jest.fn(() => {
 const mockExportHappinessData = jest.fn(() => {
   mockCalls.push("exportHappinessData");
   return {
-    changes: [{ code: "HAPPINESS_GROOMING", changeCode: 18, low: 3, mid: 3, high: 1 }],
-    services: [
-      {
-        routine: "DaisysGrooming",
-        outcomes: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
-      },
-    ],
+    changes: { "18": { code: "HAPPINESS_GROOMING", low: 3, mid: 3, high: 1 } },
+    services: {
+      DaisysGrooming: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
+    },
   };
 });
 const mockExportEncounterSlotTables = jest.fn(() => {
@@ -276,7 +280,7 @@ const mockExportMovePriorityTable = jest.fn(() => {
   mockCalls.push("exportMovePriorityTable");
   return {
     base_priority: 1,
-    effect_priorities: [{ move_effect: "PRIORITY_HIT", priority: 2 }],
+    effect_priorities: { PRIORITY_HIT: 2 },
     move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
   };
 });
@@ -287,8 +291,8 @@ const mockExportTypeCategories = jest.fn(() => {
 const mockExportTypeEffectivenessTable = jest.fn(() => {
   mockCalls.push("exportTypeEffectivenessTable");
   return {
-    matchups: [{ attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } }],
-    foresight_matchups: [{ attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } }],
+    matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
+    foresight_matchups: { NORMAL: { GHOST: { numerator: 0, denominator: 1 } } },
   };
 });
 const mockExportWeatherModifiers = jest.fn(() => {
@@ -321,14 +325,14 @@ const mockExportPlayability = jest.fn(() => {
 });
 const mockExportAudioAssets = jest.fn(() => {
   mockCalls.push("exportAudioAssets");
-  return [{
-    id: "MUSIC_ROUTE_29",
-    path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
-    kind: "music",
-    source: "midi",
-    sample_rate_hz: null,
-    channels: null,
-  }];
+  return {
+    MUSIC_ROUTE_29: {
+      id: "MUSIC_ROUTE_29",
+      path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+      kind: "music",
+      source: "midi",
+    },
+  };
 });
 const mockExportPokemonCryMetadataFromAsm = jest.fn(() => {
   mockCalls.push("exportPokemonCryMetadataFromAsm");
@@ -532,8 +536,8 @@ describe("exportCoreData", () => {
       fieldEncounters: [],
       fishing: { groups: {}, time_groups: [], swarm_rules: [] },
       fieldMoves: {
-        cut: { move_id: "CUT", badge: { region: "johto", index: 1 }, target_collisions: [], replacements: [] },
-        whirlpool: { move_id: "WHIRLPOOL", badge: { region: "johto", index: 6 }, target_collisions: [], replacements: [] },
+        cut: { move_id: "CUT", badge: { region: "johto", index: 1 }, target_collisions: [], replacements: {} },
+        whirlpool: { move_id: "WHIRLPOOL", badge: { region: "johto", index: 6 }, target_collisions: [], replacements: {} },
         strength: { move_id: "STRENGTH", badge: { region: "johto", index: 2 }, engine_flag: "ENGINE_STRENGTH_ACTIVE" },
         flash: { move_id: "FLASH", badge: { region: "johto", index: 0 }, engine_flag: "STATUSFLAGS_FLASH" },
         surf: { move_id: "SURF", badge: { region: "johto", index: 3 }, blocked_collisions: [], target_collisions: [] },
@@ -593,10 +597,15 @@ describe("exportCoreData", () => {
       fruitTrees: { FRUITTREE_ROUTE_29: "BERRY" },
       runtimeSpawnPoints: { "0": { identifier: 0, mapConstant: "PLAYERS_HOUSE_2F", mapName: "PlayersHouse2F" } },
       runtimeMapMetadata: { PLAYERS_HOUSE_2F: { constant: "PLAYERS_HOUSE_2F", name: "PlayersHouse2F" } },
-      roamingPokemon: [{ species: "RAIKOU", level: 40, mapGroup: 2, mapNumber: 5 }],
-      buenaPasswordCategories: [{ id: "HealingItems", categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] }],
-      buenaPrizes: [{ itemId: "RARE_CANDY", cost: 3 }],
-      kurtApricornRecipes: [{ apricorn: "RED_APRICORN", ball: "LEVEL_BALL" }],
+      roamingPokemon: { RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 } },
+      buenaPasswordCategories: {
+        order: ["HealingItems"],
+        categories: {
+          HealingItems: { categoryType: "BUENA_ITEM", points: 12, options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"] },
+        },
+      },
+      buenaPrizes: { RARE_CANDY: 3 },
+      kurtApricornRecipes: { RED_APRICORN: "LEVEL_BALL" },
       shuckieGift: {
         species: "SHUCKLE",
         level: 15,
@@ -606,7 +615,7 @@ describe("exportCoreData", () => {
         originalTrainerId: 518,
         gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
       },
-      dratiniMoveSets: [{ mode: 0, moves: ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] }],
+      dratiniMoveSets: { "0": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] },
       bugContestConfig: {
         parkBalls: 20,
         timerMinutes: 20,
@@ -615,7 +624,7 @@ describe("exportCoreData", () => {
         contestantFlags: ["EVENT_BUG_CATCHING_CONTESTANT_1A"],
       },
       battleTowerRules: {
-        bannedSpecies: ["MEWTWO", "MEW", "LUGIA", "HO_OH", "CELEBI"],
+        bannedSpecies: { MEWTWO: {}, MEW: {}, LUGIA: {}, HO_OH: {}, CELEBI: {} },
         requiredPartyCount: 3,
         challengeStreakLength: 7,
         minimumLevelGroup: 1,
@@ -649,13 +658,10 @@ describe("exportCoreData", () => {
       ],
       magikarpLengths: [{ threshold: 110, divisor: 1 }, { threshold: 310, divisor: 2 }],
       happinessData: {
-        changes: [{ code: "HAPPINESS_GROOMING", changeCode: 18, low: 3, mid: 3, high: 1 }],
-        services: [
-          {
-            routine: "DaisysGrooming",
-            outcomes: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
-          },
-        ],
+        changes: { "18": { code: "HAPPINESS_GROOMING", low: 3, mid: 3, high: 1 } },
+        services: {
+          DaisysGrooming: [{ rollWeight: 255, scriptValue: 2, changeCode: 18 }],
+        },
       },
       encounterSlotTables: {
         grass: [{ threshold: 100, slot: 0 }],
@@ -668,13 +674,13 @@ describe("exportCoreData", () => {
       captureWobbleProbabilities: [{ catch_rate: 255, chance: 255 }],
       movePriorities: {
         base_priority: 1,
-        effect_priorities: [{ move_effect: "PRIORITY_HIT", priority: 2 }],
+        effect_priorities: { PRIORITY_HIT: 2 },
         move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
       },
       typeCategories: { physical: ["NORMAL"], special: ["FIRE"] },
       typeEffectiveness: {
-        matchups: [{ attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } }],
-        foresight_matchups: [{ attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } }],
+        matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
+        foresight_matchups: { NORMAL: { GHOST: { numerator: 0, denominator: 1 } } },
       },
       weatherModifiers: {
         type_modifiers: [
@@ -685,20 +691,22 @@ describe("exportCoreData", () => {
       mapDimensions: {},
       mapAttributes: {},
       items: [],
-      fleeMons: { always: ["RAIKOU"], often: [], sometimes: [] },
+      fleeMons: { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
       marts: { MART_CHERRYGROVE: ["POTION"] },
       currencyConstants: { MAX_MONEY: 999999, MAX_COINS: 9999, ROUTE43GATE_TOLL: 1000 },
       pcStrings: { PCString_ChooseaPKMN: "Choose a PKMN." },
       menuIcons: { CHIKORITA: "ICON_CHIKORITA" },
-      pokedexEntries: [{ species: "CHIKORITA", classification: "LEAF", heightDigits: 211, weightDigits: 140, pages: [] }],
+      pokedexEntries: {
+        CHIKORITA: { species: "CHIKORITA", classification: "LEAF", heightDigits: 211, weightDigits: 140, pages: [] },
+      },
       pokemonFrontpicAnimations: { CHIKORITA: { commands: [{ kind: "endanim" }] } },
       initializeEvents: { eventFlags: ["EVENT_INITIAL"], engineFlags: [], variableSprites: {} },
       storyEventScriptConstants: { global: { TRUE: 1 }, maps: {} },
       phoneContacts: { PHONE_MOM: { contactId: "PHONE_MOM" } },
-      permanentPhoneNumbers: ["PHONE_MOM"],
-      specialPhoneCalls: ["SPECIALCALL_NONE"],
-      npcTrades: ["NPC_TRADE_MIKE"],
-      specialRoutines: ["FadeOutMusic"],
+      permanentPhoneNumbers: { PHONE_MOM: {} },
+      specialPhoneCalls: { SPECIALCALL_NONE: {} },
+      npcTrades: { NPC_TRADE_MIKE: {} },
+      specialRoutines: { FadeOutMusic: {} },
       asmText: { WildPokemonAppearedText: "Wild appeared!" },
       moveNames: ["POUND"],
       battleAnimations: { BattleAnim_Pound: ["anim_ret"] },
@@ -713,14 +721,14 @@ describe("exportCoreData", () => {
       npcData: {},
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
       playability: { start_maps: ["PlayersHouse2F"] },
-      audioAssets: [{
-        id: "MUSIC_ROUTE_29",
-        path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
-        kind: "music",
-        source: "midi",
-        sample_rate_hz: null,
-        channels: null,
-      }],
+      audioAssets: {
+        MUSIC_ROUTE_29: {
+          id: "MUSIC_ROUTE_29",
+          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+          kind: "music",
+          source: "midi",
+        },
+      },
     });
   });
 });

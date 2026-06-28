@@ -6,7 +6,7 @@ use crate::models::Item;
 use crate::state::{GameState, ItemUseRuntimeEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ItemUseContext {
     Field,
     Battle,
@@ -24,6 +24,7 @@ impl ItemUseContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemUseRequest {
+    #[serde(deserialize_with = "required_item_use_id")]
     pub item_id: String,
     pub context: ItemUseContext,
 }
@@ -37,6 +38,7 @@ pub struct ItemUseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ItemUseError {
     InvalidItemId {
         item_id: String,
@@ -113,12 +115,38 @@ fn validate_item_use_id(item_id: &str) -> Result<(), ItemUseError> {
         || !item_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || has_reserved_pack_prefix(item_id)
     {
         return Err(ItemUseError::InvalidItemId {
             item_id: item_id.to_string(),
         });
     }
     Ok(())
+}
+
+fn required_item_use_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty()
+        || value.trim() != value
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || has_reserved_pack_prefix(&value)
+    {
+        Err(serde::de::Error::custom(format!(
+            "item use id must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -341,6 +369,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_reserved_item_use_ids_before_unknown_lookup() {
+        let items = catalog(vec![item(
+            "POTION",
+            item_pocket("ITEM"),
+            "ITEMMENU_PARTY",
+            "ITEMMENU_PARTY",
+            true,
+        )]);
+        let mut state = GameState::default();
+
+        let error = use_bag_item(
+            &mut state,
+            &items,
+            ItemUseRequest {
+                item_id: "fallback_potion".to_string(),
+                context: ItemUseContext::Field,
+            },
+        )
+        .expect_err("reserved item ids are invalid runtime input");
+        assert_eq!(
+            error,
+            ItemUseError::InvalidItemId {
+                item_id: "fallback_potion".to_string(),
+            }
+        );
+
+        let serde_error = serde_json::from_value::<ItemUseRequest>(serde_json::json!({
+            "item_id": "legacy_potion",
+            "context": "field"
+        }))
+        .expect_err("reserved item use ids must fail during JSON load")
+        .to_string();
+        assert!(serde_error.contains("item use id must be"), "{serde_error}");
+        assert!(state.script_runtime.item_use_events.is_empty());
+    }
+
+    #[test]
     fn accepts_modpack_item_menu_ids_without_core_whitelisting() {
         let items = catalog(vec![item(
             "MOD_MENU_ITEM",
@@ -432,5 +497,32 @@ mod tests {
 
         assert!(!outcome.consumed);
         assert_eq!(state.bag.quantity(&items["MODDED_CHARM"]), 1);
+    }
+
+    #[test]
+    fn item_use_json_rejects_legacy_alias_payloads() {
+        let context_error =
+            serde_json::from_str::<ItemUseContext>(r#"{"field":{"legacy_context":"FIELD"}}"#)
+                .expect_err("item-use contexts must not accept object-shaped aliases")
+                .to_string();
+        assert!(
+            context_error.contains("invalid type")
+                || context_error.contains("unknown field `legacy_context`"),
+            "{context_error}"
+        );
+
+        let error_error = serde_json::from_value::<ItemUseError>(serde_json::json!({
+            "UnusableInContext": {
+                "item_id": "BICYCLE",
+                "context": "battle",
+                "fallback_context": "field"
+            }
+        }))
+        .expect_err("item-use errors must not accept fallback contexts")
+        .to_string();
+        assert!(
+            error_error.contains("unknown field `fallback_context`"),
+            "{error_error}"
+        );
     }
 }

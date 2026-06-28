@@ -16,6 +16,7 @@ pub const FRONTPIC_ANIM_COMMANDS: &[&str] = &[
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontpicAnimCommand {
+    #[serde(deserialize_with = "required_frontpic_command_kind")]
     pub kind: String,
     pub frame: Option<u16>,
     pub duration: Option<u16>,
@@ -30,7 +31,7 @@ pub struct FrontpicAnimProgram {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FrontpicAnimCommandIssue {
     MissingFrame,
     MissingSetRepeatCount,
@@ -63,6 +64,20 @@ pub enum FrontpicAnimCatalogIssue {
 
 pub fn is_known_frontpic_anim_command(kind: &str) -> bool {
     FRONTPIC_ANIM_COMMANDS.contains(&kind)
+}
+
+fn required_frontpic_command_kind<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_known_frontpic_anim_command(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "frontpic animation command kind must be one of {FRONTPIC_ANIM_COMMANDS:?}, found {value:?}"
+        )))
+    }
 }
 
 pub fn frontpic_anim_command_issue(
@@ -150,9 +165,15 @@ pub fn frontpic_anim_catalog_issues(
 fn is_exact_nonempty_frontpic_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 fn is_frontpic_animation_asset_key(species_id: &str, species_ids: &BTreeSet<String>) -> bool {
@@ -351,6 +372,26 @@ mod tests {
     }
 
     #[test]
+    fn frontpic_anim_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let programs = BTreeMap::from([(
+            "fallback_chikorita".to_string(),
+            FrontpicAnimProgram {
+                commands: vec![FrontpicAnimCommand {
+                    kind: FRONTPIC_ANIM_END_COMMAND.to_string(),
+                    ..FrontpicAnimCommand::default()
+                }],
+            },
+        )]);
+
+        assert_eq!(
+            frontpic_anim_catalog_issues(&programs, &BTreeSet::new()),
+            vec![FrontpicAnimCatalogIssue::InvalidSpeciesId {
+                species_id: "fallback_chikorita".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn frontpic_anim_json_requires_explicit_program_and_command_kind() {
         let missing_commands = serde_json::from_str::<FrontpicAnimProgram>(r#"{}"#)
             .expect_err("frontpic animation programs must declare command lists")
@@ -392,6 +433,26 @@ mod tests {
         assert!(
             unknown_command_field.contains("unknown field `legacyOpcode`"),
             "{unknown_command_field}"
+        );
+
+        let unknown_command_kind =
+            serde_json::from_str::<FrontpicAnimProgram>(r#"{"commands":[{"kind":"ENDANIM"}]}"#)
+                .expect_err("frontpic animation command kinds must be exact known opcodes")
+                .to_string();
+        assert!(
+            unknown_command_kind.contains("frontpic animation command kind must be one of"),
+            "{unknown_command_kind}"
+        );
+
+        let issue_error = serde_json::from_str::<FrontpicAnimCommandIssue>(
+            r#"{"missing_frame":{"fallback_frame":0}}"#,
+        )
+        .expect_err("frontpic issue variants must not accept fallback operands")
+        .to_string();
+        assert!(
+            issue_error.contains("invalid type")
+                || issue_error.contains("unknown field `fallback_frame`"),
+            "{issue_error}"
         );
     }
 }

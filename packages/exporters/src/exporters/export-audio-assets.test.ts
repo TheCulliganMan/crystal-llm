@@ -26,60 +26,49 @@ describe("export-audio-assets", () => {
     });
 
     expect(assets).toEqual(
-      expect.arrayContaining([
-        {
+      expect.objectContaining({
+        MUSIC_NONE: {
           id: "MUSIC_NONE",
           path: "content-packs/core-modular/music/MUSIC_NONE.mid",
           kind: "music",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-        {
+        MUSIC_ROUTE_29: {
           id: "MUSIC_ROUTE_29",
           path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
           kind: "music",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-        {
+        SFX_TACKLE: {
           id: "SFX_TACKLE",
           path: "content-packs/core-modular/sfx/SFX_TACKLE.mid",
           kind: "sound_effect",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-        {
+        CRY_NIDORAN_M: {
           id: "CRY_NIDORAN_M",
           path: "content-packs/core-modular/cries/CRY_NIDORAN_M.mid",
           kind: "cry",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-        {
+        CRY_FARFETCH_D: {
           id: "CRY_FARFETCH_D",
           path: "content-packs/core-modular/cries/CRY_FARFETCH_D.mid",
           kind: "cry",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-        {
+        CRY_GLIGAR: {
           id: "CRY_GLIGAR",
           path: "content-packs/core-modular/cries/CRY_GLIGAR.mid",
           kind: "cry",
           source: "midi",
-          sample_rate_hz: null,
-          channels: null,
         },
-      ])
+      })
     );
-    expect(assets.length).toBeGreaterThan(100);
-    expect(assets.every((asset) => asset.path.endsWith(".mid"))).toBe(true);
-    expect(assets.filter((asset) => asset.kind === "cry" && asset.id === "CRY_NIDORAN_M")).toHaveLength(1);
+    expect(Object.keys(assets).length).toBeGreaterThan(100);
+    expect(Object.values(assets).every((asset) => asset.path.endsWith(".mid"))).toBe(true);
+    expect(Object.values(assets).every((asset) => !("sample_rate_hz" in asset))).toBe(true);
+    expect(Object.values(assets).filter((asset) => asset.kind === "cry" && asset.id === "CRY_NIDORAN_M")).toHaveLength(1);
   });
 
   it("rejects case-changed cry labels instead of normalizing them", () => {

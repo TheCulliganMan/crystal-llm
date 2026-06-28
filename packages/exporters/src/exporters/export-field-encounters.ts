@@ -23,8 +23,7 @@ export type ExportedFieldEncounterTable = {
 
 export type ExportedFieldEncounterData = {
   map_name: string;
-  headbutt: ExportedFieldEncounterTable | null;
-  rock_smash: ExportedFieldEncounterTable | null;
+  tables: Record<string, ExportedFieldEncounterTable>;
 };
 
 type RuntimeMapMetadata = {
@@ -78,8 +77,9 @@ export function exportFieldEncounters(): ExportedFieldEncounterData[] {
     const mapName = mapNameForConstant(metadata, mapConstant);
     byMapName.set(mapName, {
       map_name: mapName,
-      headbutt,
-      rock_smash: null,
+      tables: {
+        headbutt,
+      },
     });
   }
 
@@ -92,8 +92,10 @@ export function exportFieldEncounters(): ExportedFieldEncounterData[] {
     const existing = byMapName.get(mapName);
     byMapName.set(mapName, {
       map_name: mapName,
-      headbutt: existing?.headbutt ?? null,
-      rock_smash: rockSmash,
+      tables: {
+        ...(existing?.tables ?? {}),
+        rock_smash: rockSmash,
+      },
     });
   }
 

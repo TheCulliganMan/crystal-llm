@@ -1,6 +1,9 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path},
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::multiplayer::{fnv1a32_bytes, fnv1a32_hex_bytes};
@@ -14,11 +17,28 @@ const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;
 const SAVE_HEADER_LEN: usize = SAVE_PAYLOAD_HASH_OFFSET + 4;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveModpackIdentity {
     id: String,
     hash: String,
+}
+
+impl<'de> Deserialize<'de> for SaveModpackIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveModpackIdentity {
+            id: String,
+            hash: String,
+        }
+
+        let raw = RawSaveModpackIdentity::deserialize(deserializer)?;
+        SaveModpackIdentity::new(raw.id, raw.hash).map_err(serde::de::Error::custom)
+    }
 }
 
 impl SaveModpackIdentity {
@@ -77,6 +97,14 @@ impl SaveModpackIdentity {
                     .to_string(),
             ));
         }
+        for segment in id.split('+') {
+            let lowered = segment.to_ascii_lowercase();
+            if lowered.starts_with("fallback") || lowered.starts_with("legacy") {
+                return Err(SaveError::InvalidIdentity(format!(
+                    "save modpack id segment '{segment}' uses reserved runtime pack prefix"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -107,25 +135,69 @@ fn is_exact_modpack_id(value: &str) -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveMetadata {
     modpack: SaveModpackIdentity,
+    pack_content_hash: String,
     created_frame: u64,
     saved_frame: u64,
 }
 
+impl<'de> Deserialize<'de> for SaveMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveMetadata {
+            modpack: SaveModpackIdentity,
+            pack_content_hash: String,
+            created_frame: u64,
+            saved_frame: u64,
+        }
+
+        let raw = RawSaveMetadata::deserialize(deserializer)?;
+        let metadata = Self {
+            modpack: raw.modpack,
+            pack_content_hash: raw.pack_content_hash,
+            created_frame: raw.created_frame,
+            saved_frame: raw.saved_frame,
+        };
+        metadata.validate().map_err(serde::de::Error::custom)?;
+        Ok(metadata)
+    }
+}
+
 impl SaveMetadata {
-    fn new(modpack: SaveModpackIdentity, state: &GameState) -> Self {
+    fn new(modpack: SaveModpackIdentity, pack_content_hash: String, state: &GameState) -> Self {
         Self {
             modpack,
+            pack_content_hash,
             created_frame: state.frame_counter,
             saved_frame: state.frame_counter,
         }
     }
 
+    pub fn validate(&self) -> Result<(), SaveError> {
+        self.modpack.validate()?;
+        validate_pack_content_hash(&self.pack_content_hash)?;
+        if self.created_frame > self.saved_frame {
+            return Err(SaveError::InvalidIdentity(format!(
+                "save created_frame {} cannot exceed saved_frame {}",
+                self.created_frame, self.saved_frame
+            )));
+        }
+        Ok(())
+    }
+
     pub fn modpack(&self) -> &SaveModpackIdentity {
         &self.modpack
+    }
+
+    pub fn pack_content_hash(&self) -> &str {
+        &self.pack_content_hash
     }
 
     pub fn created_frame(&self) -> u64 {
@@ -146,10 +218,10 @@ pub struct SaveGame {
 }
 
 impl SaveGame {
-    fn new(state: GameState, modpack: SaveModpackIdentity) -> Self {
+    fn new(state: GameState, modpack: SaveModpackIdentity, pack_content_hash: String) -> Self {
         Self {
             format_version: SAVE_FORMAT_VERSION,
-            metadata: SaveMetadata::new(modpack, &state),
+            metadata: SaveMetadata::new(modpack, pack_content_hash, &state),
             state,
         }
     }
@@ -158,18 +230,12 @@ impl SaveGame {
         if self.format_version != SAVE_FORMAT_VERSION {
             return Err(SaveError::UnsupportedVersion(self.format_version));
         }
-        self.metadata.modpack.validate()?;
+        self.metadata.validate()?;
         if self.metadata.saved_frame != self.state.frame_counter {
             return Err(SaveError::FrameMismatch {
                 metadata_frame: self.metadata.saved_frame,
                 state_frame: self.state.frame_counter,
             });
-        }
-        if self.metadata.created_frame > self.metadata.saved_frame {
-            return Err(SaveError::InvalidIdentity(format!(
-                "save created_frame {} cannot exceed saved_frame {}",
-                self.metadata.created_frame, self.metadata.saved_frame
-            )));
         }
         self.state
             .validate_saved_state()
@@ -200,6 +266,11 @@ pub enum SaveError {
     InvalidExtension {
         path: String,
         expected: &'static str,
+    },
+    #[error("save path {path} must not include {component} components")]
+    InvalidPathComponent {
+        path: String,
+        component: &'static str,
     },
     #[error("failed to read save {path}: {source}")]
     Read {
@@ -250,6 +321,8 @@ pub enum SaveError {
     ModpackHashMismatch { expected: String, actual: String },
     #[error("save modpack id {actual} does not match expected {expected}")]
     ModpackIdMismatch { expected: String, actual: String },
+    #[error("save pack content hash {actual} does not match expected {expected}")]
+    PackContentHashMismatch { expected: String, actual: String },
 }
 
 fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveError> {
@@ -293,9 +366,11 @@ pub fn write_save_game_for_modpack(
     path: impl AsRef<Path>,
     state: GameState,
     modpack: &SaveModpackIdentity,
+    pack_content_hash: &str,
 ) -> Result<(), SaveError> {
     modpack.validate()?;
-    let save = SaveGame::new(state, modpack.clone());
+    validate_pack_content_hash(pack_content_hash)?;
+    let save = SaveGame::new(state, modpack.clone(), pack_content_hash.to_string());
     write_save_game(path, &save)
 }
 
@@ -312,9 +387,10 @@ fn read_save_game(path: impl AsRef<Path>) -> Result<SaveGame, SaveError> {
 pub fn read_save_game_for_modpack(
     path: impl AsRef<Path>,
     expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
 ) -> Result<SaveGame, SaveError> {
     let save = read_save_game(path)?;
-    assert_save_matches_modpack(&save, expected)?;
+    assert_save_matches_modpack(&save, expected, expected_pack_content_hash)?;
     Ok(save)
 }
 
@@ -374,19 +450,22 @@ pub fn read_save_game_bytes_for_modpack(
     bytes: &[u8],
     source_name: impl Into<String>,
     expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
 ) -> Result<SaveGame, SaveError> {
     let source_name = source_name.into();
     validate_save_path(Path::new(&source_name))?;
     let save = read_save_game_bytes(bytes, source_name)?;
-    assert_save_matches_modpack(&save, expected)?;
+    assert_save_matches_modpack(&save, expected, expected_pack_content_hash)?;
     Ok(save)
 }
 
 pub fn assert_save_matches_modpack(
     save: &SaveGame,
     expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
 ) -> Result<(), SaveError> {
     expected.validate()?;
+    validate_pack_content_hash(expected_pack_content_hash)?;
     save.validate()?;
     if save.metadata.modpack.id != expected.id {
         return Err(SaveError::ModpackIdMismatch {
@@ -400,10 +479,47 @@ pub fn assert_save_matches_modpack(
             actual: save.metadata.modpack.hash.clone(),
         });
     }
+    if save.metadata.pack_content_hash != expected_pack_content_hash {
+        return Err(SaveError::PackContentHashMismatch {
+            expected: expected_pack_content_hash.to_string(),
+            actual: save.metadata.pack_content_hash.clone(),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_pack_content_hash(hash: &str) -> Result<(), SaveError> {
+    if hash.len() != 8
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SaveError::InvalidIdentity(format!(
+            "save pack content hash '{hash}' must be an exact 8-character lowercase FNV hex hash"
+        )));
+    }
     Ok(())
 }
 
 fn validate_save_path(path: &Path) -> Result<(), SaveError> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "parent-directory",
+        });
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir))
+    {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "current-directory",
+        });
+    }
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension == SAVE_EXTENSION => Ok(()),
         _ => Err(SaveError::InvalidExtension {
@@ -423,6 +539,14 @@ fn save_binary_config() -> impl bincode::config::Config {
 mod tests {
     use super::*;
 
+    fn pack_content_hash() -> &'static str {
+        "01020304"
+    }
+
+    fn test_save(state: GameState, modpack: SaveModpackIdentity) -> SaveGame {
+        SaveGame::new(state, modpack, pack_content_hash().to_string())
+    }
+
     fn temp_save_path(name: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -441,12 +565,12 @@ mod tests {
         state.frame_counter = 42;
         state.pokedex.seen_species.insert("CHIKORITA".to_string());
         let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
-        let save = SaveGame::new(state.clone(), modpack.clone());
+        let save = test_save(state.clone(), modpack.clone());
 
         write_save_game(&path, &save).expect("write save");
         let loaded = read_save_game(&path).expect("read save");
-        let loaded_for_pack =
-            read_save_game_for_modpack(&path, &modpack).expect("read save for exact pack");
+        let loaded_for_pack = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("read save for exact pack");
 
         assert_eq!(loaded.state, state);
         assert_eq!(loaded_for_pack, loaded);
@@ -464,7 +588,7 @@ mod tests {
     #[test]
     fn save_path_rejects_json_extension() {
         let path = temp_save_path("slot.json");
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
@@ -477,7 +601,7 @@ mod tests {
     #[test]
     fn save_path_requires_explicit_crystalsave_extension() {
         let path = temp_save_path("slot");
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
@@ -488,9 +612,43 @@ mod tests {
     }
 
     #[test]
+    fn save_paths_reject_current_and_parent_directory_aliases() {
+        let save = test_save(
+            GameState::default(),
+            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+        );
+        let bytes = encode_save_game_bytes(&save).expect("encode save");
+
+        let current_dir_error = write_save_game("saves/./slot.crystalsave", &save)
+            .expect_err("save writes must reject current-directory aliases");
+        assert!(matches!(
+            current_dir_error,
+            SaveError::InvalidPathComponent {
+                component: "current-directory",
+                ..
+            }
+        ));
+
+        let parent_dir_error = read_save_game_bytes_for_modpack(
+            &bytes,
+            "saves/../slot.crystalsave",
+            save.metadata().modpack(),
+            save.metadata().pack_content_hash(),
+        )
+        .expect_err("save reads must reject parent-directory aliases");
+        assert!(matches!(
+            parent_dir_error,
+            SaveError::InvalidPathComponent {
+                component: "parent-directory",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn save_rejects_trailing_bytes_and_bad_magic() {
         let path = temp_save_path("slot.crystalsave");
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
@@ -515,7 +673,7 @@ mod tests {
 
     #[test]
     fn save_rejects_empty_payload_hash_mismatch_and_legacy_unframed_payloads() {
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
@@ -558,7 +716,7 @@ mod tests {
 
     #[test]
     fn save_validates_modpack_identity_and_frame() {
-        let mut save = SaveGame::new(
+        let mut save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
@@ -620,6 +778,21 @@ mod tests {
                 "{malformed_id}: {error}"
             );
         }
+        for reserved_id in [
+            "fallback-core",
+            "legacy.core",
+            "core-modular+fallback-johto",
+            "core-modular+legacy_johto",
+        ] {
+            let error = SaveModpackIdentity::new(reserved_id, "1234abcd")
+                .expect_err("reserved runtime pack identities are invalid");
+            assert!(
+                error
+                    .to_string()
+                    .contains("uses reserved runtime pack prefix"),
+                "{reserved_id}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -636,7 +809,61 @@ mod tests {
             "{identity_error}"
         );
 
-        let mut save_json = serde_json::to_value(SaveGame::new(
+        let hash_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
+            "id": "core-modular",
+            "hash": "ABCDEF12"
+        }))
+        .expect_err("modpack identity hashes must validate during JSON load")
+        .to_string();
+        assert!(
+            hash_error.contains("exact 8-character lowercase FNV hex hash"),
+            "{hash_error}"
+        );
+
+        let reserved_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
+            "id": "core-modular+fallback-save",
+            "hash": "1234abcd"
+        }))
+        .expect_err("modpack identity ids must validate during JSON load")
+        .to_string();
+        assert!(
+            reserved_error.contains("uses reserved runtime pack prefix"),
+            "{reserved_error}"
+        );
+
+        let metadata_frame_error = serde_json::from_value::<SaveMetadata>(serde_json::json!({
+            "modpack": {
+                "id": "core-modular",
+                "hash": "1234abcd"
+            },
+            "pack_content_hash": "01020304",
+            "created_frame": 9,
+            "saved_frame": 8
+        }))
+        .expect_err("save metadata frame order must validate during JSON load")
+        .to_string();
+        assert!(
+            metadata_frame_error.contains("created_frame 9 cannot exceed saved_frame 8"),
+            "{metadata_frame_error}"
+        );
+
+        let metadata_identity_error = serde_json::from_value::<SaveMetadata>(serde_json::json!({
+            "modpack": {
+                "id": "legacy-pack",
+                "hash": "1234abcd"
+            },
+            "pack_content_hash": "01020304",
+            "created_frame": 8,
+            "saved_frame": 8
+        }))
+        .expect_err("save metadata modpack must validate during JSON load")
+        .to_string();
+        assert!(
+            metadata_identity_error.contains("uses reserved runtime pack prefix"),
+            "{metadata_identity_error}"
+        );
+
+        let mut save_json = serde_json::to_value(test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         ))
@@ -657,24 +884,24 @@ mod tests {
 
     #[test]
     fn save_modpack_hash_must_match_runtime_pack() {
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
         let expected = SaveModpackIdentity::new("core-modular", "ffffffff").expect("identity");
 
-        let error = assert_save_matches_modpack(&save, &expected)
+        let error = assert_save_matches_modpack(&save, &expected, pack_content_hash())
             .expect_err("mismatched modpack hashes must not load silently");
 
         assert!(matches!(error, SaveError::ModpackHashMismatch { .. }));
 
         let bytes = { encode_save_game_bytes(&save).expect("encode framed save") };
         assert!(matches!(
-            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected),
+            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, pack_content_hash()),
             Err(SaveError::ModpackHashMismatch { .. })
         ));
         assert!(matches!(
-            read_save_game_bytes_for_modpack(&bytes, "slot.json", &expected),
+            read_save_game_bytes_for_modpack(&bytes, "slot.json", &expected, pack_content_hash()),
             Err(SaveError::InvalidExtension { .. })
         ));
     }
@@ -682,11 +909,11 @@ mod tests {
     #[test]
     fn save_modpack_match_requires_valid_save_payload() {
         let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
-        let mut save = SaveGame::new(GameState::default(), expected.clone());
+        let mut save = test_save(GameState::default(), expected.clone());
         save.metadata.saved_frame = 9;
 
         assert!(matches!(
-            assert_save_matches_modpack(&save, &expected),
+            assert_save_matches_modpack(&save, &expected, pack_content_hash()),
             Err(SaveError::FrameMismatch {
                 metadata_frame: 9,
                 state_frame: 0
@@ -696,23 +923,40 @@ mod tests {
 
     #[test]
     fn save_modpack_id_must_match_runtime_pack() {
-        let save = SaveGame::new(
+        let save = test_save(
             GameState::default(),
             SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
         );
         let expected = SaveModpackIdentity::new("other-pack", "1234abcd").expect("identity");
 
-        let error = assert_save_matches_modpack(&save, &expected)
+        let error = assert_save_matches_modpack(&save, &expected, pack_content_hash())
             .expect_err("mismatched modpack ids must not load silently");
 
         assert!(matches!(error, SaveError::ModpackIdMismatch { .. }));
     }
 
     #[test]
+    fn save_pack_content_hash_must_match_runtime_pack() {
+        let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let save = test_save(GameState::default(), expected.clone());
+
+        let error = assert_save_matches_modpack(&save, &expected, "ffffffff")
+            .expect_err("mismatched pack content hashes must not load silently");
+
+        assert!(matches!(error, SaveError::PackContentHashMismatch { .. }));
+
+        let bytes = encode_save_game_bytes(&save).expect("encode framed save");
+        assert!(matches!(
+            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, "ffffffff"),
+            Err(SaveError::PackContentHashMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn save_validation_rejects_invalid_saved_state_identifiers() {
         let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
         let mut save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         save_json["state"]["flags"]["event_flags"]["EVENT_BAD FLAG"] = serde_json::json!(true);
         let save: SaveGame = serde_json::from_value(save_json).expect("decode exact save shape");
@@ -723,14 +967,14 @@ mod tests {
         );
 
         let bytes = { encode_save_game_bytes(&save).expect("encode framed save") };
-        let error = read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected)
+        let error = read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, pack_content_hash())
             .expect_err("binary save load must validate decoded state");
         assert!(
             matches!(error, SaveError::InvalidState(message) if message.contains("EVENT_BAD FLAG"))
         );
 
         let mut scene_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         scene_save_json["state"]["scenes"]["map_scenes"]["ElmsLab"] =
             serde_json::json!("SCENE ELMSLAB NOOP");
@@ -745,7 +989,7 @@ mod tests {
         );
 
         let mut runtime_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_save_json["state"]["script_runtime"]["next_script"] =
             serde_json::json!(" .Done@Script");
@@ -759,7 +1003,7 @@ mod tests {
         );
 
         let mut runtime_event_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_event_save_json["state"]["script_runtime"]["current_music"] =
             serde_json::json!("MUSIC ROUTE 29");
@@ -773,7 +1017,7 @@ mod tests {
         );
 
         let mut runtime_queue_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_queue_save_json["state"]["script_runtime"]["command_queue"] = serde_json::json!([{
             "command": "callasm",
@@ -792,7 +1036,7 @@ mod tests {
         );
 
         let mut state_identity_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         state_identity_save_json["state"]["active_repel_item"] = serde_json::json!("SUPER REPEL");
         let state_identity_save: SaveGame =
@@ -805,7 +1049,7 @@ mod tests {
         );
 
         let mut overworld_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         overworld_save_json["state"]["overworld"] = serde_json::json!({
             "active": {
@@ -823,7 +1067,7 @@ mod tests {
         assert!(matches!(error, SaveError::InvalidState(message) if message.contains("Route 29")));
 
         let mut bag_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         bag_save_json["state"]["bag"]["items"]["POTION"] = serde_json::json!(100);
         let bag_save: SaveGame =
@@ -835,8 +1079,19 @@ mod tests {
             matches!(error, SaveError::InvalidState(message) if message.contains("invalid saved bag"))
         );
 
+        let mut pc_bag_save_json =
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
+                .expect("save json");
+        pc_bag_save_json["state"]["bag"]["pc_items"]["POTION"] = serde_json::json!(100);
+        let pc_bag_save: SaveGame =
+            serde_json::from_value(pc_bag_save_json).expect("decode exact save shape");
+        let error = pc_bag_save
+            .validate()
+            .expect_err("saved PC item metadata must be exact");
+        assert!(matches!(error, SaveError::InvalidState(message) if message.contains("pc_items")));
+
         let mut storage_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         let mut pc_box_json =
             serde_json::to_value(crate::models::PcBox::new(0)).expect("pc box json");
@@ -852,7 +1107,7 @@ mod tests {
         );
 
         let mut party_projection_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         party_projection_save_json["state"]["party"]["pokemon"][0] = serde_json::json!({
             "species": "CHIKORITA",
@@ -868,7 +1123,7 @@ mod tests {
         );
 
         let mut battle_cursor_save_json =
-            serde_json::to_value(SaveGame::new(GameState::default(), expected.clone()))
+            serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         battle_cursor_save_json["state"]["battle_active_enemy_party_index"] = serde_json::json!(0);
         let battle_cursor_save: SaveGame =

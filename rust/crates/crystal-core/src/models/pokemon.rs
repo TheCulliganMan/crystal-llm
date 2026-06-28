@@ -7,7 +7,7 @@ use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_e
 use crate::systems::learnsets::{SpeciesLearnsets, default_moves_for_level};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum Stat {
     Hp,
     Attack,
@@ -40,6 +40,10 @@ pub fn egg_group(id: &str) -> EggGroup {
 
 pub fn ability(id: &str) -> Ability {
     id.to_string()
+}
+
+pub fn max_move_pp(base_pp: u8, pp_ups: u8) -> u8 {
+    base_pp.saturating_add((base_pp / 5).saturating_mul(pp_ups.min(3)))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,25 +138,33 @@ impl BaseStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokemonSpecies {
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub id: String,
     pub int_id: u16,
     pub base_stats: BaseStats,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub type1: PokemonType,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub type2: PokemonType,
     pub catch_rate: u8,
     pub base_exp: u16,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub item1: Option<String>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub item2: Option<String>,
     pub gender_ratio: u8,
     pub unknown1: u8,
     pub step_cycles_to_hatch: u8,
     pub unknown2: u8,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub growth_rate: GrowthRate,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub egg_group1: EggGroup,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub egg_group2: EggGroup,
+    #[serde(deserialize_with = "required_pokemon_token_vec")]
     pub tmhm_learnset: Vec<String>,
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub ability: Ability,
     pub pic_size: u8,
     pub front_pic: u16,
@@ -160,11 +172,70 @@ pub struct PokemonSpecies {
     pub weight: u16,
 }
 
-fn required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn required_pokemon_token<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<String>::deserialize(deserializer)
+    let value = String::deserialize(deserializer)?;
+    if !is_exact_pokemon_token(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "Pokemon token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )));
+    }
+    validate_no_reserved_pokemon_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_nullable_pokemon_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_pokemon_token(&token) => {
+            validate_no_reserved_pokemon_token(&token).map_err(serde::de::Error::custom)?;
+            Ok(Some(token))
+        }
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "Pokemon token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_pokemon_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if let Some(token) = values.iter().find(|token| !is_exact_pokemon_token(token)) {
+        Err(serde::de::Error::custom(format!(
+            "Pokemon token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        )))
+    } else {
+        for token in &values {
+            validate_no_reserved_pokemon_token(token).map_err(serde::de::Error::custom)?;
+        }
+        Ok(values)
+    }
+}
+
+fn is_exact_pokemon_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn validate_no_reserved_pokemon_token(value: &str) -> Result<(), String> {
+    let lowered = value.to_ascii_lowercase();
+    if lowered.starts_with("fallback") || lowered.starts_with("legacy") {
+        return Err(format!(
+            "Pokemon token '{value}' uses reserved modpack payload prefix"
+        ));
+    }
+    Ok(())
 }
 
 impl PokemonSpecies {
@@ -199,12 +270,14 @@ impl PokemonSpecies {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedMove {
+    #[serde(deserialize_with = "required_pokemon_token")]
     pub name: String,
     pub current_pp: u8,
     pub pp_ups: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum PokemonBuildError {
     #[error("missing level-up learnset for species '{species_id}'")]
     MissingLearnset { species_id: String },
@@ -222,10 +295,10 @@ pub enum PokemonBuildError {
 pub struct Pokemon {
     pub species: PokemonSpecies,
     pub nickname: String,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub item: Option<String>,
     pub moves: Vec<LearnedMove>,
-    #[serde(deserialize_with = "required_nullable_string")]
+    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub status: Option<String>,
     pub level: u8,
     pub hp: u16,
@@ -467,6 +540,8 @@ fn validate_exact_token(field: &str, value: &str) -> Result<(), String> {
     {
         return Err(format!("{field} has invalid token '{value}'"));
     }
+    validate_no_reserved_pokemon_token(value)
+        .map_err(|_| format!("{field} token '{value}' uses reserved modpack payload prefix"))?;
     Ok(())
 }
 
@@ -771,6 +846,37 @@ mod tests {
     }
 
     #[test]
+    fn species_identifier_fields_reject_malformed_tokens_at_deserialization() {
+        for (field, value) in [
+            ("id", serde_json::json!("BULBA SAUR")),
+            ("id", serde_json::json!("fallback_BULBASAUR")),
+            ("type1", serde_json::json!(" GRASS")),
+            ("type1", serde_json::json!("legacy_GRASS")),
+            ("type2", serde_json::json!("POI SON")),
+            ("item1", serde_json::json!("MIRACLE SEED")),
+            ("item2", serde_json::json!(" POISON_BARB")),
+            ("growth_rate", serde_json::json!("GROWTH MEDIUM_SLOW")),
+            ("egg_group1", serde_json::json!("EGG MONSTER")),
+            ("egg_group2", serde_json::json!("EGG_PLANT ")),
+            ("tmhm_learnset", serde_json::json!(["HEADBUTT", "MUD SLAP"])),
+            ("ability", serde_json::json!("SHED SKIN_PLUS")),
+        ] {
+            let mut species = species_json();
+            species[field] = value;
+
+            let error = serde_json::from_value::<PokemonSpecies>(species)
+                .expect_err("malformed Pokemon species identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("Pokemon token must be")
+                    || error.contains("uses reserved modpack payload prefix"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn species_json_requires_explicit_nullable_held_items() {
         let mut species = species_json();
         species
@@ -835,6 +941,56 @@ mod tests {
         .expect_err("learned moves must declare PP Up stages explicitly")
         .to_string();
         assert!(error.contains("missing field `pp_ups`"), "{error}");
+    }
+
+    #[test]
+    fn saved_pokemon_identifier_fields_reject_malformed_tokens_at_deserialization() {
+        let mut learned_move = serde_json::json!({
+            "name": "MUD SLAP",
+            "current_pp": 10,
+            "pp_ups": 0
+        });
+        let error = serde_json::from_value::<LearnedMove>(learned_move.clone())
+            .expect_err("learned move names must be exact tokens")
+            .to_string();
+        assert!(error.contains("Pokemon token must be"), "{error}");
+
+        learned_move["name"] = serde_json::json!("legacy_TACKLE");
+        let error = serde_json::from_value::<LearnedMove>(learned_move.clone())
+            .expect_err("learned move names must reject reserved payload prefixes")
+            .to_string();
+        assert!(
+            error.contains("uses reserved modpack payload prefix"),
+            "{error}"
+        );
+
+        learned_move["name"] = serde_json::json!("TACKLE");
+        let species: PokemonSpecies = serde_json::from_value(species_json()).expect("species");
+        let pokemon = Pokemon::new_for_tests(species, 5, Dv::default());
+        let mut pokemon_json = serde_json::to_value(pokemon).expect("pokemon json");
+
+        for (field, value) in [
+            ("item", serde_json::json!("MIRACLE SEED")),
+            ("item", serde_json::json!("fallback_ITEM")),
+            ("status", serde_json::json!("BAD POISON")),
+            ("status", serde_json::json!("legacy_STATUS")),
+        ] {
+            let mut candidate = pokemon_json.clone();
+            candidate[field] = value;
+
+            let error = serde_json::from_value::<Pokemon>(candidate)
+                .expect_err("saved Pokemon identifier fields must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("Pokemon token must be")
+                    || error.contains("uses reserved modpack payload prefix"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        pokemon_json["moves"] = serde_json::json!([learned_move]);
+        serde_json::from_value::<Pokemon>(pokemon_json).expect("exact learned move token is valid");
     }
 
     #[test]
@@ -1105,6 +1261,38 @@ mod tests {
                 species_id: "CHIKORITA".to_string(),
                 move_name: "TACKLE".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn stat_json_rejects_legacy_alias_payloads() {
+        let error = serde_json::from_value::<Stat>(serde_json::json!({
+            "ATTACK": {
+                "legacy_stat": "ATK"
+            }
+        }))
+        .expect_err("stats must not accept legacy object payloads")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown variant"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pokemon_build_error_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<PokemonBuildError>(serde_json::json!({
+            "UnknownLearnsetMove": {
+                "species_id": "CHIKORITA",
+                "move_name": "TACKLE",
+                "fallback_move_name": "POUND"
+            }
+        }))
+        .expect_err("Pokemon build errors must not accept fallback move names")
+        .to_string();
+        assert!(
+            error.contains("unknown field `fallback_move_name`"),
+            "{error}"
         );
     }
 }

@@ -1,13 +1,19 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use crystal_core::multiplayer::{
-    BattleActionFrame, BattleRngState, LinkByteFrame, LinkClockSyncFrame, LinkHandshakeError,
-    LinkHello, LinkMessage, LinkSessionIdentity, MultiplayerInteractionRequest,
-    MultiplayerInteractionResponse, OverworldPresence, PlayerId, PlayerInputFrame,
+    BattleActionFrame, BattleRngState, CommandChecksumResult, DeterministicInputJournalFrame,
+    LinkByteFrame, LinkClockSyncFrame, LinkHandshakeError, LinkHello, LinkMessage,
+    LinkSessionIdentity, MultiplayerInteractionRequest, MultiplayerInteractionResponse,
+    OverworldPresence, PlayerId, PlayerInputFrame, RuntimeCommandFrame, RuntimeCommandResultFrame,
     StateChecksumFrame, TradeConfirmation, TradeOffer, fnv1a32_bytes, validate_link_hello,
+    validate_link_session_identity,
 };
+#[cfg(test)]
+use crystal_core::multiplayer::{RuntimeCommandPayload, StateChecksum};
+#[cfg(test)]
+use crystal_core::state::GameEvent;
 use thiserror::Error;
 
 const LINK_FRAME_MAGIC: &[u8; 8] = b"CRYSLINK";
@@ -52,9 +58,125 @@ pub enum TransportError {
     SessionMismatch { message: String },
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EndpointError {
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+    #[error("link endpoint has not completed hello exchange")]
+    NotReady,
+    #[error("link endpoint received hello for local player {player_id}")]
+    LocalPlayerEcho { player_id: PlayerId },
+    #[error("link endpoint peer {player_id} sent conflicting hello")]
+    ConflictingPeerHello { player_id: PlayerId },
+}
+
 pub trait LinkTransport {
     fn send(&mut self, message: LinkMessage) -> Result<(), TransportError>;
     fn poll(&mut self) -> Result<Vec<LinkMessage>, TransportError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkEndpointEvent {
+    PeerHello(LinkHello),
+    Message(LinkMessage),
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkEndpoint<T> {
+    transport: T,
+    local_hello: LinkHello,
+    peers: BTreeMap<PlayerId, LinkHello>,
+    hello_sent: bool,
+}
+
+impl<T: LinkTransport> LinkEndpoint<T> {
+    pub fn new(transport: T, local_hello: LinkHello) -> Result<Self, EndpointError> {
+        validate_link_hello(local_hello.session(), &local_hello).map_err(|error| {
+            TransportError::InvalidMessage {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(Self {
+            transport,
+            local_hello,
+            peers: BTreeMap::new(),
+            hello_sent: false,
+        })
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    pub fn local_hello(&self) -> &LinkHello {
+        &self.local_hello
+    }
+
+    pub fn peers(&self) -> &BTreeMap<PlayerId, LinkHello> {
+        &self.peers
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.hello_sent && !self.peers.is_empty()
+    }
+
+    pub fn send_hello(&mut self) -> Result<(), EndpointError> {
+        self.transport
+            .send(LinkMessage::Hello(self.local_hello.clone()))?;
+        self.hello_sent = true;
+        Ok(())
+    }
+
+    pub fn send(&mut self, message: LinkMessage) -> Result<(), EndpointError> {
+        if matches!(message, LinkMessage::Hello(_)) {
+            self.transport.send(message)?;
+            self.hello_sent = true;
+            return Ok(());
+        }
+        if !self.is_ready() {
+            return Err(EndpointError::NotReady);
+        }
+        self.transport.send(message)?;
+        Ok(())
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<LinkEndpointEvent>, EndpointError> {
+        let mut events = Vec::new();
+        for message in self.transport.poll()? {
+            match message {
+                LinkMessage::Hello(hello) => {
+                    self.record_peer_hello(hello.clone())?;
+                    events.push(LinkEndpointEvent::PeerHello(hello));
+                }
+                other => events.push(LinkEndpointEvent::Message(other)),
+            }
+        }
+        Ok(events)
+    }
+
+    fn record_peer_hello(&mut self, hello: LinkHello) -> Result<(), EndpointError> {
+        validate_link_hello(self.local_hello.session(), &hello).map_err(|error| {
+            TransportError::SessionMismatch {
+                message: error.to_string(),
+            }
+        })?;
+        let player_id = hello.player().id();
+        if player_id == self.local_hello.player().id() {
+            return Err(EndpointError::LocalPlayerEcho { player_id });
+        }
+        if let Some(existing) = self.peers.get(&player_id) {
+            if existing != &hello {
+                return Err(EndpointError::ConflictingPeerHello { player_id });
+            }
+            return Ok(());
+        }
+        self.peers.insert(player_id, hello);
+        Ok(())
+    }
 }
 
 type SharedFrameQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
@@ -68,10 +190,6 @@ pub struct MemoryLinkTransport {
 }
 
 impl MemoryLinkTransport {
-    pub fn pair() -> (Self, Self) {
-        Self::pair_with_codec(LinkFrameCodec::default())
-    }
-
     pub fn pair_for_session(session: LinkSessionIdentity) -> Result<(Self, Self), TransportError> {
         Ok(Self::pair_with_codec(LinkFrameCodec::for_session(
             DEFAULT_MAX_FRAME_BYTES,
@@ -135,6 +253,7 @@ impl LinkTransport for MemoryLinkTransport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 enum WireLinkMessage {
     Hello(LinkHello),
     RngInit { state: BattleRngState },
@@ -144,7 +263,11 @@ enum WireLinkMessage {
     LinkByte(LinkByteFrame),
     LinkClockSync(LinkClockSyncFrame),
     Input(PlayerInputFrame),
+    InputJournal(DeterministicInputJournalFrame),
     StateHash(StateChecksumFrame),
+    CommandChecksum(CommandChecksumResult),
+    RuntimeCommand(RuntimeCommandFrame),
+    RuntimeCommandResult(RuntimeCommandResultFrame),
     Presence(OverworldPresence),
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
@@ -171,7 +294,11 @@ impl From<&LinkMessage> for WireLinkMessage {
             LinkMessage::LinkByte(frame) => Self::LinkByte(frame.clone()),
             LinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame.clone()),
             LinkMessage::Input(input) => Self::Input(input.clone()),
+            LinkMessage::InputJournal(journal) => Self::InputJournal(journal.clone()),
             LinkMessage::StateHash(checksum) => Self::StateHash(checksum.clone()),
+            LinkMessage::CommandChecksum(result) => Self::CommandChecksum(result.clone()),
+            LinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command.clone()),
+            LinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result.clone()),
             LinkMessage::Presence(presence) => Self::Presence(presence.clone()),
             LinkMessage::InteractionRequest(request) => Self::InteractionRequest(request.clone()),
             LinkMessage::InteractionResponse(response) => {
@@ -198,7 +325,11 @@ impl From<WireLinkMessage> for LinkMessage {
             WireLinkMessage::LinkByte(frame) => Self::LinkByte(frame),
             WireLinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame),
             WireLinkMessage::Input(input) => Self::Input(input),
+            WireLinkMessage::InputJournal(journal) => Self::InputJournal(journal),
             WireLinkMessage::StateHash(checksum) => Self::StateHash(checksum),
+            WireLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result),
+            WireLinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command),
+            WireLinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result),
             WireLinkMessage::Presence(presence) => Self::Presence(presence),
             WireLinkMessage::InteractionRequest(request) => Self::InteractionRequest(request),
             WireLinkMessage::InteractionResponse(response) => Self::InteractionResponse(response),
@@ -344,7 +475,7 @@ impl LinkFrameCodec {
                 message: error.to_string(),
             })?;
         if let Some(expected_session) = &self.session {
-            compare_sessions(expected_session, &wire_frame.session)
+            validate_link_session_identity(expected_session, &wire_frame.session)
                 .map_err(session_mismatch_error)?;
         }
         let message = wire_frame.message.into();
@@ -391,45 +522,19 @@ fn message_session(
     }
 }
 
-fn compare_sessions(
-    expected: &LinkSessionIdentity,
-    actual: &LinkSessionIdentity,
-) -> Result<(), LinkHandshakeError> {
-    expected.validate()?;
-    actual.validate()?;
-    if actual.session_id() != expected.session_id() {
-        return Err(LinkHandshakeError::SessionMismatch {
-            expected: expected.session_id().to_string(),
-            actual: actual.session_id().to_string(),
-        });
-    }
-    if actual.modpack().id() != expected.modpack().id() {
-        return Err(LinkHandshakeError::ModpackIdMismatch {
-            expected: expected.modpack().id().to_string(),
-            actual: actual.modpack().id().to_string(),
-        });
-    }
-    if actual.modpack().hash() != expected.modpack().hash() {
-        return Err(LinkHandshakeError::ModpackHashMismatch {
-            expected: expected.modpack().hash().to_string(),
-            actual: actual.modpack().hash().to_string(),
-        });
-    }
-    if actual.protocol_version() != expected.protocol_version() {
-        return Err(LinkHandshakeError::ProtocolVersionMismatch {
-            expected: expected.protocol_version(),
-            actual: actual.protocol_version(),
-        });
-    }
-    Ok(())
-}
-
 fn validate_frame_session(
     session: &LinkSessionIdentity,
     message: &LinkMessage,
 ) -> Result<(), TransportError> {
-    if let LinkMessage::Hello(hello) = message {
-        validate_link_hello(session, hello).map_err(session_mismatch_error)?;
+    match message {
+        LinkMessage::Hello(hello) => {
+            validate_link_hello(session, hello).map_err(session_mismatch_error)?;
+        }
+        LinkMessage::InputJournal(journal_frame) => {
+            validate_link_session_identity(session, journal_frame.journal().session())
+                .map_err(session_mismatch_error)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -439,6 +544,7 @@ fn session_mismatch_error(error: LinkHandshakeError) -> TransportError {
         LinkHandshakeError::SessionMismatch { .. }
         | LinkHandshakeError::ModpackIdMismatch { .. }
         | LinkHandshakeError::ModpackHashMismatch { .. }
+        | LinkHandshakeError::PackContentHashMismatch { .. }
         | LinkHandshakeError::ProtocolVersionMismatch { .. } => TransportError::SessionMismatch {
             message: error.to_string(),
         },
@@ -462,8 +568,9 @@ mod tests {
     use crystal_core::battle::turn::BattleAction;
     use crystal_core::models::{BaseStats, Dv, Pokemon, PokemonSpecies};
     use crystal_core::multiplayer::{
-        BattleActionFrame, LINK_PREAMBLE_RESPONSE, LinkByteFrame, LinkClockSyncFrame, LinkHello,
-        LinkSessionIdentity, MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame,
+        BattleActionFrame, DeterministicInputJournal, DeterministicInputJournalFrame,
+        LINK_PREAMBLE_RESPONSE, LinkByteFrame, LinkClockSyncFrame, LinkHello, LinkSessionIdentity,
+        LockstepFrame, MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame,
         StateChecksumFrame, TradeConfirmation, TradeOffer,
     };
     use crystal_core::save::SaveModpackIdentity;
@@ -473,8 +580,12 @@ mod tests {
         SaveModpackIdentity::new("core-modular", "1234abcd").expect("modpack identity")
     }
 
+    fn pack_content_hash() -> &'static str {
+        "01020304"
+    }
+
     fn session() -> LinkSessionIdentity {
-        LinkSessionIdentity::new("session-1", modpack()).expect("session")
+        LinkSessionIdentity::new("session-1", modpack(), pack_content_hash()).expect("session")
     }
 
     fn player(id: PlayerId, display_name: &str) -> PlayerIdentity {
@@ -487,6 +598,24 @@ mod tests {
 
     fn hello_message() -> LinkMessage {
         LinkMessage::Hello(LinkHello::from_session(session(), player(7, "P7")).expect("hello"))
+    }
+
+    fn hello_for(player_id: PlayerId, display_name: &str) -> LinkHello {
+        LinkHello::from_session(session(), player(player_id, display_name)).expect("hello")
+    }
+
+    fn runtime_command_frame() -> RuntimeCommandFrame {
+        RuntimeCommandFrame::new(
+            2,
+            17,
+            RuntimeCommandPayload::new(
+                "crystal_runtime_mutation_command_v1",
+                br#"{"kind":"apply_overworld_input","payload":{"buttons":["a","right"]}}"#.to_vec(),
+            )
+            .expect("runtime command payload"),
+            StateChecksum::new(144, 0xaabbccdd),
+        )
+        .expect("runtime command")
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
@@ -554,12 +683,95 @@ mod tests {
     }
 
     #[test]
+    fn binary_link_frame_round_trips_input_journal_message() {
+        let codec = session_codec();
+        let journal = DeterministicInputJournal::new(
+            session(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
+            vec![LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                .expect("lockstep frame")],
+        )
+        .expect("journal");
+        let message =
+            LinkMessage::InputJournal(DeterministicInputJournalFrame::new(journal).expect("frame"));
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
     fn binary_link_frame_round_trips_player_bound_state_hash_message() {
         let codec = session_codec();
         let message = LinkMessage::StateHash(StateChecksumFrame::new(2, Frame(144), 0xaabbccdd));
         let frame = codec.encode(&message).expect("encode");
 
         assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_command_checksum_message() {
+        let codec = session_codec();
+        let message = LinkMessage::CommandChecksum(CommandChecksumResult {
+            events: vec![GameEvent::JoypadChanged {
+                pressed: 0b0001_0000,
+                down: 0b0001_0000,
+            }],
+            checksum: StateChecksumFrame::new(2, Frame(144), 0xaabbccdd),
+        });
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_payload_hashed_runtime_command_message() {
+        let codec = session_codec();
+        let command = runtime_command_frame();
+        let message = LinkMessage::RuntimeCommand(command.clone());
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+        let LinkMessage::RuntimeCommand(decoded) = codec.decode(&frame).expect("decode command")
+        else {
+            panic!("expected runtime command");
+        };
+        assert_eq!(
+            decoded.payload().schema(),
+            "crystal_runtime_mutation_command_v1"
+        );
+        assert_eq!(
+            decoded.payload().hash(),
+            fnv1a32_bytes(decoded.payload().bytes())
+        );
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_payload_hashed_runtime_command_result_message() {
+        let codec = session_codec();
+        let result = RuntimeCommandResultFrame::new(
+            runtime_command_frame(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbccddee),
+            "overworld_input_applied",
+        )
+        .expect("runtime command result");
+        let message = LinkMessage::RuntimeCommandResult(result.clone());
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+        let LinkMessage::RuntimeCommandResult(decoded) =
+            codec.decode(&frame).expect("decode command result")
+        else {
+            panic!("expected runtime command result");
+        };
+        assert_eq!(decoded.result_tag(), "overworld_input_applied");
+        assert_eq!(
+            decoded.request().payload().hash(),
+            fnv1a32_bytes(decoded.request().payload().bytes())
+        );
+        assert_eq!(decoded, result);
     }
 
     #[test]
@@ -720,6 +932,75 @@ mod tests {
     }
 
     #[test]
+    fn wire_link_message_rejects_unknown_variant_fields() {
+        let error = serde_json::from_value::<WireLinkMessage>(serde_json::json!({
+            "Disconnect": {
+                "player_id": 7,
+                "reason": "closed",
+                "ignored": "loose"
+            }
+        }))
+        .expect_err("wire protocol variants must reject unknown fields");
+
+        assert!(
+            error.to_string().contains("unknown field `ignored`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_command_wire_rejects_legacy_command_arguments_shape() {
+        let error = serde_json::from_value::<WireLinkMessage>(serde_json::json!({
+            "RuntimeCommand": {
+                "player_id": 2,
+                "sequence": 17,
+                "command": "apply_overworld_input",
+                "arguments": ["a", "right"],
+                "expected_state": {
+                    "frame": 144,
+                    "hash": 2864434397u32
+                }
+            }
+        }))
+        .expect_err("legacy loose runtime commands must not deserialize");
+
+        assert!(
+            error.to_string().contains("unknown field `command`")
+                || error.to_string().contains("unknown field `arguments`")
+                || error.to_string().contains("missing field `payload`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_command_wire_rejects_payload_hash_mismatch() {
+        let codec = session_codec();
+        let bytes = br#"{"kind":"apply_overworld_input","payload":{"buttons":["a"]}}"#.to_vec();
+        let actual = fnv1a32_bytes(&bytes);
+        let payload = RuntimeCommandPayload::new_unchecked_for_tests(
+            "crystal_runtime_mutation_command_v1",
+            bytes,
+            0x1111_1111,
+        );
+        let message = LinkMessage::RuntimeCommand(RuntimeCommandFrame::new_unchecked_for_tests(
+            2,
+            17,
+            payload,
+            StateChecksum::new(144, 0xaabbccdd),
+        ));
+        let frame = frame_from_wire_message(WireLinkMessage::from(&message));
+
+        assert_eq!(
+            codec.decode(&frame),
+            Err(TransportError::InvalidMessage {
+                message: format!(
+                    "runtime command payload hash {actual:#010x} does not match declared 0x11111111"
+                ),
+            })
+        );
+    }
+
+    #[test]
     fn binary_link_codec_rejects_messages_that_bypass_protocol_constructors() {
         let codec = LinkFrameCodec::default();
         let invalid_hello = LinkMessage::Hello(
@@ -728,6 +1009,7 @@ mod tests {
                     "protocol_version": LINK_FRAME_VERSION,
                     "session_id": "",
                     "modpack": modpack(),
+                    "pack_content_hash": pack_content_hash(),
                 },
                 "player": {
                     "id": 7,
@@ -747,6 +1029,7 @@ mod tests {
                     "protocol_version": LINK_FRAME_VERSION,
                     "session_id": "",
                     "modpack": modpack(),
+                    "pack_content_hash": pack_content_hash(),
                 },
                 "player": {
                     "id": 7,
@@ -808,6 +1091,18 @@ mod tests {
             codec.decode(&padded_hash_frame),
             Err(TransportError::InvalidMessage {
                 message: "battle sync state hash  2222 must be exact and untrimmed".to_string()
+            })
+        );
+
+        let invalid_command_checksum_frame =
+            frame_from_wire_message(WireLinkMessage::CommandChecksum(CommandChecksumResult {
+                events: Vec::new(),
+                checksum: StateChecksumFrame::new(0, Frame(7), 0x1111_1111),
+            }));
+        assert_eq!(
+            codec.decode(&invalid_command_checksum_frame),
+            Err(TransportError::InvalidMessage {
+                message: "state checksum player id 0 is not a valid link identity".to_string()
             })
         );
 
@@ -894,6 +1189,7 @@ mod tests {
                 LinkSessionIdentity::new(
                     "session-1",
                     SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+                    pack_content_hash(),
                 )
                 .expect("other session"),
                 player(7, "P7"),
@@ -929,12 +1225,44 @@ mod tests {
         let other_session = LinkSessionIdentity::new(
             "session-1",
             SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            pack_content_hash(),
         )
         .expect("other session");
         let frame = frame_from_wire_frame(WireLinkFrame {
             session: other_session,
             message: WireLinkMessage::Input(
                 PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            ),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_input_journal_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new(
+            "session-1",
+            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            pack_content_hash(),
+        )
+        .expect("other session");
+        let journal = DeterministicInputJournal::new(
+            other_session,
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
+            vec![LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                .expect("lockstep frame")],
+        )
+        .expect("journal");
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::InputJournal(
+                DeterministicInputJournalFrame::new(journal).expect("frame"),
             ),
         });
 
@@ -1057,14 +1385,16 @@ mod tests {
             Err(TransportError::MessageTooLarge)
         );
 
-        let (_, mut peer) = MemoryLinkTransport::pair();
+        let (_, mut peer) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
         peer.push_inbound_frame_for_tests(br#"{"type":"hello"}"#.to_vec());
         assert_eq!(peer.poll(), Err(TransportError::InvalidMagic));
     }
 
     #[test]
     fn memory_transport_disconnect_is_a_hard_error() {
-        let (mut host, mut peer) = MemoryLinkTransport::pair();
+        let (mut host, mut peer) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
         host.disconnect();
         peer.disconnect();
 
@@ -1073,5 +1403,83 @@ mod tests {
             Err(TransportError::NotConnected)
         );
         assert_eq!(peer.poll(), Err(TransportError::NotConnected));
+    }
+
+    #[test]
+    fn link_endpoint_exchanges_session_bound_hellos_before_gameplay_messages() {
+        let (host_transport, peer_transport) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
+        let mut host =
+            LinkEndpoint::new(host_transport, hello_for(1, "HOST")).expect("host endpoint");
+        let mut peer =
+            LinkEndpoint::new(peer_transport, hello_for(2, "PEER")).expect("peer endpoint");
+
+        let input =
+            LinkMessage::Input(PlayerInputFrame::new(1, Frame(144), 0b1001_0000).expect("input"));
+        assert_eq!(host.send(input.clone()), Err(EndpointError::NotReady));
+
+        host.send_hello().expect("host hello");
+        peer.send_hello().expect("peer hello");
+        assert_eq!(
+            peer.poll().expect("peer poll"),
+            vec![LinkEndpointEvent::PeerHello(host.local_hello().clone())]
+        );
+        assert_eq!(
+            host.poll().expect("host poll"),
+            vec![LinkEndpointEvent::PeerHello(peer.local_hello().clone())]
+        );
+        assert!(host.is_ready());
+        assert!(peer.is_ready());
+        assert_eq!(
+            host.peers()
+                .get(&2)
+                .expect("peer identity")
+                .player()
+                .display_name(),
+            "PEER"
+        );
+
+        host.send(input.clone()).expect("gameplay send after hello");
+        assert_eq!(
+            peer.poll().expect("peer receives input"),
+            vec![LinkEndpointEvent::Message(input)]
+        );
+    }
+
+    #[test]
+    fn link_endpoint_rejects_peer_hello_conflicts_without_identity_fallback() {
+        let (host_transport, peer_transport) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
+        let mut host =
+            LinkEndpoint::new(host_transport, hello_for(1, "HOST")).expect("host endpoint");
+        let mut peer =
+            LinkEndpoint::new(peer_transport, hello_for(2, "PEER")).expect("peer endpoint");
+
+        peer.send_hello().expect("peer hello");
+        host.poll().expect("record first peer hello");
+        peer.transport_mut().send(LinkMessage::Hello(hello_for(2, "PEER_2")))
+            .expect("conflicting hello sends");
+
+        assert_eq!(
+            host.poll(),
+            Err(EndpointError::ConflictingPeerHello { player_id: 2 })
+        );
+    }
+
+    #[test]
+    fn link_endpoint_rejects_local_player_echo() {
+        let (host_transport, mut peer_transport) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
+        let mut host =
+            LinkEndpoint::new(host_transport, hello_for(1, "HOST")).expect("host endpoint");
+
+        peer_transport
+            .send(LinkMessage::Hello(hello_for(1, "HOST")))
+            .expect("echo hello sends");
+
+        assert_eq!(
+            host.poll(),
+            Err(EndpointError::LocalPlayerEcho { player_id: 1 })
+        );
     }
 }

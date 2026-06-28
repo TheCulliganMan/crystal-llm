@@ -173,11 +173,15 @@ describe("exportFieldMoves", () => {
     expect(catalog.town_map).toEqual({ item_id: "TOWN_MAP" });
     expect(catalog.surf.blocked_collisions).toEqual([0x24, 0x2c, 0x33, 0x30, 0x31, 0x32]);
     expect(catalog.waterfall.target_collisions).toEqual([0x33, 0x30, 0x31, 0x32, 0x3b]);
-    expect(catalog.cut.replacements).toEqual([
-      { tileset: "johto", block_id: 0x5b, replacement_block_id: 0x3c, variant: "tree" },
-    ]);
-    expect(catalog.whirlpool.replacements).toEqual([
-      { tileset: "johto", block_id: 0x07, replacement_block_id: 0x36, variant: "whirlpool" },
-    ]);
+    expect(catalog.cut.replacements).toEqual({
+      johto: {
+        "91": { replacement_block_id: 0x3c, variant: "tree" },
+      },
+    });
+    expect(catalog.whirlpool.replacements).toEqual({
+      johto: {
+        "7": { replacement_block_id: 0x36, variant: "whirlpool" },
+      },
+    });
   });
 });

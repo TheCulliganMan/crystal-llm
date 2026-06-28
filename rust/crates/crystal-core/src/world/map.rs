@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::map::{MapAttributes, MapConnection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Direction {
     Down,
     Up,
@@ -59,13 +59,17 @@ pub struct OverworldMapData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeMapMetadata {
+    #[serde(deserialize_with = "required_metadata_token")]
     pub constant: String,
+    #[serde(deserialize_with = "required_metadata_token")]
     pub name: String,
+    #[serde(deserialize_with = "required_metadata_token")]
     pub group_name: String,
     pub group_id: u16,
     pub map_id: u16,
     pub width: u16,
     pub height: u16,
+    #[serde(deserialize_with = "required_metadata_token")]
     pub environment: String,
     pub phone_service: u8,
 }
@@ -138,6 +142,26 @@ fn is_exact_nonempty_metadata_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_metadata_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_metadata_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "runtime map metadata token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 impl OverworldMapData {
@@ -320,6 +344,72 @@ mod tests {
     }
 
     #[test]
+    fn runtime_map_metadata_rejects_reserved_pack_prefixes() {
+        for (field, value) in [
+            ("constant", serde_json::json!("fallback_route_29")),
+            ("name", serde_json::json!("legacy_route_29")),
+            ("groupName", serde_json::json!("fallback_group")),
+            ("environment", serde_json::json!("legacy_route")),
+        ] {
+            let mut metadata = valid_runtime_map_metadata_json();
+            metadata[field] = value;
+
+            let error = serde_json::from_value::<RuntimeMapMetadata>(metadata)
+                .expect_err("reserved runtime map metadata tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("runtime map metadata token must be"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        let metadata = [(
+            "fallback_route_29".to_string(),
+            RuntimeMapMetadata {
+                constant: "fallback_route_29".to_string(),
+                name: "legacy_route_29".to_string(),
+                group_name: "GROUP_NEW_BARK".to_string(),
+                group_id: 1,
+                map_id: 2,
+                width: 10,
+                height: 9,
+                environment: "TOWN".to_string(),
+                phone_service: 1,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let map_names = [(
+            "fallback_route_29".to_string(),
+            "legacy_route_29".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            runtime_map_metadata_issues(&metadata, &map_names),
+            vec![RuntimeMapMetadataIssue::InvalidMetadata {
+                key: "fallback_route_29".to_string(),
+            }],
+        );
+    }
+
+    fn valid_runtime_map_metadata_json() -> serde_json::Value {
+        serde_json::json!({
+            "constant": "ROUTE_29",
+            "name": "Route29",
+            "groupName": "GROUP_NEW_BARK",
+            "groupId": 1,
+            "mapId": 2,
+            "width": 10,
+            "height": 9,
+            "environment": "TOWN",
+            "phoneService": 1
+        })
+    }
+
+    #[test]
     fn tile_positions_move_by_direction() {
         let pos = TilePosition::new(5, 5);
         assert_eq!(pos.moved(Direction::Up), TilePosition::new(5, 4));
@@ -337,6 +427,21 @@ mod tests {
         .to_string();
 
         assert!(error.contains("unknown field `tileX`"), "{error}");
+    }
+
+    #[test]
+    fn direction_json_rejects_legacy_alias_payloads() {
+        let error = serde_json::from_value::<Direction>(serde_json::json!({
+            "down": {
+                "legacy_direction": "DOWN"
+            }
+        }))
+        .expect_err("directions must not accept legacy object payloads")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown variant"),
+            "{error}"
+        );
     }
 
     #[test]

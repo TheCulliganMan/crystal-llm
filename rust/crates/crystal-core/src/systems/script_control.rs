@@ -10,16 +10,21 @@ use crate::state::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptControlCommand {
+    #[serde(deserialize_with = "required_control_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_compare_token")]
     pub compare_value: Option<String>,
+    #[serde(deserialize_with = "required_nullable_control_label_token")]
     pub target_label: Option<String>,
+    #[serde(deserialize_with = "required_nullable_control_label_token")]
     pub resolved_target_script: Option<String>,
+    #[serde(deserialize_with = "required_control_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptControlAction {
     Continue {
         source_script: String,
@@ -42,6 +47,7 @@ pub enum ScriptControlAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptControlCommandError {
     #[error("script control command name is empty")]
     EmptyCommand,
@@ -85,7 +91,7 @@ pub enum ScriptControlCommandError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptControlCommandIssue {
     InvalidCommand { error: ScriptControlCommandError },
     InvalidTargetScript { target_script: String },
@@ -369,6 +375,12 @@ fn require_compare_value(
             value: value.to_string(),
         });
     }
+    if has_reserved_pack_prefix(value) {
+        return Err(ScriptControlCommandError::InvalidCompareValue {
+            command: command.command.clone(),
+            value: value.to_string(),
+        });
+    }
     Ok(value)
 }
 
@@ -499,6 +511,7 @@ fn is_exact_numeric_symbol(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_nonempty_token(value: &str) -> bool {
@@ -507,6 +520,86 @@ fn is_exact_nonempty_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_control_command_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_compare_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_control_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_control_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script control command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_control_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script control label must be exact ASCII label syntax, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_control_label_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_nonempty_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script control label must be exact ASCII label syntax, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_nullable_compare_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_compare_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script control compare value must be exact visible ASCII, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -522,6 +615,56 @@ mod tests {
             source_script: "Script".to_string(),
             command_index: 6,
         }
+    }
+
+    #[test]
+    fn script_control_serialized_variants_reject_unknown_fallback_fields() {
+        let action_error = serde_json::from_value::<ScriptControlAction>(serde_json::json!({
+            "jump": {
+                "target_script": ".Done@Script",
+                "call": false,
+                "deferred": false,
+                "standard": false,
+                "source_script": "Script",
+                "command_index": 6,
+                "fallback_target_script": "DefaultScript"
+            }
+        }))
+        .expect_err("control actions must not accept fallback targets");
+        assert!(
+            action_error
+                .to_string()
+                .contains("unknown field `fallback_target_script`"),
+            "{action_error}"
+        );
+
+        let error_error = serde_json::from_value::<ScriptControlCommandError>(serde_json::json!({
+            "UnknownCommand": {
+                "command": "if_true",
+                "normalized_command": "iftrue"
+            }
+        }))
+        .expect_err("control errors must not accept normalized command aliases");
+        assert!(
+            error_error
+                .to_string()
+                .contains("unknown field `normalized_command`"),
+            "{error_error}"
+        );
+
+        let issue_error = serde_json::from_value::<ScriptControlCommandIssue>(serde_json::json!({
+            "unknown_target_script": {
+                "target_script": ".Done@Script",
+                "legacy_target_label": ".Done"
+            }
+        }))
+        .expect_err("control issues must not accept legacy target labels");
+        assert!(
+            issue_error
+                .to_string()
+                .contains("unknown field `legacy_target_label`"),
+            "{issue_error}"
+        );
     }
 
     #[test]
@@ -687,6 +830,86 @@ mod tests {
         let mut jumpstd = command("jumpstd", None, Some("PokecenterSignScript"));
         jumpstd.resolved_target_script = None;
         assert_eq!(script_control_command_issues(&jumpstd, &labels), []);
+    }
+
+    #[test]
+    fn control_commands_reject_reserved_pack_prefixes() {
+        let labels = BTreeSet::from([".Done@Script".to_string()]);
+
+        assert_eq!(
+            script_control_command_issues(&command("fallbackjump", None, Some(".Done")), &labels,),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::PaddedCommand {
+                    command: "fallbackjump".to_string(),
+                }
+            }]
+        );
+        assert_eq!(
+            script_control_command_issues(
+                &command("ifequal", Some("legacy_value"), Some(".Done")),
+                &labels,
+            ),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::InvalidCompareValue {
+                    command: "ifequal".to_string(),
+                    value: "legacy_value".to_string(),
+                }
+            }]
+        );
+        assert_eq!(
+            script_control_command_issues(
+                &command("iftrue", None, Some("fallback_target")),
+                &labels,
+            ),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::InvalidTarget {
+                    command: "iftrue".to_string(),
+                    target: "fallback_target".to_string(),
+                }
+            }]
+        );
+
+        let mut invalid_resolved = command("iftrue", None, Some(".Done"));
+        invalid_resolved.resolved_target_script = Some("legacy_target@Script".to_string());
+        assert_eq!(
+            script_control_command_issues(&invalid_resolved, &labels),
+            vec![ScriptControlCommandIssue::InvalidCommand {
+                error: ScriptControlCommandError::InvalidResolvedTarget {
+                    command: "iftrue".to_string(),
+                    target_script: "legacy_target@Script".to_string(),
+                }
+            }]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackjump")),
+            ("compare_value", serde_json::json!("legacy_value")),
+            ("target_label", serde_json::json!("fallback_target")),
+            (
+                "resolved_target_script",
+                serde_json::json!("legacy_target@Script"),
+            ),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "ifequal",
+                "compare_value": "TRUE",
+                "target_label": ".Done",
+                "resolved_target_script": ".Done@Script",
+                "source_script": "Script",
+                "command_index": 6
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptControlCommand>(payload)
+                .expect_err("reserved script control command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script control"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

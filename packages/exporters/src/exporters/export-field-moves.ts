@@ -29,8 +29,6 @@ export type ExportedFieldItemRule = {
 };
 
 export type ExportedFieldMoveReplacement = {
-  tileset: string;
-  block_id: number;
   replacement_block_id: number;
   variant: string;
 };
@@ -39,7 +37,7 @@ export type ExportedFieldMoveBlockRule = {
   move_id: string;
   badge: ExportedFieldMoveBadgeRequirement;
   target_collisions: number[];
-  replacements: ExportedFieldMoveReplacement[];
+  replacements: Record<string, Record<string, ExportedFieldMoveReplacement>>;
 };
 
 export type ExportedFieldMoveFlagRule = {
@@ -134,7 +132,10 @@ const animationVariant = (animation: number): string => {
   throw new Error(`Unsupported field move animation value ${animation}.`);
 };
 
-const parseReplacementTables = (content: string, rootLabel: string): ExportedFieldMoveReplacement[] => {
+const parseReplacementTables = (
+  content: string,
+  rootLabel: string
+): Record<string, Record<string, ExportedFieldMoveReplacement>> => {
   const lines = content.split(/\r?\n/);
   const pointers = new Map<string, string>();
   const rootIndex = lines.findIndex((line) => stripComment(line) === `${rootLabel}:`);
@@ -149,7 +150,7 @@ const parseReplacementTables = (content: string, rootLabel: string): ExportedFie
     pointers.set(match[2], tilesetName(match[1]));
   }
 
-  const replacements: ExportedFieldMoveReplacement[] = [];
+  const replacements: Record<string, Record<string, ExportedFieldMoveReplacement>> = {};
   for (const [label, tileset] of pointers) {
     let tableIndex = lines.findIndex((line, lineIndex) => lineIndex > index && stripComment(line) === `.${label}:`);
     if (tableIndex < 0) throw new Error(`Missing ${rootLabel} table .${label}.`);
@@ -160,12 +161,12 @@ const parseReplacementTables = (content: string, rootLabel: string): ExportedFie
       const match = line.match(/^db\s+([^,]+),\s+([^,]+),\s+([^,]+)$/);
       if (!match) throw new Error(`Unsupported ${rootLabel} row '${line}'.`);
       const animation = parseAsmNumber(match[3]);
-      replacements.push({
-        tileset,
-        block_id: parseAsmNumber(match[1]),
+      const blockId = parseAsmNumber(match[1]);
+      replacements[tileset] ??= {};
+      replacements[tileset][String(blockId)] = {
         replacement_block_id: parseAsmNumber(match[2]),
         variant: rootLabel === "WhirlpoolBlockPointers" ? "whirlpool" : animationVariant(animation),
-      });
+      };
     }
   }
   return replacements;

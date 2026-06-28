@@ -5,16 +5,33 @@ use super::pokemon::{PokemonType, Stat};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Move {
+    #[serde(deserialize_with = "required_move_token")]
     pub name: String,
     #[serde(rename = "type")]
+    #[serde(deserialize_with = "required_move_token")]
     pub move_type: PokemonType,
     pub power: u16,
     pub accuracy: u8,
     pub pp: u8,
+    #[serde(deserialize_with = "required_move_token")]
     pub effect: String,
     pub effect_chance: u8,
     pub stat: Option<Stat>,
     pub amount: Option<i8>,
+}
+
+fn required_move_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if !is_exact_nonempty_move_token(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "move token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )));
+    }
+    validate_no_reserved_move_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,21 +49,21 @@ pub fn move_payload_issues(move_data: &Move) -> Vec<MovePayloadIssue> {
 
     if move_data.name.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingName);
-    } else if !is_exact_nonempty_move_token(&move_data.name) {
+    } else if !is_valid_move_payload_token(&move_data.name) {
         issues.push(MovePayloadIssue::InvalidName {
             name: move_data.name.clone(),
         });
     }
     if move_data.move_type.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingType);
-    } else if !is_exact_nonempty_move_token(&move_data.move_type) {
+    } else if !is_valid_move_payload_token(&move_data.move_type) {
         issues.push(MovePayloadIssue::InvalidType {
             move_type: move_data.move_type.clone(),
         });
     }
     if move_data.effect.trim().is_empty() {
         issues.push(MovePayloadIssue::MissingEffect);
-    } else if !is_exact_nonempty_move_token(&move_data.effect) {
+    } else if !is_valid_move_payload_token(&move_data.effect) {
         issues.push(MovePayloadIssue::InvalidEffect {
             effect: move_data.effect.clone(),
         });
@@ -79,7 +96,7 @@ pub fn move_name_catalog_issues(
         });
     }
     for (index, move_name) in move_names.iter().enumerate() {
-        if !is_exact_nonempty_move_token(move_name) {
+        if !is_valid_move_payload_token(move_name) {
             issues.push(MoveNameCatalogIssue::InvalidName { index });
         }
     }
@@ -93,6 +110,20 @@ fn is_exact_nonempty_move_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_valid_move_payload_token(value: &str) -> bool {
+    is_exact_nonempty_move_token(value) && validate_no_reserved_move_token(value).is_ok()
+}
+
+fn validate_no_reserved_move_token(value: &str) -> Result<(), String> {
+    let lowered = value.to_ascii_lowercase();
+    if lowered.starts_with("fallback") || lowered.starts_with("legacy") {
+        return Err(format!(
+            "move token '{value}' uses reserved modpack payload prefix"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -165,6 +196,47 @@ mod tests {
     }
 
     #[test]
+    fn move_identifier_fields_reject_malformed_tokens_at_deserialization() {
+        for (field, value) in [
+            ("name", serde_json::json!("AETHER PULSE")),
+            ("type", serde_json::json!(" AETHER")),
+            ("type", serde_json::json!("legacy_AETHER")),
+            ("effect", serde_json::json!("MODDED EFFECT")),
+            ("effect", serde_json::json!("fallback_EFFECT")),
+        ] {
+            let mut move_json = valid_move_json();
+            move_json[field] = value;
+
+            let error = serde_json::from_value::<Move>(move_json)
+                .expect_err("malformed move identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("move token must be")
+                    || error.contains("uses reserved modpack payload prefix"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_effect_field_rejects_enum_object_values() {
+        let mut move_json = valid_move_json();
+        move_json["effect"] = serde_json::json!({ "kind": "NORMAL_HIT" });
+
+        let error = serde_json::from_value::<Move>(move_json)
+            .expect_err("move effects must be exact modpack strings, not enum objects")
+            .to_string();
+
+        assert!(
+            error.contains("invalid type: map")
+                || error.contains("invalid type: enum")
+                || error.contains("expected a string"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn move_payload_issues_require_exact_pack_owned_ids_without_effect_enums() {
         let move_data = Move {
             name: "AETHER PULSE".to_string(),
@@ -172,7 +244,7 @@ mod tests {
             power: 60,
             accuracy: 100,
             pp: 15,
-            effect: "MODDED EFFECT".to_string(),
+            effect: "fallback_EFFECT".to_string(),
             effect_chance: 0,
             stat: None,
             amount: None,
@@ -188,7 +260,7 @@ mod tests {
                     move_type: "AETHER TYPE".to_string(),
                 },
                 MovePayloadIssue::InvalidEffect {
-                    effect: "MODDED EFFECT".to_string(),
+                    effect: "fallback_EFFECT".to_string(),
                 },
             ],
         );
@@ -218,17 +290,19 @@ mod tests {
                 &[
                     "POUND".to_string(),
                     String::new(),
-                    "KARATE CHOP".to_string()
+                    "KARATE CHOP".to_string(),
+                    "legacy_POUND".to_string()
                 ],
                 2,
             ),
             vec![
                 MoveNameCatalogIssue::CountMismatch {
-                    actual_count: 3,
+                    actual_count: 4,
                     expected_count: 2,
                 },
                 MoveNameCatalogIssue::InvalidName { index: 1 },
                 MoveNameCatalogIssue::InvalidName { index: 2 },
+                MoveNameCatalogIssue::InvalidName { index: 3 },
             ],
         );
     }
@@ -236,5 +310,19 @@ mod tests {
     #[test]
     fn move_name_catalog_issues_allow_absent_partial_pack_names() {
         assert!(move_name_catalog_issues(&[], 251).is_empty());
+    }
+
+    fn valid_move_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "AETHER_PULSE",
+            "type": "AETHER",
+            "power": 60,
+            "accuracy": 100,
+            "pp": 15,
+            "effect": "MODDED_EFFECT",
+            "effect_chance": 0,
+            "stat": null,
+            "amount": null
+        })
     }
 }

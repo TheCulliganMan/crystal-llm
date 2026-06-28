@@ -13,15 +13,22 @@ use crate::world::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptObjectCommand {
+    #[serde(deserialize_with = "required_script_object_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub object_id: Option<String>,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub target_object_id: Option<String>,
     pub x: Option<u16>,
     pub y: Option<u16>,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub direction: Option<String>,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub movement: Option<String>,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub emote: Option<String>,
     pub duration: Option<u16>,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -29,7 +36,9 @@ pub struct ScriptObjectCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMovement {
+    #[serde(deserialize_with = "required_script_object_token")]
     pub label: String,
+    #[serde(deserialize_with = "required_nullable_script_label_token")]
     pub source_script: Option<String>,
     pub steps: Vec<ScriptMovementStep>,
 }
@@ -37,7 +46,9 @@ pub struct ScriptMovement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMovementStep {
+    #[serde(deserialize_with = "required_script_object_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_object_token")]
     pub direction: Option<String>,
     pub duration: Option<u16>,
     pub index: usize,
@@ -79,6 +90,7 @@ pub struct ScriptMovementOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptObjectCommandError {
     #[error("script object command '{command}' is not a state mutation")]
     NotObjectMutation { command: String },
@@ -128,7 +140,7 @@ pub enum ScriptObjectCommandError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMovementStepIssue {
     UnexpectedDirection,
     MissingDirection,
@@ -238,11 +250,18 @@ pub const SCRIPT_OBJECT_EMOTE_COMMANDS: &[&str] = &["showemote"];
 pub const SCRIPT_MOVEMENT_DIRECTION_COMMANDS: &[&str] = &[
     "step",
     "slow_step",
+    "fast_step",
     "big_step",
+    "turn_step",
     "jump_step",
     "fast_jump_step",
     "slow_jump_step",
+    "slide_step",
+    "fast_slide_step",
+    "slow_slide_step",
+    "step_bump",
     "turn_head",
+    "turn_away",
 ];
 pub const SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS: &[&str] = &["step_sleep"];
 pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
@@ -254,15 +273,24 @@ pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
     "teleport_from",
     "skyfall_top",
     "tree_shake",
+    "hide_object",
+    "show_object",
 ];
 pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "step",
     "slow_step",
+    "fast_step",
     "big_step",
+    "turn_step",
     "jump_step",
     "fast_jump_step",
     "slow_jump_step",
+    "slide_step",
+    "fast_slide_step",
+    "slow_slide_step",
+    "step_bump",
     "turn_head",
+    "turn_away",
     "step_sleep",
     "step_end",
     "fix_facing",
@@ -272,6 +300,8 @@ pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "teleport_from",
     "skyfall_top",
     "tree_shake",
+    "hide_object",
+    "show_object",
 ];
 
 pub fn is_known_script_object_command(command: &str) -> bool {
@@ -505,12 +535,98 @@ fn is_exact_script_object_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_object_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_object_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_object_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script object command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_object_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_object_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script object token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_object_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_script_object_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script object token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script label token must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_label_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_script_label_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script label token must be exact visible ASCII, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
@@ -626,10 +742,7 @@ pub fn apply_script_movement(
                 });
                 steps_applied += 1;
             }
-            command
-                if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command)
-                    && command != "turn_head" =>
-            {
+            command if movement_step_moves_object(command) => {
                 let direction = movement_step_direction(movement, step)?;
                 if !fixed_facing {
                     facing = direction;
@@ -637,11 +750,15 @@ pub fn apply_script_movement(
                 tile = move_by_stride(tile, direction, 1);
                 steps_applied += 1;
             }
-            "turn_head" => {
-                facing = movement_step_direction(movement, step)?;
+            command if movement_step_turns_without_moving(command) => {
+                let direction = movement_step_direction(movement, step)?;
+                facing = match command {
+                    "turn_away" => opposite_direction(direction),
+                    _ => direction,
+                };
                 steps_applied += 1;
             }
-            "teleport_from" | "skyfall_top" | "tree_shake" => {
+            "teleport_from" | "skyfall_top" | "tree_shake" | "hide_object" | "show_object" => {
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
@@ -895,6 +1012,36 @@ fn movement_step_direction(
             index: step.index,
         })
         .and_then(parse_script_direction)
+}
+
+fn movement_step_moves_object(command: &str) -> bool {
+    matches!(
+        command,
+        "step"
+            | "slow_step"
+            | "fast_step"
+            | "big_step"
+            | "turn_step"
+            | "jump_step"
+            | "fast_jump_step"
+            | "slow_jump_step"
+            | "slide_step"
+            | "fast_slide_step"
+            | "slow_slide_step"
+    )
+}
+
+fn movement_step_turns_without_moving(command: &str) -> bool {
+    matches!(command, "turn_head" | "turn_away" | "step_bump")
+}
+
+fn opposite_direction(direction: Direction) -> Direction {
+    match direction {
+        Direction::Down => Direction::Up,
+        Direction::Up => Direction::Down,
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
+    }
 }
 
 fn object_tile(
@@ -1253,11 +1400,18 @@ mod tests {
             &[
                 "step",
                 "slow_step",
+                "fast_step",
                 "big_step",
+                "turn_step",
                 "jump_step",
                 "fast_jump_step",
                 "slow_jump_step",
-                "turn_head"
+                "slide_step",
+                "fast_slide_step",
+                "slow_slide_step",
+                "step_bump",
+                "turn_head",
+                "turn_away"
             ]
         );
         assert_eq!(SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, &["step_sleep"]);
@@ -1271,11 +1425,47 @@ mod tests {
                 "remove_sliding",
                 "teleport_from",
                 "skyfall_top",
-                "tree_shake"
+                "tree_shake",
+                "hide_object",
+                "show_object"
             ]
         );
         assert!(is_known_script_movement_command("turn_head"));
+        assert!(is_known_script_movement_command("fast_slide_step"));
+        assert!(is_known_script_movement_command("hide_object"));
         assert!(!is_known_script_movement_command("spin_forever"));
+    }
+
+    #[test]
+    fn script_object_serialized_variants_reject_unknown_fallback_fields() {
+        let command_error = serde_json::from_value::<ScriptObjectCommandError>(serde_json::json!({
+            "UnknownObject": {
+                "object_id": "LYRA",
+                "fallback_object_id": "PLAYER"
+            }
+        }))
+        .expect_err("object errors must not accept fallback object ids");
+        assert!(
+            command_error
+                .to_string()
+                .contains("unknown field `fallback_object_id`"),
+            "{command_error}"
+        );
+
+        let movement_issue_error =
+            serde_json::from_value::<ScriptMovementStepIssue>(serde_json::json!({
+                "unknown_direction": {
+                    "direction": "north",
+                    "normalized_direction": "UP"
+                }
+            }))
+            .expect_err("movement issues must not accept normalized direction aliases");
+        assert!(
+            movement_issue_error
+                .to_string()
+                .contains("unknown field `normalized_direction`"),
+            "{movement_issue_error}"
+        );
     }
 
     #[test]
@@ -1327,6 +1517,151 @@ mod tests {
             }),
             Vec::<ScriptMovementStepIssue>::new()
         );
+    }
+
+    #[test]
+    fn object_and_movement_commands_reject_reserved_pack_prefixes() {
+        let object_event_flags =
+            BTreeMap::from([("NPC".to_string(), "EVENT_HIDE_NPC".to_string())]);
+        let hideable_event_flags = BTreeSet::from(["EVENT_HIDE_NPC".to_string()]);
+        let movements = BTreeSet::from([("Walk".to_string(), None)]);
+
+        assert_eq!(
+            script_object_command_issues(
+                &command("fallbackobject", "NPC"),
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidCommand {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "fallbackobject".to_string(),
+            }]
+        );
+
+        let reserved_object = command("appear", "legacy_npc");
+        assert_eq!(
+            script_object_command_issues(
+                &reserved_object,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidObjectId {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "appear".to_string(),
+                object_id: "legacy_npc".to_string(),
+            }]
+        );
+
+        let mut reserved_movement = command("applymovement", "NPC");
+        reserved_movement.movement = Some("fallback_walk".to_string());
+        assert_eq!(
+            script_object_command_issues(
+                &reserved_movement,
+                &object_event_flags,
+                &hideable_event_flags,
+                &movements,
+            ),
+            vec![ScriptObjectCommandIssue::InvalidMovement {
+                source_script: "Script".to_string(),
+                command_index: 3,
+                command: "applymovement".to_string(),
+                movement: "fallback_walk".to_string(),
+            }]
+        );
+
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "legacystep".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }),
+            vec![ScriptMovementStepIssue::UnsupportedCommand]
+        );
+    }
+
+    #[test]
+    fn object_and_movement_json_rejects_reserved_pack_prefixes() {
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackobject")),
+            ("object_id", serde_json::json!("legacy_npc")),
+            ("target_object_id", serde_json::json!("fallback_target")),
+            ("direction", serde_json::json!("legacy_down")),
+            ("movement", serde_json::json!("fallback_walk")),
+            ("emote", serde_json::json!("legacy_emote")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "turnobject",
+                "object_id": "NPC",
+                "target_object_id": null,
+                "x": null,
+                "y": null,
+                "direction": "DOWN",
+                "movement": null,
+                "emote": null,
+                "duration": null,
+                "source_script": ".branch@Script",
+                "command_index": 3
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptObjectCommand>(payload)
+                .expect_err("reserved script object command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script object") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("label", serde_json::json!("fallback_walk")),
+            ("source_script", serde_json::json!("legacy_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "label": "Walk",
+                "source_script": ".branch@Script",
+                "steps": []
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptMovement>(payload)
+                .expect_err("reserved script movement tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script object") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("command", serde_json::json!("legacystep")),
+            ("direction", serde_json::json!("fallback_down")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "step",
+                "direction": "DOWN",
+                "duration": null,
+                "index": 0
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptMovementStep>(payload)
+                .expect_err("reserved script movement step tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script object"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1809,6 +2144,96 @@ mod tests {
                 ScriptMovementEffect {
                     command: "tree_shake".to_string(),
                     index: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn applymovement_supports_slide_fast_bump_and_turn_away_opcodes() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(2, 2);
+        session.player.facing = Direction::Down;
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("MoreCrystalMovement".to_string());
+        let movement = ScriptMovement {
+            label: "MoreCrystalMovement".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "fast_step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "slide_step".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "fast_slide_step".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "slow_slide_step".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 3,
+                },
+                ScriptMovementStep {
+                    command: "step_bump".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 4,
+                },
+                ScriptMovementStep {
+                    command: "turn_away".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index: 5,
+                },
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 6,
+                },
+                ScriptMovementStep {
+                    command: "show_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 7,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 8,
+                },
+            ],
+        };
+
+        let outcome = apply_script_movement(&mut session, &command, &movement)
+            .expect("extended movement opcodes apply");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(2, 2));
+        assert_eq!(outcome.tile, TilePosition::new(2, 2));
+        assert_eq!(outcome.facing, Direction::Down);
+        assert_eq!(outcome.steps_applied, 8);
+        assert_eq!(
+            outcome.effects,
+            vec![
+                ScriptMovementEffect {
+                    command: "hide_object".to_string(),
+                    index: 6,
+                },
+                ScriptMovementEffect {
+                    command: "show_object".to_string(),
+                    index: 7,
                 },
             ]
         );

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::map::{ObjectEvent, WarpEvent};
 use crate::models::{Item, PokemonStorage};
 use crate::state::{EventFlagError, GameState};
 use crate::world::collision::{
@@ -9,7 +10,8 @@ use crate::world::collision::{
     sample_collision,
 };
 use crate::world::map::{Direction, OverworldMapData, TilePosition};
-use crate::world::movement::{MovementMode, PlayerMovementState, move_by_stride};
+use crate::world::movement::{MovementMode, PlayerMovementState, StepOptions, move_by_stride};
+use crate::world::session::{OverworldSession, WarpTransition};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,14 +78,12 @@ pub struct FieldMoveBlockRule {
     pub move_id: String,
     pub badge: FieldMoveBadgeRequirement,
     pub target_collisions: Vec<u8>,
-    pub replacements: Vec<FieldMoveReplacement>,
+    pub replacements: BTreeMap<String, BTreeMap<u16, FieldMoveReplacement>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveReplacement {
-    pub tileset: String,
-    pub block_id: u16,
     pub replacement_block_id: u16,
     pub variant: String,
 }
@@ -138,8 +138,9 @@ pub enum FieldMoveCatalogIssue {
     InvalidReplacementVariant {
         subject: String,
     },
-    DuplicateReplacement {
+    InvalidReplacementBlock {
         subject: String,
+        block_id: u16,
     },
     InvalidEngineFlag {
         subject: String,
@@ -151,11 +152,19 @@ pub enum FieldMoveCatalogIssue {
         item_id: String,
         escape_rope_mode: String,
     },
+    UnusableEscapeItem {
+        item_id: String,
+    },
     MissingRepelItemPayload,
+    MissingUsableRepelItemPayload,
     InvalidFieldItemId {
         subject: String,
     },
     UnknownFieldItemId {
+        subject: String,
+        item_id: String,
+    },
+    UnusableFieldItem {
         subject: String,
         item_id: String,
     },
@@ -280,28 +289,28 @@ fn collect_block_rule_issues(
             move_id: rule.move_id.clone(),
         });
     }
-    let mut seen = BTreeSet::new();
-    for (index, replacement) in rule.replacements.iter().enumerate() {
-        let replacement_subject = format!("{subject}:replacement:{index}");
-        let exact_tileset = is_exact_field_move_token(&replacement.tileset);
-        let exact_variant = is_exact_field_move_token(&replacement.variant);
+    for (tileset, blocks) in &rule.replacements {
+        let tileset_subject = format!("{subject}:replacements:{tileset}");
+        let exact_tileset = is_exact_field_move_token(tileset);
         if !exact_tileset {
             issues.push(FieldMoveCatalogIssue::InvalidReplacementTileset {
-                subject: replacement_subject.clone(),
+                subject: tileset_subject,
             });
         }
-        if !exact_variant {
-            issues.push(FieldMoveCatalogIssue::InvalidReplacementVariant {
-                subject: replacement_subject.clone(),
-            });
-        }
-        if exact_tileset
-            && exact_variant
-            && !seen.insert((replacement.tileset.as_str(), replacement.block_id))
-        {
-            issues.push(FieldMoveCatalogIssue::DuplicateReplacement {
-                subject: replacement_subject,
-            });
+        for (block_id, replacement) in blocks {
+            let replacement_subject = format!("{subject}:replacements:{tileset}:{block_id}");
+            let exact_variant = is_exact_field_move_token(&replacement.variant);
+            if !exact_variant {
+                issues.push(FieldMoveCatalogIssue::InvalidReplacementVariant {
+                    subject: replacement_subject.clone(),
+                });
+            }
+            if replacement.replacement_block_id == *block_id {
+                issues.push(FieldMoveCatalogIssue::InvalidReplacementBlock {
+                    subject: replacement_subject,
+                    block_id: *block_id,
+                });
+            }
         }
     }
 }
@@ -356,7 +365,13 @@ fn collect_escape_item_rule_issues(
         return;
     }
     match items.get(&rule.item_id) {
-        Some(item) if item.escape_rope_mode.as_deref() == Some(rule.escape_rope_mode.as_str()) => {}
+        Some(item) if item.escape_rope_mode.as_deref() == Some(rule.escape_rope_mode.as_str()) => {
+            if !item.field_usable {
+                issues.push(FieldMoveCatalogIssue::UnusableEscapeItem {
+                    item_id: rule.item_id.clone(),
+                });
+            }
+        }
         _ => issues.push(FieldMoveCatalogIssue::UnknownEscapeItemRule {
             item_id: rule.item_id.clone(),
             escape_rope_mode: rule.escape_rope_mode.clone(),
@@ -371,8 +386,14 @@ fn collect_repel_rule_issues(
     if items.is_empty() {
         return;
     }
-    if !items.values().any(|item| item.repel_steps.is_some()) {
+    let repel_items = items
+        .values()
+        .filter(|item| item.repel_steps.is_some())
+        .collect::<Vec<_>>();
+    if repel_items.is_empty() {
         issues.push(FieldMoveCatalogIssue::MissingRepelItemPayload);
+    } else if !repel_items.iter().any(|item| item.field_usable) {
+        issues.push(FieldMoveCatalogIssue::MissingUsableRepelItemPayload);
     }
 }
 
@@ -388,11 +409,16 @@ fn collect_field_item_rule_issues(
         });
         return;
     }
-    if !items.contains_key(&rule.item_id) {
-        issues.push(FieldMoveCatalogIssue::UnknownFieldItemId {
+    match items.get(&rule.item_id) {
+        Some(item) if !item.field_usable => issues.push(FieldMoveCatalogIssue::UnusableFieldItem {
             subject: subject.to_string(),
             item_id: rule.item_id.clone(),
-        });
+        }),
+        Some(_) => {}
+        None => issues.push(FieldMoveCatalogIssue::UnknownFieldItemId {
+            subject: subject.to_string(),
+            item_id: rule.item_id.clone(),
+        }),
     }
 }
 
@@ -417,9 +443,15 @@ fn collect_move_id_issues(
 fn is_exact_field_move_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 fn collect_badge_issues(
@@ -485,13 +517,50 @@ pub struct FieldMoveTravelOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RepelItemUseOutcome {
+    pub item_id: String,
+    pub repel_steps_before: u16,
+    pub repel_steps_after: u16,
+    pub active_repel_item_before: Option<String>,
+    pub active_repel_item_after: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldMoveUseOutcome {
     pub move_id: String,
     pub actor_party_index: usize,
     pub actor_species: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DigWarpMemoryOutcome {
+    pub before_map_name: Option<String>,
+    pub before_index: Option<u16>,
+    pub after_map_name: Option<String>,
+    pub after_index: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedDigWarpDestination {
+    pub map_name: String,
+    pub warp_index: u16,
+    pub tile: TilePosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SquirtBottleTarget {
+    pub target_tile: TilePosition,
+    pub target_object_identifier: Option<String>,
+    pub target_movement: String,
+    pub target_script: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum FieldMoveError {
     #[error("field move {move_id} is missing required modpack rule field {field}")]
     MissingRuleField { move_id: String, field: String },
@@ -526,6 +595,16 @@ pub enum FieldMoveError {
     MissingRepelItemSteps { item_id: String },
     #[error("field repel item {item_id} has invalid repel_steps 0")]
     InvalidRepelItemSteps { item_id: String },
+    #[error("saved active_repel_item {item_id} is missing from compiled pack items")]
+    MissingSavedActiveRepelItem { item_id: String },
+    #[error(
+        "saved repel_steps_remaining {steps_remaining} exceeds compiled active_repel_item {item_id} duration {compiled_steps}"
+    )]
+    SavedRepelStepsExceedCompiledDuration {
+        item_id: String,
+        steps_remaining: u16,
+        compiled_steps: u16,
+    },
     #[error("field item rule {rule_id} has no configured item id")]
     MissingFieldItemId { rule_id: String },
     #[error(
@@ -535,6 +614,29 @@ pub enum FieldMoveError {
         rule_id: String,
         item_id: String,
         expected_item_id: String,
+    },
+    #[error("blue card balance VAR_BLUECARDBALANCE has invalid exact integer {value}")]
+    InvalidBlueCardBalance { value: String },
+    #[error("blue card balance VAR_BLUECARDBALANCE is outside 0..=30: {balance}")]
+    BlueCardBalanceOutOfRange { balance: u16 },
+    #[error("saved blue_card_balance {balance} requires compiled Buena prize definitions")]
+    MissingBuenaPrizesForSavedBlueCardBalance { balance: u8 },
+    #[error("{context} has no saved dig warp map")]
+    MissingSavedDigWarpMap { context: String },
+    #[error("{context} has no saved dig warp index")]
+    MissingSavedDigWarpIndex { context: String },
+    #[error("{context} saved dig warp index {warp_index} missing on {map_name}")]
+    MissingSavedDigWarp {
+        context: String,
+        map_name: String,
+        warp_index: u16,
+    },
+    #[error(
+        "field squirtbottle target {object_identifier:?} references missing exact script {script}"
+    )]
+    MissingSquirtBottleTargetScript {
+        object_identifier: Option<String>,
+        script: String,
     },
     #[error("field move {move_id} cannot be used while player movement mode is {mode:?}")]
     InvalidMovementMode { move_id: String, mode: MovementMode },
@@ -576,6 +678,60 @@ pub enum FieldMoveError {
     Flag(#[from] EventFlagError),
 }
 
+pub fn resolve_squirtbottle_target<F>(
+    overworld: &OverworldSession,
+    target_script_exists: F,
+) -> Result<SquirtBottleTarget, FieldMoveError>
+where
+    F: FnOnce(&str) -> bool,
+{
+    let target_tile = move_by_stride(
+        overworld.player.tile,
+        overworld.player.facing,
+        StepOptions::default().stride_tiles,
+    );
+    let Some((_, object)) = overworld.visible_object_at(target_tile) else {
+        return Ok(SquirtBottleTarget {
+            target_tile,
+            target_object_identifier: None,
+            target_movement: String::new(),
+            target_script: None,
+        });
+    };
+    squirtbottle_target_for_object(target_tile, object, target_script_exists)
+}
+
+fn squirtbottle_target_for_object<F>(
+    target_tile: TilePosition,
+    object: &ObjectEvent,
+    target_script_exists: F,
+) -> Result<SquirtBottleTarget, FieldMoveError>
+where
+    F: FnOnce(&str) -> bool,
+{
+    const SUDOWOODO_MOVEMENT: &str = "SPRITEMOVEDATA_SUDOWOODO";
+    if object.spritemovedata != SUDOWOODO_MOVEMENT {
+        return Ok(SquirtBottleTarget {
+            target_tile,
+            target_object_identifier: object.object_identifier.clone(),
+            target_movement: object.spritemovedata.clone(),
+            target_script: None,
+        });
+    }
+    if !target_script_exists(&object.script) {
+        return Err(FieldMoveError::MissingSquirtBottleTargetScript {
+            object_identifier: object.object_identifier.clone(),
+            script: object.script.clone(),
+        });
+    }
+    Ok(SquirtBottleTarget {
+        target_tile,
+        target_object_identifier: object.object_identifier.clone(),
+        target_movement: object.spritemovedata.clone(),
+        target_script: Some(object.script.clone()),
+    })
+}
+
 pub fn apply_cut_field_move(
     catalog: &FieldMoveCatalog,
     state: &mut GameState,
@@ -587,47 +743,17 @@ pub fn apply_cut_field_move(
     metatile_x: u16,
     metatile_y: u16,
 ) -> Result<FieldMoveBlockOutcome, FieldMoveError> {
-    let rule = &catalog.cut;
-    require_rule_field(&rule.move_id, "move_id")?;
-    let actor = require_party_move(storage, party_index, &rule.move_id)?;
-    require_badge(state, &rule.move_id, &rule.badge)?;
-    let (index, previous_block_id, collisions) =
-        target_metatile(map, tileset, metatile_x, metatile_y)?;
-    if !contains_any_collision(collisions, &rule.target_collisions) {
-        return Err(FieldMoveError::UnsupportedCollision {
-            move_id: rule.move_id.clone(),
-            block_id: previous_block_id,
-        });
-    }
-    let replacement =
-        block_replacement(rule, tileset_name, previous_block_id).ok_or_else(|| {
-            FieldMoveError::UnsupportedReplacement {
-                move_id: rule.move_id.clone(),
-                tileset_name: tileset_name.to_string(),
-                block_id: previous_block_id,
-            }
-        })?;
-    let replacement_block_id = replacement.replacement_block_id;
-    map.metatile_ids[index] = replacement_block_id;
-    record_block_override(
+    apply_block_field_move(
+        &catalog.cut,
         state,
-        &map.name,
+        storage,
+        map,
+        tileset,
+        tileset_name,
+        party_index,
         metatile_x,
         metatile_y,
-        replacement_block_id,
-    );
-    Ok(FieldMoveBlockOutcome {
-        move_id: rule.move_id.clone(),
-        actor_party_index: party_index,
-        actor_species: actor.species.id.clone(),
-        map_name: map.name.clone(),
-        tileset_name: tileset_name.to_string(),
-        metatile_x,
-        metatile_y,
-        previous_block_id,
-        replacement_block_id,
-        variant: replacement.variant.clone(),
-    })
+    )
 }
 
 pub fn apply_whirlpool_field_move(
@@ -641,7 +767,30 @@ pub fn apply_whirlpool_field_move(
     metatile_x: u16,
     metatile_y: u16,
 ) -> Result<FieldMoveBlockOutcome, FieldMoveError> {
-    let rule = &catalog.whirlpool;
+    apply_block_field_move(
+        &catalog.whirlpool,
+        state,
+        storage,
+        map,
+        tileset,
+        tileset_name,
+        party_index,
+        metatile_x,
+        metatile_y,
+    )
+}
+
+fn apply_block_field_move(
+    rule: &FieldMoveBlockRule,
+    state: &mut GameState,
+    storage: &PokemonStorage,
+    map: &mut OverworldMapData,
+    tileset: &TilesetCollision,
+    tileset_name: &str,
+    party_index: usize,
+    metatile_x: u16,
+    metatile_y: u16,
+) -> Result<FieldMoveBlockOutcome, FieldMoveError> {
     require_rule_field(&rule.move_id, "move_id")?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
@@ -690,18 +839,7 @@ pub fn apply_strength_field_move(
     storage: &PokemonStorage,
     party_index: usize,
 ) -> Result<FieldMoveFlagOutcome, FieldMoveError> {
-    let rule = &catalog.strength;
-    require_rule_field(&rule.move_id, "move_id")?;
-    require_rule_field(&rule.engine_flag, "engine_flag")?;
-    let actor = require_party_move(storage, party_index, &rule.move_id)?;
-    require_badge(state, &rule.move_id, &rule.badge)?;
-    set_field_move_engine_flag(
-        state,
-        &rule.move_id,
-        party_index,
-        &actor.species.id,
-        &rule.engine_flag,
-    )
+    apply_flag_field_move(&catalog.strength, state, storage, party_index)
 }
 
 pub fn apply_flash_field_move(
@@ -710,7 +848,15 @@ pub fn apply_flash_field_move(
     storage: &PokemonStorage,
     party_index: usize,
 ) -> Result<FieldMoveFlagOutcome, FieldMoveError> {
-    let rule = &catalog.flash;
+    apply_flag_field_move(&catalog.flash, state, storage, party_index)
+}
+
+fn apply_flag_field_move(
+    rule: &FieldMoveFlagRule,
+    state: &mut GameState,
+    storage: &PokemonStorage,
+    party_index: usize,
+) -> Result<FieldMoveFlagOutcome, FieldMoveError> {
     require_rule_field(&rule.move_id, "move_id")?;
     require_rule_field(&rule.engine_flag, "engine_flag")?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
@@ -923,6 +1069,45 @@ pub fn validate_repel_item(catalog: &FieldMoveCatalog, item: &Item) -> Result<u1
     Ok(steps)
 }
 
+pub fn validate_saved_active_repel_item(
+    catalog: &FieldMoveCatalog,
+    item_id: &str,
+    item: Option<&Item>,
+    steps_remaining: u16,
+) -> Result<(), FieldMoveError> {
+    let item = item.ok_or_else(|| FieldMoveError::MissingSavedActiveRepelItem {
+        item_id: item_id.to_string(),
+    })?;
+    let compiled_steps = validate_repel_item(catalog, item)?;
+    if steps_remaining > compiled_steps {
+        return Err(FieldMoveError::SavedRepelStepsExceedCompiledDuration {
+            item_id: item.script_name.clone(),
+            steps_remaining,
+            compiled_steps,
+        });
+    }
+    Ok(())
+}
+
+pub fn apply_repel_item_use(
+    state: &mut GameState,
+    item_id: impl Into<String>,
+    steps: u16,
+) -> RepelItemUseOutcome {
+    let item_id = item_id.into();
+    let repel_steps_before = state.repel_steps_remaining;
+    let active_repel_item_before = state.active_repel_item.clone();
+    state.repel_steps_remaining = steps;
+    state.active_repel_item = Some(item_id.clone());
+    RepelItemUseOutcome {
+        item_id,
+        repel_steps_before,
+        repel_steps_after: state.repel_steps_remaining,
+        active_repel_item_before,
+        active_repel_item_after: state.active_repel_item.clone(),
+    }
+}
+
 pub fn validate_bicycle_item(
     catalog: &FieldMoveCatalog,
     item: &Item,
@@ -965,6 +1150,129 @@ pub fn validate_town_map_item(
     validate_field_item_id("town_map", &catalog.town_map, item)
 }
 
+pub fn blue_card_balance(state: &GameState) -> Result<u8, FieldMoveError> {
+    let Some(value) = state.script_runtime.variables.get("VAR_BLUECARDBALANCE") else {
+        return Ok(0);
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(FieldMoveError::InvalidBlueCardBalance {
+            value: value.clone(),
+        });
+    }
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|_| FieldMoveError::InvalidBlueCardBalance {
+            value: value.clone(),
+        })?;
+    if parsed > 30 {
+        return Err(FieldMoveError::BlueCardBalanceOutOfRange { balance: parsed });
+    }
+    Ok(parsed as u8)
+}
+
+pub fn validate_saved_blue_card_balance(
+    state: &GameState,
+    has_buena_prizes: bool,
+) -> Result<(), FieldMoveError> {
+    if state.blue_card_balance > 0 && !has_buena_prizes {
+        return Err(FieldMoveError::MissingBuenaPrizesForSavedBlueCardBalance {
+            balance: state.blue_card_balance,
+        });
+    }
+    Ok(())
+}
+
+pub fn is_dig_warp_source_environment(environment: &str) -> bool {
+    matches!(environment, "ROUTE" | "TOWN")
+}
+
+pub fn is_dig_warp_destination_environment(environment: &str) -> bool {
+    matches!(environment, "INDOOR" | "CAVE" | "DUNGEON" | "GATE")
+}
+
+pub fn is_escape_rope_environment(environment: &str) -> bool {
+    matches!(environment, "CAVE" | "DUNGEON")
+}
+
+pub fn is_bicycle_environment(environment: &str) -> bool {
+    matches!(environment, "ROUTE" | "TOWN" | "CAVE" | "GATE")
+}
+
+pub fn is_dig_field_move_environment(environment: &str) -> bool {
+    matches!(environment, "CAVE" | "DUNGEON")
+}
+
+pub fn is_fly_source_environment(environment: &str) -> bool {
+    matches!(environment, "ROUTE" | "TOWN")
+}
+
+pub fn is_teleport_source_environment(environment: &str) -> bool {
+    matches!(environment, "ROUTE" | "TOWN")
+}
+
+pub fn apply_dig_warp_memory_for_transition(
+    state: &mut GameState,
+    transition: &WarpTransition,
+    source_environment: &str,
+    destination_environment: &str,
+) -> DigWarpMemoryOutcome {
+    let before_map_name = state.dig_warp_map_name.clone();
+    let before_index = state.dig_warp_index;
+    let saved = is_dig_warp_source_environment(source_environment)
+        && is_dig_warp_destination_environment(destination_environment)
+        && !is_dig_previous_map_blacklisted(&transition.trigger.map_name);
+    if saved {
+        state.dig_warp_map_name = Some(transition.trigger.map_name.clone());
+        state.dig_warp_index = Some(transition.trigger.warp.index);
+    } else {
+        state.dig_warp_map_name = None;
+        state.dig_warp_index = None;
+    }
+    DigWarpMemoryOutcome {
+        before_map_name,
+        before_index,
+        after_map_name: state.dig_warp_map_name.clone(),
+        after_index: state.dig_warp_index,
+    }
+}
+
+pub fn saved_dig_warp_destination(
+    state: &GameState,
+    context: &str,
+    warps: &[WarpEvent],
+) -> Result<SavedDigWarpDestination, FieldMoveError> {
+    let map_name =
+        state
+            .dig_warp_map_name
+            .clone()
+            .ok_or_else(|| FieldMoveError::MissingSavedDigWarpMap {
+                context: context.to_string(),
+            })?;
+    let warp_index =
+        state
+            .dig_warp_index
+            .ok_or_else(|| FieldMoveError::MissingSavedDigWarpIndex {
+                context: context.to_string(),
+            })?;
+    let warp = warps
+        .iter()
+        .find(|warp| warp.index == warp_index)
+        .ok_or_else(|| FieldMoveError::MissingSavedDigWarp {
+            context: context.to_string(),
+            map_name: map_name.clone(),
+            warp_index,
+        })?;
+    Ok(SavedDigWarpDestination {
+        map_name,
+        warp_index,
+        tile: TilePosition::new(warp.x as i16, warp.y as i16),
+    })
+}
+
+pub fn is_dig_previous_map_blacklisted(map_name: &str) -> bool {
+    matches!(map_name, "MountMoonSquare" | "TinTowerRoof")
+}
+
 fn validate_field_item_id(
     rule_id: &str,
     rule: &FieldItemRule,
@@ -999,6 +1307,20 @@ fn validate_move_only_field_move(
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     Ok(FieldMoveUseOutcome {
         move_id: rule.move_id.clone(),
+        actor_party_index: party_index,
+        actor_species: actor.species.id.clone(),
+    })
+}
+
+pub fn validate_direct_field_move_actor(
+    storage: &PokemonStorage,
+    party_index: usize,
+    move_id: &str,
+) -> Result<FieldMoveUseOutcome, FieldMoveError> {
+    require_rule_field(move_id, "move_id")?;
+    let actor = require_party_move(storage, party_index, move_id)?;
+    Ok(FieldMoveUseOutcome {
+        move_id: move_id.to_string(),
         actor_party_index: party_index,
         actor_species: actor.species.id.clone(),
     })
@@ -1134,14 +1456,14 @@ fn block_replacement<'a>(
     block_id: u16,
 ) -> Option<&'a FieldMoveReplacement> {
     rule.replacements
-        .iter()
-        .find(|replacement| replacement.tileset == tileset_name && replacement.block_id == block_id)
+        .get(tileset_name)
+        .and_then(|blocks| blocks.get(&block_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::MapAttributes;
+    use crate::map::{MapAttributes, WarpEvent};
     use crate::models::{BaseStats, Dv, Item, LearnedMove, Pokemon, PokemonSpecies, item_pocket};
     use crate::world::collision::permissions;
 
@@ -1176,18 +1498,24 @@ mod tests {
         }
     }
 
-    fn replacement(
-        tileset: &str,
-        block_id: u16,
-        replacement_block_id: u16,
-        variant: &str,
-    ) -> FieldMoveReplacement {
+    fn replacement(replacement_block_id: u16, variant: &str) -> FieldMoveReplacement {
         FieldMoveReplacement {
-            tileset: tileset.to_string(),
-            block_id,
             replacement_block_id,
             variant: variant.to_string(),
         }
+    }
+
+    fn replacements(
+        entries: Vec<(&str, u16, u16, &str)>,
+    ) -> BTreeMap<String, BTreeMap<u16, FieldMoveReplacement>> {
+        let mut replacements = BTreeMap::new();
+        for (tileset, block_id, replacement_block_id, variant) in entries {
+            replacements
+                .entry(tileset.to_string())
+                .or_insert_with(BTreeMap::new)
+                .insert(block_id, replacement(replacement_block_id, variant));
+        }
+        replacements
     }
 
     fn catalog() -> FieldMoveCatalog {
@@ -1202,16 +1530,16 @@ mod tests {
                     COLL_LONG_GRASS,
                     COLL_LONG_GRASS_ALT,
                 ],
-                replacements: vec![
-                    replacement("johto", 0x03, 0x02, "grass"),
-                    replacement("johto", 0x5b, 0x3c, "tree"),
-                ],
+                replacements: replacements(vec![
+                    ("johto", 0x03, 0x02, "grass"),
+                    ("johto", 0x5b, 0x3c, "tree"),
+                ]),
             },
             whirlpool: FieldMoveBlockRule {
                 move_id: MOVE_WHIRLPOOL.to_string(),
                 badge: badge(BADGE_GLACIER),
                 target_collisions: vec![COLL_WHIRLPOOL, COLL_WHIRLPOOL_ALT],
-                replacements: vec![replacement("johto", 0x07, 0x36, "whirlpool")],
+                replacements: replacements(vec![("johto", 0x07, 0x36, "whirlpool")]),
             },
             strength: FieldMoveFlagRule {
                 move_id: MOVE_STRENGTH.to_string(),
@@ -1759,6 +2087,237 @@ mod tests {
     }
 
     #[test]
+    fn direct_field_move_actor_validation_uses_exact_move_id() {
+        let storage = storage_with("HEADBUTT");
+
+        assert_eq!(
+            validate_direct_field_move_actor(&storage, 0, "HEADBUTT"),
+            Ok(FieldMoveUseOutcome {
+                move_id: "HEADBUTT".to_string(),
+                actor_party_index: 0,
+                actor_species: "CHIKORITA".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_direct_field_move_actor(&storage, 0, "headbutt"),
+            Err(FieldMoveError::PokemonDoesNotKnowMove {
+                party_index: 0,
+                move_id: "headbutt".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_direct_field_move_actor(&storage, 0, "SWEET_SCENT"),
+            Err(FieldMoveError::PokemonDoesNotKnowMove {
+                party_index: 0,
+                move_id: "SWEET_SCENT".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn blue_card_balance_reads_exact_script_variable_without_fallback() {
+        let mut state = GameState::default();
+        assert_eq!(blue_card_balance(&state), Ok(0));
+
+        state
+            .script_runtime
+            .variables
+            .insert("VAR_BLUECARDBALANCE".to_string(), "30".to_string());
+        assert_eq!(blue_card_balance(&state), Ok(30));
+
+        state
+            .script_runtime
+            .variables
+            .insert("VAR_BLUECARDBALANCE".to_string(), " 3".to_string());
+        assert_eq!(
+            blue_card_balance(&state),
+            Err(FieldMoveError::InvalidBlueCardBalance {
+                value: " 3".to_string(),
+            })
+        );
+
+        state
+            .script_runtime
+            .variables
+            .insert("VAR_BLUECARDBALANCE".to_string(), "31".to_string());
+        assert_eq!(
+            blue_card_balance(&state),
+            Err(FieldMoveError::BlueCardBalanceOutOfRange { balance: 31 })
+        );
+
+        state.script_runtime.variables.insert(
+            "VAR_BLUECARDBALANCE".to_string(),
+            "999999999999".to_string(),
+        );
+        assert_eq!(
+            blue_card_balance(&state),
+            Err(FieldMoveError::InvalidBlueCardBalance {
+                value: "999999999999".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn field_move_environment_predicates_match_crystal_categories_exactly() {
+        for environment in ["ROUTE", "TOWN"] {
+            assert!(is_dig_warp_source_environment(environment));
+            assert!(is_fly_source_environment(environment));
+            assert!(is_teleport_source_environment(environment));
+        }
+        for environment in ["INDOOR", "CAVE", "DUNGEON", "GATE"] {
+            assert!(is_dig_warp_destination_environment(environment));
+        }
+        for environment in ["CAVE", "DUNGEON"] {
+            assert!(is_escape_rope_environment(environment));
+            assert!(is_dig_field_move_environment(environment));
+        }
+        for environment in ["ROUTE", "TOWN", "CAVE", "GATE"] {
+            assert!(is_bicycle_environment(environment));
+        }
+        for environment in ["route", "INDOORS", "FOREST", ""] {
+            assert!(!is_dig_warp_source_environment(environment));
+            assert!(!is_dig_warp_destination_environment(environment));
+            assert!(!is_escape_rope_environment(environment));
+            assert!(!is_bicycle_environment(environment));
+            assert!(!is_dig_field_move_environment(environment));
+            assert!(!is_fly_source_environment(environment));
+            assert!(!is_teleport_source_environment(environment));
+        }
+    }
+
+    fn warp_transition_from(map_name: &str, index: u16) -> WarpTransition {
+        let warp = WarpEvent {
+            index,
+            x: 3,
+            y: 4,
+            target_map_constant: "DESTINATION".to_string(),
+            target_map: "DESTINATION".to_string(),
+            target_warp_id: 1,
+        };
+        WarpTransition {
+            trigger: crate::world::session::WarpTrigger {
+                map_name: map_name.to_string(),
+                tile: TilePosition::new(3, 4),
+                warp: warp.clone(),
+            },
+            destination: crate::world::session::WarpDestination {
+                map_name: "DESTINATION".to_string(),
+                tile: TilePosition::new(1, 2),
+                warp,
+            },
+        }
+    }
+
+    #[test]
+    fn dig_warp_memory_saves_only_valid_source_destination_transitions() {
+        let mut state = GameState {
+            dig_warp_map_name: Some("OLD_MAP".to_string()),
+            dig_warp_index: Some(9),
+            ..GameState::default()
+        };
+        let transition = warp_transition_from("ROUTE_29", 3);
+
+        assert_eq!(
+            apply_dig_warp_memory_for_transition(&mut state, &transition, "ROUTE", "CAVE"),
+            DigWarpMemoryOutcome {
+                before_map_name: Some("OLD_MAP".to_string()),
+                before_index: Some(9),
+                after_map_name: Some("ROUTE_29".to_string()),
+                after_index: Some(3),
+            }
+        );
+        assert_eq!(state.dig_warp_map_name.as_deref(), Some("ROUTE_29"));
+        assert_eq!(state.dig_warp_index, Some(3));
+
+        assert_eq!(
+            apply_dig_warp_memory_for_transition(&mut state, &transition, "CAVE", "ROUTE"),
+            DigWarpMemoryOutcome {
+                before_map_name: Some("ROUTE_29".to_string()),
+                before_index: Some(3),
+                after_map_name: None,
+                after_index: None,
+            }
+        );
+        assert_eq!(state.dig_warp_map_name, None);
+        assert_eq!(state.dig_warp_index, None);
+    }
+
+    #[test]
+    fn dig_warp_memory_rejects_blacklisted_previous_maps() {
+        let mut state = GameState::default();
+        let transition = warp_transition_from("TinTowerRoof", 2);
+
+        assert_eq!(
+            apply_dig_warp_memory_for_transition(&mut state, &transition, "TOWN", "INDOOR"),
+            DigWarpMemoryOutcome {
+                before_map_name: None,
+                before_index: None,
+                after_map_name: None,
+                after_index: None,
+            }
+        );
+        assert!(is_dig_previous_map_blacklisted("TinTowerRoof"));
+    }
+
+    #[test]
+    fn saved_dig_warp_destination_requires_exact_saved_map_and_warp_index() {
+        let warps = vec![
+            WarpEvent {
+                index: 1,
+                x: 5,
+                y: 7,
+                target_map_constant: "DESTINATION".to_string(),
+                target_map: "DESTINATION".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
+                index: 3,
+                x: 9,
+                y: 11,
+                target_map_constant: "DESTINATION".to_string(),
+                target_map: "DESTINATION".to_string(),
+                target_warp_id: 2,
+            },
+        ];
+        let mut state = GameState::default();
+
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Err(FieldMoveError::MissingSavedDigWarpMap {
+                context: "DIG field move".to_string(),
+            })
+        );
+
+        state.dig_warp_map_name = Some("ROUTE_29".to_string());
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Err(FieldMoveError::MissingSavedDigWarpIndex {
+                context: "DIG field move".to_string(),
+            })
+        );
+
+        state.dig_warp_index = Some(2);
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Err(FieldMoveError::MissingSavedDigWarp {
+                context: "DIG field move".to_string(),
+                map_name: "ROUTE_29".to_string(),
+                warp_index: 2,
+            })
+        );
+
+        state.dig_warp_index = Some(3);
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Ok(SavedDigWarpDestination {
+                map_name: "ROUTE_29".to_string(),
+                warp_index: 3,
+                tile: TilePosition::new(9, 11),
+            })
+        );
+    }
+
+    #[test]
     fn move_only_field_move_rejects_malformed_catalog_move_id_before_party_check() {
         let mut catalog = catalog();
         catalog.dig.move_id = "DI G".to_string();
@@ -1849,6 +2408,48 @@ mod tests {
                 .expect("repel payload accepted"),
             75
         );
+        assert_eq!(
+            validate_saved_active_repel_item(&catalog, "MOD_REPEL", None, 10),
+            Err(FieldMoveError::MissingSavedActiveRepelItem {
+                item_id: "MOD_REPEL".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_saved_active_repel_item(
+                &catalog,
+                "MOD_REPEL",
+                Some(&repel_item("MOD_REPEL", Some(75))),
+                76,
+            ),
+            Err(FieldMoveError::SavedRepelStepsExceedCompiledDuration {
+                item_id: "MOD_REPEL".to_string(),
+                steps_remaining: 76,
+                compiled_steps: 75,
+            })
+        );
+    }
+
+    #[test]
+    fn repel_item_use_commits_exact_item_and_replaces_existing_repel_state() {
+        let mut state = GameState::default();
+        state.repel_steps_remaining = 3;
+        state.active_repel_item = Some("OLD_REPEL".to_string());
+
+        let outcome = apply_repel_item_use(&mut state, "MOD_REPEL", 100);
+
+        assert_eq!(outcome.item_id, "MOD_REPEL");
+        assert_eq!(outcome.repel_steps_before, 3);
+        assert_eq!(outcome.repel_steps_after, 100);
+        assert_eq!(
+            outcome.active_repel_item_before,
+            Some("OLD_REPEL".to_string())
+        );
+        assert_eq!(
+            outcome.active_repel_item_after,
+            Some("MOD_REPEL".to_string())
+        );
+        assert_eq!(state.repel_steps_remaining, 100);
+        assert_eq!(state.active_repel_item, Some("MOD_REPEL".to_string()));
     }
 
     #[test]
@@ -1972,38 +2573,12 @@ mod tests {
                 index: 8,
             },
             target_collisions: Vec::new(),
-            replacements: vec![
-                FieldMoveReplacement {
-                    tileset: "".to_string(),
-                    block_id: 1,
-                    replacement_block_id: 2,
-                    variant: "tree".to_string(),
-                },
-                FieldMoveReplacement {
-                    tileset: "johto cave".to_string(),
-                    block_id: 3,
-                    replacement_block_id: 4,
-                    variant: "tall grass".to_string(),
-                },
-                FieldMoveReplacement {
-                    tileset: "johto cave".to_string(),
-                    block_id: 3,
-                    replacement_block_id: 5,
-                    variant: "tree".to_string(),
-                },
-                FieldMoveReplacement {
-                    tileset: "JOHTO_CAVE".to_string(),
-                    block_id: 3,
-                    replacement_block_id: 6,
-                    variant: "TREE".to_string(),
-                },
-                FieldMoveReplacement {
-                    tileset: "JOHTO_CAVE".to_string(),
-                    block_id: 3,
-                    replacement_block_id: 7,
-                    variant: "TREE".to_string(),
-                },
-            ],
+            replacements: replacements(vec![
+                ("", 1, 2, "tree"),
+                ("johto cave", 3, 4, "tall grass"),
+                ("JOHTO_CAVE", 3, 6, "TREE"),
+                ("johto", 7, 7, "tree"),
+            ]),
         };
         catalog.fly = FieldMoveRule {
             move_id: "FL Y".to_string(),
@@ -2050,22 +2625,18 @@ mod tests {
         );
         assert!(
             issues.contains(&FieldMoveCatalogIssue::InvalidReplacementTileset {
-                subject: "field_moves:cut:replacement:0".to_string(),
+                subject: "field_moves:cut:replacements:".to_string(),
             })
         );
         assert!(
             issues.contains(&FieldMoveCatalogIssue::InvalidReplacementVariant {
-                subject: "field_moves:cut:replacement:1".to_string(),
+                subject: "field_moves:cut:replacements:johto cave:3".to_string(),
             })
         );
         assert!(
-            issues.contains(&FieldMoveCatalogIssue::DuplicateReplacement {
-                subject: "field_moves:cut:replacement:4".to_string(),
-            })
-        );
-        assert!(
-            !issues.contains(&FieldMoveCatalogIssue::DuplicateReplacement {
-                subject: "field_moves:cut:replacement:2".to_string(),
+            issues.contains(&FieldMoveCatalogIssue::InvalidReplacementBlock {
+                subject: "field_moves:cut:replacements:johto:7".to_string(),
+                block_id: 7,
             })
         );
         assert!(issues.contains(&FieldMoveCatalogIssue::InvalidMoveId {
@@ -2131,6 +2702,51 @@ mod tests {
     }
 
     #[test]
+    fn field_move_catalog_issues_reject_declared_items_that_are_not_field_usable() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.escape_rope = FieldEscapeItemRule {
+            item_id: "ESCAPE_ROPE".to_string(),
+            escape_rope_mode: "DIG_WARP".to_string(),
+        };
+        catalog.bicycle = FieldItemRule {
+            item_id: "BICYCLE".to_string(),
+        };
+
+        let mut escape_rope = escape_item("ESCAPE_ROPE", Some("DIG_WARP"));
+        escape_rope.field_usable = false;
+        let mut bicycle = field_effect_item("BICYCLE", "BICYCLE");
+        bicycle.field_usable = false;
+        let items = BTreeMap::from([
+            ("ESCAPE_ROPE".to_string(), escape_rope),
+            ("BICYCLE".to_string(), bicycle),
+        ]);
+
+        let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
+
+        assert!(issues.contains(&FieldMoveCatalogIssue::UnusableEscapeItem {
+            item_id: "ESCAPE_ROPE".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::UnusableFieldItem {
+            subject: "field_moves:bicycle".to_string(),
+            item_id: "BICYCLE".to_string(),
+        }));
+    }
+
+    #[test]
+    fn field_move_catalog_issues_reject_repel_payloads_that_are_not_field_usable() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.repel = FieldRepelItemRule {};
+
+        let mut repel = repel_item("MOD_REPEL", Some(100));
+        repel.field_usable = false;
+        let items = BTreeMap::from([("MOD_REPEL".to_string(), repel)]);
+
+        let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
+
+        assert!(issues.contains(&FieldMoveCatalogIssue::MissingUsableRepelItemPayload));
+    }
+
+    #[test]
     fn field_move_catalog_issues_reject_invalid_escape_rule_without_unknown_fallback() {
         let mut catalog = FieldMoveCatalog::default();
         catalog.escape_rope = FieldEscapeItemRule {
@@ -2149,6 +2765,77 @@ mod tests {
             !issues
                 .iter()
                 .any(|issue| matches!(issue, FieldMoveCatalogIssue::UnknownEscapeItemRule { .. }))
+        );
+    }
+
+    #[test]
+    fn field_move_tokens_reject_reserved_pack_prefixes() {
+        let mut catalog = FieldMoveCatalog::default();
+        catalog.fly = FieldMoveRule {
+            move_id: "fallback_fly".to_string(),
+            badge: badge(BADGE_STORM),
+        };
+        catalog.strength = FieldMoveFlagRule {
+            move_id: "STRENGTH".to_string(),
+            badge: badge(BADGE_PLAIN),
+            engine_flag: "legacy_strength_flag".to_string(),
+        };
+        catalog.escape_rope = FieldEscapeItemRule {
+            item_id: "fallback_escape_rope".to_string(),
+            escape_rope_mode: "legacy_dig_warp".to_string(),
+        };
+
+        let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &BTreeMap::new());
+
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidMoveId {
+            subject: "field_moves:fly".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEngineFlag {
+            subject: "field_moves:strength".to_string(),
+            move_id: "STRENGTH".to_string(),
+        }));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEscapeItemId));
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEscapeItemMode));
+
+        assert_eq!(
+            require_rule_field("fallback_move", "move_id"),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "move_id".to_string(),
+                value: "fallback_move".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn field_move_error_json_rejects_unknown_fallback_fields() {
+        let replacement_error = serde_json::from_value::<FieldMoveError>(serde_json::json!({
+            "UnsupportedReplacement": {
+                "move_id": "CUT",
+                "tileset_name": "JohtoOverworld",
+                "block_id": 7,
+                "fallback_block_id": 1
+            }
+        }))
+        .expect_err("fallback block id must be rejected")
+        .to_string();
+        assert!(
+            replacement_error.contains("unknown field `fallback_block_id`"),
+            "{replacement_error}"
+        );
+
+        let item_error = serde_json::from_value::<FieldMoveError>(serde_json::json!({
+            "InvalidFieldItemId": {
+                "rule_id": "bicycle",
+                "item_id": "MOD_BICYCLE",
+                "expected_item_id": "BICYCLE",
+                "legacy_item_id": "BICYCLE"
+            }
+        }))
+        .expect_err("legacy item id must be rejected")
+        .to_string();
+        assert!(
+            item_error.contains("unknown field `legacy_item_id`"),
+            "{item_error}"
         );
     }
 }

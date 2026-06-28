@@ -7,22 +7,28 @@ use crate::state::{
     ScriptMapRuntimeKind, ScriptWarpRequest,
 };
 use crate::world::map::{Direction, TilePosition};
+use crate::world::movement::PlayerMovementState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMapCommand {
+    #[serde(deserialize_with = "required_script_map_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_script_map_token")]
     pub target_map: Option<String>,
     pub x: Option<u16>,
     pub y: Option<u16>,
+    #[serde(deserialize_with = "required_nullable_script_map_token")]
     pub facing: Option<String>,
+    #[serde(deserialize_with = "required_nullable_script_map_token")]
     pub map_setup: Option<String>,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMapAction {
     NoWarp {
         source_script: String,
@@ -54,6 +60,7 @@ pub enum ScriptMapAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptMapCommandError {
     #[error("script map command '{command}' is not exact pack syntax")]
     InvalidCommand { command: String },
@@ -87,6 +94,10 @@ pub enum ScriptMapCommandError {
     InvalidMapSetup { command: String, map_setup: String },
     #[error("script map command '{command}' has unexpected map setup")]
     UnexpectedMapSetup { command: String },
+    #[error("cannot complete script warp without a pending script warp")]
+    MissingPendingScriptWarp,
+    #[error("completed script warp does not match pending script warp")]
+    PendingScriptWarpMismatch,
 }
 
 pub const SCRIPT_MAP_WARP_COMMANDS: &[&str] = &["warp"];
@@ -298,6 +309,34 @@ pub fn apply_script_map_command(
     let action = resolve_script_map_command(command, map_ids)?;
     apply_script_map_action_to_state(state, &action);
     Ok(action)
+}
+
+pub fn complete_pending_script_warp(
+    state: &mut GameState,
+    request: &ScriptWarpRequest,
+) -> Result<ScriptWarpRequest, ScriptMapCommandError> {
+    let pending = state
+        .script_runtime
+        .pending_script_warp
+        .as_ref()
+        .ok_or(ScriptMapCommandError::MissingPendingScriptWarp)?;
+    if pending != request {
+        return Err(ScriptMapCommandError::PendingScriptWarpMismatch);
+    }
+    state
+        .script_runtime
+        .pending_script_warp
+        .take()
+        .ok_or(ScriptMapCommandError::MissingPendingScriptWarp)
+}
+
+pub fn apply_script_warp_arrival_facing(
+    player: &mut PlayerMovementState,
+    request: &ScriptWarpRequest,
+) -> Option<Direction> {
+    let facing = request.facing?;
+    player.facing = facing;
+    Some(facing)
 }
 
 pub fn apply_script_map_action_to_state(state: &mut GameState, action: &ScriptMapAction) {
@@ -610,12 +649,68 @@ fn is_exact_nonempty_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_map_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_map_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_map_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script map command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_script_map_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_nonempty_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script map token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script label token must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -656,6 +751,42 @@ mod tests {
         assert!(is_known_script_map_command("warpfacing"));
         assert!(!is_known_script_map_command("Warp"));
         assert!(!is_known_script_map_command("loadmap"));
+    }
+
+    #[test]
+    fn script_map_serialized_variants_reject_unknown_fallback_fields() {
+        let action_error = serde_json::from_value::<ScriptMapAction>(serde_json::json!({
+            "warp": {
+                "target_map": "EcruteakCity",
+                "tile": { "x": 4, "y": 8 },
+                "facing": "down",
+                "source_script": "WarpScript",
+                "command_index": 4,
+                "fallback_target_map": "NewBarkTown"
+            }
+        }))
+        .expect_err("map actions must not accept fallback targets");
+        assert!(
+            action_error
+                .to_string()
+                .contains("unknown field `fallback_target_map`"),
+            "{action_error}"
+        );
+
+        let command_error = serde_json::from_value::<ScriptMapCommandError>(serde_json::json!({
+            "UnknownTargetMap": {
+                "command": "warp",
+                "target_map": "EcruteakCity",
+                "legacy_target_map": "ECRUTEAK_CITY"
+            }
+        }))
+        .expect_err("map command errors must not accept legacy target fields");
+        assert!(
+            command_error
+                .to_string()
+                .contains("unknown field `legacy_target_map`"),
+            "{command_error}"
+        );
     }
 
     #[test]
@@ -756,6 +887,67 @@ mod tests {
                 map_setup: "MAPSETUP TRAIN".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn script_map_commands_reject_reserved_pack_prefixes() {
+        let maps = maps();
+        assert_eq!(
+            script_map_command_issues(&command("fallbackwarp"), &maps),
+            vec![ScriptMapCommandError::InvalidCommand {
+                command: "fallbackwarp".to_string(),
+            }]
+        );
+
+        let mut warp = command("warp");
+        warp.target_map = Some("legacy_map".to_string());
+        warp.x = Some(1);
+        warp.y = Some(1);
+        assert!(script_map_command_issues(&warp, &maps).contains(
+            &ScriptMapCommandError::InvalidTargetMap {
+                command: "warp".to_string(),
+                target_map: "legacy_map".to_string(),
+            }
+        ));
+
+        let mut reanchor = command("reanchormap");
+        reanchor.map_setup = Some("fallback_setup".to_string());
+        assert_eq!(
+            script_map_command_issues(&reanchor, &maps),
+            vec![ScriptMapCommandError::InvalidMapSetup {
+                command: "reanchormap".to_string(),
+                map_setup: "fallback_setup".to_string(),
+            }]
+        );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackwarp")),
+            ("target_map", serde_json::json!("legacy_map")),
+            ("facing", serde_json::json!("fallback_down")),
+            ("map_setup", serde_json::json!("legacy_setup")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "warpfacing",
+                "target_map": "EcruteakCity",
+                "x": 1,
+                "y": 1,
+                "facing": "DOWN",
+                "map_setup": null,
+                "source_script": ".branch@WarpScript",
+                "command_index": 4
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptMapCommand>(payload)
+                .expect_err("reserved script map command tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script map") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1029,6 +1221,82 @@ mod tests {
             state.script_runtime.map_events[0].kind,
             ScriptMapRuntimeKind::NoWarp
         );
+    }
+
+    #[test]
+    fn completing_pending_script_warp_clears_exact_request_only() {
+        let request = ScriptWarpRequest {
+            target_map: "EcruteakCity".to_string(),
+            tile: TilePosition::new(6, 27),
+            facing: Some(Direction::Down),
+            source_script: "WarpScript".to_string(),
+            command_index: 2,
+        };
+        let mut state = GameState::default();
+        state.script_runtime.pending_script_warp = Some(request.clone());
+
+        assert_eq!(
+            complete_pending_script_warp(&mut state, &request),
+            Ok(request)
+        );
+        assert_eq!(state.script_runtime.pending_script_warp, None);
+    }
+
+    #[test]
+    fn completing_pending_script_warp_rejects_missing_or_changed_request() {
+        let request = ScriptWarpRequest {
+            target_map: "EcruteakCity".to_string(),
+            tile: TilePosition::new(6, 27),
+            facing: None,
+            source_script: "WarpScript".to_string(),
+            command_index: 2,
+        };
+        let mut state = GameState::default();
+
+        assert_eq!(
+            complete_pending_script_warp(&mut state, &request),
+            Err(ScriptMapCommandError::MissingPendingScriptWarp)
+        );
+
+        let pending = ScriptWarpRequest {
+            target_map: "GoldenrodCity".to_string(),
+            ..request.clone()
+        };
+        state.script_runtime.pending_script_warp = Some(pending.clone());
+        assert_eq!(
+            complete_pending_script_warp(&mut state, &request),
+            Err(ScriptMapCommandError::PendingScriptWarpMismatch)
+        );
+        assert_eq!(state.script_runtime.pending_script_warp, Some(pending));
+    }
+
+    #[test]
+    fn script_warp_arrival_facing_applies_only_explicit_direction() {
+        let mut player = PlayerMovementState::new(TilePosition::new(6, 27));
+        player.facing = Direction::Left;
+        let request = ScriptWarpRequest {
+            target_map: "EcruteakCity".to_string(),
+            tile: TilePosition::new(6, 27),
+            facing: Some(Direction::Up),
+            source_script: "WarpScript".to_string(),
+            command_index: 2,
+        };
+
+        assert_eq!(
+            apply_script_warp_arrival_facing(&mut player, &request),
+            Some(Direction::Up)
+        );
+        assert_eq!(player.facing, Direction::Up);
+
+        let no_facing = ScriptWarpRequest {
+            facing: None,
+            ..request
+        };
+        assert_eq!(
+            apply_script_warp_arrival_facing(&mut player, &no_facing),
+            None
+        );
+        assert_eq!(player.facing, Direction::Up);
     }
 
     #[test]

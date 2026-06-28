@@ -10,6 +10,7 @@ pub mod flee_mons;
 pub mod gift_pokemon;
 pub mod item_use;
 pub mod learnsets;
+pub mod map_context;
 pub mod phone;
 pub mod runtime_pack;
 pub mod script_audio;

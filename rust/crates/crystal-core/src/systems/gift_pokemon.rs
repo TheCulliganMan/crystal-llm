@@ -6,6 +6,7 @@ use crate::models::{
     CaptureStorageLocation, Dv, Item, Move, Pokemon, PokemonBuildError, PokemonSpecies,
     PokemonStorage, create_pokemon_from_known_dvs,
 };
+use crate::state::GameState;
 use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
 
@@ -53,6 +54,7 @@ pub struct GiftPokemonOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum GiftPokemonError {
     InvalidSpeciesId { species_id: String },
     UnknownSpecies { species_id: String },
@@ -143,9 +145,15 @@ fn push_label_issue(
 fn is_exact_gift_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn give_gift_pokemon(
@@ -228,6 +236,32 @@ pub fn give_gift_pokemon(
         source_script: request.source_script,
         command_index: request.command_index,
     })
+}
+
+pub fn grant_gift_pokemon_to_state(
+    state: &mut GameState,
+    species: &BTreeMap<String, PokemonSpecies>,
+    learnsets: &SpeciesLearnsets,
+    moves: &BTreeMap<String, Move>,
+    growth_rates: &GrowthRateCatalog,
+    items: &BTreeMap<String, Item>,
+    request: GiftPokemonRequest,
+) -> Result<GiftPokemonOutcome, GiftPokemonError> {
+    let egg = request.egg;
+    let outcome = give_gift_pokemon(
+        &mut state.storage,
+        species,
+        learnsets,
+        moves,
+        growth_rates,
+        items,
+        request,
+    )?;
+    if !egg {
+        state.pokedex.record_caught_pokemon(&outcome.pokemon);
+    }
+    state.sync_party_from_storage();
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -365,6 +399,73 @@ mod tests {
     }
 
     #[test]
+    fn gift_pokemon_script_issues_reject_reserved_pack_prefix_tokens() {
+        let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
+        let items = BTreeMap::from([("BERRY".to_string(), item("BERRY"))]);
+        let labels = ["GiftNicknameText".to_string()].into_iter().collect();
+        let gift = GiftPokemonScript {
+            species_id: "fallback_cyndaquil".to_string(),
+            level_token: "5".to_string(),
+            level: 5,
+            held_item_id: Some("legacy_berry".to_string()),
+            nickname_label: Some("fallback_nickname".to_string()),
+            ot_label: Some("legacy_ot".to_string()),
+            source_script: "GiftScript".to_string(),
+            command_index: 4,
+            egg: false,
+        };
+
+        assert_eq!(
+            gift_pokemon_script_issues(&gift, &species_map, &items, &labels),
+            vec![
+                GiftPokemonScriptIssue::InvalidSpeciesId {
+                    species_id: "fallback_cyndaquil".to_string(),
+                },
+                GiftPokemonScriptIssue::InvalidHeldItemId {
+                    item_id: "legacy_berry".to_string(),
+                },
+                GiftPokemonScriptIssue::InvalidLabel {
+                    field: "nickname",
+                    label: "fallback_nickname".to_string(),
+                },
+                GiftPokemonScriptIssue::InvalidLabel {
+                    field: "original trainer",
+                    label: "legacy_ot".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn gift_pokemon_error_json_rejects_unknown_fallback_fields() {
+        let species_error = serde_json::from_value::<GiftPokemonError>(serde_json::json!({
+            "UnknownSpecies": {
+                "species_id": "MODMON",
+                "fallback_species_id": "PIKACHU"
+            }
+        }))
+        .expect_err("fallback species id must be rejected")
+        .to_string();
+        assert!(
+            species_error.contains("unknown field `fallback_species_id`"),
+            "{species_error}"
+        );
+
+        let item_error = serde_json::from_value::<GiftPokemonError>(serde_json::json!({
+            "UnknownHeldItem": {
+                "item_id": "MOD_ITEM",
+                "legacy_item_id": "NO_ITEM"
+            }
+        }))
+        .expect_err("legacy item id must be rejected")
+        .to_string();
+        assert!(
+            item_error.contains("unknown field `legacy_item_id`"),
+            "{item_error}"
+        );
+    }
+
+    #[test]
     fn gives_exact_species_to_party_with_exact_held_item() {
         let mut storage = PokemonStorage::default();
         let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
@@ -465,6 +566,38 @@ mod tests {
                 item_id: "BERRY JUICE".to_string(),
             })
         );
+
+        assert_eq!(
+            give_gift_pokemon(
+                &mut storage,
+                &species_map,
+                &learnsets("CYNDAQUIL"),
+                &BTreeMap::new(),
+                &growth_rates(),
+                &items,
+                request("fallback_cyndaquil", 5),
+            ),
+            Err(GiftPokemonError::InvalidSpeciesId {
+                species_id: "fallback_cyndaquil".to_string(),
+            })
+        );
+
+        let mut reserved_item = request("CYNDAQUIL", 5);
+        reserved_item.held_item_id = Some("legacy_berry".to_string());
+        assert_eq!(
+            give_gift_pokemon(
+                &mut storage,
+                &species_map,
+                &learnsets("CYNDAQUIL"),
+                &BTreeMap::new(),
+                &growth_rates(),
+                &items,
+                reserved_item,
+            ),
+            Err(GiftPokemonError::InvalidHeldItemId {
+                item_id: "legacy_berry".to_string(),
+            })
+        );
         assert_eq!(storage.party.filled_slots(), 0);
     }
 
@@ -489,6 +622,59 @@ mod tests {
         assert_eq!(outcome.pokemon.nickname, EGG_NICKNAME);
         assert_eq!(outcome.pokemon.hp, 0);
         assert_eq!(outcome.pokemon.happiness, 20);
+    }
+
+    #[test]
+    fn grant_gift_pokemon_to_state_syncs_party_and_records_only_non_eggs() {
+        let mut state = GameState::default();
+        let species_map = BTreeMap::from([
+            ("CYNDAQUIL".to_string(), species("CYNDAQUIL")),
+            ("TOGEPI".to_string(), species("TOGEPI")),
+        ]);
+
+        let outcome = grant_gift_pokemon_to_state(
+            &mut state,
+            &species_map,
+            &learnsets("CYNDAQUIL"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            request("CYNDAQUIL", 5),
+        )
+        .expect("gift pokemon");
+
+        assert_eq!(outcome.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().species.id,
+            "CYNDAQUIL"
+        );
+        assert_eq!(
+            state.party.pokemon[0].as_ref().unwrap().species,
+            "CYNDAQUIL"
+        );
+        assert!(state.pokedex.has_seen("CYNDAQUIL"));
+        assert!(state.pokedex.has_caught("CYNDAQUIL"));
+
+        let mut egg_request = request("TOGEPI", 5);
+        egg_request.egg = true;
+        grant_gift_pokemon_to_state(
+            &mut state,
+            &species_map,
+            &learnsets("TOGEPI"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            egg_request,
+        )
+        .expect("gift egg");
+
+        assert_eq!(
+            state.storage.party.pokemon[1].as_ref().unwrap().species.id,
+            "TOGEPI"
+        );
+        assert_eq!(state.party.pokemon[1].as_ref().unwrap().species, "TOGEPI");
+        assert!(!state.pokedex.has_seen("TOGEPI"));
+        assert!(!state.pokedex.has_caught("TOGEPI"));
     }
 
     #[test]

@@ -5,14 +5,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioKind {
     Music,
     SoundEffect,
     Cry,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioProgramRef {
     pub kind: AudioKind,
@@ -20,11 +20,43 @@ pub struct AudioProgramRef {
 }
 
 impl AudioProgramRef {
-    pub fn music(asset_id: impl Into<String>) -> Self {
-        Self {
-            kind: AudioKind::Music,
+    pub fn new(kind: AudioKind, asset_id: impl Into<String>) -> Result<Self> {
+        let reference = Self {
+            kind,
             asset_id: asset_id.into(),
+        };
+        reference.validate()?;
+        Ok(reference)
+    }
+
+    pub fn music(asset_id: impl Into<String>) -> Result<Self> {
+        Self::new(AudioKind::Music, asset_id)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_audio_asset_id(self.kind, &self.asset_id)
+    }
+}
+
+impl<'de> Deserialize<'de> for AudioProgramRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawAudioProgramRef {
+            kind: AudioKind,
+            asset_id: String,
         }
+
+        let raw = RawAudioProgramRef::deserialize(deserializer)?;
+        let reference = Self {
+            kind: raw.kind,
+            asset_id: raw.asset_id,
+        };
+        reference.validate().map_err(serde::de::Error::custom)?;
+        Ok(reference)
     }
 }
 
@@ -48,12 +80,20 @@ impl AudioPointerTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioPcmFormat {
+    pub sample_rate_hz: u32,
+    pub channels: u8,
+    pub bits_per_sample: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AudioProgramSource {
     Midi(Vec<u8>),
     Pcm {
-        sample_rate_hz: u32,
-        channels: u16,
         bytes: Vec<u8>,
+        format: AudioPcmFormat,
     },
 }
 
@@ -200,6 +240,10 @@ fn validate_audio_asset_id(kind: AudioKind, asset_id: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
     if !valid {
         anyhow::bail!("audio asset id '{asset_id}' must use exact {prefix}* modpack id");
+    }
+    let payload = &asset_id[prefix.len()..];
+    if payload.starts_with("FALLBACK") || payload.starts_with("LEGACY") {
+        anyhow::bail!("audio asset id '{asset_id}' uses reserved runtime pack prefix");
     }
     Ok(())
 }
@@ -536,6 +580,27 @@ mod tests {
     }
 
     #[test]
+    fn audio_discovery_rejects_reserved_runtime_identity_prefixes() {
+        let temp = generated_midi_audio_root();
+        std::fs::copy(
+            repository_root_for_tests().join("apps/web/test-fixtures/audio/route29.mid"),
+            temp.join("music/MUSIC_FALLBACK_ROUTE_29.mid"),
+        )
+        .expect("copy reserved music fixture");
+
+        let error = AudioRepository::from_audio_root(&temp)
+            .load_pointer_table()
+            .expect_err("reserved audio asset ids must not be accepted")
+            .to_string();
+
+        assert!(
+            error.contains("uses reserved runtime pack prefix"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn audio_discovery_rejects_non_mid_files_instead_of_ignoring_them() {
         let temp = generated_midi_audio_root();
         std::fs::copy(
@@ -574,7 +639,7 @@ mod tests {
         assert!(!program.cache_key.contains(".mp3"));
         match program.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("music fixture must load as MIDI"),
+            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
         }
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -589,7 +654,7 @@ mod tests {
         assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
         match sfx.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("sfx fixture must load as MIDI"),
+            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
         }
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -605,7 +670,7 @@ mod tests {
         assert!(!cry.cache_key.contains(".mp3"));
         match cry.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("cry fixture must load as MIDI"),
+            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
         }
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -628,6 +693,15 @@ mod tests {
         assert!(
             lowercase.contains("must use exact MUSIC_* modpack id"),
             "{lowercase}"
+        );
+
+        let reserved = repo
+            .build_program(AudioKind::Cry, "CRY_LEGACY_NIDORAN_M")
+            .expect_err("reserved cry asset id is invalid")
+            .to_string();
+        assert!(
+            reserved.contains("uses reserved runtime pack prefix"),
+            "{reserved}"
         );
 
         let missing = repo
@@ -771,6 +845,46 @@ Music_Test_Ch1:
 
     #[test]
     fn audio_json_rejects_unknown_mp3_and_fallback_fields() {
+        let reference = serde_json::from_value::<AudioProgramRef>(serde_json::json!({
+            "kind": "music",
+            "asset_id": "MUSIC_ROUTE_29"
+        }))
+        .expect("valid exact audio ref");
+        assert_eq!(
+            reference,
+            AudioProgramRef::music("MUSIC_ROUTE_29").expect("checked constructor")
+        );
+
+        let lowercase_ref = serde_json::from_value::<AudioProgramRef>(serde_json::json!({
+            "kind": "music",
+            "asset_id": "route29"
+        }))
+        .expect_err("audio refs must reject lowercase ids")
+        .to_string();
+        assert!(
+            lowercase_ref.contains("must use exact MUSIC_* modpack id"),
+            "{lowercase_ref}"
+        );
+
+        let wrong_kind_ref = serde_json::from_value::<AudioProgramRef>(serde_json::json!({
+            "kind": "cry",
+            "asset_id": "MUSIC_ROUTE_29"
+        }))
+        .expect_err("audio refs must reject kind/id prefix mismatches")
+        .to_string();
+        assert!(
+            wrong_kind_ref.contains("must use exact CRY_* modpack id"),
+            "{wrong_kind_ref}"
+        );
+
+        let reserved_ref = AudioProgramRef::music("MUSIC_FALLBACK_ROUTE_29")
+            .expect_err("audio refs must reject reserved ids")
+            .to_string();
+        assert!(
+            reserved_ref.contains("uses reserved runtime pack prefix"),
+            "{reserved_ref}"
+        );
+
         let ref_error = serde_json::from_value::<AudioProgramRef>(serde_json::json!({
             "kind": "music",
             "asset_id": "route29",

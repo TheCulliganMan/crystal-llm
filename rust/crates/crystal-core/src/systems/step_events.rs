@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::{Party, Pokemon};
+use crate::state::GameState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +30,7 @@ impl Default for StepEventRules {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum StepEventRulesIssue {
     MissingPoisonStepInterval,
     InvalidPoisonStatus { poison_status: String },
@@ -67,9 +69,15 @@ pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssu
 fn is_exact_step_event_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +135,17 @@ pub fn process_step(
         poison_result,
         happiness_changed,
     }
+}
+
+pub fn process_overworld_step(state: &mut GameState, rules: &StepEventRules) -> StepEventResult {
+    let result = process_step(rules, &mut state.step_events, &mut state.storage.party);
+    if state.repel_steps_remaining == 0 {
+        state.active_repel_item = None;
+    } else {
+        state.tick_repel_step_after_movement();
+    }
+    state.sync_party_from_storage();
+    result
 }
 
 pub fn apply_happiness_step(
@@ -298,6 +317,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn step_event_rules_issues_reject_reserved_pack_prefix_tokens() {
+        let rules = StepEventRules {
+            poison_step_interval: 4,
+            egg_step_trigger: 0x80,
+            hatched_egg_happiness: 0x78,
+            poison_status: "fallback_poison".to_string(),
+            egg_nickname: "legacy_egg".to_string(),
+            happiness_step_counter_mask: 1,
+            happiness_step_counter_target: 0,
+        };
+
+        assert_eq!(
+            step_event_rules_issues(&rules),
+            vec![
+                StepEventRulesIssue::InvalidPoisonStatus {
+                    poison_status: "fallback_poison".to_string(),
+                },
+                StepEventRulesIssue::InvalidEggNickname {
+                    egg_nickname: "legacy_egg".to_string(),
+                },
+            ]
+        );
+    }
+
     fn pokemon(id: &str) -> Pokemon {
         Pokemon::new_for_tests(
             PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65)),
@@ -462,5 +506,52 @@ mod tests {
         assert_eq!(result.happiness_changed, vec!["CHIKORITA".to_string()]);
         assert_eq!(party.pokemon[0].as_ref().expect("mon").happiness, 71);
         assert_eq!(party.pokemon[1].as_ref().expect("egg").happiness, 70);
+    }
+
+    #[test]
+    fn overworld_step_processes_party_events_repel_and_party_sync() {
+        let mut state = GameState::default();
+        let mut oddish = pokemon("ODDISH");
+        oddish.hp = 3;
+        oddish.status = Some(rules().poison_status);
+        state.storage.party.pokemon[0] = Some(oddish);
+        state.step_events.poison_step_count = 3;
+        state.repel_steps_remaining = 1;
+        state.active_repel_item = Some("REPEL".to_string());
+
+        let result = process_overworld_step(&mut state, &rules());
+
+        assert_eq!(
+            result.poison_result,
+            Some(PoisonDamageResult {
+                damaged_names: vec!["ODDISH".to_string()],
+                fainted_names: Vec::new(),
+            })
+        );
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 2);
+        assert_eq!(state.party.pokemon[0].as_ref().unwrap().species, "ODDISH");
+        assert_eq!(state.repel_steps_remaining, 0);
+        assert_eq!(state.active_repel_item, None);
+
+        state.active_repel_item = Some("REPEL".to_string());
+        let _ = process_overworld_step(&mut state, &rules());
+        assert_eq!(state.repel_steps_remaining, 0);
+        assert_eq!(state.active_repel_item, None);
+    }
+
+    #[test]
+    fn step_event_issue_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<StepEventRulesIssue>(serde_json::json!({
+            "InvalidPoisonStatus": {
+                "poison_status": "PSN",
+                "fallback_poison_status": "POISON"
+            }
+        }))
+        .expect_err("fallback poison status must be rejected")
+        .to_string();
+        assert!(
+            error.contains("unknown field `fallback_poison_status`"),
+            "{error}"
+        );
     }
 }

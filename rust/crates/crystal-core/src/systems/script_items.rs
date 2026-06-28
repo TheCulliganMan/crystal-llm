@@ -8,8 +8,10 @@ use crate::state::GameState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemGrant {
+    #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
     pub quantity: u16,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
     pub verbose: bool,
@@ -18,13 +20,15 @@ pub struct ScriptItemGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemAccess {
+    #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
+    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptItemGrantOutcome {
     Granted {
         item_id: String,
@@ -61,6 +65,7 @@ pub struct ScriptItemTakeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptItemGrantError {
     UnknownItem { item_id: String },
     InvalidQuantity,
@@ -68,13 +73,14 @@ pub enum ScriptItemGrantError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ScriptItemAccessError {
     UnknownItem { item_id: String },
     Bag { error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptItemGrantIssue {
     InvalidItem { item_id: String },
     UnknownItem { item_id: String },
@@ -82,7 +88,7 @@ pub enum ScriptItemGrantIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptItemAccessIssue {
     InvalidItem { item_id: String },
     UnknownItem { item_id: String },
@@ -135,6 +141,47 @@ fn is_exact_script_item_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_item_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_item_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script item token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script label token must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 pub fn grant_script_item(
@@ -378,6 +425,118 @@ mod tests {
             [ScriptItemGrantIssue::InvalidItem {
                 item_id: "ITEM FROM_MEM".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn script_item_grants_reject_reserved_pack_prefixes() {
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
+
+        assert_eq!(
+            script_item_grant_issues(&grant("fallback_potion", 1), &items),
+            [ScriptItemGrantIssue::InvalidItem {
+                item_id: "fallback_potion".to_string()
+            }]
+        );
+        assert_eq!(
+            script_item_access_issues(&access("legacy_pass"), &items),
+            [ScriptItemAccessIssue::InvalidItem {
+                item_id: "legacy_pass".to_string()
+            }]
+        );
+
+        for (field, value) in [
+            ("item_id", serde_json::json!("fallback_potion")),
+            ("source_script", serde_json::json!("legacy_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "item_id": "POTION",
+                "quantity": 1,
+                "source_script": ".branch@GiftScript",
+                "command_index": 3,
+                "verbose": true
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptItemGrant>(payload)
+                .expect_err("reserved script item grant tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script item") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("item_id", serde_json::json!("legacy_pass")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "item_id": "PASS",
+                "source_script": ".branch@GateScript",
+                "command_index": 7
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptItemAccess>(payload)
+                .expect_err("reserved script item access tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("script item") || error.contains("script label"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_item_serialized_variants_reject_unknown_fallback_fields() {
+        let grant_outcome_error =
+            serde_json::from_value::<ScriptItemGrantOutcome>(serde_json::json!({
+                "granted": {
+                    "item_id": "POTION",
+                    "quantity": 1,
+                    "source_script": "GiftScript",
+                    "command_index": 3,
+                    "verbose": true,
+                    "fallback_item_id": "BERRY"
+                }
+            }))
+            .expect_err("grant outcomes must not accept fallback fields");
+        assert!(
+            grant_outcome_error
+                .to_string()
+                .contains("unknown field `fallback_item_id`"),
+            "{grant_outcome_error}"
+        );
+
+        let access_error = serde_json::from_value::<ScriptItemAccessError>(serde_json::json!({
+            "UnknownItem": {
+                "item_id": "PASS",
+                "legacy_item_id": "S_S_TICKET"
+            }
+        }))
+        .expect_err("access errors must not accept legacy fields");
+        assert!(
+            access_error
+                .to_string()
+                .contains("unknown field `legacy_item_id`"),
+            "{access_error}"
+        );
+
+        let issue_error = serde_json::from_value::<ScriptItemGrantIssue>(serde_json::json!({
+            "unknown_item": {
+                "item_id": "POTION",
+                "normalized_item_id": "POTION"
+            }
+        }))
+        .expect_err("grant issues must not accept normalized aliases");
+        assert!(
+            issue_error
+                .to_string()
+                .contains("unknown field `normalized_item_id`"),
+            "{issue_error}"
         );
     }
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Dv, LearnedMove};
+use super::{Dv, Item, LearnedMove};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,27 +43,99 @@ impl TrainerCatalog {
 #[serde(deny_unknown_fields)]
 pub struct Trainer {
     pub name: String,
+    #[serde(deserialize_with = "required_trainer_token")]
     pub trainer_id: String,
+    #[serde(deserialize_with = "required_trainer_token")]
     pub trainer_class: String,
     pub party: Vec<TrainerPartyPokemon>,
     pub win_quote: String,
     pub lose_quote: String,
+    #[serde(deserialize_with = "required_nullable_trainer_token_vec")]
     pub items: Vec<Option<String>>,
     pub base_reward: u32,
     pub ai_move_flags: u32,
     pub ai_item_switch_flags: u32,
+    #[serde(deserialize_with = "required_trainer_token")]
     pub encounter_music: String,
+    #[serde(deserialize_with = "required_trainer_token_vec")]
     pub ai_layers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrainerPartyPokemon {
+    #[serde(deserialize_with = "required_trainer_token")]
     pub species: String,
     pub level: u8,
+    #[serde(deserialize_with = "required_nullable_trainer_token")]
     pub item: Option<String>,
     pub moves: Vec<LearnedMove>,
     pub dvs: Dv,
+}
+
+fn required_trainer_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_trainer_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "trainer token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_trainer_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_nonempty_trainer_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "trainer token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_trainer_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if let Some(token) = values
+        .iter()
+        .find(|token| !is_exact_nonempty_trainer_token(token))
+    {
+        Err(serde::de::Error::custom(format!(
+            "trainer token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        )))
+    } else {
+        Ok(values)
+    }
+}
+
+fn required_nullable_trainer_token_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<Option<String>>::deserialize(deserializer)?;
+    if let Some(token) = values
+        .iter()
+        .flatten()
+        .find(|token| !is_exact_nonempty_trainer_token(token))
+    {
+        Err(serde::de::Error::custom(format!(
+            "trainer token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        )))
+    } else {
+        Ok(values)
+    }
 }
 
 impl Default for TrainerPartyPokemon {
@@ -175,6 +247,11 @@ pub enum TrainerCatalogIssue {
         slot: usize,
         item_id: String,
     },
+    UnusableBattleItem {
+        trainer_id: String,
+        slot: usize,
+        item_id: String,
+    },
     InvalidPartyMove {
         trainer_id: String,
         slot: usize,
@@ -190,7 +267,7 @@ pub enum TrainerCatalogIssue {
 pub fn trainer_catalog_issues(
     catalog: &TrainerCatalog,
     species_ids: &BTreeSet<String>,
-    item_ids: &BTreeSet<String>,
+    items: &BTreeMap<String, Item>,
     move_ids: &BTreeSet<String>,
 ) -> Vec<TrainerCatalogIssue> {
     let mut issues = Vec::new();
@@ -242,7 +319,7 @@ pub fn trainer_catalog_issues(
                         slot,
                         item_id: item_id.to_string(),
                     });
-                } else if !item_ids.contains(item_id) {
+                } else if !items.contains_key(item_id) {
                     issues.push(TrainerCatalogIssue::UnknownPartyItem {
                         trainer_id: trainer.trainer_id.clone(),
                         slot,
@@ -276,12 +353,22 @@ pub fn trainer_catalog_issues(
                     slot,
                     item_id: item_id.to_string(),
                 });
-            } else if !item_ids.contains(item_id) {
-                issues.push(TrainerCatalogIssue::UnknownBattleItem {
-                    trainer_id: trainer.trainer_id.clone(),
-                    slot,
-                    item_id: item_id.to_string(),
-                });
+            } else {
+                match items.get(item_id) {
+                    Some(item) if !item.battle_usable => {
+                        issues.push(TrainerCatalogIssue::UnusableBattleItem {
+                            trainer_id: trainer.trainer_id.clone(),
+                            slot,
+                            item_id: item_id.to_string(),
+                        });
+                    }
+                    Some(_) => {}
+                    None => issues.push(TrainerCatalogIssue::UnknownBattleItem {
+                        trainer_id: trainer.trainer_id.clone(),
+                        slot,
+                        item_id: item_id.to_string(),
+                    }),
+                }
             }
         }
     }
@@ -294,6 +381,10 @@ fn is_exact_nonempty_trainer_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            token if token.starts_with("fallback") || token.starts_with("legacy")
+        )
 }
 
 #[cfg(test)]
@@ -371,6 +462,161 @@ mod tests {
     }
 
     #[test]
+    fn trainer_identifier_fields_reject_malformed_tokens_at_deserialization() {
+        for (field, value) in [
+            ("trainer_id", serde_json::json!("YOUNGSTER JOEY")),
+            ("trainer_class", serde_json::json!("YOUNG STER")),
+            ("items", serde_json::json!([null, "SUPER POTION"])),
+            (
+                "encounter_music",
+                serde_json::json!("MUSIC YOUNGSTER_ENCOUNTER"),
+            ),
+            ("ai_layers", serde_json::json!(["BASIC", "SMART AI"])),
+        ] {
+            let mut trainer = valid_trainer_json();
+            trainer[field] = value;
+
+            let error = serde_json::from_value::<Trainer>(trainer)
+                .expect_err("malformed trainer identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("trainer token must be"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("species", serde_json::json!("RAT TATA")),
+            ("item", serde_json::json!("BERRY JUICE")),
+        ] {
+            let mut trainer = valid_trainer_json();
+            trainer["party"][0][field] = value;
+
+            let error = serde_json::from_value::<Trainer>(trainer)
+                .expect_err("malformed trainer party identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("trainer token must be"),
+                "party {field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn trainer_identifier_fields_reject_reserved_pack_prefixes() {
+        for (field, value) in [
+            ("trainer_id", serde_json::json!("fallback_youngster")),
+            ("trainer_class", serde_json::json!("legacy_class")),
+            ("items", serde_json::json!([null, "fallback_potion"])),
+            (
+                "encounter_music",
+                serde_json::json!("legacy_encounter_music"),
+            ),
+            ("ai_layers", serde_json::json!(["BASIC", "fallback_ai"])),
+        ] {
+            let mut trainer = valid_trainer_json();
+            trainer[field] = value;
+
+            let error = serde_json::from_value::<Trainer>(trainer)
+                .expect_err("reserved trainer identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("trainer token must be"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("species", serde_json::json!("fallback_species")),
+            ("item", serde_json::json!("legacy_item")),
+        ] {
+            let mut trainer = valid_trainer_json();
+            trainer["party"][0][field] = value;
+
+            let error = serde_json::from_value::<Trainer>(trainer)
+                .expect_err("reserved trainer party identifiers must fail before runtime use")
+                .to_string();
+
+            assert!(
+                error.contains("trainer token must be"),
+                "party {field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    fn valid_trainer_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "Youngster Joey",
+            "trainer_id": "YOUNGSTER_JOEY",
+            "trainer_class": "YOUNGSTER",
+            "party": [{
+                "species": "RATTATA",
+                "level": 6,
+                "item": null,
+                "moves": [],
+                "dvs": { "attack": 0, "defense": 0, "speed": 0, "special": 0, "hp": 0 }
+            }],
+            "win_quote": "I won!",
+            "lose_quote": "I lost!",
+            "items": [],
+            "base_reward": 4,
+            "ai_move_flags": 0,
+            "ai_item_switch_flags": 0,
+            "encounter_music": "MUSIC_YOUNGSTER_ENCOUNTER",
+            "ai_layers": []
+        })
+    }
+
+    fn test_item(id: &str, battle_usable: bool) -> Item {
+        use crate::models::item_pocket;
+
+        Item {
+            name: id.to_string(),
+            description: "Test item".to_string(),
+            effect: "NONE".to_string(),
+            status_heals: Vec::new(),
+            revive_hp_percent: None,
+            party_revive_hp_percent: None,
+            pp_restore_scope: None,
+            pp_restore_points: None,
+            pp_up_stages: None,
+            vitamin_stat: None,
+            vitamin_stat_exp: None,
+            vitamin_max_stat_exp: None,
+            rare_candy_level_gain: None,
+            battle_stat_boost_stat: None,
+            battle_stat_boost_stages: None,
+            battle_escape_mode: None,
+            battle_focus_energy: None,
+            battle_stat_drop_guard: None,
+            battle_stat_drop_guard_turns: None,
+            confusion_heal: None,
+            repel_steps: None,
+            escape_rope_mode: None,
+            price: 0,
+            held_effect: "HELD_NONE".to_string(),
+            parameter: 0,
+            property: "NO_LIMITS".to_string(),
+            pocket: item_pocket("ITEM"),
+            field_menu: "ITEMMENU_NOUSE".to_string(),
+            field_usable: false,
+            battle_menu: if battle_usable {
+                "ITEMMENU_CLOSE".to_string()
+            } else {
+                "ITEMMENU_NOUSE".to_string()
+            },
+            battle_usable,
+            script_name: id.to_string(),
+            consumable: true,
+            tmhm_index: None,
+            tmhm_move: None,
+        }
+    }
+
+    #[test]
     fn trainer_catalog_json_requires_explicit_trainers_map() {
         let error = serde_json::from_str::<TrainerCatalog>(r#"{}"#)
             .expect_err("missing trainer catalog must not default to empty")
@@ -408,6 +654,35 @@ mod tests {
             TrainerCatalogError::InvalidTrainerClass {
                 trainer_id: "YOUNGSTER_JOEY".to_string(),
                 trainer_class: "YOUNG STER".to_string(),
+            }
+        );
+
+        let reserved_trainer_id_error = catalog
+            .insert(Trainer {
+                trainer_id: "fallback_youngster".to_string(),
+                trainer_class: "YOUNGSTER".to_string(),
+                ..Trainer::default()
+            })
+            .expect_err("reserved trainer ids must not enter the catalog");
+        assert_eq!(
+            reserved_trainer_id_error,
+            TrainerCatalogError::InvalidTrainerId {
+                trainer_id: "fallback_youngster".to_string(),
+            }
+        );
+
+        let reserved_trainer_class_error = catalog
+            .insert(Trainer {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "legacy_class".to_string(),
+                ..Trainer::default()
+            })
+            .expect_err("reserved trainer classes must not enter the catalog");
+        assert_eq!(
+            reserved_trainer_class_error,
+            TrainerCatalogError::InvalidTrainerClass {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                trainer_class: "legacy_class".to_string(),
             }
         );
 
@@ -495,11 +770,14 @@ mod tests {
                 .collect(),
         };
         let species_ids = BTreeSet::from(["RATTATA".to_string()]);
-        let item_ids = BTreeSet::from(["BERRY".to_string(), "POTION".to_string()]);
+        let items = BTreeMap::from([
+            ("BERRY".to_string(), test_item("BERRY", false)),
+            ("POTION".to_string(), test_item("POTION", true)),
+        ]);
         let move_ids = BTreeSet::from(["TACKLE".to_string()]);
 
         assert_eq!(
-            trainer_catalog_issues(&catalog, &species_ids, &item_ids, &move_ids),
+            trainer_catalog_issues(&catalog, &species_ids, &items, &move_ids),
             vec![
                 TrainerCatalogIssue::KeyMismatch {
                     key: "YOUNGSTER_JOEY".to_string(),
@@ -566,13 +844,125 @@ mod tests {
         };
 
         assert_eq!(
-            trainer_catalog_issues(&catalog, &species_ids, &item_ids, &move_ids),
+            trainer_catalog_issues(&catalog, &species_ids, &items, &move_ids),
             vec![
                 TrainerCatalogIssue::MissingTrainerClass {
                     trainer_id: "YOUNGSTER_JOEY".to_string(),
                 },
                 TrainerCatalogIssue::EmptyParty {
                     trainer_id: "YOUNGSTER_JOEY".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn trainer_catalog_issues_reject_battle_items_that_are_not_battle_usable() {
+        let trainer = Trainer {
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            party: vec![TrainerPartyPokemon {
+                species: "RATTATA".to_string(),
+                level: 6,
+                item: Some("BERRY".to_string()),
+                moves: vec![LearnedMove {
+                    name: "TACKLE".to_string(),
+                    current_pp: 35,
+                    pp_ups: 0,
+                }],
+                dvs: Dv::default(),
+            }],
+            items: vec![Some("POTION".to_string())],
+            ..Trainer::default()
+        };
+        let catalog = TrainerCatalog {
+            trainers: [(trainer.trainer_id.clone(), trainer)]
+                .into_iter()
+                .collect(),
+        };
+        let species_ids = BTreeSet::from(["RATTATA".to_string()]);
+        let items = BTreeMap::from([
+            ("BERRY".to_string(), test_item("BERRY", false)),
+            ("POTION".to_string(), test_item("POTION", false)),
+        ]);
+        let move_ids = BTreeSet::from(["TACKLE".to_string()]);
+
+        assert_eq!(
+            trainer_catalog_issues(&catalog, &species_ids, &items, &move_ids),
+            vec![TrainerCatalogIssue::UnusableBattleItem {
+                trainer_id: "YOUNGSTER_JOEY".to_string(),
+                slot: 0,
+                item_id: "POTION".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn trainer_catalog_issues_reject_reserved_pack_references() {
+        let trainer = Trainer {
+            trainer_id: "fallback_youngster".to_string(),
+            trainer_class: "legacy_class".to_string(),
+            party: vec![TrainerPartyPokemon {
+                species: "fallback_rattata".to_string(),
+                level: 6,
+                item: Some("legacy_berry".to_string()),
+                moves: vec![LearnedMove {
+                    name: "fallback_tackle".to_string(),
+                    current_pp: 35,
+                    pp_ups: 0,
+                }],
+                dvs: Dv::default(),
+            }],
+            items: vec![Some("legacy_potion".to_string())],
+            ..Trainer::default()
+        };
+        let trainer_id = trainer.trainer_id.clone();
+        let catalog = TrainerCatalog {
+            trainers: [(trainer.trainer_id.clone(), trainer)]
+                .into_iter()
+                .collect(),
+        };
+
+        assert_eq!(
+            trainer_catalog_issues(
+                &catalog,
+                &BTreeSet::from(["fallback_rattata".to_string()]),
+                &BTreeMap::from([
+                    ("legacy_berry".to_string(), test_item("legacy_berry", false)),
+                    (
+                        "legacy_potion".to_string(),
+                        test_item("legacy_potion", true)
+                    ),
+                ]),
+                &BTreeSet::from(["fallback_tackle".to_string()])
+            ),
+            vec![
+                TrainerCatalogIssue::InvalidTrainerId {
+                    trainer_id: trainer_id.clone(),
+                },
+                TrainerCatalogIssue::InvalidTrainerClass {
+                    trainer_id: trainer_id.clone(),
+                    trainer_class: "legacy_class".to_string(),
+                },
+                TrainerCatalogIssue::InvalidPartySpecies {
+                    trainer_id: trainer_id.clone(),
+                    slot: 0,
+                    species: "fallback_rattata".to_string(),
+                },
+                TrainerCatalogIssue::InvalidPartyItem {
+                    trainer_id: trainer_id.clone(),
+                    slot: 0,
+                    item_id: "legacy_berry".to_string(),
+                },
+                TrainerCatalogIssue::InvalidPartyMove {
+                    trainer_id: trainer_id.clone(),
+                    slot: 0,
+                    move_id: "fallback_tackle".to_string(),
+                },
+                TrainerCatalogIssue::InvalidBattleItem {
+                    trainer_id,
+                    slot: 0,
+                    item_id: "legacy_potion".to_string(),
                 },
             ]
         );

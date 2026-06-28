@@ -46,6 +46,7 @@ impl TypeMultiplier {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Weather {
     None,
     Rain,
@@ -65,24 +66,8 @@ impl Weather {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeatherModifiers {
-    pub type_modifiers: Vec<WeatherTypeModifier>,
-    pub move_effect_modifiers: Vec<WeatherMoveEffectModifier>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WeatherTypeModifier {
-    pub weather: String,
-    pub move_type: PokemonType,
-    pub multiplier: TypeMultiplier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WeatherMoveEffectModifier {
-    pub weather: String,
-    pub move_effect: String,
-    pub multiplier: TypeMultiplier,
+    pub type_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+    pub move_effect_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +92,9 @@ pub enum WeatherModifierIssue {
     InvalidWeather {
         table: WeatherModifierTableKind,
         weather: String,
+    },
+    InvalidMoveType {
+        move_type: String,
     },
     InvalidMoveEffect {
         move_effect: String,
@@ -138,40 +126,49 @@ pub fn weather_modifier_issues(
         .values()
         .map(|move_data| move_data.effect.as_str())
         .collect();
-    for entry in &modifiers.type_modifiers {
-        if !is_exact_battle_damage_token(&entry.weather) {
+    for (weather, type_modifiers) in &modifiers.type_modifiers {
+        if !is_exact_battle_damage_token(weather) {
             issues.push(WeatherModifierIssue::InvalidWeather {
                 table: WeatherModifierTableKind::TypeModifiers,
-                weather: entry.weather.clone(),
+                weather: weather.clone(),
             });
         }
-        push_type_multiplier_issue(
-            WeatherModifierTableKind::TypeModifiers,
-            entry.multiplier,
-            &mut issues,
-        );
+        for (move_type, multiplier) in type_modifiers {
+            if !is_exact_battle_damage_token(move_type) {
+                issues.push(WeatherModifierIssue::InvalidMoveType {
+                    move_type: move_type.clone(),
+                });
+            }
+            push_type_multiplier_issue(
+                WeatherModifierTableKind::TypeModifiers,
+                *multiplier,
+                &mut issues,
+            );
+        }
     }
-    for entry in &modifiers.move_effect_modifiers {
-        if !is_exact_battle_damage_token(&entry.weather) {
+    for (weather, move_effect_modifiers) in &modifiers.move_effect_modifiers {
+        if !is_exact_battle_damage_token(weather) {
             issues.push(WeatherModifierIssue::InvalidWeather {
                 table: WeatherModifierTableKind::MoveEffectModifiers,
-                weather: entry.weather.clone(),
+                weather: weather.clone(),
             });
         }
-        if !is_exact_battle_damage_token(&entry.move_effect) {
-            issues.push(WeatherModifierIssue::InvalidMoveEffect {
-                move_effect: entry.move_effect.clone(),
-            });
-        } else if !move_effect_ids.contains(entry.move_effect.as_str()) {
-            issues.push(WeatherModifierIssue::UnknownMoveEffect {
-                move_effect: entry.move_effect.clone(),
-            });
+        for (move_effect, multiplier) in move_effect_modifiers {
+            if !is_exact_battle_damage_token(move_effect) {
+                issues.push(WeatherModifierIssue::InvalidMoveEffect {
+                    move_effect: move_effect.clone(),
+                });
+            } else if !move_effect_ids.contains(move_effect.as_str()) {
+                issues.push(WeatherModifierIssue::UnknownMoveEffect {
+                    move_effect: move_effect.clone(),
+                });
+            }
+            push_type_multiplier_issue(
+                WeatherModifierTableKind::MoveEffectModifiers,
+                *multiplier,
+                &mut issues,
+            );
         }
-        push_type_multiplier_issue(
-            WeatherModifierTableKind::MoveEffectModifiers,
-            entry.multiplier,
-            &mut issues,
-        );
     }
     issues
 }
@@ -189,16 +186,8 @@ fn push_type_multiplier_issue(
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeEffectivenessTable {
-    pub matchups: Vec<TypeEffectivenessEntry>,
-    pub foresight_matchups: Vec<TypeEffectivenessEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TypeEffectivenessEntry {
-    pub attacker: PokemonType,
-    pub defender: PokemonType,
-    pub multiplier: TypeMultiplier,
+    pub matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+    pub foresight_matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,11 +228,6 @@ pub enum TypeEffectivenessTableIssue {
         table: TypeEffectivenessTableKind,
         defender: PokemonType,
     },
-    DuplicateMatchup {
-        table: TypeEffectivenessTableKind,
-        attacker: PokemonType,
-        defender: PokemonType,
-    },
     MissingMatchup {
         attacker: String,
         defender: String,
@@ -273,27 +257,22 @@ pub fn type_effectiveness_table_issues(
         .chain(categories.special.iter())
         .map(String::as_str)
         .collect();
-    let mut matchup_pairs = BTreeSet::new();
-    for entry in &table.matchups {
+    for (attacker, defenders) in &table.matchups {
         push_type_effectiveness_entry_issues(
             TypeEffectivenessTableKind::Matchups,
-            entry,
+            attacker,
+            defenders,
             &declared_types,
             &mut issues,
         );
-        if type_effectiveness_entry_has_exact_pair(entry)
-            && !matchup_pairs.insert((entry.attacker.as_str(), entry.defender.as_str()))
-        {
-            issues.push(TypeEffectivenessTableIssue::DuplicateMatchup {
-                table: TypeEffectivenessTableKind::Matchups,
-                attacker: entry.attacker.clone(),
-                defender: entry.defender.clone(),
-            });
-        }
     }
     for attacker in &declared_types {
         for defender in &declared_types {
-            if !matchup_pairs.contains(&(*attacker, *defender)) {
+            if !table
+                .matchups
+                .get(*attacker)
+                .is_some_and(|defenders| defenders.contains_key(*defender))
+            {
                 issues.push(TypeEffectivenessTableIssue::MissingMatchup {
                     attacker: (*attacker).to_string(),
                     defender: (*defender).to_string(),
@@ -302,23 +281,14 @@ pub fn type_effectiveness_table_issues(
         }
     }
 
-    let mut foresight_pairs = BTreeSet::new();
-    for entry in &table.foresight_matchups {
+    for (attacker, defenders) in &table.foresight_matchups {
         push_type_effectiveness_entry_issues(
             TypeEffectivenessTableKind::ForesightMatchups,
-            entry,
+            attacker,
+            defenders,
             &declared_types,
             &mut issues,
         );
-        if type_effectiveness_entry_has_exact_pair(entry)
-            && !foresight_pairs.insert((entry.attacker.as_str(), entry.defender.as_str()))
-        {
-            issues.push(TypeEffectivenessTableIssue::DuplicateMatchup {
-                table: TypeEffectivenessTableKind::ForesightMatchups,
-                attacker: entry.attacker.clone(),
-                defender: entry.defender.clone(),
-            });
-        }
     }
 
     issues
@@ -326,43 +296,41 @@ pub fn type_effectiveness_table_issues(
 
 fn push_type_effectiveness_entry_issues(
     table: TypeEffectivenessTableKind,
-    entry: &TypeEffectivenessEntry,
+    attacker: &str,
+    defenders: &BTreeMap<String, TypeMultiplier>,
     declared_types: &BTreeSet<&str>,
     issues: &mut Vec<TypeEffectivenessTableIssue>,
 ) {
-    if entry.multiplier.denominator == 0 {
-        issues.push(TypeEffectivenessTableIssue::InvalidMultiplierDenominator { table });
-    }
     if declared_types.is_empty() {
         return;
     }
-    if !is_exact_battle_damage_token(entry.attacker.as_str()) {
+    if !is_exact_battle_damage_token(attacker) {
         issues.push(TypeEffectivenessTableIssue::InvalidAttacker {
             table,
-            attacker: entry.attacker.clone(),
+            attacker: attacker.to_string(),
         });
-    } else if !declared_types.contains(entry.attacker.as_str()) {
+    } else if !declared_types.contains(attacker) {
         issues.push(TypeEffectivenessTableIssue::UnknownAttacker {
             table,
-            attacker: entry.attacker.clone(),
+            attacker: attacker.to_string(),
         });
     }
-    if !is_exact_battle_damage_token(entry.defender.as_str()) {
-        issues.push(TypeEffectivenessTableIssue::InvalidDefender {
-            table,
-            defender: entry.defender.clone(),
-        });
-    } else if !declared_types.contains(entry.defender.as_str()) {
-        issues.push(TypeEffectivenessTableIssue::UnknownDefender {
-            table,
-            defender: entry.defender.clone(),
-        });
+    for (defender, multiplier) in defenders {
+        if multiplier.denominator == 0 {
+            issues.push(TypeEffectivenessTableIssue::InvalidMultiplierDenominator { table });
+        }
+        if !is_exact_battle_damage_token(defender) {
+            issues.push(TypeEffectivenessTableIssue::InvalidDefender {
+                table,
+                defender: defender.clone(),
+            });
+        } else if !declared_types.contains(defender.as_str()) {
+            issues.push(TypeEffectivenessTableIssue::UnknownDefender {
+                table,
+                defender: defender.clone(),
+            });
+        }
     }
-}
-
-fn type_effectiveness_entry_has_exact_pair(entry: &TypeEffectivenessEntry) -> bool {
-    is_exact_battle_damage_token(entry.attacker.as_str())
-        && is_exact_battle_damage_token(entry.defender.as_str())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,9 +411,15 @@ fn push_type_category_token_issue(
 fn is_exact_battle_damage_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,6 +450,7 @@ pub struct DamageResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DamageCalculationError {
     MissingStat {
         pokemon_id: String,
@@ -561,9 +536,9 @@ pub fn type_effectiveness(
     }
     table
         .matchups
-        .iter()
-        .find(|entry| entry.attacker == move_type && entry.defender == defender_type)
-        .map(|entry| entry.multiplier)
+        .get(move_type)
+        .and_then(|defenders| defenders.get(defender_type))
+        .copied()
         .ok_or_else(|| DamageCalculationError::MissingTypeEffectiveness {
             attacker: move_type.to_string(),
             defender: defender_type.to_string(),
@@ -732,15 +707,15 @@ pub fn apply_weather_type_modifier(
     }
     let Some(entry) = weather_modifiers
         .type_modifiers
-        .iter()
-        .find(|entry| entry.weather == weather_id && entry.move_type == move_type)
+        .get(weather_id)
+        .and_then(|modifiers| modifiers.get(move_type))
     else {
         return Err(DamageCalculationError::MissingWeatherModifier {
             weather,
             move_type: move_type.to_string(),
         });
     };
-    Ok(entry.multiplier.apply_floor(damage))
+    Ok(entry.apply_floor(damage))
 }
 
 fn distinct_defender_types(defender: &Pokemon) -> Vec<PokemonType> {
@@ -774,6 +749,51 @@ mod tests {
         BaseStats, Dv, PokemonSpecies, create_pokemon_from_known_dvs, growth_rate, pokemon_type,
     };
     use crate::systems::experience::crystal_growth_rate_catalog_for_tests;
+
+    #[test]
+    fn damage_error_json_rejects_unknown_fallback_fields() {
+        let weather_error = serde_json::from_value::<DamageCalculationError>(serde_json::json!({
+            "MissingWeatherModifier": {
+                "weather": "Rain",
+                "move_type": "WATER",
+                "fallback_multiplier": { "numerator": 1, "denominator": 1 }
+            }
+        }))
+        .expect_err("damage errors must not accept fallback multipliers")
+        .to_string();
+        assert!(
+            weather_error.contains("unknown field `fallback_multiplier`"),
+            "{weather_error}"
+        );
+
+        let category_error = serde_json::from_value::<DamageCalculationError>(serde_json::json!({
+            "MissingTypeCategory": {
+                "move_type": "FIRE",
+                "default_category": "special"
+            }
+        }))
+        .expect_err("damage errors must not accept default type categories")
+        .to_string();
+        assert!(
+            category_error.contains("unknown field `default_category`"),
+            "{category_error}"
+        );
+    }
+
+    #[test]
+    fn weather_json_rejects_legacy_alias_payloads() {
+        let error = serde_json::from_value::<Weather>(serde_json::json!({
+            "Rain": {
+                "fallback_weather": "WEATHER_RAIN"
+            }
+        }))
+        .expect_err("weather must not accept object-shaped fallback aliases")
+        .to_string();
+        assert!(
+            error.contains("invalid type") || error.contains("unknown field `fallback_weather`"),
+            "{error}"
+        );
+    }
 
     fn stat_multipliers() -> BattleStatMultiplierTables {
         BattleStatMultiplierTables {
@@ -837,41 +857,53 @@ mod tests {
 
     fn weather_modifiers() -> WeatherModifiers {
         WeatherModifiers {
-            type_modifiers: vec![
-                WeatherTypeModifier {
-                    weather: "WEATHER_RAIN".to_string(),
-                    move_type: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier {
-                        numerator: 3,
-                        denominator: 2,
-                    },
-                },
-                WeatherTypeModifier {
-                    weather: "WEATHER_RAIN".to_string(),
-                    move_type: pokemon_type("FIRE"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 2,
-                    },
-                },
-                WeatherTypeModifier {
-                    weather: "WEATHER_SUN".to_string(),
-                    move_type: pokemon_type("FIRE"),
-                    multiplier: TypeMultiplier {
-                        numerator: 3,
-                        denominator: 2,
-                    },
-                },
-                WeatherTypeModifier {
-                    weather: "WEATHER_SUN".to_string(),
-                    move_type: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 2,
-                    },
-                },
-            ],
-            move_effect_modifiers: vec![],
+            type_modifiers: [
+                (
+                    "WEATHER_RAIN".to_string(),
+                    [
+                        (
+                            "WATER".to_string(),
+                            TypeMultiplier {
+                                numerator: 3,
+                                denominator: 2,
+                            },
+                        ),
+                        (
+                            "FIRE".to_string(),
+                            TypeMultiplier {
+                                numerator: 1,
+                                denominator: 2,
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                (
+                    "WEATHER_SUN".to_string(),
+                    [
+                        (
+                            "FIRE".to_string(),
+                            TypeMultiplier {
+                                numerator: 3,
+                                denominator: 2,
+                            },
+                        ),
+                        (
+                            "WATER".to_string(),
+                            TypeMultiplier {
+                                numerator: 1,
+                                denominator: 2,
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            move_effect_modifiers: BTreeMap::new(),
         }
     }
 
@@ -883,48 +915,68 @@ mod tests {
         solarbeam.effect = "SOLARBEAM".to_string();
         moves.insert(solarbeam.name.clone(), solarbeam);
         let modifiers = WeatherModifiers {
-            type_modifiers: vec![
-                WeatherTypeModifier {
-                    weather: " WEATHER_RAIN".to_string(),
-                    move_type: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 0,
-                    },
-                },
-                WeatherTypeModifier {
-                    weather: "WEATHER RAIN".to_string(),
-                    move_type: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-            ],
-            move_effect_modifiers: vec![
-                WeatherMoveEffectModifier {
-                    weather: String::new(),
-                    move_effect: " SOLARBEAM".to_string(),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 0,
-                    },
-                },
-                WeatherMoveEffectModifier {
-                    weather: "WEATHER SUN".to_string(),
-                    move_effect: "SOLAR BEAM".to_string(),
-                    multiplier: TypeMultiplier::one(),
-                },
-            ],
+            type_modifiers: [
+                (
+                    " WEATHER_RAIN".to_string(),
+                    [(
+                        "WATER".to_string(),
+                        TypeMultiplier {
+                            numerator: 1,
+                            denominator: 0,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                (
+                    "WEATHER RAIN".to_string(),
+                    [("WATER".to_string(), TypeMultiplier::one())]
+                        .into_iter()
+                        .collect(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            move_effect_modifiers: [
+                (
+                    String::new(),
+                    [(
+                        " SOLARBEAM".to_string(),
+                        TypeMultiplier {
+                            numerator: 1,
+                            denominator: 0,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                (
+                    "WEATHER SUN".to_string(),
+                    [("SOLAR BEAM".to_string(), TypeMultiplier::one())]
+                        .into_iter()
+                        .collect(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
         };
         let unknown_effect_modifiers = WeatherModifiers {
-            type_modifiers: vec![WeatherTypeModifier {
-                weather: "WEATHER_SUN".to_string(),
-                move_type: pokemon_type("FIRE"),
-                multiplier: TypeMultiplier::one(),
-            }],
-            move_effect_modifiers: vec![WeatherMoveEffectModifier {
-                weather: "WEATHER_SUN".to_string(),
-                move_effect: "MOONBEAM".to_string(),
-                multiplier: TypeMultiplier::one(),
-            }],
+            type_modifiers: [(
+                "WEATHER_SUN".to_string(),
+                [("FIRE".to_string(), TypeMultiplier::one())]
+                    .into_iter()
+                    .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            move_effect_modifiers: [(
+                "WEATHER_SUN".to_string(),
+                [("MOONBEAM".to_string(), TypeMultiplier::one())]
+                    .into_iter()
+                    .collect(),
+            )]
+            .into_iter()
+            .collect(),
         };
 
         assert_eq!(
@@ -977,72 +1029,24 @@ mod tests {
     }
 
     fn type_effectiveness_table() -> TypeEffectivenessTable {
-        TypeEffectivenessTable {
-            matchups: vec![
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: TypeMultiplier::one(),
+        serde_json::from_value(serde_json::json!({
+            "matchups": {
+                "NORMAL": { "NORMAL": { "numerator": 1, "denominator": 1 } },
+                "GHOST": { "STEEL": { "numerator": 1, "denominator": 2 } },
+                "DARK": { "STEEL": { "numerator": 1, "denominator": 2 } },
+                "ELECTRIC": { "GROUND": { "numerator": 0, "denominator": 1 } },
+                "ICE": {
+                    "GRASS": { "numerator": 2, "denominator": 1 },
+                    "FLYING": { "numerator": 2, "denominator": 1 }
                 },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("GHOST"),
-                    defender: pokemon_type("STEEL"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 2,
-                    },
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("DARK"),
-                    defender: pokemon_type("STEEL"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 2,
-                    },
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("ELECTRIC"),
-                    defender: pokemon_type("GROUND"),
-                    multiplier: TypeMultiplier::zero(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("ICE"),
-                    defender: pokemon_type("GRASS"),
-                    multiplier: TypeMultiplier {
-                        numerator: 2,
-                        denominator: 1,
-                    },
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("ICE"),
-                    defender: pokemon_type("FLYING"),
-                    multiplier: TypeMultiplier {
-                        numerator: 2,
-                        denominator: 1,
-                    },
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIRE"),
-                    defender: pokemon_type("GRASS"),
-                    multiplier: TypeMultiplier {
-                        numerator: 2,
-                        denominator: 1,
-                    },
-                },
-            ],
-            foresight_matchups: vec![
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("GHOST"),
-                    multiplier: TypeMultiplier::zero(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIGHTING"),
-                    defender: pokemon_type("GHOST"),
-                    multiplier: TypeMultiplier::zero(),
-                },
-            ],
-        }
+                "FIRE": { "GRASS": { "numerator": 2, "denominator": 1 } }
+            },
+            "foresight_matchups": {
+                "NORMAL": { "GHOST": { "numerator": 0, "denominator": 1 } },
+                "FIGHTING": { "GHOST": { "numerator": 0, "denominator": 1 } }
+            }
+        }))
+        .expect("type effectiveness fixture should parse")
     }
 
     fn type_categories() -> TypeCategories {
@@ -1123,89 +1127,66 @@ mod tests {
     }
 
     #[test]
+    fn battle_damage_tokens_reject_reserved_pack_prefixes() {
+        let categories = TypeCategories {
+            physical: vec!["fallback_normal".to_string()],
+            special: vec!["legacy_fire".to_string()],
+        };
+
+        assert_eq!(
+            type_category_issues(&categories, true),
+            vec![
+                TypeCategoryIssue::InvalidToken {
+                    table: TypeCategoryTableKind::Physical,
+                    type_id: "fallback_normal".to_string(),
+                },
+                TypeCategoryIssue::InvalidToken {
+                    table: TypeCategoryTableKind::Special,
+                    type_id: "legacy_fire".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn type_effectiveness_table_issues_validate_definitive_rows() {
         let categories = TypeCategories {
             physical: vec!["NORMAL".to_string()],
             special: vec!["FIRE".to_string()],
         };
-        let table = TypeEffectivenessTable {
-            matchups: vec![
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 0,
-                    },
+        let table: TypeEffectivenessTable = serde_json::from_value(serde_json::json!({
+            "matchups": {
+                "NORMAL": {
+                    "NORMAL": { "numerator": 1, "denominator": 0 }
                 },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: TypeMultiplier::one(),
+                "WATER": {
+                    "FIRE": { "numerator": 1, "denominator": 1 }
                 },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("WATER"),
-                    defender: pokemon_type("FIRE"),
-                    multiplier: TypeMultiplier::one(),
+                "WA TER": {
+                    "FIRE": { "numerator": 1, "denominator": 1 }
                 },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("WA TER"),
-                    defender: pokemon_type("FIRE"),
-                    multiplier: TypeMultiplier::one(),
+                "FIRE": {
+                    "WA TER": { "numerator": 1, "denominator": 1 },
+                    "WATER": { "numerator": 1, "denominator": 1 }
+                }
+            },
+            "foresight_matchups": {
+                "NORMAL": {
+                    "WATER": { "numerator": 1, "denominator": 0 },
+                    "WA TER": { "numerator": 1, "denominator": 1 }
                 },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIRE"),
-                    defender: pokemon_type("WA TER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIRE"),
-                    defender: pokemon_type("WA TER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIRE"),
-                    defender: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-            ],
-            foresight_matchups: vec![
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier {
-                        numerator: 1,
-                        denominator: 0,
-                    },
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("WATER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NO RMAL"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: TypeMultiplier::one(),
-                },
-                TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("WA TER"),
-                    multiplier: TypeMultiplier::one(),
-                },
-            ],
-        };
+                "NO RMAL": {
+                    "NORMAL": { "numerator": 1, "denominator": 1 }
+                }
+            }
+        }))
+        .expect("type effectiveness fixture should parse");
 
         assert_eq!(
             type_effectiveness_table_issues(&table, &categories, true),
             vec![
                 TypeEffectivenessTableIssue::InvalidMultiplierDenominator {
                     table: TypeEffectivenessTableKind::Matchups,
-                },
-                TypeEffectivenessTableIssue::DuplicateMatchup {
-                    table: TypeEffectivenessTableKind::Matchups,
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("NORMAL"),
                 },
                 TypeEffectivenessTableIssue::UnknownAttacker {
                     table: TypeEffectivenessTableKind::Matchups,
@@ -1214,10 +1195,6 @@ mod tests {
                 TypeEffectivenessTableIssue::InvalidAttacker {
                     table: TypeEffectivenessTableKind::Matchups,
                     attacker: pokemon_type("WA TER"),
-                },
-                TypeEffectivenessTableIssue::InvalidDefender {
-                    table: TypeEffectivenessTableKind::Matchups,
-                    defender: pokemon_type("WA TER"),
                 },
                 TypeEffectivenessTableIssue::InvalidDefender {
                     table: TypeEffectivenessTableKind::Matchups,
@@ -1244,15 +1221,6 @@ mod tests {
                 },
                 TypeEffectivenessTableIssue::UnknownDefender {
                     table: TypeEffectivenessTableKind::ForesightMatchups,
-                    defender: pokemon_type("WATER"),
-                },
-                TypeEffectivenessTableIssue::UnknownDefender {
-                    table: TypeEffectivenessTableKind::ForesightMatchups,
-                    defender: pokemon_type("WATER"),
-                },
-                TypeEffectivenessTableIssue::DuplicateMatchup {
-                    table: TypeEffectivenessTableKind::ForesightMatchups,
-                    attacker: pokemon_type("NORMAL"),
                     defender: pokemon_type("WATER"),
                 },
                 TypeEffectivenessTableIssue::InvalidAttacker {

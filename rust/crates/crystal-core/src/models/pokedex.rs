@@ -7,10 +7,13 @@ use super::pokemon::{Pokemon, PokemonSpecies};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimePokedexEntry {
+    #[serde(deserialize_with = "required_pokedex_id")]
     pub species: String,
+    #[serde(deserialize_with = "required_pokedex_text")]
     pub classification: String,
     pub height_digits: u16,
     pub weight_digits: u16,
+    #[serde(deserialize_with = "required_pokedex_pages")]
     pub pages: Vec<String>,
 }
 
@@ -87,13 +90,67 @@ pub fn pokedex_entry_catalog_issues(
 fn is_exact_nonempty_pokedex_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
+}
+
 fn is_exact_nonempty_pokedex_text(value: &str) -> bool {
     !value.is_empty() && value.trim() == value
+}
+
+fn required_pokedex_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_pokedex_id(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "pokedex species id must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_pokedex_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_pokedex_text(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "pokedex text must be exact non-empty text, found {value:?}"
+        )))
+    }
+}
+
+fn required_pokedex_pages<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if values.is_empty() {
+        return Err(serde::de::Error::custom(
+            "pokedex pages must contain at least one page",
+        ));
+    }
+    for value in &values {
+        if !is_exact_nonempty_pokedex_text(value) {
+            return Err(serde::de::Error::custom(format!(
+                "pokedex page must be exact non-empty text, found {value:?}"
+            )));
+        }
+    }
+    Ok(values)
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +195,73 @@ impl PokedexState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum PokedexSaveError {
+    #[error("saved {path} {species} is missing from compiled pack pokemon")]
+    MissingSpecies { path: &'static str, species: String },
+    #[error("saved {path} {species} does not match compiled species id {compiled_species}")]
+    SpeciesMismatch {
+        path: &'static str,
+        species: String,
+        compiled_species: String,
+    },
+    #[error("saved pokedex.caught_species {species} is not present in saved pokedex.seen_species")]
+    CaughtSpeciesNotSeen { species: String },
+}
+
+pub fn validate_saved_pokedex_references<F>(
+    pokedex: &PokedexState,
+    compiled_species_id: F,
+) -> Result<(), PokedexSaveError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for species in &pokedex.seen_species {
+        validate_saved_pokedex_species_reference(
+            "pokedex.seen_species",
+            species,
+            &compiled_species_id,
+        )?;
+    }
+    for species in &pokedex.caught_species {
+        validate_saved_pokedex_species_reference(
+            "pokedex.caught_species",
+            species,
+            &compiled_species_id,
+        )?;
+        if !pokedex.seen_species.contains(species) {
+            return Err(PokedexSaveError::CaughtSpeciesNotSeen {
+                species: species.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_saved_pokedex_species_reference<F>(
+    path: &'static str,
+    species: &str,
+    compiled_species_id: &F,
+) -> Result<(), PokedexSaveError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let compiled_species =
+        compiled_species_id(species).ok_or_else(|| PokedexSaveError::MissingSpecies {
+            path,
+            species: species.to_string(),
+        })?;
+    if compiled_species != species {
+        return Err(PokedexSaveError::SpeciesMismatch {
+            path,
+            species: species.to_string(),
+            compiled_species,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +296,58 @@ mod tests {
         assert!(pokedex.has_seen("modpack_CHIKORITA"));
         assert!(!pokedex.has_seen("MODPACK_CHIKORITA"));
         assert!(!pokedex.has_seen("CHIKORITA"));
+    }
+
+    #[test]
+    fn validate_saved_pokedex_references_rejects_missing_species() {
+        let mut pokedex = PokedexState::default();
+        pokedex.seen_species.insert("CHIKORITA".to_string());
+
+        let error = validate_saved_pokedex_references(&pokedex, |_| None)
+            .expect_err("saved seen species must exist in compiled Pokemon table");
+
+        assert_eq!(
+            error,
+            PokedexSaveError::MissingSpecies {
+                path: "pokedex.seen_species",
+                species: "CHIKORITA".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_saved_pokedex_references_rejects_mismatched_species_payload() {
+        let mut pokedex = PokedexState::default();
+        pokedex.seen_species.insert("CHIKORITA".to_string());
+
+        let error = validate_saved_pokedex_references(&pokedex, |_| Some("CYNDAQUIL".to_string()))
+            .expect_err("saved species key must match compiled Pokemon payload id");
+
+        assert_eq!(
+            error,
+            PokedexSaveError::SpeciesMismatch {
+                path: "pokedex.seen_species",
+                species: "CHIKORITA".to_string(),
+                compiled_species: "CYNDAQUIL".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_saved_pokedex_references_rejects_caught_without_seen() {
+        let mut pokedex = PokedexState::default();
+        pokedex.caught_species.insert("CHIKORITA".to_string());
+
+        let error =
+            validate_saved_pokedex_references(&pokedex, |species| Some(species.to_string()))
+                .expect_err("caught species must also be saved as seen");
+
+        assert_eq!(
+            error,
+            PokedexSaveError::CaughtSpeciesNotSeen {
+                species: "CHIKORITA".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -254,5 +430,90 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn pokedex_entry_catalog_issues_reject_reserved_pack_prefix_ids() {
+        let entries = [(
+            "fallback_chikorita".to_string(),
+            RuntimePokedexEntry {
+                species: "legacy_chikorita".to_string(),
+                classification: "Leaf".to_string(),
+                height_digits: 4,
+                weight_digits: 64,
+                pages: vec!["A sweet aroma wafts from its leaf.".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            pokedex_entry_catalog_issues(&entries, &BTreeSet::new()),
+            vec![
+                PokedexEntryCatalogIssue::InvalidSpeciesId {
+                    species_id: "fallback_chikorita".to_string(),
+                },
+                PokedexEntryCatalogIssue::SpeciesMismatch {
+                    species_id: "fallback_chikorita".to_string(),
+                    record_species: "legacy_chikorita".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pokedex_entry_json_rejects_malformed_pack_fields_at_deserialization() {
+        let cases = [
+            (
+                "species",
+                serde_json::json!({
+                    "species": "CHIKO RITA",
+                    "classification": "Leaf",
+                    "heightDigits": 211,
+                    "weightDigits": 141,
+                    "pages": ["A sweet aroma gently wafts from its leaf."]
+                }),
+            ),
+            (
+                "classification",
+                serde_json::json!({
+                    "species": "CHIKORITA",
+                    "classification": " Leaf",
+                    "heightDigits": 211,
+                    "weightDigits": 141,
+                    "pages": ["A sweet aroma gently wafts from its leaf."]
+                }),
+            ),
+            (
+                "empty pages",
+                serde_json::json!({
+                    "species": "CHIKORITA",
+                    "classification": "Leaf",
+                    "heightDigits": 211,
+                    "weightDigits": 141,
+                    "pages": []
+                }),
+            ),
+            (
+                "page",
+                serde_json::json!({
+                    "species": "CHIKORITA",
+                    "classification": "Leaf",
+                    "heightDigits": 211,
+                    "weightDigits": 141,
+                    "pages": ["A sweet aroma gently wafts from its leaf. "]
+                }),
+            ),
+        ];
+
+        for (label, payload) in cases {
+            let error = serde_json::from_value::<RuntimePokedexEntry>(payload)
+                .expect_err("malformed pokedex entry fields must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("pokedex"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
     }
 }

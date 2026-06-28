@@ -145,13 +145,11 @@ describe("core exporters integration", () => {
     );
 
     const fleeMons = JSON.parse(fs.readFileSync(path.join(dataDir, "flee_mons.json"), "utf8")) as {
-      always: string[];
-      often: string[];
-      sometimes: string[];
+      buckets: Record<string, string[]>;
     };
-    expect(fleeMons.always).toEqual(expect.arrayContaining(["RAIKOU", "ENTEI"]));
-    expect(fleeMons.often).toContain("DELIBIRD");
-    expect(fleeMons.sometimes).toContain("MAGNEMITE");
+    expect(fleeMons.buckets.always).toEqual(expect.arrayContaining(["RAIKOU", "ENTEI"]));
+    expect(fleeMons.buckets.often).toContain("DELIBIRD");
+    expect(fleeMons.buckets.sometimes).toContain("MAGNEMITE");
 
     const marts = JSON.parse(fs.readFileSync(path.join(dataDir, "marts.json"), "utf8")) as Record<string, string[]>;
     expect(marts.MART_CHERRYGROVE).toEqual(["POTION", "ANTIDOTE", "PARLYZ_HEAL", "AWAKENING"]);
@@ -171,17 +169,15 @@ describe("core exporters integration", () => {
 
     const pokedexEntries = JSON.parse(
       fs.readFileSync(path.join(dataDir, "pokedex_entries.json"), "utf8")
-    ) as Array<{ species: string; classification: string; heightDigits: number; weightDigits: number; pages: string[] }>;
-    expect(pokedexEntries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          species: "CHIKORITA",
-          classification: "LEAF",
-          heightDigits: 211,
-          weightDigits: 140,
-          pages: expect.arrayContaining([expect.stringContaining("sunlight")]),
-        }),
-      ])
+    ) as Record<string, { species: string; classification: string; heightDigits: number; weightDigits: number; pages: string[] }>;
+    expect(pokedexEntries.CHIKORITA).toEqual(
+      expect.objectContaining({
+        species: "CHIKORITA",
+        classification: "LEAF",
+        heightDigits: 211,
+        weightDigits: 140,
+        pages: expect.arrayContaining([expect.stringContaining("sunlight")]),
+      })
     );
 
     const evolutions = JSON.parse(fs.readFileSync(path.join(dataDir, "evolutions.json"), "utf8")) as Array<{

@@ -45,9 +45,15 @@ pub fn menu_icon_catalog_issues(
 fn is_exact_nonempty_menu_icon_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
+        && !has_reserved_pack_prefix(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -99,6 +105,28 @@ mod tests {
                     species_id: "BAYLEEF".to_string(),
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn menu_icon_catalog_issues_reject_reserved_pack_prefix_tokens() {
+        let menu_icons = [(
+            "fallback_chikorita".to_string(),
+            "legacy_icon_chikorita".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            menu_icon_catalog_issues(&menu_icons, &BTreeSet::new()),
+            vec![
+                MenuIconCatalogIssue::InvalidSpeciesId {
+                    species_id: "fallback_chikorita".to_string(),
+                },
+                MenuIconCatalogIssue::InvalidIcon {
+                    species_id: "fallback_chikorita".to_string(),
+                },
+            ]
         );
     }
 }

@@ -13,7 +13,8 @@ pub mod pokemon;
 pub mod trainer;
 
 pub use bag::{
-    BALL_POCKET_CAPACITY, Bag, ITEM_POCKET_CAPACITY, KEY_ITEM_POCKET_CAPACITY, MAX_ITEM_STACK,
+    BALL_POCKET_CAPACITY, Bag, BagSaveError, ITEM_POCKET_CAPACITY, KEY_ITEM_POCKET_CAPACITY,
+    MAX_ITEM_STACK, PC_ITEM_CAPACITY, validate_saved_bag_pocket_references,
 };
 pub use battle_animation::{BattleAnimationCatalogIssue, battle_animation_catalog_issues};
 pub use box_storage::{
@@ -41,12 +42,13 @@ pub use move_data::{
 pub use party::{PARTY_SIZE, Party};
 pub use pc_string::{PcStringCatalogIssue, pc_string_catalog_issues};
 pub use pokedex::{
-    PokedexEntryCatalogIssue, PokedexState, RuntimePokedexEntry, pokedex_entry_catalog_issues,
+    PokedexEntryCatalogIssue, PokedexSaveError, PokedexState, RuntimePokedexEntry,
+    pokedex_entry_catalog_issues, validate_saved_pokedex_references,
 };
 pub use pokemon::{
     Ability, BaseStats, Dv, EggGroup, GrowthRate, LearnedMove, Pokemon, PokemonBuildError,
     PokemonSpecies, PokemonType, Stat, ability, calculate_stats, create_pokemon_from_known_dvs,
-    egg_group, growth_rate, pokemon_species_display_name, pokemon_type,
+    egg_group, growth_rate, max_move_pp, pokemon_species_display_name, pokemon_type,
 };
 pub use trainer::{
     Trainer, TrainerCatalog, TrainerCatalogError, TrainerCatalogIssue, TrainerPartyPokemon,

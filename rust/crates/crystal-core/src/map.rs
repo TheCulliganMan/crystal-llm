@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapConnection {
+    #[serde(deserialize_with = "required_map_token")]
     pub direction: String,
+    #[serde(deserialize_with = "required_map_token")]
     pub target_map: String,
     pub offset: i32,
 }
@@ -13,24 +15,37 @@ pub struct MapConnection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapAttributes {
+    #[serde(deserialize_with = "required_map_token")]
     pub tileset_name: String,
     pub border_block: u8,
     pub width: u16,
     pub height: u16,
     pub connections: Vec<MapConnection>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub time_of_day: Option<String>,
     pub phone_service: u8,
     pub phone_flag: bool,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub environment: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub location: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub music: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub palette: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub fishing_group: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_constant: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_group_constant: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub blocks_label: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_scripts_label: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_events_label: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub connection_flags: Option<String>,
 }
 
@@ -40,7 +55,9 @@ pub struct WarpEvent {
     pub index: u16,
     pub x: u16,
     pub y: u16,
+    #[serde(deserialize_with = "required_map_token")]
     pub target_map_constant: String,
+    #[serde(deserialize_with = "required_map_token")]
     pub target_map: String,
     pub target_warp_id: i16,
 }
@@ -50,7 +67,9 @@ pub struct WarpEvent {
 pub struct CoordEvent {
     pub x: u16,
     pub y: u16,
+    #[serde(deserialize_with = "required_empty_or_map_token")]
     pub scene_id: String,
+    #[serde(deserialize_with = "required_map_token")]
     pub script_name: String,
 }
 
@@ -59,7 +78,9 @@ pub struct CoordEvent {
 pub struct BackgroundEvent {
     pub x: u16,
     pub y: u16,
+    #[serde(deserialize_with = "required_map_token")]
     pub event_type: String,
+    #[serde(deserialize_with = "required_map_token")]
     pub script: String,
 }
 
@@ -74,7 +95,9 @@ pub struct MapEvents {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapScene {
+    #[serde(deserialize_with = "required_map_token")]
     pub scene_id: String,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub script_name: Option<String>,
 }
 
@@ -87,7 +110,9 @@ pub struct MapSceneTable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapScriptSectionCommand {
+    #[serde(deserialize_with = "required_map_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_map_token_vec")]
     pub args: Vec<String>,
     pub command_index: usize,
 }
@@ -95,9 +120,79 @@ pub struct MapScriptSectionCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapEventSectionCommand {
+    #[serde(deserialize_with = "required_map_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_map_token_vec")]
     pub args: Vec<String>,
     pub command_index: usize,
+}
+
+fn required_map_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_nonempty_map_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "map token must be exact ASCII alphanumeric/underscore/hyphen, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_map_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_nonempty_map_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "map token must be exact ASCII alphanumeric/underscore/hyphen, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_empty_or_map_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || is_exact_nonempty_map_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "map token must be empty or exact ASCII alphanumeric/underscore/hyphen, found {value:?}"
+        )))
+    }
+}
+
+fn required_map_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if let Some(token) = values
+        .iter()
+        .find(|token| !is_exact_nonempty_map_token(token))
+    {
+        Err(serde::de::Error::custom(format!(
+            "map token must be exact ASCII alphanumeric/underscore/hyphen, found {token:?}"
+        )))
+    } else {
+        Ok(values)
+    }
+}
+
+fn is_exact_nonempty_map_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && !has_reserved_pack_prefix(value)
 }
 
 pub fn map_script_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
@@ -125,7 +220,7 @@ pub fn map_event_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MapScriptSectionCommandIssue {
     UnknownCommand,
     WrongArgCount {
@@ -144,7 +239,7 @@ pub enum MapScriptSectionCommandIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MapEventSectionCommandIssue {
     UnknownCommand,
     WrongArgCount {
@@ -258,26 +353,40 @@ fn is_exact_nonempty_section_arg(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectEvent {
+    #[serde(deserialize_with = "required_map_token")]
     pub sprite: String,
     pub x: u16,
     pub y: u16,
+    #[serde(deserialize_with = "required_map_token")]
     pub spritemovedata: String,
     pub move_range_x: u16,
     pub move_range_y: u16,
     pub hram_x: i16,
     pub hram_y: i16,
     pub pal: u8,
+    #[serde(deserialize_with = "required_map_token")]
     pub object_type: String,
     pub radius: u16,
+    #[serde(deserialize_with = "required_map_token")]
     pub script: String,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub label: Option<String>,
+    #[serde(deserialize_with = "required_empty_or_map_token")]
     pub event_flag: String,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub object_identifier: Option<String>,
+    #[serde(deserialize_with = "required_nullable_map_token")]
     pub sightline_direction_override: Option<String>,
 }
 
@@ -610,5 +719,332 @@ mod tests {
         .expect_err("object events must not accept legacy fields")
         .to_string();
         assert!(error.contains("unknown field `legacy_sprite`"), "{error}");
+
+        let error = serde_json::from_value::<MapScriptSectionCommandIssue>(serde_json::json!({
+            "unknown_scene_script": {
+                "script": "Route29Scene",
+                "fallback_script": "DefaultScene"
+            }
+        }))
+        .expect_err("map script issues must not accept fallback scripts")
+        .to_string();
+        assert!(error.contains("unknown field `fallback_script`"), "{error}");
+
+        let error = serde_json::from_value::<MapEventSectionCommandIssue>(serde_json::json!({
+            "unknown_object_event_script": {
+                "script": "Route29YoungsterScript",
+                "legacy_script": "YoungsterScript"
+            }
+        }))
+        .expect_err("map event issues must not accept legacy scripts")
+        .to_string();
+        assert!(error.contains("unknown field `legacy_script`"), "{error}");
+    }
+
+    #[test]
+    fn map_json_rejects_malformed_pack_tokens_at_deserialization() {
+        for (field, value) in [
+            ("tileset_name", serde_json::json!("johto tileset")),
+            ("time_of_day", serde_json::json!("day time")),
+            ("environment", serde_json::json!("ROUTE AREA")),
+            ("location", serde_json::json!("NEW BARK")),
+            ("music", serde_json::json!("MUSIC ROUTE_29")),
+            ("palette", serde_json::json!("PALETTE DAY")),
+            ("fishing_group", serde_json::json!("GROUP OLD_ROD")),
+            ("map_constant", serde_json::json!("ROUTE 29")),
+            ("map_group_constant", serde_json::json!("GROUP JOHTO")),
+            ("blocks_label", serde_json::json!("Route29 Blocks")),
+            ("map_scripts_label", serde_json::json!("Route29 Scripts")),
+            ("map_events_label", serde_json::json!("Route29 Events")),
+            ("connection_flags", serde_json::json!("NORTH SOUTH")),
+        ] {
+            let mut attributes = valid_map_attributes_json();
+            attributes[field] = value;
+
+            let error = serde_json::from_value::<MapAttributes>(attributes)
+                .expect_err("malformed map attribute tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("direction", serde_json::json!("north west")),
+            ("target_map", serde_json::json!("Route 30")),
+        ] {
+            let mut connection = serde_json::json!({
+                "direction": "north",
+                "target_map": "Route30",
+                "offset": 0
+            });
+            connection[field] = value;
+
+            let error = serde_json::from_value::<MapConnection>(connection)
+                .expect_err("malformed map connection tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "connection {field} produced unexpected error: {error}"
+            );
+        }
+
+        let mut warp = serde_json::json!({
+            "index": 0,
+            "x": 1,
+            "y": 2,
+            "target_map_constant": "ROUTE_29",
+            "target_map": "Route29",
+            "target_warp_id": 1
+        });
+        warp["target_map_constant"] = serde_json::json!("ROUTE 29");
+        let error = serde_json::from_value::<WarpEvent>(warp)
+            .expect_err("malformed warp tokens must fail during JSON load")
+            .to_string();
+        assert!(error.contains("map token must be"), "{error}");
+
+        for (field, value) in [
+            ("scene_id", serde_json::json!("SCENE ROUTE29")),
+            ("script_name", serde_json::json!("Route29 Scene")),
+        ] {
+            let mut scene = serde_json::json!({
+                "scene_id": "SCENE_ROUTE29",
+                "script_name": "Route29Scene"
+            });
+            scene[field] = value;
+
+            let error = serde_json::from_value::<MapScene>(scene)
+                .expect_err("malformed map scene tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "scene {field} produced unexpected error: {error}"
+            );
+        }
+
+        for (label, payload) in [
+            (
+                "script command",
+                serde_json::json!({
+                    "command": "scene script",
+                    "args": ["Route29Scene"],
+                    "command_index": 0
+                }),
+            ),
+            (
+                "event command args",
+                serde_json::json!({
+                    "command": "bg_event",
+                    "args": ["1", "2", "BGEVENT READ", "Route29Sign"],
+                    "command_index": 0
+                }),
+            ),
+        ] {
+            let error = if label == "script command" {
+                serde_json::from_value::<MapScriptSectionCommand>(payload)
+                    .expect_err("malformed map script command tokens must fail during JSON load")
+                    .to_string()
+            } else {
+                serde_json::from_value::<MapEventSectionCommand>(payload)
+                    .expect_err("malformed map event command tokens must fail during JSON load")
+                    .to_string()
+            };
+            assert!(
+                error.contains("map token must be"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("sprite", serde_json::json!("SPRITE YOUNGSTER")),
+            (
+                "spritemovedata",
+                serde_json::json!("SPRITEMOVEDATA STANDING"),
+            ),
+            ("object_type", serde_json::json!("OBJECTTYPE SCRIPT")),
+            ("script", serde_json::json!("Route29 Script")),
+            ("label", serde_json::json!("Youngster Label")),
+            ("event_flag", serde_json::json!("EVENT BEAT_JOEY")),
+            ("object_identifier", serde_json::json!("OBJECT YOUNGSTER")),
+            (
+                "sightline_direction_override",
+                serde_json::json!("north west"),
+            ),
+        ] {
+            let mut object = valid_object_event_json();
+            object[field] = value;
+
+            let error = serde_json::from_value::<ObjectEvent>(object)
+                .expect_err("malformed object event tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "object {field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_json_rejects_reserved_pack_prefixes_at_deserialization() {
+        for (field, value) in [
+            ("tileset_name", serde_json::json!("fallback_tileset")),
+            ("time_of_day", serde_json::json!("legacy_day")),
+            ("environment", serde_json::json!("fallback_route")),
+            ("location", serde_json::json!("legacy_new_bark")),
+            ("music", serde_json::json!("fallback_music")),
+            ("palette", serde_json::json!("legacy_palette")),
+            ("fishing_group", serde_json::json!("fallback_fishing")),
+            ("map_constant", serde_json::json!("legacy_route_29")),
+            ("map_group_constant", serde_json::json!("fallback_group")),
+            ("blocks_label", serde_json::json!("legacy_blocks")),
+            ("map_scripts_label", serde_json::json!("fallback_scripts")),
+            ("map_events_label", serde_json::json!("legacy_events")),
+            (
+                "connection_flags",
+                serde_json::json!("fallback_connections"),
+            ),
+        ] {
+            let mut attributes = valid_map_attributes_json();
+            attributes[field] = value;
+
+            let error = serde_json::from_value::<MapAttributes>(attributes)
+                .expect_err("reserved map attribute tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("direction", serde_json::json!("legacy_north")),
+            ("target_map", serde_json::json!("fallback_route_30")),
+        ] {
+            let mut connection = serde_json::json!({
+                "direction": "north",
+                "target_map": "Route30",
+                "offset": 0
+            });
+            connection[field] = value;
+
+            let error = serde_json::from_value::<MapConnection>(connection)
+                .expect_err("reserved map connection tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "connection {field} produced unexpected error: {error}"
+            );
+        }
+
+        for (label, payload) in [
+            (
+                "script command arg",
+                serde_json::json!({
+                    "command": "scene_script",
+                    "args": ["fallback_scene"],
+                    "command_index": 0
+                }),
+            ),
+            (
+                "event command",
+                serde_json::json!({
+                    "command": "legacy_bg_event",
+                    "args": ["1", "2", "BGEVENT_READ", "Route29Sign"],
+                    "command_index": 0
+                }),
+            ),
+        ] {
+            let error = if label == "script command arg" {
+                serde_json::from_value::<MapScriptSectionCommand>(payload)
+                    .expect_err("reserved map script command tokens must fail during JSON load")
+                    .to_string()
+            } else {
+                serde_json::from_value::<MapEventSectionCommand>(payload)
+                    .expect_err("reserved map event command tokens must fail during JSON load")
+                    .to_string()
+            };
+            assert!(
+                error.contains("map token must be"),
+                "{label} produced unexpected error: {error}"
+            );
+        }
+
+        for (field, value) in [
+            ("sprite", serde_json::json!("fallback_sprite")),
+            ("spritemovedata", serde_json::json!("legacy_move")),
+            ("object_type", serde_json::json!("fallback_object")),
+            ("script", serde_json::json!("legacy_script")),
+            ("label", serde_json::json!("fallback_label")),
+            ("event_flag", serde_json::json!("legacy_event")),
+            ("object_identifier", serde_json::json!("fallback_object_id")),
+            (
+                "sightline_direction_override",
+                serde_json::json!("legacy_north"),
+            ),
+        ] {
+            let mut object = valid_object_event_json();
+            object[field] = value;
+
+            let error = serde_json::from_value::<ObjectEvent>(object)
+                .expect_err("reserved object event tokens must fail during JSON load")
+                .to_string();
+
+            assert!(
+                error.contains("map token must be"),
+                "object {field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    fn valid_map_attributes_json() -> serde_json::Value {
+        serde_json::json!({
+            "tileset_name": "johto",
+            "border_block": 5,
+            "width": 20,
+            "height": 18,
+            "connections": [],
+            "time_of_day": null,
+            "phone_service": 0,
+            "phone_flag": false,
+            "environment": null,
+            "location": null,
+            "music": null,
+            "palette": null,
+            "fishing_group": null,
+            "map_constant": null,
+            "map_group_constant": null,
+            "blocks_label": null,
+            "map_scripts_label": null,
+            "map_events_label": null,
+            "connection_flags": null
+        })
+    }
+
+    fn valid_object_event_json() -> serde_json::Value {
+        serde_json::json!({
+            "sprite": "SPRITE_YOUNGSTER",
+            "x": 4,
+            "y": 5,
+            "spritemovedata": "SPRITEMOVEDATA_STANDING_DOWN",
+            "move_range_x": 0,
+            "move_range_y": 0,
+            "hram_x": 0,
+            "hram_y": 0,
+            "pal": 0,
+            "object_type": "OBJECTTYPE_SCRIPT",
+            "radius": 0,
+            "script": "Route29YoungsterScript",
+            "label": null,
+            "event_flag": "-1",
+            "object_identifier": null,
+            "sightline_direction_override": null
+        })
     }
 }
