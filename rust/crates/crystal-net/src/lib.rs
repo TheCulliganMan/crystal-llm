@@ -4,11 +4,13 @@ use std::rc::Rc;
 
 use crystal_core::multiplayer::{
     BattleActionFrame, BattleRngState, CommandChecksumResult, DeterministicInputJournalFrame,
-    LinkByteFrame, LinkClockSyncFrame, LinkHandshakeError, LinkHello, LinkMessage,
-    LinkSessionIdentity, MultiplayerInteractionRequest, MultiplayerInteractionResponse,
-    OverworldPresence, PlayerId, PlayerInputFrame, RuntimeCommandFrame, RuntimeCommandResultFrame,
-    StateChecksumFrame, TradeConfirmation, TradeOffer, fnv1a32_bytes, validate_link_hello,
-    validate_link_session_identity,
+    DeterministicReplayBundle, LinkByteFrame, LinkClockSyncFrame, LinkHandshakeError, LinkHello,
+    LinkMessage, LinkSessionIdentity, MenuChoiceFrame, MenuChoiceResultFrame,
+    MultiplayerInteractionRequest, MultiplayerInteractionResponse, OverworldPresence, PlayerId,
+    PlayerInputFrame, RuntimeCommandFrame, RuntimeCommandResultFrame, SaveCheckpointFrame,
+    SaveResumeReplayBundle, SessionRuntimeCommandFrame, SessionRuntimeCommandResultFrame,
+    SessionSaveCheckpointFrame, SessionSaveSummaryFrame, StateChecksumFrame, TradeConfirmation,
+    TradeOffer, fnv1a32_bytes, validate_link_hello, validate_link_session_identity,
 };
 #[cfg(test)]
 use crystal_core::multiplayer::{RuntimeCommandPayload, StateChecksum};
@@ -68,6 +70,14 @@ pub enum EndpointError {
     LocalPlayerEcho { player_id: PlayerId },
     #[error("link endpoint peer {player_id} sent conflicting hello")]
     ConflictingPeerHello { player_id: PlayerId },
+    #[error("link endpoint has no save checkpoint for peer {player_id}")]
+    MissingPeerCheckpoint { player_id: PlayerId },
+    #[error("link endpoint received save checkpoint for unknown peer {player_id}")]
+    UnknownPeerCheckpoint { player_id: PlayerId },
+    #[error("link endpoint peer {player_id} sent conflicting save checkpoint")]
+    ConflictingPeerCheckpoint { player_id: PlayerId },
+    #[error("link endpoint received peer menu choice for unknown player {player_id}")]
+    UnknownPeerMenuChoice { player_id: PlayerId },
 }
 
 pub trait LinkTransport {
@@ -78,6 +88,12 @@ pub trait LinkTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEndpointEvent {
     PeerHello(LinkHello),
+    PeerSaveCheckpoint {
+        player_id: PlayerId,
+        checkpoint: SaveCheckpointFrame,
+    },
+    PeerMenuChoice(MenuChoiceFrame),
+    PeerMenuChoiceResult(MenuChoiceResultFrame),
     Message(LinkMessage),
 }
 
@@ -86,6 +102,7 @@ pub struct LinkEndpoint<T> {
     transport: T,
     local_hello: LinkHello,
     peers: BTreeMap<PlayerId, LinkHello>,
+    peer_checkpoints: BTreeMap<PlayerId, SaveCheckpointFrame>,
     hello_sent: bool,
 }
 
@@ -100,6 +117,7 @@ impl<T: LinkTransport> LinkEndpoint<T> {
             transport,
             local_hello,
             peers: BTreeMap::new(),
+            peer_checkpoints: BTreeMap::new(),
             hello_sent: false,
         })
     }
@@ -120,8 +138,44 @@ impl<T: LinkTransport> LinkEndpoint<T> {
         &self.peers
     }
 
+    pub fn peer_checkpoints(&self) -> &BTreeMap<PlayerId, SaveCheckpointFrame> {
+        &self.peer_checkpoints
+    }
+
+    pub fn has_peer_checkpoint(&self, player_id: PlayerId) -> bool {
+        self.peer_checkpoints.contains_key(&player_id)
+    }
+
+    pub fn is_checkpoint_ready(&self) -> bool {
+        self.hello_sent
+            && !self.peers.is_empty()
+            && self
+                .peers
+                .keys()
+                .all(|player_id| self.peer_checkpoints.contains_key(player_id))
+    }
+
     pub fn is_ready(&self) -> bool {
         self.hello_sent && !self.peers.is_empty()
+    }
+
+    pub fn is_ready_for_gameplay(&self) -> bool {
+        self.is_checkpoint_ready()
+    }
+
+    pub fn require_checkpoints_for_players(
+        &self,
+        players: impl IntoIterator<Item = PlayerId>,
+    ) -> Result<(), EndpointError> {
+        for player_id in players {
+            if player_id == self.local_hello.player().id() {
+                continue;
+            }
+            if !self.peer_checkpoints.contains_key(&player_id) {
+                return Err(EndpointError::MissingPeerCheckpoint { player_id });
+            }
+        }
+        Ok(())
     }
 
     pub fn send_hello(&mut self) -> Result<(), EndpointError> {
@@ -137,7 +191,17 @@ impl<T: LinkTransport> LinkEndpoint<T> {
             self.hello_sent = true;
             return Ok(());
         }
-        if !self.is_ready() {
+        if matches!(
+            message,
+            LinkMessage::SaveSummary(_) | LinkMessage::SaveCheckpoint(_)
+        ) {
+            if !self.hello_sent {
+                return Err(EndpointError::NotReady);
+            }
+            self.transport.send(message)?;
+            return Ok(());
+        }
+        if !self.is_ready_for_gameplay() {
             return Err(EndpointError::NotReady);
         }
         self.transport.send(message)?;
@@ -151,6 +215,21 @@ impl<T: LinkTransport> LinkEndpoint<T> {
                 LinkMessage::Hello(hello) => {
                     self.record_peer_hello(hello.clone())?;
                     events.push(LinkEndpointEvent::PeerHello(hello));
+                }
+                LinkMessage::SaveCheckpoint(checkpoint) => {
+                    let player_id = self.record_peer_checkpoint(checkpoint.clone())?;
+                    events.push(LinkEndpointEvent::PeerSaveCheckpoint {
+                        player_id,
+                        checkpoint,
+                    });
+                }
+                LinkMessage::MenuChoice(choice) => {
+                    self.validate_peer_menu_choice(&choice)?;
+                    events.push(LinkEndpointEvent::PeerMenuChoice(choice));
+                }
+                LinkMessage::MenuChoiceResult(result) => {
+                    self.validate_peer_menu_choice_result(&result)?;
+                    events.push(LinkEndpointEvent::PeerMenuChoiceResult(result));
                 }
                 other => events.push(LinkEndpointEvent::Message(other)),
             }
@@ -176,6 +255,60 @@ impl<T: LinkTransport> LinkEndpoint<T> {
         }
         self.peers.insert(player_id, hello);
         Ok(())
+    }
+
+    fn record_peer_checkpoint(
+        &mut self,
+        checkpoint: SaveCheckpointFrame,
+    ) -> Result<PlayerId, EndpointError> {
+        checkpoint
+            .validate()
+            .map_err(|error| TransportError::InvalidMessage {
+                message: error.to_string(),
+            })?;
+        let player_id = checkpoint.checksum().player_id();
+        if player_id == self.local_hello.player().id() {
+            return Err(EndpointError::LocalPlayerEcho { player_id });
+        }
+        if !self.peers.contains_key(&player_id) {
+            return Err(EndpointError::UnknownPeerCheckpoint { player_id });
+        }
+        if let Some(existing) = self.peer_checkpoints.get(&player_id) {
+            if existing != &checkpoint {
+                return Err(EndpointError::ConflictingPeerCheckpoint { player_id });
+            }
+            return Ok(player_id);
+        }
+        self.peer_checkpoints.insert(player_id, checkpoint);
+        Ok(player_id)
+    }
+
+    fn validate_peer_menu_choice(&self, choice: &MenuChoiceFrame) -> Result<(), EndpointError> {
+        choice
+            .validate()
+            .map_err(|error| TransportError::InvalidMessage {
+                message: error.to_string(),
+            })?;
+        let player_id = choice.player_id();
+        if player_id == self.local_hello.player().id() {
+            return Err(EndpointError::LocalPlayerEcho { player_id });
+        }
+        if !self.peers.contains_key(&player_id) {
+            return Err(EndpointError::UnknownPeerMenuChoice { player_id });
+        }
+        Ok(())
+    }
+
+    fn validate_peer_menu_choice_result(
+        &self,
+        result: &MenuChoiceResultFrame,
+    ) -> Result<(), EndpointError> {
+        result
+            .validate()
+            .map_err(|error| TransportError::InvalidMessage {
+                message: error.to_string(),
+            })?;
+        self.validate_peer_menu_choice(result.choice())
     }
 }
 
@@ -263,11 +396,17 @@ enum WireLinkMessage {
     LinkByte(LinkByteFrame),
     LinkClockSync(LinkClockSyncFrame),
     Input(PlayerInputFrame),
+    MenuChoice(MenuChoiceFrame),
+    MenuChoiceResult(MenuChoiceResultFrame),
     InputJournal(DeterministicInputJournalFrame),
+    DeterministicReplay(DeterministicReplayBundle),
+    SaveResumeReplay(SaveResumeReplayBundle),
+    SaveSummary(SessionSaveSummaryFrame),
+    SaveCheckpoint(SessionSaveCheckpointFrame),
     StateHash(StateChecksumFrame),
     CommandChecksum(CommandChecksumResult),
-    RuntimeCommand(RuntimeCommandFrame),
-    RuntimeCommandResult(RuntimeCommandResultFrame),
+    RuntimeCommand(SessionRuntimeCommandFrame),
+    RuntimeCommandResult(SessionRuntimeCommandResultFrame),
     Presence(OverworldPresence),
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
@@ -281,33 +420,70 @@ struct WireLinkFrame {
     message: WireLinkMessage,
 }
 
-impl From<&LinkMessage> for WireLinkMessage {
-    fn from(message: &LinkMessage) -> Self {
+impl WireLinkMessage {
+    fn from_link_message(
+        message: &LinkMessage,
+        session: &LinkSessionIdentity,
+    ) -> Result<Self, TransportError> {
         match message {
-            LinkMessage::Hello(hello) => Self::Hello(hello.clone()),
-            LinkMessage::RngInit { state } => Self::RngInit { state: *state },
-            LinkMessage::BattleAction(action) => Self::BattleAction(action.clone()),
-            LinkMessage::TradeOffer(offer) => Self::TradeOffer(offer.clone()),
+            LinkMessage::Hello(hello) => Ok(Self::Hello(hello.clone())),
+            LinkMessage::RngInit { state } => Ok(Self::RngInit { state: *state }),
+            LinkMessage::BattleAction(action) => Ok(Self::BattleAction(action.clone())),
+            LinkMessage::TradeOffer(offer) => Ok(Self::TradeOffer(offer.clone())),
             LinkMessage::TradeConfirmation(confirmation) => {
-                Self::TradeConfirmation(confirmation.clone())
+                Ok(Self::TradeConfirmation(confirmation.clone()))
             }
-            LinkMessage::LinkByte(frame) => Self::LinkByte(frame.clone()),
-            LinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame.clone()),
-            LinkMessage::Input(input) => Self::Input(input.clone()),
-            LinkMessage::InputJournal(journal) => Self::InputJournal(journal.clone()),
-            LinkMessage::StateHash(checksum) => Self::StateHash(checksum.clone()),
-            LinkMessage::CommandChecksum(result) => Self::CommandChecksum(result.clone()),
-            LinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command.clone()),
-            LinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result.clone()),
-            LinkMessage::Presence(presence) => Self::Presence(presence.clone()),
-            LinkMessage::InteractionRequest(request) => Self::InteractionRequest(request.clone()),
+            LinkMessage::LinkByte(frame) => Ok(Self::LinkByte(frame.clone())),
+            LinkMessage::LinkClockSync(frame) => Ok(Self::LinkClockSync(frame.clone())),
+            LinkMessage::Input(input) => Ok(Self::Input(input.clone())),
+            LinkMessage::MenuChoice(choice) => Ok(Self::MenuChoice(choice.clone())),
+            LinkMessage::MenuChoiceResult(result) => Ok(Self::MenuChoiceResult(result.clone())),
+            LinkMessage::InputJournal(journal) => Ok(Self::InputJournal(journal.clone())),
+            LinkMessage::DeterministicReplay(bundle) => {
+                Ok(Self::DeterministicReplay(bundle.clone()))
+            }
+            LinkMessage::SaveResumeReplay(bundle) => Ok(Self::SaveResumeReplay(bundle.clone())),
+            LinkMessage::SaveSummary(summary) => Ok(Self::SaveSummary(
+                SessionSaveSummaryFrame::new(session.clone(), summary.clone()).map_err(
+                    |error| TransportError::InvalidMessage {
+                        message: error.to_string(),
+                    },
+                )?,
+            )),
+            LinkMessage::SaveCheckpoint(checkpoint) => Ok(Self::SaveCheckpoint(
+                SessionSaveCheckpointFrame::new(session.clone(), checkpoint.clone()).map_err(
+                    |error| TransportError::InvalidMessage {
+                        message: error.to_string(),
+                    },
+                )?,
+            )),
+            LinkMessage::StateHash(checksum) => Ok(Self::StateHash(checksum.clone())),
+            LinkMessage::CommandChecksum(result) => Ok(Self::CommandChecksum(result.clone())),
+            LinkMessage::RuntimeCommand(command) => Ok(Self::RuntimeCommand(
+                SessionRuntimeCommandFrame::new(session.clone(), command.clone()).map_err(
+                    |error| TransportError::InvalidMessage {
+                        message: error.to_string(),
+                    },
+                )?,
+            )),
+            LinkMessage::RuntimeCommandResult(result) => Ok(Self::RuntimeCommandResult(
+                SessionRuntimeCommandResultFrame::new(session.clone(), result.clone()).map_err(
+                    |error| TransportError::InvalidMessage {
+                        message: error.to_string(),
+                    },
+                )?,
+            )),
+            LinkMessage::Presence(presence) => Ok(Self::Presence(presence.clone())),
+            LinkMessage::InteractionRequest(request) => {
+                Ok(Self::InteractionRequest(request.clone()))
+            }
             LinkMessage::InteractionResponse(response) => {
-                Self::InteractionResponse(response.clone())
+                Ok(Self::InteractionResponse(response.clone()))
             }
-            LinkMessage::Disconnect { player_id, reason } => Self::Disconnect {
+            LinkMessage::Disconnect { player_id, reason } => Ok(Self::Disconnect {
                 player_id: *player_id,
                 reason: reason.clone(),
-            },
+            }),
         }
     }
 }
@@ -325,11 +501,23 @@ impl From<WireLinkMessage> for LinkMessage {
             WireLinkMessage::LinkByte(frame) => Self::LinkByte(frame),
             WireLinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame),
             WireLinkMessage::Input(input) => Self::Input(input),
+            WireLinkMessage::MenuChoice(choice) => Self::MenuChoice(choice),
+            WireLinkMessage::MenuChoiceResult(result) => Self::MenuChoiceResult(result),
             WireLinkMessage::InputJournal(journal) => Self::InputJournal(journal),
+            WireLinkMessage::DeterministicReplay(bundle) => Self::DeterministicReplay(bundle),
+            WireLinkMessage::SaveResumeReplay(bundle) => Self::SaveResumeReplay(bundle),
+            WireLinkMessage::SaveSummary(summary) => Self::SaveSummary(summary.into_summary()),
+            WireLinkMessage::SaveCheckpoint(checkpoint) => {
+                Self::SaveCheckpoint(checkpoint.into_checkpoint())
+            }
             WireLinkMessage::StateHash(checksum) => Self::StateHash(checksum),
             WireLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result),
-            WireLinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command),
-            WireLinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result),
+            WireLinkMessage::RuntimeCommand(command) => {
+                Self::RuntimeCommand(command.into_command())
+            }
+            WireLinkMessage::RuntimeCommandResult(result) => {
+                Self::RuntimeCommandResult(result.into_result())
+            }
             WireLinkMessage::Presence(presence) => Self::Presence(presence),
             WireLinkMessage::InteractionRequest(request) => Self::InteractionRequest(request),
             WireLinkMessage::InteractionResponse(response) => Self::InteractionResponse(response),
@@ -348,7 +536,10 @@ pub struct LinkFrameCodec {
 
 impl Default for LinkFrameCodec {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_FRAME_BYTES).expect("default frame limit fits link header")
+        Self {
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            session: None,
+        }
     }
 }
 
@@ -386,8 +577,8 @@ impl LinkFrameCodec {
         validate_link_message(message)?;
         validate_frame_session(&session, message)?;
         let wire_frame = WireLinkFrame {
+            message: WireLinkMessage::from_link_message(message, &session)?,
             session,
-            message: WireLinkMessage::from(message),
         };
         let payload = bincode::serde::encode_to_vec(&wire_frame, link_frame_binary_config())
             .map_err(|error| TransportError::InvalidPayload {
@@ -478,6 +669,7 @@ impl LinkFrameCodec {
             validate_link_session_identity(expected_session, &wire_frame.session)
                 .map_err(session_mismatch_error)?;
         }
+        validate_wire_frame_session(&wire_frame.session, &wire_frame.message)?;
         let message = wire_frame.message.into();
         if self.session.is_none() && !matches!(message, LinkMessage::Hello(_)) {
             return Err(TransportError::MissingSessionBinding);
@@ -534,6 +726,116 @@ fn validate_frame_session(
             validate_link_session_identity(session, journal_frame.journal().session())
                 .map_err(session_mismatch_error)?;
         }
+        LinkMessage::DeterministicReplay(bundle) => {
+            validate_link_session_identity(session, bundle.input_journal().journal().session())
+                .map_err(session_mismatch_error)?;
+        }
+        LinkMessage::SaveResumeReplay(bundle) => {
+            validate_link_session_identity(session, bundle.checkpoint().session())
+                .map_err(session_mismatch_error)?;
+            validate_link_session_identity(
+                session,
+                bundle.replay().input_journal().journal().session(),
+            )
+            .map_err(session_mismatch_error)?;
+            bundle
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        LinkMessage::SaveSummary(summary) => {
+            let frame = SessionSaveSummaryFrame::new(session.clone(), summary.clone()).map_err(
+                |error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                },
+            )?;
+            frame
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        LinkMessage::SaveCheckpoint(checkpoint) => {
+            let frame = SessionSaveCheckpointFrame::new(session.clone(), checkpoint.clone())
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+            frame
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_wire_frame_session(
+    session: &LinkSessionIdentity,
+    message: &WireLinkMessage,
+) -> Result<(), TransportError> {
+    match message {
+        WireLinkMessage::RuntimeCommand(command) => {
+            validate_link_session_identity(session, command.session())
+                .map_err(session_mismatch_error)?;
+            command
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        WireLinkMessage::RuntimeCommandResult(result) => {
+            validate_link_session_identity(session, result.session())
+                .map_err(session_mismatch_error)?;
+            result
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        WireLinkMessage::DeterministicReplay(bundle) => {
+            validate_link_session_identity(session, bundle.input_journal().journal().session())
+                .map_err(session_mismatch_error)?;
+            bundle
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        WireLinkMessage::SaveResumeReplay(bundle) => {
+            validate_link_session_identity(session, bundle.checkpoint().session())
+                .map_err(session_mismatch_error)?;
+            validate_link_session_identity(
+                session,
+                bundle.replay().input_journal().journal().session(),
+            )
+            .map_err(session_mismatch_error)?;
+            bundle
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        WireLinkMessage::SaveSummary(summary) => {
+            validate_link_session_identity(session, summary.session())
+                .map_err(session_mismatch_error)?;
+            summary
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
+        WireLinkMessage::SaveCheckpoint(checkpoint) => {
+            validate_link_session_identity(session, checkpoint.session())
+                .map_err(session_mismatch_error)?;
+            checkpoint
+                .validate()
+                .map_err(|error| TransportError::InvalidMessage {
+                    message: error.to_string(),
+                })?;
+        }
         _ => {}
     }
     Ok(())
@@ -573,7 +875,7 @@ mod tests {
         LockstepFrame, MultiplayerInteractionKind, PlayerIdentity, PlayerInputFrame,
         StateChecksumFrame, TradeConfirmation, TradeOffer,
     };
-    use crystal_core::save::SaveModpackIdentity;
+    use crystal_core::save::{SaveGameSummary, SaveModpackIdentity};
     use crystal_core::timing::Frame;
 
     fn modpack() -> SaveModpackIdentity {
@@ -616,6 +918,21 @@ mod tests {
             StateChecksum::new(144, 0xaabbccdd),
         )
         .expect("runtime command")
+    }
+
+    fn save_summary(frame: u64) -> SaveGameSummary {
+        serde_json::from_value(serde_json::json!({
+            "format_version": crystal_core::save::SAVE_FORMAT_VERSION,
+            "modpack": {
+                "id": "core-modular",
+                "hash": "1234abcd"
+            },
+            "pack_content_hash": pack_content_hash(),
+            "created_frame": frame,
+            "saved_frame": frame,
+            "state_frame": frame
+        }))
+        .expect("save summary")
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
@@ -683,6 +1000,34 @@ mod tests {
     }
 
     #[test]
+    fn binary_link_frame_round_trips_menu_choice_message() {
+        let codec = session_codec();
+        let message = LinkMessage::MenuChoice(
+            MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice"),
+        );
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_menu_choice_result_message() {
+        let codec = session_codec();
+        let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
+        let message = LinkMessage::MenuChoiceResult(
+            MenuChoiceResultFrame::new(
+                choice,
+                StateChecksumFrame::new(2, Frame(145), 0xaabb_ccdd),
+                "2",
+            )
+            .expect("menu choice result"),
+        );
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
     fn binary_link_frame_round_trips_input_journal_message() {
         let codec = session_codec();
         let journal = DeterministicInputJournal::new(
@@ -690,8 +1035,10 @@ mod tests {
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
-            vec![LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
-                .expect("lockstep frame")],
+            vec![
+                LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                    .expect("lockstep frame"),
+            ],
         )
         .expect("journal");
         let message =
@@ -699,6 +1046,153 @@ mod tests {
         let frame = codec.encode(&message).expect("encode");
 
         assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_deterministic_replay_bundle_message() {
+        let codec = session_codec();
+        let journal = DeterministicInputJournal::new(
+            session(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(146), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(
+                    144,
+                    std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]),
+                )
+                .expect("lockstep frame 144"),
+                LockstepFrame::new(
+                    145,
+                    std::collections::BTreeMap::from([(1, 0x00), (2, 0x80)]),
+                )
+                .expect("lockstep frame 145"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let command = runtime_command_frame();
+        let result = RuntimeCommandResultFrame::new(
+            command.clone(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbcc_ddee),
+            "overworld_input_applied",
+        )
+        .expect("runtime command result");
+        let menu_result = MenuChoiceResultFrame::new(
+            MenuChoiceFrame::new(1, Frame(145), "RuntimeMenu", 1, 4).expect("menu choice"),
+            StateChecksumFrame::new(1, Frame(146), 0xbbcc_ddee),
+            "2",
+        )
+        .expect("menu choice result");
+        let bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            vec![SessionRuntimeCommandFrame::new(session(), command).expect("session command")],
+            vec![
+                SessionRuntimeCommandResultFrame::new(session(), result)
+                    .expect("session command result"),
+            ],
+            vec![menu_result],
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay bundle");
+        let message = LinkMessage::DeterministicReplay(bundle);
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_save_resume_replay_bundle_message() {
+        let codec = session_codec();
+        let checkpoint = SessionSaveCheckpointFrame::new(
+            session(),
+            SaveCheckpointFrame::new(
+                save_summary(144),
+                StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            )
+            .expect("save checkpoint"),
+        )
+        .expect("session checkpoint");
+        let journal = DeterministicInputJournal::new(
+            session(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(145), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(
+                    144,
+                    std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]),
+                )
+                .expect("lockstep frame"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let replay = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay bundle");
+        let bundle =
+            SaveResumeReplayBundle::new(checkpoint.clone(), replay).expect("save resume replay");
+        let message = LinkMessage::SaveResumeReplay(bundle.clone());
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+        let wire_frame: WireLinkFrame =
+            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], link_frame_binary_config())
+                .expect("decode wire frame")
+                .0;
+        let WireLinkMessage::SaveResumeReplay(bound) = wire_frame.message else {
+            panic!("expected save resume replay wire message");
+        };
+        assert_eq!(bound, bundle);
+        assert_eq!(bound.checkpoint(), &checkpoint);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_session_bound_save_summary_message() {
+        let codec = session_codec();
+        let summary = save_summary(144);
+        let message = LinkMessage::SaveSummary(summary.clone());
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+        let wire_frame: WireLinkFrame =
+            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], link_frame_binary_config())
+                .expect("decode wire frame")
+                .0;
+        let WireLinkMessage::SaveSummary(bound) = wire_frame.message else {
+            panic!("expected save summary wire message");
+        };
+        assert_eq!(bound.session(), &session());
+        assert_eq!(bound.summary(), &summary);
+    }
+
+    #[test]
+    fn binary_link_frame_round_trips_session_bound_save_checkpoint_message() {
+        let codec = session_codec();
+        let checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd),
+        )
+        .expect("save checkpoint");
+        let message = LinkMessage::SaveCheckpoint(checkpoint.clone());
+        let frame = codec.encode(&message).expect("encode");
+
+        assert_eq!(codec.decode(&frame).expect("decode"), message);
+        let wire_frame: WireLinkFrame =
+            bincode::serde::decode_from_slice(&frame[HEADER_LEN..], link_frame_binary_config())
+                .expect("decode wire frame")
+                .0;
+        let WireLinkMessage::SaveCheckpoint(bound) = wire_frame.message else {
+            panic!("expected save checkpoint wire message");
+        };
+        assert_eq!(bound.session(), &session());
+        assert_eq!(bound.checkpoint(), &checkpoint);
     }
 
     #[test]
@@ -749,6 +1243,24 @@ mod tests {
     }
 
     #[test]
+    fn binary_link_frame_rejects_runtime_command_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new("session-2", modpack(), pack_content_hash())
+            .expect("other session");
+        let command = SessionRuntimeCommandFrame::new(other_session, runtime_command_frame())
+            .expect("session-bound command");
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::RuntimeCommand(command),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn binary_link_frame_round_trips_payload_hashed_runtime_command_result_message() {
         let codec = session_codec();
         let result = RuntimeCommandResultFrame::new(
@@ -772,6 +1284,30 @@ mod tests {
             fnv1a32_bytes(decoded.request().payload().bytes())
         );
         assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn binary_link_frame_rejects_runtime_command_result_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new("session-2", modpack(), pack_content_hash())
+            .expect("other session");
+        let result = RuntimeCommandResultFrame::new(
+            runtime_command_frame(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbccddee),
+            "overworld_input_applied",
+        )
+        .expect("runtime command result");
+        let result = SessionRuntimeCommandResultFrame::new(other_session, result)
+            .expect("session-bound command result");
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::RuntimeCommandResult(result),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
     }
 
     #[test]
@@ -967,6 +1503,8 @@ mod tests {
         assert!(
             error.to_string().contains("unknown field `command`")
                 || error.to_string().contains("unknown field `arguments`")
+                || error.to_string().contains("unknown field `player_id`")
+                || error.to_string().contains("missing field `session`")
                 || error.to_string().contains("missing field `payload`"),
             "{error}"
         );
@@ -982,13 +1520,15 @@ mod tests {
             bytes,
             0x1111_1111,
         );
-        let message = LinkMessage::RuntimeCommand(RuntimeCommandFrame::new_unchecked_for_tests(
+        let command = RuntimeCommandFrame::new_unchecked_for_tests(
             2,
             17,
             payload,
             StateChecksum::new(144, 0xaabbccdd),
+        );
+        let frame = frame_from_wire_message(WireLinkMessage::RuntimeCommand(
+            SessionRuntimeCommandFrame::new_unchecked_for_tests(session(), command),
         ));
-        let frame = frame_from_wire_message(WireLinkMessage::from(&message));
 
         assert_eq!(
             codec.decode(&frame),
@@ -1255,8 +1795,10 @@ mod tests {
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
-            vec![LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
-                .expect("lockstep frame")],
+            vec![
+                LockstepFrame::new(4, std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                    .expect("lockstep frame"),
+            ],
         )
         .expect("journal");
         let frame = frame_from_wire_frame(WireLinkFrame {
@@ -1264,6 +1806,157 @@ mod tests {
             message: WireLinkMessage::InputJournal(
                 DeterministicInputJournalFrame::new(journal).expect("frame"),
             ),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_deterministic_replay_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new(
+            "session-1",
+            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            pack_content_hash(),
+        )
+        .expect("other session");
+        let journal = DeterministicInputJournal::new(
+            other_session.clone(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(146), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(
+                    144,
+                    std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]),
+                )
+                .expect("lockstep frame 144"),
+                LockstepFrame::new(
+                    145,
+                    std::collections::BTreeMap::from([(1, 0x00), (2, 0x80)]),
+                )
+                .expect("lockstep frame 145"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("frame");
+        let command = runtime_command_frame();
+        let result = RuntimeCommandResultFrame::new(
+            command.clone(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbcc_ddee),
+            "overworld_input_applied",
+        )
+        .expect("runtime command result");
+        let bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            vec![
+                SessionRuntimeCommandFrame::new(other_session.clone(), command)
+                    .expect("session command"),
+            ],
+            vec![
+                SessionRuntimeCommandResultFrame::new(other_session, result)
+                    .expect("session command result"),
+            ],
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay bundle");
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::DeterministicReplay(bundle),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_save_resume_replay_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new("session-2", modpack(), pack_content_hash())
+            .expect("other session");
+        let checkpoint = SessionSaveCheckpointFrame::new(
+            other_session,
+            SaveCheckpointFrame::new(
+                save_summary(144),
+                StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            )
+            .expect("save checkpoint"),
+        )
+        .expect("session checkpoint");
+        let journal = DeterministicInputJournal::new(
+            session(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(145), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(
+                    144,
+                    std::collections::BTreeMap::from([(1, 0x10), (2, 0x20)]),
+                )
+                .expect("lockstep frame"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let replay = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay bundle");
+        let bundle = SaveResumeReplayBundle::new_unchecked_for_tests(checkpoint, replay);
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::SaveResumeReplay(bundle),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_save_summary_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new("session-2", modpack(), pack_content_hash())
+            .expect("other session");
+        let summary =
+            SessionSaveSummaryFrame::new_unchecked_for_tests(other_session, save_summary(144));
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::SaveSummary(summary),
+        });
+
+        assert!(matches!(
+            codec.decode(&frame),
+            Err(TransportError::SessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binary_link_codec_rejects_save_checkpoint_with_embedded_session_mismatch() {
+        let codec = session_codec();
+        let other_session = LinkSessionIdentity::new("session-2", modpack(), pack_content_hash())
+            .expect("other session");
+        let checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd),
+        )
+        .expect("save checkpoint");
+        let checkpoint =
+            SessionSaveCheckpointFrame::new_unchecked_for_tests(other_session, checkpoint);
+        let frame = frame_from_wire_frame(WireLinkFrame {
+            session: session(),
+            message: WireLinkMessage::SaveCheckpoint(checkpoint),
         });
 
         assert!(matches!(
@@ -1417,19 +2110,44 @@ mod tests {
         let input =
             LinkMessage::Input(PlayerInputFrame::new(1, Frame(144), 0b1001_0000).expect("input"));
         assert_eq!(host.send(input.clone()), Err(EndpointError::NotReady));
+        let checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(1, Frame(144), 0xaabb_ccdd),
+        )
+        .expect("save checkpoint");
+        let checkpoint_message = LinkMessage::SaveCheckpoint(checkpoint.clone());
+        assert_eq!(
+            host.send(checkpoint_message.clone()),
+            Err(EndpointError::NotReady)
+        );
 
         host.send_hello().expect("host hello");
+        host.send(checkpoint_message)
+            .expect("checkpoint send after local hello");
         peer.send_hello().expect("peer hello");
         assert_eq!(
             peer.poll().expect("peer poll"),
-            vec![LinkEndpointEvent::PeerHello(host.local_hello().clone())]
+            vec![
+                LinkEndpointEvent::PeerHello(host.local_hello().clone()),
+                LinkEndpointEvent::PeerSaveCheckpoint {
+                    player_id: 1,
+                    checkpoint: checkpoint.clone()
+                }
+            ]
         );
+        assert_eq!(peer.peer_checkpoints().get(&1), Some(&checkpoint));
         assert_eq!(
             host.poll().expect("host poll"),
             vec![LinkEndpointEvent::PeerHello(peer.local_hello().clone())]
         );
         assert!(host.is_ready());
+        assert!(!host.is_ready_for_gameplay());
+        assert_eq!(
+            host.require_checkpoints_for_players([1, 2]),
+            Err(EndpointError::MissingPeerCheckpoint { player_id: 2 })
+        );
         assert!(peer.is_ready());
+        assert!(peer.is_ready_for_gameplay());
         assert_eq!(
             host.peers()
                 .get(&2)
@@ -1437,6 +2155,69 @@ mod tests {
                 .player()
                 .display_name(),
             "PEER"
+        );
+        assert_eq!(host.send(input.clone()), Err(EndpointError::NotReady));
+        let peer_checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(2, Frame(144), 0xbbcc_ddee),
+        )
+        .expect("peer checkpoint");
+        peer.send(LinkMessage::SaveCheckpoint(peer_checkpoint.clone()))
+            .expect("peer checkpoint send after hello");
+        assert!(matches!(
+            host.poll().expect("host checkpoint poll").as_slice(),
+            [LinkEndpointEvent::PeerSaveCheckpoint { player_id: 2, .. }]
+        ));
+        assert!(host.has_peer_checkpoint(2));
+        assert!(host.is_ready_for_gameplay());
+        assert_eq!(host.require_checkpoints_for_players([1, 2]), Ok(()));
+        peer.send(LinkMessage::SaveCheckpoint(peer_checkpoint))
+            .expect("duplicate peer checkpoint send");
+        assert!(matches!(
+            host.poll()
+                .expect("host duplicate checkpoint poll")
+                .as_slice(),
+            [LinkEndpointEvent::PeerSaveCheckpoint { player_id: 2, .. }]
+        ));
+        let menu_choice =
+            MenuChoiceFrame::new(2, Frame(145), "RuntimeMenu", 1, 4).expect("menu choice");
+        peer.send(LinkMessage::MenuChoice(menu_choice.clone()))
+            .expect("peer menu choice send");
+        assert_eq!(
+            host.poll().expect("host menu choice poll"),
+            vec![LinkEndpointEvent::PeerMenuChoice(menu_choice)]
+        );
+        let menu_result = MenuChoiceResultFrame::new(
+            MenuChoiceFrame::new(2, Frame(145), "RuntimeMenu", 1, 4).expect("menu choice"),
+            StateChecksumFrame::new(2, Frame(146), 0xddee_ff00),
+            "2",
+        )
+        .expect("menu choice result");
+        peer.send(LinkMessage::MenuChoiceResult(menu_result.clone()))
+            .expect("peer menu choice result send");
+        assert_eq!(
+            host.poll().expect("host menu choice result poll"),
+            vec![LinkEndpointEvent::PeerMenuChoiceResult(menu_result)]
+        );
+        peer.send(LinkMessage::MenuChoice(
+            MenuChoiceFrame::new(3, Frame(145), "RuntimeMenu", 1, 4)
+                .expect("unknown peer menu choice"),
+        ))
+        .expect("unknown peer menu choice transport send");
+        assert_eq!(
+            host.poll(),
+            Err(EndpointError::UnknownPeerMenuChoice { player_id: 3 })
+        );
+        let conflicting_checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(2, Frame(144), 0xccdd_eeff),
+        )
+        .expect("conflicting checkpoint");
+        peer.send(LinkMessage::SaveCheckpoint(conflicting_checkpoint))
+            .expect("conflicting checkpoint transport send");
+        assert_eq!(
+            host.poll(),
+            Err(EndpointError::ConflictingPeerCheckpoint { player_id: 2 })
         );
 
         host.send(input.clone()).expect("gameplay send after hello");
@@ -1457,12 +2238,35 @@ mod tests {
 
         peer.send_hello().expect("peer hello");
         host.poll().expect("record first peer hello");
-        peer.transport_mut().send(LinkMessage::Hello(hello_for(2, "PEER_2")))
+        peer.transport_mut()
+            .send(LinkMessage::Hello(hello_for(2, "PEER_2")))
             .expect("conflicting hello sends");
 
         assert_eq!(
             host.poll(),
             Err(EndpointError::ConflictingPeerHello { player_id: 2 })
+        );
+    }
+
+    #[test]
+    fn link_endpoint_rejects_peer_checkpoint_before_hello() {
+        let (host_transport, mut peer_transport) =
+            MemoryLinkTransport::pair_for_session(session()).expect("session transport");
+        let mut host =
+            LinkEndpoint::new(host_transport, hello_for(1, "HOST")).expect("host endpoint");
+        let checkpoint = SaveCheckpointFrame::new(
+            save_summary(144),
+            StateChecksumFrame::new(2, Frame(144), 0xbbcc_ddee),
+        )
+        .expect("peer checkpoint");
+
+        peer_transport
+            .send(LinkMessage::SaveCheckpoint(checkpoint))
+            .expect("session-bound checkpoint sends");
+
+        assert_eq!(
+            host.poll(),
+            Err(EndpointError::UnknownPeerCheckpoint { player_id: 2 })
         );
     }
 

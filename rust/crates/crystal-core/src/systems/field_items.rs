@@ -8,32 +8,143 @@ use crate::state::{EventFlagError, GameState};
 use crate::systems::script_objects::is_hideable_object_event_flag;
 use crate::world::map::TilePosition;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldItemPickup {
-    #[serde(deserialize_with = "required_field_item_token")]
     pub item_id: String,
     pub quantity: u16,
-    #[serde(deserialize_with = "required_field_item_token")]
     pub event_flag: String,
     pub source: FieldItemSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldItemPickup {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPickup {
+            #[serde(deserialize_with = "required_field_item_token")]
+            item_id: String,
+            quantity: u16,
+            #[serde(deserialize_with = "required_field_item_token")]
+            event_flag: String,
+            source: FieldItemSource,
+        }
+
+        let raw = RawPickup::deserialize(deserializer)?;
+        if raw.quantity == 0 {
+            return Err(serde::de::Error::custom(
+                "field item pickup quantity must be positive",
+            ));
+        }
+        validate_collectible_flag(&raw.event_flag)
+            .map_err(|error| serde::de::Error::custom(format!("{error:?}")))?;
+        Ok(Self {
+            item_id: raw.item_id,
+            quantity: raw.quantity,
+            event_flag: raw.event_flag,
+            source: raw.source,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptFieldPickup {
-    #[serde(deserialize_with = "required_script_field_pickup_command_token")]
     pub command: String,
-    #[serde(deserialize_with = "required_nullable_field_item_token")]
     pub item_id: Option<String>,
     pub quantity: u16,
-    #[serde(deserialize_with = "required_nullable_field_item_token")]
     pub event_flag: Option<String>,
-    #[serde(deserialize_with = "required_nullable_field_item_token")]
     pub fruit_tree_id: Option<String>,
-    #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptFieldPickup {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPickup {
+            #[serde(default, deserialize_with = "required_script_field_pickup_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_field_item_token")]
+            item_id: Option<String>,
+            quantity: u16,
+            #[serde(deserialize_with = "required_nullable_field_item_token")]
+            event_flag: Option<String>,
+            #[serde(deserialize_with = "required_nullable_field_item_token")]
+            fruit_tree_id: Option<String>,
+            #[serde(deserialize_with = "required_script_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawPickup::deserialize(deserializer)?;
+        if !raw.command.is_empty() {
+            match raw.command.as_str() {
+            "itemball" | "hiddenitem" => {
+                if raw.quantity == 0 {
+                    return Err(serde::de::Error::custom(
+                        "script field pickup quantity must be positive",
+                    ));
+                }
+                if raw.item_id.is_none() {
+                    return Err(serde::de::Error::custom(
+                        "script field pickup item_id is required",
+                    ));
+                }
+                let event_flag = raw.event_flag.as_deref().ok_or_else(|| {
+                    serde::de::Error::custom("script field pickup event_flag is required")
+                })?;
+                validate_collectible_flag(event_flag)
+                    .map_err(|error| serde::de::Error::custom(format!("{error:?}")))?;
+                if raw.fruit_tree_id.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "script field pickup fruit_tree_id must be null for item pickups",
+                    ));
+                }
+            }
+            "fruittree" => {
+                if raw.quantity != 1 {
+                    return Err(serde::de::Error::custom(
+                        "fruit tree pickup quantity must be exactly 1",
+                    ));
+                }
+                if raw.item_id.is_some() || raw.event_flag.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "fruit tree pickup must not inline item_id or event_flag",
+                    ));
+                }
+                if raw.fruit_tree_id.is_none() {
+                    return Err(serde::de::Error::custom(
+                        "fruit tree pickup fruit_tree_id is required",
+                    ));
+                }
+            }
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown script field pickup command '{}'",
+                    raw.command
+                )));
+            }
+            }
+        }
+
+        Ok(Self {
+            command: raw.command,
+            item_id: raw.item_id,
+            quantity: raw.quantity,
+            event_flag: raw.event_flag,
+            fruit_tree_id: raw.fruit_tree_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -250,6 +361,9 @@ pub fn script_field_pickup_issues(
         if pickup.item_id.is_some() || pickup.event_flag.is_some() {
             issues.push(ScriptFieldPickupIssue::MalformedFruitTree);
         }
+        if pickup.quantity != 1 {
+            issues.push(ScriptFieldPickupIssue::InvalidQuantity);
+        }
     } else if !is_exact_script_field_pickup_command_token(&pickup.command) {
         issues.push(ScriptFieldPickupIssue::InvalidCommand);
     } else if !is_known_script_field_pickup_command(&pickup.command) {
@@ -406,6 +520,9 @@ pub enum FieldItemError {
         command: String,
     },
     FruitTreeRequiresCatalog,
+    InvalidScriptPickup {
+        issue: ScriptFieldPickupIssue,
+    },
     MalformedScriptPickup {
         command: String,
         reason: String,
@@ -513,12 +630,28 @@ pub fn pickup_script_field_item(
     fruit_trees: &FruitTreeCatalog,
     pickup: ScriptFieldPickup,
 ) -> Result<FieldItemPickupOutcome, FieldItemError> {
+    let pickup = resolve_script_field_item_pickup(item_catalog, fruit_trees, pickup)?;
+    pickup_field_item(state, item_catalog, pickup)
+}
+
+pub fn resolve_script_field_item_pickup(
+    item_catalog: &BTreeMap<String, Item>,
+    fruit_trees: &FruitTreeCatalog,
+    pickup: ScriptFieldPickup,
+) -> Result<FieldItemPickup, FieldItemError> {
+    if let Some(issue) = script_field_pickup_issues(&pickup, item_catalog, fruit_trees)
+        .into_iter()
+        .next()
+    {
+        return Err(FieldItemError::InvalidScriptPickup { issue });
+    }
     let pickup = if pickup.command == "fruittree" {
         pickup.to_fruit_tree_pickup(fruit_trees)?
     } else {
         pickup.to_field_item_pickup()?
     };
-    pickup_field_item(state, item_catalog, pickup)
+    validate_field_item_pickup(item_catalog, &pickup)?;
+    Ok(pickup)
 }
 
 pub fn pickup_field_item(
@@ -526,13 +659,7 @@ pub fn pickup_field_item(
     item_catalog: &BTreeMap<String, Item>,
     pickup: FieldItemPickup,
 ) -> Result<FieldItemPickupOutcome, FieldItemError> {
-    if pickup.quantity == 0 {
-        return Err(FieldItemError::InvalidQuantity);
-    }
-    validate_collectible_flag(&pickup.event_flag)?;
-    validate_field_item_token(&pickup.item_id).map_err(|_| FieldItemError::InvalidItem {
-        item_id: pickup.item_id.clone(),
-    })?;
+    validate_field_item_pickup(item_catalog, &pickup)?;
     if state
         .flags
         .is_event_flag_set(&pickup.event_flag)
@@ -572,6 +699,25 @@ pub fn pickup_field_item(
         event_flag: pickup.event_flag,
         source: pickup.source,
     })
+}
+
+pub fn validate_field_item_pickup(
+    item_catalog: &BTreeMap<String, Item>,
+    pickup: &FieldItemPickup,
+) -> Result<(), FieldItemError> {
+    if pickup.quantity == 0 {
+        return Err(FieldItemError::InvalidQuantity);
+    }
+    validate_collectible_flag(&pickup.event_flag)?;
+    validate_field_item_token(&pickup.item_id).map_err(|_| FieldItemError::InvalidItem {
+        item_id: pickup.item_id.clone(),
+    })?;
+    item_catalog
+        .get(&pickup.item_id)
+        .ok_or_else(|| FieldItemError::UnknownItem {
+            item_id: pickup.item_id.clone(),
+        })?;
+    Ok(())
 }
 
 pub fn fruit_tree_collected_flag(fruit_tree_id: &str) -> String {
@@ -1151,6 +1297,13 @@ mod tests {
                 ScriptFieldPickupIssue::MalformedFruitTree,
             ]
         );
+        bad_fruit.item_id = None;
+        bad_fruit.quantity = 2;
+        bad_fruit.fruit_tree_id = Some("FRUITTREE_ROUTE_29".to_string());
+        assert_eq!(
+            script_field_pickup_issues(&bad_fruit, &items, &fruit_trees),
+            vec![ScriptFieldPickupIssue::InvalidQuantity]
+        );
     }
 
     #[test]
@@ -1274,8 +1427,8 @@ mod tests {
 
         assert_eq!(
             pickup_script_field_item(&mut state, &items, &fruit_trees, pickup),
-            Err(FieldItemError::UnknownFruitTree {
-                fruit_tree_id: "fruittree_route_29".to_string(),
+            Err(FieldItemError::InvalidScriptPickup {
+                issue: ScriptFieldPickupIssue::UnknownFruitTree,
             })
         );
         assert!(state.bag.items.is_empty());
@@ -1301,8 +1454,36 @@ mod tests {
 
         assert_eq!(
             pickup_script_field_item(&mut state, &items, &fruit_trees, pickup),
-            Err(FieldItemError::InvalidFruitTree {
-                fruit_tree_id: "FRUITTREE ROUTE_29".to_string(),
+            Err(FieldItemError::InvalidScriptPickup {
+                issue: ScriptFieldPickupIssue::InvalidFruitTree,
+            })
+        );
+        assert!(state.bag.items.is_empty());
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("FRUITTREE_ROUTE_29_COLLECTED"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn script_pickup_runtime_rejects_invalid_pack_shape_before_state_mutation() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("BERRY", item_pocket("ITEM"))]);
+        let fruit_trees = FruitTreeCatalog(
+            [("FRUITTREE_ROUTE_29".to_string(), "BERRY".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut pickup = script_pickup("fruittree");
+        pickup.fruit_tree_id = Some("FRUITTREE_ROUTE_29".to_string());
+        pickup.quantity = 2;
+
+        assert_eq!(
+            pickup_script_field_item(&mut state, &items, &fruit_trees, pickup),
+            Err(FieldItemError::InvalidScriptPickup {
+                issue: ScriptFieldPickupIssue::InvalidQuantity,
             })
         );
         assert!(state.bag.items.is_empty());

@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::models::{Party, Pokemon};
 use crate::state::GameState;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepEventRules {
     pub poison_step_interval: u8,
@@ -13,6 +13,38 @@ pub struct StepEventRules {
     pub egg_nickname: String,
     pub happiness_step_counter_mask: u8,
     pub happiness_step_counter_target: u8,
+}
+
+impl<'de> Deserialize<'de> for StepEventRules {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawStepEventRules {
+            poison_step_interval: u8,
+            egg_step_trigger: u8,
+            hatched_egg_happiness: u8,
+            poison_status: String,
+            egg_nickname: String,
+            happiness_step_counter_mask: u8,
+            happiness_step_counter_target: u8,
+        }
+
+        let raw = RawStepEventRules::deserialize(deserializer)?;
+        let rules = Self {
+            poison_step_interval: raw.poison_step_interval,
+            egg_step_trigger: raw.egg_step_trigger,
+            hatched_egg_happiness: raw.hatched_egg_happiness,
+            poison_status: raw.poison_status,
+            egg_nickname: raw.egg_nickname,
+            happiness_step_counter_mask: raw.happiness_step_counter_mask,
+            happiness_step_counter_target: raw.happiness_step_counter_target,
+        };
+        rules.validate_shape().map_err(D::Error::custom)?;
+        Ok(rules)
+    }
 }
 
 impl Default for StepEventRules {
@@ -29,6 +61,18 @@ impl Default for StepEventRules {
     }
 }
 
+impl StepEventRules {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self == &Self::default() {
+            return Ok(());
+        }
+        if let Some(issue) = step_event_rules_issues(self).into_iter().next() {
+            return Err(format!("invalid step event rules: {issue:?}"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StepEventRulesIssue {
@@ -36,6 +80,15 @@ pub enum StepEventRulesIssue {
     InvalidPoisonStatus { poison_status: String },
     InvalidEggNickname { egg_nickname: String },
     HappinessTargetOutsideMask { target: u8, mask: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+pub enum StepEventError {
+    #[error("step event rules are missing")]
+    MissingRules,
+    #[error("step event rules are invalid: {issue:?}")]
+    InvalidRules { issue: StepEventRulesIssue },
 }
 
 pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssue> {
@@ -64,6 +117,16 @@ pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssu
         });
     }
     issues
+}
+
+pub fn require_step_event_rules(rules: &StepEventRules) -> Result<(), StepEventError> {
+    if rules == &StepEventRules::default() {
+        return Err(StepEventError::MissingRules);
+    }
+    if let Some(issue) = step_event_rules_issues(rules).into_iter().next() {
+        return Err(StepEventError::InvalidRules { issue });
+    }
+    Ok(())
 }
 
 fn is_exact_step_event_token(value: &str) -> bool {
@@ -137,6 +200,15 @@ pub fn process_step(
     }
 }
 
+pub fn process_step_checked(
+    rules: &StepEventRules,
+    counters: &mut StepEventCounters,
+    party: &mut Party,
+) -> Result<StepEventResult, StepEventError> {
+    require_step_event_rules(rules)?;
+    Ok(process_step(rules, counters, party))
+}
+
 pub fn process_overworld_step(state: &mut GameState, rules: &StepEventRules) -> StepEventResult {
     let result = process_step(rules, &mut state.step_events, &mut state.storage.party);
     if state.repel_steps_remaining == 0 {
@@ -146,6 +218,14 @@ pub fn process_overworld_step(state: &mut GameState, rules: &StepEventRules) -> 
     }
     state.sync_party_from_storage();
     result
+}
+
+pub fn process_overworld_step_checked(
+    state: &mut GameState,
+    rules: &StepEventRules,
+) -> Result<StepEventResult, StepEventError> {
+    require_step_event_rules(rules)?;
+    Ok(process_overworld_step(state, rules))
 }
 
 pub fn apply_happiness_step(
@@ -340,6 +420,34 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn checked_step_processing_rejects_missing_or_invalid_rules_before_mutation() {
+        let mut party = Party::default();
+        let mut counters = StepEventCounters::default();
+        assert_eq!(
+            process_step_checked(&StepEventRules::default(), &mut counters, &mut party),
+            Err(StepEventError::MissingRules)
+        );
+        assert_eq!(counters, StepEventCounters::default());
+        assert_eq!(party, Party::default());
+
+        let mut bad_rules = rules();
+        bad_rules.poison_step_interval = 0;
+        let mut oddish = pokemon("ODDISH");
+        oddish.hp = 3;
+        oddish.status = Some("POISON".to_string());
+        party = party_with(vec![(0, oddish)]);
+        let before_party = party.clone();
+        assert_eq!(
+            process_step_checked(&bad_rules, &mut counters, &mut party),
+            Err(StepEventError::InvalidRules {
+                issue: StepEventRulesIssue::MissingPoisonStepInterval,
+            })
+        );
+        assert_eq!(counters, StepEventCounters::default());
+        assert_eq!(party, before_party);
     }
 
     fn pokemon(id: &str) -> Pokemon {

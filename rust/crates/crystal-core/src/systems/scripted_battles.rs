@@ -1,11 +1,27 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::battle::start::{StaticWildBattleStart, activate_static_wild_battle_start};
 use crate::map::ObjectEvent;
 use crate::state::{EventFlagError, GameState, RngSeedCommit};
 use crate::world::session::OverworldSession;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub const SCRIPT_TRAINER_TABLE_COMMANDS: &[&str] = &["trainer"];
+pub const SCRIPT_TRAINER_BATTLE_COMMANDS: &[&str] = &["winlosstext", "loadtrainer", "startbattle"];
+pub const SCRIPT_WILD_BATTLE_COMMANDS: &[&str] = &["loadwildmon", "startbattle"];
+
+pub fn is_known_script_trainer_table_command(command: &str) -> bool {
+    SCRIPT_TRAINER_TABLE_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_trainer_battle_command(command: &str) -> bool {
+    SCRIPT_TRAINER_BATTLE_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_wild_battle_command(command: &str) -> bool {
+    SCRIPT_WILD_BATTLE_COMMANDS.contains(&command)
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptedBattleEffects {
     #[serde(deserialize_with = "required_scripted_battle_token_vec")]
@@ -14,6 +30,46 @@ pub struct ScriptedBattleEffects {
     pub script_flags: Vec<String>,
     #[serde(deserialize_with = "required_scripted_battle_token_vec")]
     pub disappear_object_ids: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ScriptedBattleEffects {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptedBattleEffects {
+            #[serde(deserialize_with = "required_scripted_battle_token_vec")]
+            event_flags: Vec<String>,
+            #[serde(deserialize_with = "required_scripted_battle_token_vec")]
+            script_flags: Vec<String>,
+            #[serde(deserialize_with = "required_scripted_battle_token_vec")]
+            disappear_object_ids: Vec<String>,
+        }
+
+        let raw = RawScriptedBattleEffects::deserialize(deserializer)?;
+        let effects = Self {
+            event_flags: raw.event_flags,
+            script_flags: raw.script_flags,
+            disappear_object_ids: raw.disappear_object_ids,
+        };
+        effects.validate_shape().map_err(D::Error::custom)?;
+        Ok(effects)
+    }
+}
+
+impl ScriptedBattleEffects {
+    fn validate_shape(&self) -> Result<(), String> {
+        for event_flag in self.event_flags.iter().chain(self.script_flags.iter()) {
+            if event_flag == "0" || event_flag == "-1" {
+                return Err(format!(
+                    "scripted battle effect flag {event_flag} is not a real flag"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +293,24 @@ mod tests {
             object_identifier: Some(object_identifier.to_string()),
             sightline_direction_override: None,
         }
+    }
+
+    #[test]
+    fn exported_scripted_battle_command_sets_are_exact() {
+        assert!(SCRIPT_TRAINER_TABLE_COMMANDS.contains(&"trainer"));
+        assert!(SCRIPT_TRAINER_BATTLE_COMMANDS.contains(&"winlosstext"));
+        assert!(SCRIPT_TRAINER_BATTLE_COMMANDS.contains(&"loadtrainer"));
+        assert!(SCRIPT_TRAINER_BATTLE_COMMANDS.contains(&"startbattle"));
+        assert!(SCRIPT_WILD_BATTLE_COMMANDS.contains(&"loadwildmon"));
+        assert!(SCRIPT_WILD_BATTLE_COMMANDS.contains(&"startbattle"));
+        assert!(is_known_script_trainer_table_command("trainer"));
+        assert!(is_known_script_trainer_battle_command("loadtrainer"));
+        assert!(is_known_script_wild_battle_command("loadwildmon"));
+        assert!(!is_known_script_trainer_table_command("Trainer"));
+        assert!(!is_known_script_trainer_battle_command(
+            "fallback_loadtrainer"
+        ));
+        assert!(!is_known_script_wild_battle_command("legacy_loadwildmon"));
     }
 
     #[test]

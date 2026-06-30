@@ -1,13 +1,35 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::pokemon::Pokemon;
 
 pub const PARTY_SIZE: usize = 6;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Party {
     pub pokemon: [Option<Pokemon>; PARTY_SIZE],
+}
+
+impl<'de> Deserialize<'de> for Party {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawParty {
+            pokemon: [Option<Pokemon>; PARTY_SIZE],
+        }
+
+        let raw = RawParty::deserialize(deserializer)?;
+        let party = Self {
+            pokemon: raw.pokemon,
+        };
+        party
+            .validate_saved_state()
+            .map_err(serde::de::Error::custom)?;
+        Ok(party)
+    }
 }
 
 impl Default for Party {

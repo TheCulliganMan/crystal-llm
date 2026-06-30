@@ -8,9 +8,12 @@ use crate::state::{
     ScriptRuntimeVariableWrite,
 };
 
+pub const SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE: &str = "SPECIALCALL_NONE";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeCommand {
+    #[serde(default)]
     pub command: String,
     pub args: Vec<String>,
     pub source_script: String,
@@ -24,19 +27,93 @@ pub struct ScriptRuntimeInputs {
     pub game_version: Option<String>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoryEventScriptConstants {
     pub global: BTreeMap<String, i64>,
     pub maps: BTreeMap<String, BTreeMap<String, i64>>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for StoryEventScriptConstants {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawConstants {
+            global: BTreeMap<String, i64>,
+            maps: BTreeMap<String, BTreeMap<String, i64>>,
+        }
+
+        let raw = RawConstants::deserialize(deserializer)?;
+        for key in raw.global.keys() {
+            require_runtime_token("story_event_script_constants.global key", key)
+                .map_err(serde::de::Error::custom)?;
+        }
+        for (map_name, constants) in &raw.maps {
+            require_runtime_token("story_event_script_constants.maps key", map_name)
+                .map_err(serde::de::Error::custom)?;
+            for key in constants.keys() {
+                require_runtime_token(
+                    &format!("story_event_script_constants.maps[{map_name}] key"),
+                    key,
+                )
+                .map_err(serde::de::Error::custom)?;
+            }
+        }
+        Ok(Self {
+            global: raw.global,
+            maps: raw.maps,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InitializeEventsConfig {
     pub event_flags: Vec<String>,
     pub engine_flags: Vec<String>,
     pub variable_sprites: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for InitializeEventsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawConfig {
+            event_flags: Vec<String>,
+            engine_flags: Vec<String>,
+            variable_sprites: BTreeMap<String, String>,
+        }
+
+        let raw = RawConfig::deserialize(deserializer)?;
+        for flag in &raw.event_flags {
+            require_runtime_token("initialize_events.eventFlags", flag)
+                .map_err(serde::de::Error::custom)?;
+        }
+        for flag in &raw.engine_flags {
+            require_runtime_token("initialize_events.engineFlags", flag)
+                .map_err(serde::de::Error::custom)?;
+        }
+        for (sprite, replacement) in &raw.variable_sprites {
+            require_runtime_token("initialize_events.variableSprites key", sprite)
+                .map_err(serde::de::Error::custom)?;
+            require_runtime_token(
+                &format!("initialize_events.variableSprites[{sprite}]"),
+                replacement,
+            )
+            .map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            event_flags: raw.event_flags,
+            engine_flags: raw.engine_flags,
+            variable_sprites: raw.variable_sprites,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,14 +213,20 @@ pub enum ScriptRuntimeCommandError {
     EmptyArg { command: String },
     #[error("script runtime command '{command}' has a whitespace-padded argument '{arg}'")]
     PaddedArg { command: String, arg: String },
+    #[error("script runtime source script '{source_script}' is not exact pack syntax")]
+    InvalidSourceScript { source_script: String },
     #[error("script runtime command '{command}' has invalid numeric token syntax '{token}'")]
     InvalidNumericToken { command: String, token: String },
     #[error("script runtime command '{command}' has an unknown numeric token '{token}'")]
     UnknownNumericToken { command: String, token: String },
     #[error("script runtime command '{command}' requires script accumulator")]
     MissingAccumulator { command: String },
+    #[error("script runtime command '{command}' requires an active menu")]
+    MissingActiveMenu { command: String },
     #[error("script runtime command 'random' requires deterministic random input")]
     MissingRandomInput,
+    #[error("script runtime command 'random' requires a positive upper bound")]
+    RandomBoundZero,
     #[error("script runtime command 'random' received value {value} outside upper bound {bound}")]
     RandomInputOutOfRange { value: u32, bound: u32 },
     #[error("script runtime command 'checkver' requires explicit game version input")]
@@ -190,7 +273,7 @@ pub fn commit_interaction_script_dispatch(
     })
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeReferenceCatalog {
     pub special_routines: BTreeSet<String>,
@@ -201,6 +284,59 @@ pub struct ScriptRuntimeReferenceCatalog {
     pub special_phone_calls: BTreeSet<String>,
     pub npc_trades: BTreeSet<String>,
     pub script_labels: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for ScriptRuntimeReferenceCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCatalog {
+            special_routines: BTreeSet<String>,
+            trainer_classes: BTreeMap<String, String>,
+            items: BTreeSet<String>,
+            pokemon: BTreeSet<String>,
+            phone_contacts: BTreeSet<String>,
+            special_phone_calls: BTreeSet<String>,
+            npc_trades: BTreeSet<String>,
+            script_labels: BTreeSet<String>,
+        }
+
+        let raw = RawCatalog::deserialize(deserializer)?;
+        validate_runtime_pack_id_set("script_runtime.special_routines", &raw.special_routines)
+            .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_map("script_runtime.trainer_classes", &raw.trainer_classes)
+            .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set("script_runtime.items", &raw.items)
+            .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set("script_runtime.pokemon", &raw.pokemon)
+            .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set("script_runtime.phone_contacts", &raw.phone_contacts)
+            .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set(
+            "script_runtime.special_phone_calls",
+            &raw.special_phone_calls,
+        )
+        .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set("script_runtime.npc_trades", &raw.npc_trades)
+            .map_err(serde::de::Error::custom)?;
+        for label in &raw.script_labels {
+            require_runtime_label("script_runtime.script_labels", label)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            special_routines: raw.special_routines,
+            trainer_classes: raw.trainer_classes,
+            items: raw.items,
+            pokemon: raw.pokemon,
+            phone_contacts: raw.phone_contacts,
+            special_phone_calls: raw.special_phone_calls,
+            npc_trades: raw.npc_trades,
+            script_labels: raw.script_labels,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +447,54 @@ fn is_exact_nonempty_runtime_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
+fn require_runtime_token(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_nonempty_runtime_token(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be a nonempty exact runtime token, found {value:?}"
+        ))
+    }
+}
+
+fn require_runtime_pack_id(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_nonempty_runtime_pack_id(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be a nonempty exact pack id, found {value:?}"
+        ))
+    }
+}
+
+fn require_runtime_label(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_nonempty_runtime_label(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be a nonempty exact script label, found {value:?}"
+        ))
+    }
+}
+
+fn validate_runtime_pack_id_set(field: &str, values: &BTreeSet<String>) -> Result<(), String> {
+    for value in values {
+        require_runtime_pack_id(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_pack_id_map(
+    field: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (key, value) in values {
+        require_runtime_pack_id(&format!("{field} key"), key)?;
+        require_runtime_pack_id(&format!("{field}[{key}]"), value)?;
+    }
+    Ok(())
+}
+
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
@@ -418,7 +602,9 @@ pub fn script_runtime_command_issues(
                 issues.push(ScriptRuntimeCommandIssue::InvalidSpecialPhoneCall {
                     call_id: call_id.clone(),
                 });
-            } else if !catalog.special_phone_calls.contains(call_id) {
+            } else if call_id != SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE
+                && !catalog.special_phone_calls.contains(call_id)
+            {
                 issues.push(ScriptRuntimeCommandIssue::UnknownSpecialPhoneCall {
                     call_id: call_id.clone(),
                 });
@@ -534,10 +720,13 @@ pub fn apply_script_runtime_command(
         }
         "random" => {
             let bound = parse_u32_token(&command.command, &command.args[0])?;
+            if bound == 0 {
+                return Err(ScriptRuntimeCommandError::RandomBoundZero);
+            }
             let value = inputs
                 .random_value
                 .ok_or(ScriptRuntimeCommandError::MissingRandomInput)?;
-            if bound != 0 && value >= bound {
+            if value >= bound {
                 return Err(ScriptRuntimeCommandError::RandomInputOutOfRange { value, bound });
             }
             set_script_value(state, &command, value.to_string())
@@ -591,6 +780,11 @@ pub fn validate_script_runtime_command(
     if !is_exact_nonempty_runtime_token(&command.command) {
         return Err(ScriptRuntimeCommandError::PaddedCommand {
             command: command.command.clone(),
+        });
+    }
+    if !is_exact_nonempty_runtime_label(&command.source_script) {
+        return Err(ScriptRuntimeCommandError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
         });
     }
     let expected = script_runtime_command_arg_counts()
@@ -677,7 +871,14 @@ fn apply_runtime_effect(
             state.script_runtime.active_menu = Some(command.args[0].clone());
             state.script_runtime.window_open = true;
         }
-        "verticalmenu" => state.script_runtime.window_open = true,
+        "verticalmenu" => {
+            if state.script_runtime.active_menu.is_none() {
+                return Err(ScriptRuntimeCommandError::MissingActiveMenu {
+                    command: command.command.clone(),
+                });
+            }
+            state.script_runtime.window_open = true;
+        }
         "closewindow" => state.script_runtime.window_open = false,
         "menu_coords" => {
             state.script_runtime.menu_coords = Some([
@@ -689,6 +890,11 @@ fn apply_runtime_effect(
         }
         "dontrestartmapmusic" => state.script_runtime.map_music_restart_disabled = true,
         "playmapmusic" => state.script_runtime.map_music_requested = true,
+        "lock" => state.script_runtime.player_input_locked = true,
+        "release" => state.script_runtime.player_input_locked = false,
+        "lockall" => state.script_runtime.all_input_locked = true,
+        "releaseall" => state.script_runtime.all_input_locked = false,
+        "stop" => state.script_runtime.script_stop_requested = true,
         "faceplayer" | "endifjustbattled" | "jumpstd" => {}
         "itemnotify" => state.script_runtime.item_notify_queued = true,
         "verbosegiveitemvar" => {
@@ -698,15 +904,26 @@ fn apply_runtime_effect(
                 .insert(command.args[0].clone(), command.args[1].clone());
         }
         "addcellnum" => {
-            state
+            let added = state
                 .script_runtime
                 .phone_numbers
                 .insert(command.args[0].clone());
+            state.script_runtime.script_value = Some(if added {
+                "0".to_string()
+            } else {
+                "1".to_string()
+            });
         }
-        "specialphonecall" => state
-            .script_runtime
-            .special_phone_calls
-            .push(command.args[0].clone()),
+        "specialphonecall" => {
+            if command.args[0] == SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE {
+                state.script_runtime.special_phone_calls.clear();
+            } else {
+                state
+                    .script_runtime
+                    .special_phone_calls
+                    .push(command.args[0].clone());
+            }
+        }
         "pokepic" => state.script_runtime.active_pokemon_picture = Some(command.args[0].clone()),
         "closepokepic" => state.script_runtime.active_pokemon_picture = None,
         "trade" => state
@@ -1029,6 +1246,11 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("menu_coords", 4),
         ("dontrestartmapmusic", 0),
         ("playmapmusic", 0),
+        ("lock", 0),
+        ("release", 0),
+        ("lockall", 0),
+        ("releaseall", 0),
+        ("stop", 0),
         ("faceplayer", 0),
         ("endifjustbattled", 0),
         ("jumpstd", 1),
@@ -1153,6 +1375,11 @@ mod tests {
         assert_eq!(counts.get("special"), Some(&1));
         assert_eq!(counts.get("checkver"), Some(&0));
         assert_eq!(counts.get("givepokemail"), Some(&1));
+        assert_eq!(counts.get("lock"), Some(&0));
+        assert_eq!(counts.get("release"), Some(&0));
+        assert_eq!(counts.get("lockall"), Some(&0));
+        assert_eq!(counts.get("releaseall"), Some(&0));
+        assert_eq!(counts.get("stop"), Some(&0));
         assert!(!counts.contains_key("SPECIAL"));
 
         assert_eq!(
@@ -1354,6 +1581,16 @@ mod tests {
             }]
         );
         assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "specialphonecall",
+                    &[SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE]
+                ),
+                &catalog
+            ),
+            []
+        );
+        assert_eq!(
             script_runtime_command_issues(&command("trade", &["npc_trade_mike"]), &catalog),
             vec![ScriptRuntimeCommandIssue::UnknownNpcTrade {
                 trade_id: "npc_trade_mike".to_string()
@@ -1468,8 +1705,92 @@ mod tests {
                 .phone_numbers
                 .contains("PHONE_YOUNGSTER_JOE")
         );
-        assert_eq!(state.script_runtime.effects.len(), 3);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        apply_script_runtime_command(
+            &mut state,
+            command("addcellnum", &["PHONE_YOUNGSTER_JOE"]),
+            default_inputs(),
+        )
+        .expect("duplicate addcellnum");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(state.script_runtime.effects.len(), 4);
         assert_eq!(state.script_runtime.effects[0].command, "special");
+        assert_eq!(state.script_runtime.effects[3].command, "addcellnum");
+    }
+
+    #[test]
+    fn specialphonecall_none_clears_queued_calls_without_saving_sentinel() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(
+            &mut state,
+            command("specialphonecall", &["SPECIALCALL_MASTERBALL"]),
+            default_inputs(),
+        )
+        .expect("queue call");
+        apply_script_runtime_command(
+            &mut state,
+            command(
+                "specialphonecall",
+                &[SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE],
+            ),
+            default_inputs(),
+        )
+        .expect("clear calls");
+
+        assert!(state.script_runtime.special_phone_calls.is_empty());
+        assert_eq!(
+            state
+                .script_runtime
+                .effects
+                .iter()
+                .map(|effect| (effect.command.clone(), effect.args.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "specialphonecall".to_string(),
+                    vec!["SPECIALCALL_MASTERBALL".to_string()]
+                ),
+                (
+                    "specialphonecall".to_string(),
+                    vec![SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE.to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn lock_release_and_stop_commands_mutate_exact_runtime_state() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(&mut state, command("lock", &[]), default_inputs())
+            .expect("lock");
+        apply_script_runtime_command(&mut state, command("lockall", &[]), default_inputs())
+            .expect("lockall");
+        apply_script_runtime_command(&mut state, command("stop", &[]), default_inputs())
+            .expect("stop");
+
+        assert!(state.script_runtime.player_input_locked);
+        assert!(state.script_runtime.all_input_locked);
+        assert!(state.script_runtime.script_stop_requested);
+
+        apply_script_runtime_command(&mut state, command("release", &[]), default_inputs())
+            .expect("release");
+        apply_script_runtime_command(&mut state, command("releaseall", &[]), default_inputs())
+            .expect("releaseall");
+
+        assert!(!state.script_runtime.player_input_locked);
+        assert!(!state.script_runtime.all_input_locked);
+        assert!(state.script_runtime.script_stop_requested);
+        assert_eq!(
+            state
+                .script_runtime
+                .effects
+                .iter()
+                .map(|effect| effect.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lock", "lockall", "stop", "release", "releaseall"]
+        );
     }
 
     #[test]
@@ -1509,6 +1830,17 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::RandomInputOutOfRange { .. })
         ));
+        assert_eq!(
+            apply_script_runtime_command(
+                &mut state,
+                command("random", &["0"]),
+                ScriptRuntimeInputs {
+                    random_value: Some(0),
+                    game_version: None,
+                },
+            ),
+            Err(ScriptRuntimeCommandError::RandomBoundZero)
+        );
     }
 
     #[test]
@@ -1910,6 +2242,14 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::PaddedArg { .. })
         ));
+        let mut bad_source = command("special", &["HealParty"]);
+        bad_source.source_script = "fallback_script".to_string();
+        assert_eq!(
+            apply_script_runtime_command(&mut state, bad_source, default_inputs()),
+            Err(ScriptRuntimeCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
         assert!(matches!(
             apply_script_runtime_command(
                 &mut state,
@@ -1938,6 +2278,7 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::EmptyStack)
         ));
+        assert!(state.script_runtime.effects.is_empty());
     }
 
     #[test]
@@ -1971,6 +2312,50 @@ mod tests {
         assert!(explicit_empty_args.args.is_empty());
         assert_eq!(explicit_empty_args.source_script, "RuntimeScript");
         assert_eq!(explicit_empty_args.command_index, 4);
+    }
+
+    #[test]
+    fn verticalmenu_requires_loaded_menu_identity() {
+        let mut state = GameState::default();
+        let error = apply_script_runtime_command(
+            &mut state,
+            command("verticalmenu", &[]),
+            default_inputs(),
+        )
+        .expect_err("verticalmenu requires loadmenu state");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::MissingActiveMenu {
+                command: "verticalmenu".to_string(),
+            }
+        );
+        assert!(!state.script_runtime.window_open);
+        assert!(state.script_runtime.effects.is_empty());
+
+        apply_script_runtime_command(
+            &mut state,
+            command("loadmenu", &["RuntimeMenu"]),
+            default_inputs(),
+        )
+        .expect("load menu");
+        apply_script_runtime_command(&mut state, command("verticalmenu", &[]), default_inputs())
+            .expect("vertical menu");
+
+        assert_eq!(
+            state.script_runtime.active_menu.as_deref(),
+            Some("RuntimeMenu")
+        );
+        assert!(state.script_runtime.window_open);
+        assert_eq!(
+            state
+                .script_runtime
+                .effects
+                .iter()
+                .map(|effect| effect.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["loadmenu", "verticalmenu"]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::models::{
@@ -27,14 +27,52 @@ pub fn is_known_script_mart_type(mart_type: &str) -> bool {
         || SCRIPT_SHOP_ZERO_MART_TYPES.contains(&mart_type)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptShopCommand {
+    #[serde(deserialize_with = "required_script_shop_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_script_shop_token")]
     pub mart_type: String,
+    #[serde(deserialize_with = "required_script_shop_token")]
     pub mart_id: String,
+    #[serde(deserialize_with = "required_script_shop_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptShopCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptShopCommand {
+            #[serde(default, deserialize_with = "required_script_shop_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_script_shop_token")]
+            mart_type: String,
+            #[serde(deserialize_with = "required_script_shop_token")]
+            mart_id: String,
+            #[serde(deserialize_with = "required_script_shop_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptShopCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            mart_type: raw.mart_type,
+            mart_id: raw.mart_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_shop_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -170,6 +208,8 @@ pub enum ShopError {
     InvalidMartType { mart_type: String },
     #[error("invalid mart id '{mart_id}'")]
     InvalidMartId { mart_id: String },
+    #[error("invalid script shop source script '{source_script}'")]
+    InvalidSourceScript { source_script: String },
     #[error("mart type '{mart_type}' cannot use explicit mart id 0")]
     InvalidZeroMart { mart_type: String },
     #[error("shop money mutation requires currency constant '{constant}'")]
@@ -202,6 +242,7 @@ pub fn script_shop_command_issues(
                     | ShopError::UnknownCommand { .. }
                     | ShopError::UnknownMartType { .. }
                     | ShopError::InvalidMartId { .. }
+                    | ShopError::InvalidSourceScript { .. }
                     | ShopError::InvalidZeroMart { .. }
                     | ShopError::UnknownMart { .. }),
                 ) => Some(ScriptShopCommandIssue {
@@ -215,13 +256,24 @@ pub fn script_shop_command_issues(
         .collect()
 }
 
+fn validate_script_shop_command_shape(command: &ScriptShopCommand) -> Result<(), String> {
+    validate_script_shop_command_token(&command.command).map_err(|error| error.to_string())?;
+    validate_script_shop_source_script(&command.source_script)
+        .map_err(|error| error.to_string())?;
+    validate_script_mart_type(&command.mart_type).map_err(|error| error.to_string())?;
+    if command.mart_id == "0" {
+        validate_zero_mart(&command.mart_type).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn apply_script_shop_command(
     state: &mut GameState,
     catalog: &MartCatalog,
     items: &BTreeMap<String, Item>,
     command: ScriptShopCommand,
 ) -> Result<ScriptShopOutcome, ShopError> {
-    validate_script_mart_type(&command.mart_type)?;
+    validate_script_shop_command(catalog, &command)?;
     let inventory = if command.mart_id == "0" {
         validate_zero_mart(&command.mart_type)?;
         Vec::new()
@@ -262,6 +314,7 @@ pub fn validate_script_shop_command(
     command: &ScriptShopCommand,
 ) -> Result<(), ShopError> {
     validate_script_shop_command_token(&command.command)?;
+    validate_script_shop_source_script(&command.source_script)?;
     validate_script_mart_type(&command.mart_type)?;
     if command.mart_id == "0" {
         validate_zero_mart(&command.mart_type)
@@ -320,6 +373,55 @@ fn is_exact_shop_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_script_shop_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn validate_script_shop_source_script(source_script: &str) -> Result<(), ShopError> {
+    if is_exact_script_shop_label_token(source_script) {
+        Ok(())
+    } else {
+        Err(ShopError::InvalidSourceScript {
+            source_script: source_script.to_string(),
+        })
+    }
+}
+
+fn required_script_shop_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_script_shop_command_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_script_shop_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_shop_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script shop token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_shop_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_script_shop_source_script(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 fn has_reserved_pack_prefix(value: &str) -> bool {
@@ -767,6 +869,11 @@ mod tests {
                     ),
                     shop_command("legacy_marttype", "CHERRYGROVE_MART"),
                     shop_command("MARTTYPE_STANDARD", "fallback_mart"),
+                    {
+                        let mut command = shop_command("MARTTYPE_STANDARD", "CHERRYGROVE_MART");
+                        command.source_script = "fallback_script".to_string();
+                        command
+                    },
                 ],
             )
             .into_iter()
@@ -782,8 +889,35 @@ mod tests {
                 ShopError::InvalidMartId {
                     mart_id: "fallback_mart".to_string(),
                 },
+                ShopError::InvalidSourceScript {
+                    source_script: "fallback_script".to_string(),
+                },
             ]
         );
+
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackshop")),
+            ("mart_type", serde_json::json!("legacy_marttype")),
+            ("mart_id", serde_json::json!("fallback_mart")),
+            ("source_script", serde_json::json!("legacy_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "pokemart",
+                "mart_type": "MARTTYPE_STANDARD",
+                "mart_id": "CHERRYGROVE_MART",
+                "source_script": "ShopScript",
+                "command_index": 11
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptShopCommand>(payload)
+                .expect_err("reserved shop command tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("shop") || error.contains("source"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -925,6 +1059,47 @@ mod tests {
             })
         );
         assert_eq!(state.script_runtime.shop_events.len(), 1);
+    }
+
+    #[test]
+    fn invalid_script_shop_source_does_not_mutate_runtime_state() {
+        let catalog = MartCatalog(
+            [(
+                "MartCherrygroveDex".to_string(),
+                vec!["POKE_BALL".to_string(), "POTION".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let items = items();
+        let mut state = GameState::default();
+        state.script_runtime.pending_shop = Some(ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "PreviousMart".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "PreviousScript".to_string(),
+            command_index: 1,
+        });
+        let mut command = shop_command("MARTTYPE_STANDARD", "MartCherrygroveDex");
+        command.source_script = "fallback_script".to_string();
+
+        assert_eq!(
+            apply_script_shop_command(&mut state, &catalog, &items, command),
+            Err(ShopError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+        assert!(state.script_runtime.shop_events.is_empty());
+        assert_eq!(
+            state.script_runtime.pending_shop,
+            Some(ScriptShopRequest {
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "PreviousMart".to_string(),
+                inventory: vec!["POTION".to_string()],
+                source_script: "PreviousScript".to_string(),
+                command_index: 1,
+            })
+        );
     }
 
     #[test]

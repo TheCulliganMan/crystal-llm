@@ -13,7 +13,7 @@ use crate::world::map::{Direction, OverworldMapData, TilePosition};
 use crate::world::movement::{MovementMode, PlayerMovementState, StepOptions, move_by_stride};
 use crate::world::session::{OverworldSession, WarpTransition};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveCatalog {
     pub cut: FieldMoveBlockRule,
@@ -25,6 +25,9 @@ pub struct FieldMoveCatalog {
     pub fly: FieldMoveRule,
     pub dig: FieldMoveMoveRule,
     pub teleport: FieldMoveMoveRule,
+    pub headbutt: FieldMoveMoveRule,
+    pub rock_smash: FieldMoveMoveRule,
+    pub sweet_scent: FieldMoveMoveRule,
     pub escape_rope: FieldEscapeItemRule,
     pub repel: FieldRepelItemRule,
     pub bicycle: FieldItemRule,
@@ -35,44 +38,198 @@ pub struct FieldMoveCatalog {
     pub town_map: FieldItemRule,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveCatalog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFieldMoveCatalog {
+            cut: FieldMoveBlockRule,
+            whirlpool: FieldMoveBlockRule,
+            strength: FieldMoveFlagRule,
+            flash: FieldMoveFlagRule,
+            surf: FieldMoveTravelRule,
+            waterfall: FieldMoveTravelRule,
+            fly: FieldMoveRule,
+            dig: FieldMoveMoveRule,
+            teleport: FieldMoveMoveRule,
+            headbutt: FieldMoveMoveRule,
+            rock_smash: FieldMoveMoveRule,
+            sweet_scent: FieldMoveMoveRule,
+            escape_rope: FieldEscapeItemRule,
+            repel: FieldRepelItemRule,
+            bicycle: FieldItemRule,
+            itemfinder: FieldItemRule,
+            squirtbottle: FieldItemRule,
+            coin_case: FieldItemRule,
+            blue_card: FieldItemRule,
+            town_map: FieldItemRule,
+        }
+
+        let raw = RawFieldMoveCatalog::deserialize(deserializer)?;
+        let catalog = Self {
+            cut: raw.cut,
+            whirlpool: raw.whirlpool,
+            strength: raw.strength,
+            flash: raw.flash,
+            surf: raw.surf,
+            waterfall: raw.waterfall,
+            fly: raw.fly,
+            dig: raw.dig,
+            teleport: raw.teleport,
+            headbutt: raw.headbutt,
+            rock_smash: raw.rock_smash,
+            sweet_scent: raw.sweet_scent,
+            escape_rope: raw.escape_rope,
+            repel: raw.repel,
+            bicycle: raw.bicycle,
+            itemfinder: raw.itemfinder,
+            squirtbottle: raw.squirtbottle,
+            coin_case: raw.coin_case,
+            blue_card: raw.blue_card,
+            town_map: raw.town_map,
+        };
+        validate_field_move_catalog_pack_tokens(&catalog).map_err(serde::de::Error::custom)?;
+        Ok(catalog)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveBadgeRequirement {
     pub region: String,
     pub index: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveBadgeRequirement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBadge {
+            region: String,
+            index: usize,
+        }
+
+        let raw = RawBadge::deserialize(deserializer)?;
+        Ok(Self {
+            region: raw.region,
+            index: raw.index,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveRule {
     pub move_id: String,
     pub badge: FieldMoveBadgeRequirement,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            move_id: String,
+            badge: FieldMoveBadgeRequirement,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        Ok(Self {
+            move_id: raw.move_id,
+            badge: raw.badge,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveMoveRule {
     pub move_id: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveMoveRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            move_id: String,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        Ok(Self {
+            move_id: raw.move_id,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldEscapeItemRule {
     pub item_id: String,
     pub escape_rope_mode: String,
 }
 
+impl<'de> Deserialize<'de> for FieldEscapeItemRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            item_id: String,
+            escape_rope_mode: String,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        Ok(Self {
+            item_id: raw.item_id,
+            escape_rope_mode: raw.escape_rope_mode,
+        })
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldRepelItemRule {}
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldItemRule {
     pub item_id: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldItemRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            item_id: String,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        Ok(Self {
+            item_id: raw.item_id,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveBlockRule {
     pub move_id: String,
@@ -81,14 +238,82 @@ pub struct FieldMoveBlockRule {
     pub replacements: BTreeMap<String, BTreeMap<u16, FieldMoveReplacement>>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveBlockRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            move_id: String,
+            badge: FieldMoveBadgeRequirement,
+            target_collisions: Vec<u8>,
+            replacements: BTreeMap<String, BTreeMap<u16, FieldMoveReplacement>>,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        if raw.target_collisions.is_empty() {
+            return Err(serde::de::Error::custom(
+                "field_move.block.target_collisions must not be empty",
+            ));
+        }
+        if raw.replacements.is_empty() {
+            return Err(serde::de::Error::custom(
+                "field_move.block.replacements must not be empty",
+            ));
+        }
+        for (tileset, replacements) in &raw.replacements {
+            if replacements.is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "field_move.block.replacements[{tileset}] must not be empty"
+                )));
+            }
+            for (block_id, replacement) in replacements {
+                if replacement.replacement_block_id == *block_id {
+                    return Err(serde::de::Error::custom(format!(
+                        "field_move.block.replacements[{tileset}][{block_id}].replacement_block_id must change the block"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            move_id: raw.move_id,
+            badge: raw.badge,
+            target_collisions: raw.target_collisions,
+            replacements: raw.replacements,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveReplacement {
     pub replacement_block_id: u16,
     pub variant: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveReplacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawReplacement {
+            replacement_block_id: u16,
+            variant: String,
+        }
+
+        let raw = RawReplacement::deserialize(deserializer)?;
+        Ok(Self {
+            replacement_block_id: raw.replacement_block_id,
+            variant: raw.variant,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveFlagRule {
     pub move_id: String,
@@ -96,13 +321,64 @@ pub struct FieldMoveFlagRule {
     pub engine_flag: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldMoveFlagRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            move_id: String,
+            badge: FieldMoveBadgeRequirement,
+            engine_flag: String,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        Ok(Self {
+            move_id: raw.move_id,
+            badge: raw.badge,
+            engine_flag: raw.engine_flag,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveTravelRule {
     pub move_id: String,
     pub badge: FieldMoveBadgeRequirement,
     pub blocked_collisions: Vec<u8>,
     pub target_collisions: Vec<u8>,
+}
+
+impl<'de> Deserialize<'de> for FieldMoveTravelRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            move_id: String,
+            badge: FieldMoveBadgeRequirement,
+            blocked_collisions: Vec<u8>,
+            target_collisions: Vec<u8>,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        if raw.target_collisions.is_empty() {
+            return Err(serde::de::Error::custom(
+                "field_move.travel.target_collisions must not be empty",
+            ));
+        }
+        Ok(Self {
+            move_id: raw.move_id,
+            badge: raw.badge,
+            blocked_collisions: raw.blocked_collisions,
+            target_collisions: raw.target_collisions,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +487,24 @@ pub fn field_move_catalog_issues(
         moves,
         &mut issues,
     );
+    collect_move_only_rule_issues(
+        "field_moves:headbutt",
+        &catalog.headbutt,
+        moves,
+        &mut issues,
+    );
+    collect_move_only_rule_issues(
+        "field_moves:rock_smash",
+        &catalog.rock_smash,
+        moves,
+        &mut issues,
+    );
+    collect_move_only_rule_issues(
+        "field_moves:sweet_scent",
+        &catalog.sweet_scent,
+        moves,
+        &mut issues,
+    );
     collect_escape_item_rule_issues(&catalog.escape_rope, items, &mut issues);
     collect_repel_rule_issues(items, &mut issues);
     collect_field_item_rule_issues("field_moves:bicycle", &catalog.bicycle, items, &mut issues);
@@ -245,6 +539,112 @@ pub fn field_move_catalog_issues(
         &mut issues,
     );
     issues
+}
+
+fn validate_field_move_catalog_pack_tokens(catalog: &FieldMoveCatalog) -> Result<(), String> {
+    validate_block_rule_pack_tokens("field_moves.cut", &catalog.cut)?;
+    validate_block_rule_pack_tokens("field_moves.whirlpool", &catalog.whirlpool)?;
+    validate_flag_rule_pack_tokens("field_moves.strength", &catalog.strength)?;
+    validate_flag_rule_pack_tokens("field_moves.flash", &catalog.flash)?;
+    validate_travel_rule_pack_tokens("field_moves.surf", &catalog.surf)?;
+    validate_travel_rule_pack_tokens("field_moves.waterfall", &catalog.waterfall)?;
+    validate_move_rule_pack_tokens("field_moves.fly", &catalog.fly)?;
+    validate_move_only_rule_pack_tokens("field_moves.dig", &catalog.dig)?;
+    validate_move_only_rule_pack_tokens("field_moves.teleport", &catalog.teleport)?;
+    validate_move_only_rule_pack_tokens("field_moves.headbutt", &catalog.headbutt)?;
+    validate_move_only_rule_pack_tokens("field_moves.rock_smash", &catalog.rock_smash)?;
+    validate_move_only_rule_pack_tokens("field_moves.sweet_scent", &catalog.sweet_scent)?;
+    validate_exact_field_move_token(
+        "field_moves.escape_rope.item_id",
+        &catalog.escape_rope.item_id,
+    )?;
+    validate_exact_field_move_token(
+        "field_moves.escape_rope.escape_rope_mode",
+        &catalog.escape_rope.escape_rope_mode,
+    )?;
+    validate_item_rule_pack_tokens("field_moves.bicycle", &catalog.bicycle)?;
+    validate_item_rule_pack_tokens("field_moves.itemfinder", &catalog.itemfinder)?;
+    validate_item_rule_pack_tokens("field_moves.squirtbottle", &catalog.squirtbottle)?;
+    validate_item_rule_pack_tokens("field_moves.coin_case", &catalog.coin_case)?;
+    validate_item_rule_pack_tokens("field_moves.blue_card", &catalog.blue_card)?;
+    validate_item_rule_pack_tokens("field_moves.town_map", &catalog.town_map)?;
+    Ok(())
+}
+
+fn validate_block_rule_pack_tokens(subject: &str, rule: &FieldMoveBlockRule) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.move_id"), &rule.move_id)?;
+    validate_badge_pack_tokens(subject, &rule.move_id, &rule.badge)?;
+    for (tileset, replacements) in &rule.replacements {
+        validate_exact_field_move_token(&format!("{subject}.replacements key"), tileset)?;
+        for (block_id, replacement) in replacements {
+            validate_exact_field_move_token(
+                &format!("{subject}.replacements[{tileset}][{block_id}].variant"),
+                &replacement.variant,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_flag_rule_pack_tokens(subject: &str, rule: &FieldMoveFlagRule) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.move_id"), &rule.move_id)?;
+    validate_badge_pack_tokens(subject, &rule.move_id, &rule.badge)?;
+    validate_exact_field_move_token(&format!("{subject}.engine_flag"), &rule.engine_flag)
+}
+
+fn validate_travel_rule_pack_tokens(
+    subject: &str,
+    rule: &FieldMoveTravelRule,
+) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.move_id"), &rule.move_id)?;
+    validate_badge_pack_tokens(subject, &rule.move_id, &rule.badge)
+}
+
+fn validate_move_rule_pack_tokens(subject: &str, rule: &FieldMoveRule) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.move_id"), &rule.move_id)?;
+    validate_badge_pack_tokens(subject, &rule.move_id, &rule.badge)
+}
+
+fn validate_move_only_rule_pack_tokens(
+    subject: &str,
+    rule: &FieldMoveMoveRule,
+) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.move_id"), &rule.move_id)
+}
+
+fn validate_item_rule_pack_tokens(subject: &str, rule: &FieldItemRule) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.item_id"), &rule.item_id)
+}
+
+fn validate_badge_pack_tokens(
+    subject: &str,
+    move_id: &str,
+    badge: &FieldMoveBadgeRequirement,
+) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.{move_id}.badge.region"), &badge.region)?;
+    if badge.region != "johto" {
+        return Err(format!(
+            "{subject}.{move_id}.badge.region must be johto, found {:?}",
+            badge.region
+        ));
+    }
+    if badge.index >= 8 {
+        return Err(format!(
+            "{subject}.{move_id}.badge.index must be 0..7, found {}",
+            badge.index
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_field_move_token(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_field_move_token(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be exact ASCII alphanumeric/underscore, found {value:?}"
+        ))
+    }
 }
 
 fn collect_move_rule_issues(
@@ -791,7 +1191,7 @@ fn apply_block_field_move(
     metatile_x: u16,
     metatile_y: u16,
 ) -> Result<FieldMoveBlockOutcome, FieldMoveError> {
-    require_rule_field(&rule.move_id, "move_id")?;
+    require_block_rule_shape(rule)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
     let (index, previous_block_id, collisions) =
@@ -857,8 +1257,7 @@ fn apply_flag_field_move(
     storage: &PokemonStorage,
     party_index: usize,
 ) -> Result<FieldMoveFlagOutcome, FieldMoveError> {
-    require_rule_field(&rule.move_id, "move_id")?;
-    require_rule_field(&rule.engine_flag, "engine_flag")?;
+    require_flag_rule_shape(rule)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
     set_field_move_engine_flag(
@@ -880,7 +1279,7 @@ pub fn apply_surf_field_move(
     party_index: usize,
 ) -> Result<FieldMoveTravelOutcome, FieldMoveError> {
     let rule = &catalog.surf;
-    require_rule_field(&rule.move_id, "move_id")?;
+    require_travel_rule_shape(rule, false)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
     if player.mode == MovementMode::Surf {
@@ -933,7 +1332,7 @@ pub fn apply_waterfall_field_move(
     party_index: usize,
 ) -> Result<FieldMoveTravelOutcome, FieldMoveError> {
     let rule = &catalog.waterfall;
-    require_rule_field(&rule.move_id, "move_id")?;
+    require_travel_rule_shape(rule, true)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
     if player.mode != MovementMode::Surf {
@@ -1005,7 +1404,7 @@ pub fn validate_fly_field_move(
     party_index: usize,
 ) -> Result<FieldMoveUseOutcome, FieldMoveError> {
     let rule = &catalog.fly;
-    require_rule_field(&rule.move_id, "move_id")?;
+    require_move_badge_rule_shape(rule)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
     Ok(FieldMoveUseOutcome {
@@ -1312,6 +1711,78 @@ fn validate_move_only_field_move(
     })
 }
 
+fn require_block_rule_shape(rule: &FieldMoveBlockRule) -> Result<(), FieldMoveError> {
+    require_move_badge_rule_fields(&rule.move_id, &rule.badge)?;
+    if rule.target_collisions.is_empty() {
+        return Err(FieldMoveError::MissingRuleField {
+            move_id: rule.move_id.clone(),
+            field: "target_collisions".to_string(),
+        });
+    }
+    if rule.replacements.is_empty() {
+        return Err(FieldMoveError::MissingRuleField {
+            move_id: rule.move_id.clone(),
+            field: "replacements".to_string(),
+        });
+    }
+    for (tileset, replacements) in &rule.replacements {
+        require_rule_field(tileset, "replacement_tileset")?;
+        for (block_id, replacement) in replacements {
+            require_rule_field(&replacement.variant, "replacement_variant")?;
+            if replacement.replacement_block_id == *block_id {
+                return Err(FieldMoveError::InvalidRuleField {
+                    field: "replacement_block_id".to_string(),
+                    value: replacement.replacement_block_id.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_flag_rule_shape(rule: &FieldMoveFlagRule) -> Result<(), FieldMoveError> {
+    require_move_badge_rule_fields(&rule.move_id, &rule.badge)?;
+    require_rule_field(&rule.engine_flag, "engine_flag")
+}
+
+fn require_travel_rule_shape(
+    rule: &FieldMoveTravelRule,
+    require_target_collisions: bool,
+) -> Result<(), FieldMoveError> {
+    require_move_badge_rule_fields(&rule.move_id, &rule.badge)?;
+    if require_target_collisions && rule.target_collisions.is_empty() {
+        return Err(FieldMoveError::MissingRuleField {
+            move_id: rule.move_id.clone(),
+            field: "target_collisions".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn require_move_badge_rule_shape(rule: &FieldMoveRule) -> Result<(), FieldMoveError> {
+    require_move_badge_rule_fields(&rule.move_id, &rule.badge)
+}
+
+fn require_move_badge_rule_fields(
+    move_id: &str,
+    badge: &FieldMoveBadgeRequirement,
+) -> Result<(), FieldMoveError> {
+    require_rule_field(move_id, "move_id")?;
+    if badge.region != "johto" {
+        return Err(FieldMoveError::UnsupportedBadgeRegion {
+            move_id: move_id.to_string(),
+            region: badge.region.clone(),
+        });
+    }
+    if badge.index >= 8 {
+        return Err(FieldMoveError::InvalidBadgeIndex {
+            move_id: move_id.to_string(),
+            badge_index: badge.index,
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_direct_field_move_actor(
     storage: &PokemonStorage,
     party_index: usize,
@@ -1586,6 +2057,15 @@ mod tests {
             teleport: FieldMoveMoveRule {
                 move_id: MOVE_TELEPORT.to_string(),
             },
+            headbutt: FieldMoveMoveRule {
+                move_id: "HEADBUTT".to_string(),
+            },
+            rock_smash: FieldMoveMoveRule {
+                move_id: "ROCK_SMASH".to_string(),
+            },
+            sweet_scent: FieldMoveMoveRule {
+                move_id: "SWEET_SCENT".to_string(),
+            },
             escape_rope: FieldEscapeItemRule {
                 item_id: "ESCAPE_ROPE".to_string(),
                 escape_rope_mode: "DIG_WARP".to_string(),
@@ -1816,6 +2296,36 @@ mod tests {
                 .copied(),
             Some(0x3c)
         );
+    }
+
+    #[test]
+    fn block_field_move_rejects_malformed_replacement_rule_before_mutation() {
+        let mut catalog = catalog();
+        catalog.cut.replacements = replacements(vec![("johto", 0x5b, 0x5b, "tree")]);
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_HIVE] = true;
+        let storage = storage_with(MOVE_CUT);
+        let mut map = map(vec![0x5b, 0x00]);
+
+        assert_eq!(
+            apply_cut_field_move(
+                &catalog,
+                &mut state,
+                &storage,
+                &mut map,
+                &tileset(),
+                "johto",
+                0,
+                0,
+                0,
+            ),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "replacement_block_id".to_string(),
+                value: "91".to_string(),
+            })
+        );
+        assert_eq!(map.metatile_at(0, 0), Some(0x5b));
+        assert!(state.map_block_overrides.is_empty());
     }
 
     #[test]
@@ -2804,6 +3314,89 @@ mod tests {
                 value: "fallback_move".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn field_move_catalog_json_rejects_malformed_pack_tokens() {
+        for (field_path, value, expected) in [
+            (
+                &["fly", "move_id"][..],
+                serde_json::json!("fallback_fly"),
+                "field_moves.fly.move_id",
+            ),
+            (
+                &["strength", "engine_flag"][..],
+                serde_json::json!("legacy_strength_flag"),
+                "field_moves.strength.engine_flag",
+            ),
+            (
+                &["escape_rope", "item_id"][..],
+                serde_json::json!("fallback_escape_rope"),
+                "field_moves.escape_rope.item_id",
+            ),
+            (
+                &["bicycle", "item_id"][..],
+                serde_json::json!("legacy_bicycle"),
+                "field_moves.bicycle.item_id",
+            ),
+            (
+                &["cut", "badge", "region"][..],
+                serde_json::json!("legacy_johto"),
+                "field_moves.cut.CUT.badge.region",
+            ),
+        ] {
+            let mut payload = serde_json::to_value(catalog()).expect("serialize catalog");
+            set_json_path(&mut payload, field_path, value);
+            let error = serde_json::from_value::<FieldMoveCatalog>(payload)
+                .expect_err("malformed field move catalog tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{field_path:?} produced unexpected error: {error}"
+            );
+        }
+
+        let mut payload = serde_json::to_value(catalog()).expect("serialize catalog");
+        payload["cut"]["replacements"] = serde_json::json!({
+            "legacy_tileset": {
+                "3": {
+                    "replacement_block_id": 2,
+                    "variant": "grass"
+                }
+            }
+        });
+        let error = serde_json::from_value::<FieldMoveCatalog>(payload)
+            .expect_err("replacement tileset keys must fail during JSON load")
+            .to_string();
+        assert!(
+            error.contains("field_moves.cut.replacements key"),
+            "{error}"
+        );
+
+        let mut payload = serde_json::to_value(catalog()).expect("serialize catalog");
+        payload["cut"]["replacements"] = serde_json::json!({
+            "johto": {
+                "3": {
+                    "replacement_block_id": 2,
+                    "variant": "fallback_grass"
+                }
+            }
+        });
+        let error = serde_json::from_value::<FieldMoveCatalog>(payload)
+            .expect_err("replacement variants must fail during JSON load")
+            .to_string();
+        assert!(
+            error.contains("field_moves.cut.replacements[johto][3].variant"),
+            "{error}"
+        );
+    }
+
+    fn set_json_path(payload: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+        let mut current = payload;
+        for key in &path[..path.len() - 1] {
+            current = current.get_mut(*key).expect("test path exists");
+        }
+        current[path[path.len() - 1]] = value;
     }
 
     #[test]

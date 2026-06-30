@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::map::MapSceneTable;
 use crate::state::{GameState, SceneError, SceneStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptSceneCommand {
     #[serde(deserialize_with = "required_script_scene_command_token")]
@@ -15,6 +15,42 @@ pub struct ScriptSceneCommand {
     #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptSceneCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptSceneCommand {
+            #[serde(deserialize_with = "required_script_scene_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_scene_token")]
+            map_id: Option<String>,
+            #[serde(deserialize_with = "required_nullable_script_scene_token")]
+            scene_id: Option<String>,
+            #[serde(deserialize_with = "required_script_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptSceneCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            map_id: raw.map_id,
+            scene_id: raw.scene_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if let Some(issue) = script_scene_command_issues(&command).into_iter().next() {
+            return Err(D::Error::custom(format!(
+                "invalid script scene command: {issue:?}"
+            )));
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +74,7 @@ pub enum ScriptSceneError {
     MissingTargetMap { command: String },
     InvalidTargetMap { command: String, map_id: String },
     UnexpectedTargetMap { command: String },
+    InvalidSourceScript { source_script: String },
     MissingSceneId { command: String },
     InvalidSceneId { command: String, scene_id: String },
     UnexpectedSceneId { command: String },
@@ -53,6 +90,7 @@ pub enum ScriptSceneCommandIssue {
     MissingTargetMap,
     InvalidTargetMap,
     UnexpectedTargetMap,
+    InvalidSourceScript,
     MissingSceneId,
     InvalidSceneId,
     UnexpectedSceneId,
@@ -76,6 +114,9 @@ pub fn is_known_script_scene_command(command: &str) -> bool {
 
 pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSceneCommandIssue> {
     let mut issues = Vec::new();
+    if !is_exact_script_label_token(&command.source_script) {
+        issues.push(ScriptSceneCommandIssue::InvalidSourceScript);
+    }
     if !is_exact_script_scene_command_token(&command.command) {
         issues.push(ScriptSceneCommandIssue::InvalidCommand);
     } else if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
@@ -124,6 +165,11 @@ pub fn apply_script_scene_command(
     table: &MapSceneTable,
     command: ScriptSceneCommand,
 ) -> Result<ScriptSceneOutcome, ScriptSceneError> {
+    if !is_exact_script_label_token(&command.source_script) {
+        return Err(ScriptSceneError::InvalidSourceScript {
+            source_script: command.source_script,
+        });
+    }
     if !is_exact_script_scene_command_token(&command.command) {
         return Err(ScriptSceneError::InvalidCommand {
             command: command.command,
@@ -619,6 +665,33 @@ mod tests {
             Err(ScriptSceneError::InvalidCommand {
                 command: "SetScene".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_scene_source_script_before_scene_mutation() {
+        let mut state = GameState::default();
+        state
+            .scenes
+            .enter_map("Route43Gate", &table())
+            .expect("enter map");
+        let mut bad_source = command("setscene", None, Some("SCENE_ROUTE43GATE_NOOP"));
+        bad_source.source_script = "legacy_script".to_string();
+
+        assert_eq!(
+            script_scene_command_issues(&bad_source),
+            vec![ScriptSceneCommandIssue::InvalidSourceScript]
+        );
+        assert_eq!(
+            apply_script_scene_command(&mut state, "Route43Gate", None, &table(), bad_source,),
+            Err(ScriptSceneError::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+            })
+        );
+        assert_eq!(state.scenes.scene_name, "SCENE_ROUTE43GATE_ROCKETS");
+        assert_eq!(
+            state.scenes.map_scenes["Route43Gate"],
+            "SCENE_ROUTE43GATE_ROCKETS"
         );
     }
 

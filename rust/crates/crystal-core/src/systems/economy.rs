@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::GameState;
 
@@ -28,14 +28,52 @@ impl MoneyAccount {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptEconomyCommand {
+    #[serde(deserialize_with = "required_economy_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_nullable_economy_token")]
     pub account: Option<String>,
+    #[serde(deserialize_with = "required_economy_amount_token_vec")]
     pub amount_tokens: Vec<String>,
+    #[serde(deserialize_with = "required_economy_source_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptEconomyCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptEconomyCommand {
+            #[serde(default, deserialize_with = "required_economy_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_economy_token")]
+            account: Option<String>,
+            #[serde(deserialize_with = "required_economy_amount_token_vec")]
+            amount_tokens: Vec<String>,
+            #[serde(deserialize_with = "required_economy_source_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptEconomyCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            account: raw.account,
+            amount_tokens: raw.amount_tokens,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_economy_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -78,6 +116,14 @@ impl AmountComparison {
             Self::HaveLess => "HAVE_LESS",
             Self::HaveAmount => "HAVE_AMOUNT",
             Self::HaveMore => "HAVE_MORE",
+        }
+    }
+
+    pub fn script_code(self) -> &'static str {
+        match self {
+            Self::HaveMore => "0",
+            Self::HaveAmount => "1",
+            Self::HaveLess => "2",
         }
     }
 
@@ -169,6 +215,61 @@ pub fn is_known_script_economy_command(command: &str) -> bool {
         || SCRIPT_COIN_MUTATION_COMMANDS.contains(&command)
 }
 
+fn validate_script_economy_command_shape(command: &ScriptEconomyCommand) -> Result<(), String> {
+    if !is_known_script_economy_command(&command.command) {
+        return Err(format!(
+            "unknown script economy command {}",
+            command.command
+        ));
+    }
+    if command.amount_tokens.is_empty() {
+        return Err(format!(
+            "script economy command {} requires amount tokens",
+            command.command
+        ));
+    }
+    if SCRIPT_MONEY_CHECK_COMMANDS.contains(&command.command.as_str())
+        || SCRIPT_MONEY_MUTATION_COMMANDS.contains(&command.command.as_str())
+    {
+        let Some(account) = command.account.as_deref() else {
+            return Err(format!(
+                "script economy command {} requires money account",
+                command.command
+            ));
+        };
+        MoneyAccount::from_script_id(account).map_err(|error| format!("{error:?}"))?;
+    } else if command.account.is_some() {
+        return Err(format!(
+            "script economy command {} must not declare money account",
+            command.command
+        ));
+    }
+    validate_amount_expression_shape(&command.amount_tokens)
+}
+
+fn validate_amount_expression_shape(amount_tokens: &[String]) -> Result<(), String> {
+    if amount_tokens.is_empty() || amount_tokens.len() % 2 == 0 {
+        return Err(format!(
+            "script economy amount expression has invalid token count {}",
+            amount_tokens.len()
+        ));
+    }
+    for (index, token) in amount_tokens.iter().enumerate() {
+        if index % 2 == 0 {
+            if token == "+" || token == "-" {
+                return Err(format!(
+                    "script economy amount atom at index {index} must not be operator {token}"
+                ));
+            }
+        } else if token != "+" && token != "-" {
+            return Err(format!(
+                "script economy amount operator at index {index} must be + or -"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn script_economy_command_issues(
     command: &ScriptEconomyCommand,
     constants: &CurrencyCatalog,
@@ -237,6 +338,87 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
     value.starts_with("fallback") || value.starts_with("legacy")
 }
 
+fn is_exact_economy_source_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn is_exact_economy_amount_token(value: &str) -> bool {
+    value == "+"
+        || value == "-"
+        || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        || is_exact_economy_token(value)
+        || is_exact_economy_amount_expression(value)
+}
+
+fn is_exact_economy_amount_expression(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'-' | b' '))
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_economy_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_economy_command_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script economy command must be exact lowercase ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_economy_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_economy_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "script economy token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_economy_amount_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    for value in &values {
+        if !is_exact_economy_amount_token(value) {
+            return Err(serde::de::Error::custom(format!(
+                "script economy amount token must be exact digits, '+', '-', or ASCII alphanumeric/underscore constant, found {value:?}"
+            )));
+        }
+    }
+    Ok(values)
+}
+
+fn required_economy_source_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_economy_source_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script economy source script must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
 pub fn apply_script_economy_command(
     state: &mut GameState,
     command: ScriptEconomyCommand,
@@ -247,7 +429,7 @@ pub fn apply_script_economy_command(
         "checkmoney" => {
             let account = require_money_account(&command)?;
             let check = check_money(state, account, &command.amount_tokens, constants)?;
-            let script_value = check.comparison.script_label().to_string();
+            let script_value = check.comparison.script_code().to_string();
             state.script_runtime.script_value = Some(script_value.clone());
             Ok(ScriptEconomyOutcome::Check {
                 command: command.command,
@@ -284,7 +466,7 @@ pub fn apply_script_economy_command(
         "checkcoins" => {
             reject_money_account(&command)?;
             let check = check_coins(state, &command.amount_tokens, constants)?;
-            let script_value = check.comparison.script_label().to_string();
+            let script_value = check.comparison.script_code().to_string();
             state.script_runtime.script_value = Some(script_value.clone());
             Ok(ScriptEconomyOutcome::Check {
                 command: command.command,
@@ -337,15 +519,14 @@ pub fn resolve_amount(
     constants: &CurrencyCatalog,
 ) -> Result<u32, EconomyError> {
     let expression = amount_tokens.join(" ");
-    let mut tokens = expression.split_whitespace();
-    let Some(first) = tokens.next() else {
+    let Some(first) = amount_tokens.first() else {
         return Err(EconomyError::EmptyAmountExpression);
     };
     let mut value = resolve_amount_atom(first, constants)?;
-    while let Some(operator) = tokens.next() {
-        let Some(rhs) = tokens.next() else {
-            return Err(EconomyError::InvalidAmountExpression { expression });
-        };
+    let mut chunks = amount_tokens[1..].chunks_exact(2);
+    for pair in &mut chunks {
+        let operator = pair[0].as_str();
+        let rhs = pair[1].as_str();
         let amount = resolve_amount_atom(rhs, constants)?;
         value =
             match operator {
@@ -365,6 +546,9 @@ pub fn resolve_amount(
                     });
                 }
             };
+    }
+    if !chunks.remainder().is_empty() {
+        return Err(EconomyError::InvalidAmountExpression { expression });
     }
     Ok(value)
 }
@@ -655,6 +839,12 @@ mod tests {
         );
         assert_eq!(
             resolve_amount(&tokens(&["MAX_COINS - 1"]), &constants),
+            Err(EconomyError::InvalidAmountToken {
+                token: "MAX_COINS - 1".to_string(),
+            })
+        );
+        assert_eq!(
+            resolve_amount(&tokens(&["MAX_COINS", "-", "1"]), &constants),
             Ok(9_998)
         );
         assert_eq!(
@@ -927,13 +1117,17 @@ mod tests {
     }
 
     #[test]
-    fn applies_script_economy_checks_to_exact_accumulator_labels() {
+    fn applies_script_economy_checks_to_exact_numeric_accumulator_codes() {
         let constants = CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect());
         let mut state = GameState {
             money: 500,
             coins: 400,
             ..GameState::default()
         };
+
+        assert_eq!(AmountComparison::HaveMore.script_code(), "0");
+        assert_eq!(AmountComparison::HaveAmount.script_code(), "1");
+        assert_eq!(AmountComparison::HaveLess.script_code(), "2");
 
         let money = apply_script_economy_command(
             &mut state,
@@ -948,15 +1142,12 @@ mod tests {
                 current: 500,
                 required: 500,
                 comparison: AmountComparison::HaveAmount,
-                script_value: "HAVE_AMOUNT".to_string(),
+                script_value: "1".to_string(),
                 source_script: "EconomyScript".to_string(),
                 command_index: 9,
             }
         );
-        assert_eq!(
-            state.script_runtime.script_value.as_deref(),
-            Some("HAVE_AMOUNT")
-        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
 
         apply_script_economy_command(
             &mut state,
@@ -964,10 +1155,7 @@ mod tests {
             &constants,
         )
         .expect("check coins");
-        assert_eq!(
-            state.script_runtime.script_value.as_deref(),
-            Some("HAVE_LESS")
-        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("2"));
     }
 
     #[test]
@@ -1127,5 +1315,46 @@ mod tests {
                 || comparison_error.contains("unknown field `fallback_comparison`"),
             "{comparison_error}"
         );
+
+        for (field, value) in [
+            ("command", serde_json::json!("take money")),
+            ("command", serde_json::json!("fallbackmoney")),
+            ("account", serde_json::json!("YOUR MONEY")),
+            ("account", serde_json::json!("legacy_money")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "takemoney",
+                "account": "YOUR_MONEY",
+                "amount_tokens": ["PRICE"],
+                "source_script": "EconomyScript",
+                "command_index": 9
+            });
+            payload[field] = value;
+            let error = serde_json::from_value::<ScriptEconomyCommand>(payload)
+                .expect_err("malformed economy command fields must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("script economy"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+
+        for amount_tokens in [
+            serde_json::json!([""]),
+            serde_json::json!(["PRICE TOKEN"]),
+            serde_json::json!(["fallback_price"]),
+        ] {
+            let error = serde_json::from_value::<ScriptEconomyCommand>(serde_json::json!({
+                "command": "takemoney",
+                "account": "YOUR_MONEY",
+                "amount_tokens": amount_tokens,
+                "source_script": "EconomyScript",
+                "command_index": 9
+            }))
+            .expect_err("malformed economy amount tokens must fail during JSON load")
+            .to_string();
+            assert!(error.contains("script economy amount token"), "{error}");
+        }
     }
 }

@@ -16,34 +16,39 @@ pub use bag::{
     BALL_POCKET_CAPACITY, Bag, BagSaveError, ITEM_POCKET_CAPACITY, KEY_ITEM_POCKET_CAPACITY,
     MAX_ITEM_STACK, PC_ITEM_CAPACITY, validate_saved_bag_pocket_references,
 };
-pub use battle_animation::{BattleAnimationCatalogIssue, battle_animation_catalog_issues};
+pub use battle_animation::{
+    BattleAnimationCatalogIssue, BattleAnimationCommandTable, BattleAnimationTable,
+    battle_animation_catalog_issues,
+};
 pub use box_storage::{
     CaptureStorageLocation, MAX_BOX_MONS, MAX_PC_BOXES, PcBox, PokemonStorage,
     format_default_box_name,
 };
 pub use display_metadata::{
     PokegearLandmark, PokegearLandmarkIssue, PokegearLandmarksPayload, PokegearTownMapPaletteIssue,
-    RuntimeBundleIssue, SpritePaletteDefaultIssue, pokegear_landmark_issues,
-    pokegear_town_map_palette_issues, runtime_bundle_issues, sprite_palette_default_issues,
+    PokegearTownMapPaletteTable, RuntimeBundleIssue, SpritePaletteDefaultIssue,
+    SpritePaletteDefaultTable, pokegear_landmark_issues, pokegear_town_map_palette_issues,
+    runtime_bundle_issues, sprite_palette_default_issues,
 };
 pub use frontpic_anim::{
     FRONTPIC_ANIM_COMMANDS, FrontpicAnimCatalogIssue, FrontpicAnimCommand,
-    FrontpicAnimCommandIssue, FrontpicAnimProgram, frontpic_anim_catalog_issues,
-    frontpic_anim_command_issue, is_known_frontpic_anim_command,
+    FrontpicAnimCommandIssue, FrontpicAnimProgram, FrontpicAnimProgramTable,
+    frontpic_anim_catalog_issues, frontpic_anim_command_issue, is_known_frontpic_anim_command,
 };
 pub use item::{
     ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item, ItemPocket,
     item_pocket,
 };
-pub use menu_icon::{MenuIconCatalogIssue, menu_icon_catalog_issues};
+pub use menu_icon::{MenuIconCatalogIssue, MenuIconTable, menu_icon_catalog_issues};
 pub use move_data::{
-    Move, MoveNameCatalogIssue, MovePayloadIssue, move_name_catalog_issues, move_payload_issues,
+    Move, MoveNameCatalogIssue, MoveNameTable, MovePayloadIssue, move_name_catalog_issues,
+    move_payload_issues,
 };
 pub use party::{PARTY_SIZE, Party};
-pub use pc_string::{PcStringCatalogIssue, pc_string_catalog_issues};
+pub use pc_string::{PcStringCatalogIssue, PcStringTable, pc_string_catalog_issues};
 pub use pokedex::{
     PokedexEntryCatalogIssue, PokedexSaveError, PokedexState, RuntimePokedexEntry,
-    pokedex_entry_catalog_issues, validate_saved_pokedex_references,
+    RuntimePokedexEntryTable, pokedex_entry_catalog_issues, validate_saved_pokedex_references,
 };
 pub use pokemon::{
     Ability, BaseStats, Dv, EggGroup, GrowthRate, LearnedMove, Pokemon, PokemonBuildError,

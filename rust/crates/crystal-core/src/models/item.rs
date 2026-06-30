@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub type ItemPocket = String;
 
@@ -11,7 +11,7 @@ pub fn item_pocket(id: &str) -> ItemPocket {
     id.to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
     pub name: String,
@@ -77,6 +77,163 @@ pub struct Item {
     pub tmhm_index: Option<usize>,
     #[serde(deserialize_with = "required_nullable_item_token")]
     pub tmhm_move: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Item {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawItem {
+            name: String,
+            description: String,
+            #[serde(deserialize_with = "required_item_token")]
+            effect: String,
+            #[serde(deserialize_with = "required_item_token_vec")]
+            status_heals: Vec<String>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            revive_hp_percent: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            party_revive_hp_percent: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            pp_restore_scope: Option<String>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            pp_restore_points: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            pp_up_stages: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            vitamin_stat: Option<String>,
+            #[serde(deserialize_with = "required_nullable_u16")]
+            vitamin_stat_exp: Option<u16>,
+            #[serde(deserialize_with = "required_nullable_u16")]
+            vitamin_max_stat_exp: Option<u16>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            rare_candy_level_gain: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            battle_stat_boost_stat: Option<String>,
+            #[serde(deserialize_with = "required_nullable_u8")]
+            battle_stat_boost_stages: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            battle_escape_mode: Option<String>,
+            #[serde(deserialize_with = "required_nullable_bool")]
+            battle_focus_energy: Option<bool>,
+            #[serde(default, deserialize_with = "required_nullable_bool")]
+            battle_stat_drop_guard: Option<bool>,
+            #[serde(default, deserialize_with = "required_nullable_u8")]
+            battle_stat_drop_guard_turns: Option<u8>,
+            #[serde(deserialize_with = "required_nullable_bool")]
+            confusion_heal: Option<bool>,
+            #[serde(deserialize_with = "required_nullable_u16")]
+            repel_steps: Option<u16>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            escape_rope_mode: Option<String>,
+            price: u16,
+            #[serde(deserialize_with = "required_item_token")]
+            held_effect: String,
+            parameter: i16,
+            #[serde(deserialize_with = "required_empty_or_item_token")]
+            property: String,
+            #[serde(deserialize_with = "required_item_token")]
+            pocket: ItemPocket,
+            #[serde(default, deserialize_with = "required_empty_or_item_token")]
+            field_menu: String,
+            #[serde(default)]
+            field_usable: bool,
+            #[serde(default, deserialize_with = "required_empty_or_item_token")]
+            battle_menu: String,
+            #[serde(default)]
+            battle_usable: bool,
+            #[serde(deserialize_with = "required_item_token")]
+            script_name: String,
+            consumable: bool,
+            #[serde(deserialize_with = "required_nullable_usize")]
+            tmhm_index: Option<usize>,
+            #[serde(deserialize_with = "required_nullable_item_token")]
+            tmhm_move: Option<String>,
+        }
+
+        let raw = RawItem::deserialize(deserializer)?;
+        let item = Self {
+            name: raw.name,
+            description: raw.description,
+            effect: raw.effect,
+            status_heals: raw.status_heals,
+            revive_hp_percent: raw.revive_hp_percent,
+            party_revive_hp_percent: raw.party_revive_hp_percent,
+            pp_restore_scope: raw.pp_restore_scope,
+            pp_restore_points: raw.pp_restore_points,
+            pp_up_stages: raw.pp_up_stages,
+            vitamin_stat: raw.vitamin_stat,
+            vitamin_stat_exp: raw.vitamin_stat_exp,
+            vitamin_max_stat_exp: raw.vitamin_max_stat_exp,
+            rare_candy_level_gain: raw.rare_candy_level_gain,
+            battle_stat_boost_stat: raw.battle_stat_boost_stat,
+            battle_stat_boost_stages: raw.battle_stat_boost_stages,
+            battle_escape_mode: raw.battle_escape_mode,
+            battle_focus_energy: raw.battle_focus_energy,
+            battle_stat_drop_guard: raw.battle_stat_drop_guard,
+            battle_stat_drop_guard_turns: raw.battle_stat_drop_guard_turns,
+            confusion_heal: raw.confusion_heal,
+            repel_steps: raw.repel_steps,
+            escape_rope_mode: raw.escape_rope_mode,
+            price: raw.price,
+            held_effect: raw.held_effect,
+            parameter: raw.parameter,
+            property: raw.property,
+            pocket: raw.pocket,
+            field_menu: raw.field_menu,
+            field_usable: raw.field_usable,
+            battle_menu: raw.battle_menu,
+            battle_usable: raw.battle_usable,
+            script_name: raw.script_name,
+            consumable: raw.consumable,
+            tmhm_index: raw.tmhm_index,
+            tmhm_move: raw.tmhm_move,
+        };
+        validate_item_payload(&item).map_err(serde::de::Error::custom)?;
+        Ok(item)
+    }
+}
+
+fn validate_item_payload(item: &Item) -> Result<(), String> {
+    validate_exact_item_text("item.name", &item.name)?;
+    validate_exact_optional_item_text("item.description", &item.description)?;
+    if item.pp_up_stages.is_some_and(|stages| stages > 3) {
+        return Err("item.pp_up_stages must be in 0..=3".to_string());
+    }
+    if item.revive_hp_percent.is_some_and(|percent| percent > 100)
+        || item
+            .party_revive_hp_percent
+            .is_some_and(|percent| percent > 100)
+    {
+        return Err("item revive HP percent fields must be in 0..=100".to_string());
+    }
+    if item
+        .battle_stat_boost_stages
+        .is_some_and(|stages| stages == 0)
+    {
+        return Err("item.battle_stat_boost_stages must be positive".to_string());
+    }
+    if item.tmhm_index.is_some() != item.tmhm_move.is_some() {
+        return Err("item TM/HM index and move must be declared together".to_string());
+    }
+    Ok(())
+}
+
+fn validate_exact_item_text(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!("{field} must be exact non-empty text"));
+    }
+    Ok(())
+}
+
+fn validate_exact_optional_item_text(field: &str, value: &str) -> Result<(), String> {
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!("{field} must be exact text"));
+    }
+    Ok(())
 }
 
 fn required_item_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -149,7 +306,7 @@ fn is_exact_item_token(value: &str) -> bool {
         && value.trim() == value
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'|' | b' '))
 }
 
 fn validate_no_reserved_item_token(value: &str) -> Result<(), String> {

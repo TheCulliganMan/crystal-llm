@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{EventFlagError, GameState, is_engine_flag_name};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptFlagCommand {
     #[serde(deserialize_with = "required_script_flag_command_token")]
@@ -12,6 +12,38 @@ pub struct ScriptFlagCommand {
     #[serde(deserialize_with = "required_script_flag_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptFlagCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptFlagCommand {
+            #[serde(default, deserialize_with = "required_script_flag_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_script_flag_token")]
+            flag_id: String,
+            #[serde(deserialize_with = "required_script_flag_source_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptFlagCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            flag_id: raw.flag_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_flag_command(&command)
+                .map_err(|error| D::Error::custom(format!("{error:?}")))?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +73,8 @@ pub struct ScriptFlagCheckOutcome {
 pub enum ScriptFlagError {
     InvalidCommand { command: String },
     UnknownCommand { command: String },
+    EmptyFlagId { command: String },
+    InvalidFlagId { command: String, flag_id: String },
     Flag { error: EventFlagError },
 }
 
@@ -59,9 +93,16 @@ impl From<EventFlagError> for ScriptFlagError {
     }
 }
 
-pub const SCRIPT_FLAG_MUTATION_COMMANDS: &[&str] =
-    &["setevent", "clearevent", "setflag", "clearflag"];
-pub const SCRIPT_FLAG_CHECK_COMMANDS: &[&str] = &["checkevent", "checkflag"];
+pub const SCRIPT_FLAG_MUTATION_COMMANDS: &[&str] = &[
+    "setevent",
+    "clearevent",
+    "setflag",
+    "set_flag",
+    "setengineflag",
+    "clearflag",
+    "clear_flag",
+];
+pub const SCRIPT_FLAG_CHECK_COMMANDS: &[&str] = &["checkevent", "checkflag", "check_flag"];
 
 pub fn is_known_script_flag_command(command: &str) -> bool {
     SCRIPT_FLAG_MUTATION_COMMANDS.contains(&command)
@@ -83,10 +124,37 @@ pub fn script_flag_command_issues(command: &ScriptFlagCommand) -> Vec<ScriptFlag
     issues
 }
 
+pub fn validate_script_flag_command(command: &ScriptFlagCommand) -> Result<(), ScriptFlagError> {
+    if !is_exact_script_flag_command_token(&command.command) {
+        return Err(ScriptFlagError::InvalidCommand {
+            command: command.command.clone(),
+        });
+    }
+    if !is_known_script_flag_command(&command.command) {
+        return Err(ScriptFlagError::UnknownCommand {
+            command: command.command.clone(),
+        });
+    }
+    if command.flag_id.is_empty() {
+        return Err(ScriptFlagError::EmptyFlagId {
+            command: command.command.clone(),
+        });
+    }
+    if !is_exact_script_flag_token(&command.flag_id) {
+        return Err(ScriptFlagError::InvalidFlagId {
+            command: command.command.clone(),
+            flag_id: command.flag_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn is_exact_script_flag_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
-        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         && !has_reserved_pack_prefix(value)
 }
 
@@ -95,7 +163,16 @@ fn is_exact_script_flag_token(value: &str) -> bool {
         && value.trim() == value
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_flag_source_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
         && !has_reserved_pack_prefix(value)
 }
 
@@ -108,7 +185,7 @@ where
         Ok(value)
     } else {
         Err(serde::de::Error::custom(format!(
-            "script flag command must be exact lowercase ASCII, found {value:?}"
+            "script flag command must be exact lowercase ASCII/underscore, found {value:?}"
         )))
     }
 }
@@ -127,6 +204,20 @@ where
     }
 }
 
+fn required_script_flag_source_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_flag_source_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script flag source must be exact ASM label syntax, found {value:?}"
+        )))
+    }
+}
+
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
@@ -136,14 +227,10 @@ pub fn apply_script_flag_mutation(
     state: &mut GameState,
     command: ScriptFlagCommand,
 ) -> Result<ScriptFlagMutationOutcome, ScriptFlagError> {
-    if !is_exact_script_flag_command_token(&command.command) {
-        return Err(ScriptFlagError::InvalidCommand {
-            command: command.command,
-        });
-    }
+    validate_script_flag_command(&command)?;
     let value = match command.command.as_str() {
-        "setevent" | "setflag" => true,
-        "clearevent" | "clearflag" => false,
+        "setevent" | "setflag" | "set_flag" | "setengineflag" => true,
+        "clearevent" | "clearflag" | "clear_flag" => false,
         other => {
             return Err(ScriptFlagError::UnknownCommand {
                 command: other.to_string(),
@@ -170,13 +257,9 @@ pub fn check_script_flag(
     state: &GameState,
     command: ScriptFlagCommand,
 ) -> Result<ScriptFlagCheckOutcome, ScriptFlagError> {
-    if !is_exact_script_flag_command_token(&command.command) {
-        return Err(ScriptFlagError::InvalidCommand {
-            command: command.command,
-        });
-    }
+    validate_script_flag_command(&command)?;
     match command.command.as_str() {
-        "checkevent" | "checkflag" => {}
+        "checkevent" | "checkflag" | "check_flag" => {}
         other => {
             return Err(ScriptFlagError::UnknownCommand {
                 command: other.to_string(),
@@ -202,14 +285,19 @@ pub fn check_script_flag(
 fn is_engine_command(command: &ScriptFlagCommand) -> bool {
     matches!(
         command.command.as_str(),
-        "setflag" | "clearflag" | "checkflag"
+        "setflag"
+            | "set_flag"
+            | "setengineflag"
+            | "clearflag"
+            | "clear_flag"
+            | "checkflag"
+            | "check_flag"
     ) || is_engine_flag_name(&command.flag_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::EventFlagError;
 
     fn command(name: &str, flag_id: &str) -> ScriptFlagCommand {
         ScriptFlagCommand {
@@ -224,9 +312,14 @@ mod tests {
     fn exported_flag_command_sets_are_exact() {
         assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"setevent"));
         assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"clearflag"));
+        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"set_flag"));
+        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"clear_flag"));
+        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"setengineflag"));
         assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkevent"));
         assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkflag"));
+        assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"check_flag"));
         assert!(is_known_script_flag_command("setflag"));
+        assert!(is_known_script_flag_command("set_flag"));
         assert!(!is_known_script_flag_command("SetFlag"));
         assert!(!is_known_script_flag_command("toggleevent"));
     }
@@ -350,6 +443,23 @@ mod tests {
                 .set,
             true
         );
+
+        apply_script_flag_mutation(&mut state, command("clear_flag", "ENGINE_ZEPHYRBADGE"))
+            .expect("clear exact underscore engine flag");
+        assert_eq!(
+            check_script_flag(&state, command("check_flag", "ENGINE_ZEPHYRBADGE"))
+                .expect("check exact underscore engine flag")
+                .set,
+            false
+        );
+
+        let set_engine =
+            apply_script_flag_mutation(&mut state, command("setengineflag", "ENGINE_FLYPOINT"))
+                .expect("set explicit engine flag");
+        assert_eq!(set_engine.command, "setengineflag");
+        assert!(set_engine.engine_flag);
+        assert_eq!(set_engine.value, true);
+        assert_eq!(state.flags.is_engine_flag_set("ENGINE_FLYPOINT"), Ok(true));
     }
 
     #[test]
@@ -363,9 +473,20 @@ mod tests {
         );
         assert_eq!(
             apply_script_flag_mutation(&mut state, command("setevent", "")),
-            Err(ScriptFlagError::Flag {
-                error: EventFlagError::EmptyFlagName
+            Err(ScriptFlagError::EmptyFlagId {
+                command: "setevent".to_string()
             })
+        );
+        assert_eq!(
+            apply_script_flag_mutation(&mut state, command("setevent", "EVENT ROUTE_29_POTION")),
+            Err(ScriptFlagError::InvalidFlagId {
+                command: "setevent".to_string(),
+                flag_id: "EVENT ROUTE_29_POTION".to_string(),
+            })
+        );
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_ROUTE_29_POTION"),
+            Ok(false)
         );
         assert_eq!(
             check_script_flag(&state, command("setevent", "EVENT_ROUTE_29_POTION")),

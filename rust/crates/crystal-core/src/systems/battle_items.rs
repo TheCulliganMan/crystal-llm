@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::pokemon::StatExperience;
@@ -85,11 +85,60 @@ pub struct BattleItemOutcome {
     pub consumed: bool,
 }
 
+pub const ITEM_EFFECT_BEHAVIOR_REVIVE: &str = "REVIVE";
+pub const ITEM_EFFECT_BEHAVIOR_VITAMIN: &str = "VITAMIN";
+pub const ITEM_EFFECT_BEHAVIOR_BATTLE_STAT_BOOST: &str = "BATTLE_STAT_BOOST";
+pub const ITEM_EFFECT_BEHAVIOR_DIRE_HIT: &str = "DIRE_HIT";
+pub const ITEM_EFFECT_BEHAVIOR_CONFUSION_HEAL: &str = "CONFUSION_HEAL";
+pub const ITEM_EFFECT_BEHAVIOR_FULL_RESTORE: &str = "FULL_RESTORE";
+pub const ITEM_EFFECT_BEHAVIOR_FULL_HEAL: &str = "FULL_HEAL";
+pub const ITEM_EFFECT_BEHAVIOR_STATUS_HEAL: &str = "STATUS_HEAL";
+pub const ITEM_EFFECT_BEHAVIOR_RESTORE_HP: &str = "RESTORE_HP";
+pub const ITEM_EFFECT_BEHAVIOR_PP_UP: &str = "PP_UP";
+pub const ITEM_EFFECT_BEHAVIOR_RESTORE_PP: &str = "RESTORE_PP";
+pub const ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE: &str = "PARTY_REVIVE";
+pub const ITEM_EFFECT_BEHAVIOR_RARE_CANDY: &str = "RARE_CANDY";
+pub const ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE: &str = "EVOLUTION_STONE";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BattleItemEffectPlan {
+    pub item_id: String,
+    pub effect_id: String,
+    pub behavior_id: String,
+}
+
+impl<'de> Deserialize<'de> for BattleItemEffectPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleItemEffectPlan {
+            item_id: String,
+            effect_id: String,
+            behavior_id: String,
+        }
+
+        let raw = RawBattleItemEffectPlan::deserialize(deserializer)?;
+        let plan = Self {
+            item_id: raw.item_id,
+            effect_id: raw.effect_id,
+            behavior_id: raw.behavior_id,
+        };
+        validate_battle_item_effect_plan(&plan).map_err(D::Error::custom)?;
+        Ok(plan)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum BattleItemError {
     #[error("battle item {item_id} declares no battle item payload")]
     MissingBattleItemPayload { item_id: String },
+    #[error("battle item effect plan field {field} has invalid token {value}")]
+    InvalidEffectPlanToken { field: &'static str, value: String },
     #[error("battle item {item_id} has invalid heal amount {amount}")]
     InvalidHealAmount { item_id: String, amount: i16 },
     #[error("battle item {item_id} cannot heal a fainted Pokemon")]
@@ -651,37 +700,26 @@ pub fn apply_active_battle_item_effect(
     item: &Item,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
-    if item.revive_hp_percent.is_some() {
-        return apply_revive(pokemon, item, consumed);
+    let Some(plan) = active_battle_item_effect_plan(item) else {
+        return Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
+        });
+    };
+    validate_battle_item_effect_plan(&plan)?;
+    match plan.behavior_id.as_str() {
+        ITEM_EFFECT_BEHAVIOR_REVIVE => apply_revive(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_VITAMIN => apply_vitamin(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_BATTLE_STAT_BOOST => apply_battle_stat_boost(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_DIRE_HIT => apply_battle_focus_energy(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_CONFUSION_HEAL => apply_confusion_heal(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_FULL_RESTORE => apply_full_restore(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_FULL_HEAL => apply_full_heal(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_STATUS_HEAL => apply_status_heal(pokemon, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_RESTORE_HP => apply_restore_hp(pokemon, item, consumed),
+        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: behavior_id.to_string(),
+        }),
     }
-    if item.vitamin_stat.is_some()
-        || item.vitamin_stat_exp.is_some()
-        || item.vitamin_max_stat_exp.is_some()
-    {
-        return apply_vitamin(pokemon, item, consumed);
-    }
-    if item.battle_stat_boost_stat.is_some() || item.battle_stat_boost_stages.is_some() {
-        return apply_battle_stat_boost(pokemon, item, consumed);
-    }
-    if item.battle_focus_energy.is_some() {
-        return apply_battle_focus_energy(pokemon, item, consumed);
-    }
-    if item.confusion_heal.is_some() {
-        return apply_confusion_heal(pokemon, item, consumed);
-    }
-    if !item.status_heals.is_empty() && item.parameter != 0 {
-        return apply_full_restore(pokemon, item, consumed);
-    }
-    if !item.status_heals.is_empty() {
-        return apply_status_heal(pokemon, item, consumed);
-    }
-    if item.parameter != 0 {
-        return apply_restore_hp(pokemon, item, consumed);
-    }
-
-    Err(BattleItemError::MissingBattleItemPayload {
-        item_id: item.script_name.clone(),
-    })
 }
 
 pub fn apply_battle_pp_item_effect(
@@ -691,16 +729,21 @@ pub fn apply_battle_pp_item_effect(
     move_slot: Option<usize>,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
-    if item.pp_up_stages.is_some() {
-        return apply_pp_up(pokemon, item, moves, move_slot, consumed);
+    let Some(plan) = battle_pp_item_effect_plan(item) else {
+        return Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
+        });
+    };
+    validate_battle_item_effect_plan(&plan)?;
+    match plan.behavior_id.as_str() {
+        ITEM_EFFECT_BEHAVIOR_PP_UP => apply_pp_up(pokemon, item, moves, move_slot, consumed),
+        ITEM_EFFECT_BEHAVIOR_RESTORE_PP => {
+            apply_restore_pp(pokemon, item, moves, move_slot, consumed)
+        }
+        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: behavior_id.to_string(),
+        }),
     }
-    if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
-        return apply_restore_pp(pokemon, item, moves, move_slot, consumed);
-    }
-
-    Err(BattleItemError::MissingBattleItemPayload {
-        item_id: item.script_name.clone(),
-    })
 }
 
 pub fn apply_party_wide_item_effect(
@@ -708,13 +751,124 @@ pub fn apply_party_wide_item_effect(
     item: &Item,
     consumed: bool,
 ) -> Result<PartyItemOutcome, BattleItemError> {
-    if item.party_revive_hp_percent.is_some() {
-        return apply_sacred_ash(party, item, consumed);
+    let Some(plan) = party_wide_item_effect_plan(item) else {
+        return Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
+        });
+    };
+    validate_battle_item_effect_plan(&plan)?;
+    match plan.behavior_id.as_str() {
+        ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE => apply_sacred_ash(party, item, consumed),
+        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: behavior_id.to_string(),
+        }),
     }
+}
 
-    Err(BattleItemError::MissingBattleItemPayload {
+pub fn active_battle_item_effect_plan(item: &Item) -> Option<BattleItemEffectPlan> {
+    battle_item_effect_plan(item, active_battle_item_behavior_id(item)?)
+}
+
+pub fn battle_pp_item_effect_plan(item: &Item) -> Option<BattleItemEffectPlan> {
+    battle_item_effect_plan(item, battle_pp_item_behavior_id(item)?)
+}
+
+pub fn party_wide_item_effect_plan(item: &Item) -> Option<BattleItemEffectPlan> {
+    battle_item_effect_plan(item, party_wide_item_behavior_id(item)?)
+}
+
+pub fn party_special_item_effect_plan(
+    item: &Item,
+    evolutions: &EvolutionTable,
+) -> Option<BattleItemEffectPlan> {
+    if item.rare_candy_level_gain.is_some() {
+        return battle_item_effect_plan(item, ITEM_EFFECT_BEHAVIOR_RARE_CANDY);
+    }
+    if evolutions.contains_item_evolution(&item.script_name) {
+        return battle_item_effect_plan(item, ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE);
+    }
+    None
+}
+
+fn battle_item_effect_plan(
+    item: &Item,
+    behavior_id: impl Into<String>,
+) -> Option<BattleItemEffectPlan> {
+    Some(BattleItemEffectPlan {
         item_id: item.script_name.clone(),
+        effect_id: item.effect.clone(),
+        behavior_id: behavior_id.into(),
     })
+}
+
+fn validate_battle_item_effect_plan(plan: &BattleItemEffectPlan) -> Result<(), BattleItemError> {
+    validate_battle_item_effect_plan_token("item_id", &plan.item_id)?;
+    validate_battle_item_effect_plan_token("effect_id", &plan.effect_id)?;
+    validate_battle_item_effect_plan_token("behavior_id", &plan.behavior_id)
+}
+
+fn validate_battle_item_effect_plan_token(
+    field: &'static str,
+    value: &str,
+) -> Result<(), BattleItemError> {
+    if is_exact_item_id_token(value) {
+        Ok(())
+    } else {
+        Err(BattleItemError::InvalidEffectPlanToken {
+            field,
+            value: value.to_string(),
+        })
+    }
+}
+
+fn active_battle_item_behavior_id(item: &Item) -> Option<&'static str> {
+    if item.revive_hp_percent.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_REVIVE);
+    }
+    if item.vitamin_stat.is_some()
+        || item.vitamin_stat_exp.is_some()
+        || item.vitamin_max_stat_exp.is_some()
+    {
+        return Some(ITEM_EFFECT_BEHAVIOR_VITAMIN);
+    }
+    if item.battle_stat_boost_stat.is_some() || item.battle_stat_boost_stages.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_BATTLE_STAT_BOOST);
+    }
+    if item.battle_focus_energy.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_DIRE_HIT);
+    }
+    if !item.status_heals.is_empty() && item.parameter != 0 {
+        return Some(ITEM_EFFECT_BEHAVIOR_FULL_RESTORE);
+    }
+    if !item.status_heals.is_empty() && item.confusion_heal.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_FULL_HEAL);
+    }
+    if item.confusion_heal.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_CONFUSION_HEAL);
+    }
+    if !item.status_heals.is_empty() {
+        return Some(ITEM_EFFECT_BEHAVIOR_STATUS_HEAL);
+    }
+    if item.parameter != 0 {
+        return Some(ITEM_EFFECT_BEHAVIOR_RESTORE_HP);
+    }
+    None
+}
+
+fn battle_pp_item_behavior_id(item: &Item) -> Option<&'static str> {
+    if item.pp_up_stages.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_PP_UP);
+    }
+    if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
+        return Some(ITEM_EFFECT_BEHAVIOR_RESTORE_PP);
+    }
+    None
+}
+
+fn party_wide_item_behavior_id(item: &Item) -> Option<&'static str> {
+    item.party_revive_hp_percent
+        .is_some()
+        .then_some(ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE)
 }
 
 fn apply_sacred_ash(
@@ -858,8 +1012,14 @@ pub fn apply_party_special_item_effect(
     time_of_day: TimeOfDay,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
-    if item.rare_candy_level_gain.is_some() {
-        apply_rare_candy_item_effect(
+    let Some(plan) = party_special_item_effect_plan(item, evolutions) else {
+        return Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
+        });
+    };
+    validate_battle_item_effect_plan(&plan)?;
+    match plan.behavior_id.as_str() {
+        ITEM_EFFECT_BEHAVIOR_RARE_CANDY => apply_rare_candy_item_effect(
             pokemon,
             item,
             species,
@@ -870,9 +1030,8 @@ pub fn apply_party_special_item_effect(
             evolutions,
             time_of_day,
             consumed,
-        )
-    } else if evolutions.contains_item_evolution(&item.script_name) {
-        apply_evolution_stone_item_effect(
+        ),
+        ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE => apply_evolution_stone_item_effect(
             pokemon,
             item,
             species,
@@ -881,11 +1040,10 @@ pub fn apply_party_special_item_effect(
             evolutions,
             time_of_day,
             consumed,
-        )
-    } else {
-        Err(BattleItemError::MissingBattleItemPayload {
-            item_id: item.script_name.clone(),
-        })
+        ),
+        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: behavior_id.to_string(),
+        }),
     }
 }
 
@@ -1069,6 +1227,70 @@ fn apply_status_heal(
         confusion_turns_before: pokemon.confusion_turns,
         confusion_turns_after: pokemon.confusion_turns,
         focus_energy_before: pokemon.focus_energy,
+        focus_energy_after: pokemon.focus_energy,
+        pp_changes: Vec::new(),
+        stat_changes: Vec::new(),
+        battle_stat_stage_changes: Vec::new(),
+        learned_moves: Vec::new(),
+        evolution_target: None,
+        consumed,
+    })
+}
+
+fn apply_full_heal(
+    pokemon: &mut Pokemon,
+    item: &Item,
+    consumed: bool,
+) -> Result<BattleItemOutcome, BattleItemError> {
+    if item.status_heals.is_empty() {
+        return Err(BattleItemError::MissingStatusHeals {
+            item_id: item.script_name.clone(),
+        });
+    }
+    let confusion_heal =
+        item.confusion_heal
+            .ok_or_else(|| BattleItemError::MissingConfusionHeal {
+                item_id: item.script_name.clone(),
+            })?;
+    if !confusion_heal {
+        return Err(BattleItemError::InvalidConfusionHeal {
+            item_id: item.script_name.clone(),
+        });
+    }
+
+    let status_before = pokemon.status.clone();
+    let hp_before = pokemon.hp;
+    let confusion_turns_before = pokemon.confusion_turns;
+    let focus_energy_before = pokemon.focus_energy;
+    let heals_current_status = pokemon.status.as_deref().is_some_and(|status| {
+        item.status_heals
+            .iter()
+            .any(|healed_status| healed_status == status)
+    });
+    if !heals_current_status && pokemon.confusion_turns == 0 {
+        return Err(BattleItemError::NoTargetChange {
+            item_id: item.script_name.clone(),
+        });
+    }
+
+    if heals_current_status {
+        clear_status(pokemon);
+    }
+    pokemon.confusion_turns = 0;
+
+    Ok(BattleItemOutcome {
+        item_id: item.script_name.clone(),
+        hp_before,
+        hp_after: pokemon.hp,
+        level_before: pokemon.level,
+        level_after: pokemon.level,
+        experience_before: pokemon.experience,
+        experience_after: pokemon.experience,
+        status_before,
+        status_after: pokemon.status.clone(),
+        confusion_turns_before,
+        confusion_turns_after: pokemon.confusion_turns,
+        focus_energy_before,
         focus_energy_after: pokemon.focus_energy,
         pp_changes: Vec::new(),
         stat_changes: Vec::new(),
@@ -1913,6 +2135,15 @@ mod tests {
         item
     }
 
+    fn full_heal_item(status_heals: Vec<&str>, confusion_heal: Option<bool>) -> Item {
+        let mut item = status_item(status_heals);
+        item.effect = "FULL_HEAL".to_string();
+        item.script_name = "FULL_HEAL".to_string();
+        item.name = "FULL HEAL".to_string();
+        item.confusion_heal = confusion_heal;
+        item
+    }
+
     fn revive_item(percent: Option<u8>) -> Item {
         let mut item = test_item("REVIVE", 0);
         item.revive_hp_percent = percent;
@@ -2697,6 +2928,84 @@ mod tests {
 
         assert_eq!(pokemon.status, None);
         assert_eq!(pokemon.sleep_turns, 0);
+    }
+
+    #[test]
+    fn battle_items_full_heal_clears_status_and_confusion_from_exact_payload() {
+        let item = full_heal_item(
+            vec!["POISON", "BURN", "FREEZE", "SLEEP", "PARALYSIS"],
+            Some(true),
+        );
+        let mut pokemon = test_pokemon(35, 35);
+        pokemon.status = Some("POISON".to_string());
+        pokemon.confusion_turns = 4;
+
+        let outcome =
+            apply_active_battle_item_effect(&mut pokemon, &item, true).expect("full heal works");
+
+        assert_eq!(outcome.item_id, "FULL_HEAL");
+        assert_eq!(outcome.status_before, Some("POISON".to_string()));
+        assert_eq!(outcome.status_after, None);
+        assert_eq!(outcome.confusion_turns_before, 4);
+        assert_eq!(outcome.confusion_turns_after, 0);
+        assert_eq!(pokemon.status, None);
+        assert_eq!(pokemon.confusion_turns, 0);
+        assert!(outcome.consumed);
+    }
+
+    #[test]
+    fn battle_items_full_heal_can_clear_confusion_without_status() {
+        let item = full_heal_item(
+            vec!["POISON", "BURN", "FREEZE", "SLEEP", "PARALYSIS"],
+            Some(true),
+        );
+        let mut pokemon = test_pokemon(35, 35);
+        pokemon.confusion_turns = 2;
+
+        let outcome = apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect("full heal clears confusion");
+
+        assert_eq!(outcome.status_before, None);
+        assert_eq!(outcome.status_after, None);
+        assert_eq!(outcome.confusion_turns_before, 2);
+        assert_eq!(outcome.confusion_turns_after, 0);
+        assert_eq!(pokemon.confusion_turns, 0);
+    }
+
+    #[test]
+    fn battle_items_full_heal_rejects_invalid_or_unchanged_targets_without_mutation() {
+        let mut invalid = test_pokemon(35, 35);
+        invalid.status = Some("POISON".to_string());
+        invalid.confusion_turns = 2;
+        let invalid_before = invalid.clone();
+        assert_eq!(
+            apply_active_battle_item_effect(
+                &mut invalid,
+                &full_heal_item(vec!["POISON"], Some(false)),
+                true,
+            )
+            .expect_err("false confusion heal metadata is invalid"),
+            BattleItemError::InvalidConfusionHeal {
+                item_id: "FULL_HEAL".to_string(),
+            }
+        );
+        assert_eq!(invalid, invalid_before);
+
+        let mut mismatched = test_pokemon(35, 35);
+        mismatched.status = Some("BURN".to_string());
+        let mismatched_before = mismatched.clone();
+        assert_eq!(
+            apply_active_battle_item_effect(
+                &mut mismatched,
+                &full_heal_item(vec!["POISON"], Some(true)),
+                true,
+            )
+            .expect_err("mismatched status and no confusion has no effect"),
+            BattleItemError::NoTargetChange {
+                item_id: "FULL_HEAL".to_string(),
+            }
+        );
+        assert_eq!(mismatched, mismatched_before);
     }
 
     #[test]
@@ -3914,6 +4223,38 @@ mod tests {
             error,
             BattleItemError::MissingBattleItemPayload {
                 item_id: "POTION".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
+    }
+
+    #[test]
+    fn battle_item_effect_plans_reject_malformed_string_ids_without_enum_lock_in() {
+        let mut item = test_item("RESTORE HP", 20);
+        let mut pokemon = test_pokemon(17, 35);
+        let before = pokemon.clone();
+
+        let error = apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect_err("malformed effect id rejected before mutation");
+
+        assert_eq!(
+            error,
+            BattleItemError::InvalidEffectPlanToken {
+                field: "effect_id",
+                value: "RESTORE HP".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
+
+        item.effect = "MODDED_RESTORE_HP".to_string();
+        item.script_name = "fallback_potion".to_string();
+        let error = apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect_err("reserved item id rejected before mutation");
+        assert_eq!(
+            error,
+            BattleItemError::InvalidEffectPlanToken {
+                field: "item_id",
+                value: "fallback_potion".to_string(),
             }
         );
         assert_eq!(pokemon, before);

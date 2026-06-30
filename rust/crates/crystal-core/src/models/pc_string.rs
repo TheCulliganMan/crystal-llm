@@ -1,5 +1,28 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize, de::Error as _};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct PcStringTable(pub BTreeMap<String, String>);
+
+impl<'de> Deserialize<'de> for PcStringTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        if values.is_empty() {
+            return Err(D::Error::custom("pc string table must not be empty"));
+        }
+        if let Some(issue) = pc_string_catalog_issues(&values).into_iter().next() {
+            return Err(D::Error::custom(format!(
+                "invalid pc string table entry: {issue:?}"
+            )));
+        }
+        Ok(Self(values))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PcStringCatalogIssue {
     InvalidString { key: String },

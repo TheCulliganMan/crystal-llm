@@ -5,6 +5,7 @@ import { exportWildEncounters } from "./export-wild-encounters";
 import { exportFieldEncounters } from "./export-field-encounters";
 import { exportFishing } from "./export-fishing";
 import { exportFieldMoves } from "./export-field-moves";
+import { exportFlyDestinations } from "./export-fly-destinations";
 import { exportBattleRewardRules } from "./export-battle-reward-rules";
 import { exportBattleEscapeRules } from "./export-battle-escape-rules";
 import { exportStepEventRules } from "./export-step-event-rules";
@@ -61,6 +62,7 @@ export function exportCoreData(): void {
   const fieldEncounters = exportFieldEncounters();
   const fishing = exportFishing();
   const fieldMoves = exportFieldMoves();
+  const flyDestinations = exportFlyDestinations();
   const battleRewardRules = exportBattleRewardRules();
   const battleEscapeRules = exportBattleEscapeRules();
   const stepEventRules = exportStepEventRules();
@@ -127,6 +129,7 @@ export function exportCoreData(): void {
     fieldEncounters,
     fishing,
     fieldMoves,
+    flyDestinations,
     battleRewardRules,
     battleEscapeRules,
     stepEventRules,

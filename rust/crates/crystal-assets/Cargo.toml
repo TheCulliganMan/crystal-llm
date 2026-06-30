@@ -11,6 +11,7 @@ anyhow.workspace = true
 ciborium.workspace = true
 crystal-core = { path = "../crystal-core" }
 serde.workspace = true
+serde_path_to_error = "0.1"
 serde_json.workspace = true
 
 [features]

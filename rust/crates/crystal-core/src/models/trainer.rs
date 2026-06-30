@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::{Dv, Item, LearnedMove};
 
@@ -39,7 +39,7 @@ impl TrainerCatalog {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Trainer {
     pub name: String,
@@ -55,13 +55,60 @@ pub struct Trainer {
     pub base_reward: u32,
     pub ai_move_flags: u32,
     pub ai_item_switch_flags: u32,
-    #[serde(deserialize_with = "required_trainer_token")]
+    #[serde(deserialize_with = "required_trainer_encounter_music_token")]
     pub encounter_music: String,
     #[serde(deserialize_with = "required_trainer_token_vec")]
     pub ai_layers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for Trainer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTrainer {
+            name: String,
+            #[serde(deserialize_with = "required_trainer_token")]
+            trainer_id: String,
+            #[serde(deserialize_with = "required_trainer_token")]
+            trainer_class: String,
+            party: Vec<TrainerPartyPokemon>,
+            win_quote: String,
+            lose_quote: String,
+            #[serde(deserialize_with = "required_nullable_trainer_token_vec")]
+            items: Vec<Option<String>>,
+            base_reward: u32,
+            ai_move_flags: u32,
+            ai_item_switch_flags: u32,
+            #[serde(deserialize_with = "required_trainer_encounter_music_token")]
+            encounter_music: String,
+            #[serde(deserialize_with = "required_trainer_token_vec")]
+            ai_layers: Vec<String>,
+        }
+
+        let raw = RawTrainer::deserialize(deserializer)?;
+        let trainer = Self {
+            name: raw.name,
+            trainer_id: raw.trainer_id,
+            trainer_class: raw.trainer_class,
+            party: raw.party,
+            win_quote: raw.win_quote,
+            lose_quote: raw.lose_quote,
+            items: raw.items,
+            base_reward: raw.base_reward,
+            ai_move_flags: raw.ai_move_flags,
+            ai_item_switch_flags: raw.ai_item_switch_flags,
+            encounter_music: raw.encounter_music,
+            ai_layers: raw.ai_layers,
+        };
+        trainer.validate_shape().map_err(D::Error::custom)?;
+        Ok(trainer)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrainerPartyPokemon {
     #[serde(deserialize_with = "required_trainer_token")]
@@ -71,6 +118,36 @@ pub struct TrainerPartyPokemon {
     pub item: Option<String>,
     pub moves: Vec<LearnedMove>,
     pub dvs: Dv,
+}
+
+impl<'de> Deserialize<'de> for TrainerPartyPokemon {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTrainerPartyPokemon {
+            #[serde(deserialize_with = "required_trainer_token")]
+            species: String,
+            level: u8,
+            #[serde(deserialize_with = "required_nullable_trainer_token")]
+            item: Option<String>,
+            moves: Vec<LearnedMove>,
+            dvs: Dv,
+        }
+
+        let raw = RawTrainerPartyPokemon::deserialize(deserializer)?;
+        let party = Self {
+            species: raw.species,
+            level: raw.level,
+            item: raw.item,
+            moves: raw.moves,
+            dvs: raw.dvs,
+        };
+        party.validate_shape().map_err(D::Error::custom)?;
+        Ok(party)
+    }
 }
 
 fn required_trainer_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -83,6 +160,20 @@ where
     } else {
         Err(serde::de::Error::custom(format!(
             "trainer token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_trainer_encounter_music_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || is_exact_nonempty_trainer_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "trainer encounter music must be empty or exact ASCII alphanumeric/underscore, found {value:?}"
         )))
     }
 }
@@ -166,6 +257,27 @@ impl Default for Trainer {
             encounter_music: String::new(),
             ai_layers: Vec::new(),
         }
+    }
+}
+
+impl Trainer {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.party.is_empty() {
+            return Err(format!("trainer {} must declare a party", self.trainer_id));
+        }
+        Ok(())
+    }
+}
+
+impl TrainerPartyPokemon {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.level == 0 {
+            return Err(format!(
+                "trainer party Pokemon {} must have positive level",
+                self.species
+            ));
+        }
+        Ok(())
     }
 }
 

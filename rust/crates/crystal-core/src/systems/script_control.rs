@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{
     GameState, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
     ScriptReturnFrame,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptControlCommand {
     #[serde(deserialize_with = "required_control_command_token")]
@@ -21,6 +21,43 @@ pub struct ScriptControlCommand {
     #[serde(deserialize_with = "required_control_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptControlCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptControlCommand {
+            #[serde(default, deserialize_with = "required_control_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_compare_token")]
+            compare_value: Option<String>,
+            #[serde(deserialize_with = "required_nullable_control_label_token")]
+            target_label: Option<String>,
+            #[serde(deserialize_with = "required_nullable_control_label_token")]
+            resolved_target_script: Option<String>,
+            #[serde(deserialize_with = "required_control_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptControlCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            compare_value: raw.compare_value,
+            target_label: raw.target_label,
+            resolved_target_script: raw.resolved_target_script,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_control_command(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +117,8 @@ pub enum ScriptControlCommandError {
         command: String,
         target_script: String,
     },
+    #[error("script control source script '{source_script}' is invalid")]
+    InvalidSourceScript { source_script: String },
     #[error("script accumulator is unset for '{command}'")]
     UnsetAccumulator { command: String },
     #[error("script accumulator value '{value}' is not an exact TRUE/FALSE token")]
@@ -258,6 +297,7 @@ pub fn apply_script_control_action_to_state(state: &mut GameState, action: &Scri
 pub fn validate_script_control_command(
     command: &ScriptControlCommand,
 ) -> Result<(), ScriptControlCommandError> {
+    reject_invalid_source_script(command)?;
     if command.command.is_empty() {
         return Err(ScriptControlCommandError::EmptyCommand);
     }
@@ -297,6 +337,18 @@ pub fn validate_script_control_command(
         }
     }
     Ok(())
+}
+
+fn reject_invalid_source_script(
+    command: &ScriptControlCommand,
+) -> Result<(), ScriptControlCommandError> {
+    if is_exact_nonempty_token(&command.source_script) {
+        Ok(())
+    } else {
+        Err(ScriptControlCommandError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+        })
+    }
 }
 
 fn branch(
@@ -1124,6 +1176,30 @@ mod tests {
 
         assert!(state.script_runtime.control_events.is_empty());
         assert_eq!(state.script_runtime.next_script, None);
+        assert!(state.script_runtime.call_stack.is_empty());
+        assert!(state.script_runtime.deferred_scripts.is_empty());
+    }
+
+    #[test]
+    fn invalid_control_source_script_does_not_mutate_runtime_state() {
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("TRUE".to_string());
+        state.script_runtime.next_script = Some("PendingScript".to_string());
+        let mut bad_source = command("scall", None, Some(".Done"));
+        bad_source.source_script = "fallback_script".to_string();
+
+        assert_eq!(
+            apply_script_control_command(&mut state, bad_source, &BTreeMap::new()),
+            Err(ScriptControlCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+
+        assert!(state.script_runtime.control_events.is_empty());
+        assert_eq!(
+            state.script_runtime.next_script.as_deref(),
+            Some("PendingScript")
+        );
         assert!(state.script_runtime.call_stack.is_empty());
         assert!(state.script_runtime.deferred_scripts.is_empty());
     }

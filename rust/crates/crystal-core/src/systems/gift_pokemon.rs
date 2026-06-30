@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::models::{
     CaptureStorageLocation, Dv, Item, Move, Pokemon, PokemonBuildError, PokemonSpecies,
@@ -12,34 +12,134 @@ use crate::systems::learnsets::SpeciesLearnsets;
 
 pub const NO_ITEM: &str = "NO_ITEM";
 pub const EGG_NICKNAME: &str = "EGG";
+pub const SCRIPT_GIFT_POKEMON_COMMANDS: &[&str] = &["givepoke", "giveegg"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub fn is_known_script_gift_pokemon_command(command: &str) -> bool {
+    SCRIPT_GIFT_POKEMON_COMMANDS.contains(&command)
+}
+
+pub fn is_script_gift_egg_command(command: &str) -> bool {
+    command == "giveegg"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GiftPokemonScript {
+    #[serde(deserialize_with = "required_gift_token")]
     pub species_id: String,
+    #[serde(deserialize_with = "required_gift_value_token")]
     pub level_token: String,
     pub level: u8,
+    #[serde(deserialize_with = "required_nullable_gift_token")]
     pub held_item_id: Option<String>,
+    #[serde(deserialize_with = "required_nullable_gift_token")]
     pub nickname_label: Option<String>,
+    #[serde(deserialize_with = "required_nullable_gift_token")]
     pub ot_label: Option<String>,
+    #[serde(deserialize_with = "required_gift_label_token")]
     pub source_script: String,
     pub command_index: usize,
     pub egg: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for GiftPokemonScript {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawGiftPokemonScript {
+            #[serde(deserialize_with = "required_gift_token")]
+            species_id: String,
+            #[serde(deserialize_with = "required_gift_value_token")]
+            level_token: String,
+            level: u8,
+            #[serde(deserialize_with = "required_nullable_gift_token")]
+            held_item_id: Option<String>,
+            #[serde(deserialize_with = "required_nullable_gift_token")]
+            nickname_label: Option<String>,
+            #[serde(deserialize_with = "required_nullable_gift_token")]
+            ot_label: Option<String>,
+            #[serde(deserialize_with = "required_gift_label_token")]
+            source_script: String,
+            command_index: usize,
+            egg: bool,
+        }
+
+        let raw = RawGiftPokemonScript::deserialize(deserializer)?;
+        let script = Self {
+            species_id: raw.species_id,
+            level_token: raw.level_token,
+            level: raw.level,
+            held_item_id: raw.held_item_id,
+            nickname_label: raw.nickname_label,
+            ot_label: raw.ot_label,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+            egg: raw.egg,
+        };
+        validate_gift_level(script.level).map_err(D::Error::custom)?;
+        Ok(script)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GiftPokemonRequest {
+    #[serde(deserialize_with = "required_gift_token")]
     pub species_id: String,
     pub level: u8,
+    #[serde(deserialize_with = "required_nullable_gift_token")]
     pub held_item_id: Option<String>,
     pub nickname: Option<String>,
     pub original_trainer_name: String,
     pub original_trainer_id: u16,
+    #[serde(deserialize_with = "required_gift_label_token")]
     pub source_script: String,
     pub command_index: usize,
     pub egg: bool,
     pub dvs: Dv,
+}
+
+impl<'de> Deserialize<'de> for GiftPokemonRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawGiftPokemonRequest {
+            #[serde(deserialize_with = "required_gift_token")]
+            species_id: String,
+            level: u8,
+            #[serde(deserialize_with = "required_nullable_gift_token")]
+            held_item_id: Option<String>,
+            nickname: Option<String>,
+            original_trainer_name: String,
+            original_trainer_id: u16,
+            #[serde(deserialize_with = "required_gift_label_token")]
+            source_script: String,
+            command_index: usize,
+            egg: bool,
+            dvs: Dv,
+        }
+
+        let raw = RawGiftPokemonRequest::deserialize(deserializer)?;
+        validate_gift_level(raw.level).map_err(D::Error::custom)?;
+        Ok(Self {
+            species_id: raw.species_id,
+            level: raw.level,
+            held_item_id: raw.held_item_id,
+            nickname: raw.nickname,
+            original_trainer_name: raw.original_trainer_name,
+            original_trainer_id: raw.original_trainer_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+            egg: raw.egg,
+            dvs: raw.dvs,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +160,7 @@ pub enum GiftPokemonError {
     UnknownSpecies { species_id: String },
     InvalidHeldItemId { item_id: String },
     UnknownHeldItem { item_id: String },
+    InvalidSourceScript { source_script: String },
     InvalidLevel { level: u8 },
     StorageFull { species_id: String },
     PokemonBuild { error: PokemonBuildError },
@@ -71,6 +172,7 @@ pub enum GiftPokemonScriptIssue {
     UnknownSpecies { species_id: String },
     InvalidHeldItemId { item_id: String },
     UnknownHeldItem { item_id: String },
+    InvalidSourceScript { source_script: String },
     EmptyLabel { field: &'static str },
     InvalidLabel { field: &'static str, label: String },
     UnknownLabel { field: &'static str, label: String },
@@ -83,6 +185,11 @@ pub fn gift_pokemon_script_issues(
     script_labels: &BTreeSet<String>,
 ) -> Vec<GiftPokemonScriptIssue> {
     let mut issues = Vec::new();
+    if !is_exact_gift_label_token(&gift.source_script) {
+        issues.push(GiftPokemonScriptIssue::InvalidSourceScript {
+            source_script: gift.source_script.clone(),
+        });
+    }
     if !is_exact_gift_token(&gift.species_id) {
         issues.push(GiftPokemonScriptIssue::InvalidSpeciesId {
             species_id: gift.species_id.clone(),
@@ -151,6 +258,84 @@ fn is_exact_gift_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn is_exact_gift_value_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn is_exact_gift_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn validate_gift_level(level: u8) -> Result<(), String> {
+    if level == 0 {
+        Err("gift Pokemon level must be positive".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn required_gift_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_gift_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "gift Pokemon token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_nullable_gift_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(token) if is_exact_gift_token(&token) => Ok(Some(token)),
+        Some(token) => Err(serde::de::Error::custom(format!(
+            "gift Pokemon token must be exact ASCII alphanumeric/underscore, found {token:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_gift_value_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_gift_value_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "gift Pokemon value token must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn required_gift_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_gift_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "gift Pokemon source script must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
@@ -168,6 +353,11 @@ pub fn give_gift_pokemon(
     if request.level == 0 {
         return Err(GiftPokemonError::InvalidLevel {
             level: request.level,
+        });
+    }
+    if !is_exact_gift_label_token(&request.source_script) {
+        return Err(GiftPokemonError::InvalidSourceScript {
+            source_script: request.source_script.clone(),
         });
     }
     if !is_exact_gift_token(&request.species_id) {
@@ -361,6 +551,18 @@ mod tests {
     }
 
     #[test]
+    fn exported_script_gift_command_set_is_exact() {
+        assert!(SCRIPT_GIFT_POKEMON_COMMANDS.contains(&"givepoke"));
+        assert!(SCRIPT_GIFT_POKEMON_COMMANDS.contains(&"giveegg"));
+        assert!(is_known_script_gift_pokemon_command("givepoke"));
+        assert!(is_known_script_gift_pokemon_command("giveegg"));
+        assert!(is_script_gift_egg_command("giveegg"));
+        assert!(!is_script_gift_egg_command("givepoke"));
+        assert!(!is_known_script_gift_pokemon_command("GivePoke"));
+        assert!(!is_known_script_gift_pokemon_command("fallback_givepoke"));
+    }
+
+    #[test]
     fn gift_pokemon_script_issues_validate_exact_ids_and_labels() {
         let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
         let items = BTreeMap::from([("BERRY".to_string(), item("BERRY"))]);
@@ -372,7 +574,7 @@ mod tests {
             held_item_id: Some("BERRY JUICE".to_string()),
             nickname_label: Some("Gift NicknameText".to_string()),
             ot_label: Some(" GiftOtText".to_string()),
-            source_script: "GiftScript".to_string(),
+            source_script: "fallback_script".to_string(),
             command_index: 4,
             egg: false,
         };
@@ -385,6 +587,9 @@ mod tests {
                 },
                 GiftPokemonScriptIssue::InvalidHeldItemId {
                     item_id: "BERRY JUICE".to_string(),
+                },
+                GiftPokemonScriptIssue::InvalidSourceScript {
+                    source_script: "fallback_script".to_string(),
                 },
                 GiftPokemonScriptIssue::InvalidLabel {
                     field: "nickname",
@@ -434,6 +639,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn gift_pokemon_script_json_rejects_reserved_pack_tokens() {
+        for (field, value) in [
+            ("species_id", serde_json::json!("fallback_cyndaquil")),
+            ("level_token", serde_json::json!("legacy_level")),
+            ("held_item_id", serde_json::json!("legacy_berry")),
+            ("nickname_label", serde_json::json!("fallback_nickname")),
+            ("ot_label", serde_json::json!("legacy_ot")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "species_id": "CYNDAQUIL",
+                "level_token": "5",
+                "level": 5,
+                "held_item_id": "BERRY",
+                "nickname_label": "GiftNicknameText",
+                "ot_label": "GiftOtText",
+                "source_script": "GiftScript",
+                "command_index": 4,
+                "egg": false
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<GiftPokemonScript>(payload)
+                .expect_err("reserved gift Pokemon script tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("gift Pokemon") || error.contains("gift Pokemon"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -596,6 +834,23 @@ mod tests {
             ),
             Err(GiftPokemonError::InvalidHeldItemId {
                 item_id: "legacy_berry".to_string(),
+            })
+        );
+
+        let mut reserved_source = request("CYNDAQUIL", 5);
+        reserved_source.source_script = "fallback_script".to_string();
+        assert_eq!(
+            give_gift_pokemon(
+                &mut storage,
+                &species_map,
+                &learnsets("CYNDAQUIL"),
+                &BTreeMap::new(),
+                &growth_rates(),
+                &items,
+                reserved_source,
+            ),
+            Err(GiftPokemonError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
             })
         );
         assert_eq!(storage.party.filled_slots(), 0);

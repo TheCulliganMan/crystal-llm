@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::GameState;
 
@@ -15,10 +15,16 @@ impl<'de> Deserialize<'de> for PhoneContactCatalog {
         D: serde::Deserializer<'de>,
     {
         let contacts = BTreeMap::<String, PhoneContactRecord>::deserialize(deserializer)?;
-        for contact_id in contacts.keys() {
+        for (contact_id, record) in &contacts {
             if !is_exact_phone_token(contact_id) {
                 return Err(serde::de::Error::custom(format!(
                     "phone contact catalog entry id '{contact_id}' must be exact ASCII alphanumeric or underscore"
+                )));
+            }
+            if record.contact_id != *contact_id {
+                return Err(serde::de::Error::custom(format!(
+                    "phone contact catalog entry id '{contact_id}' must match record contactId '{}'",
+                    record.contact_id
                 )));
             }
         }
@@ -30,34 +36,131 @@ impl<'de> Deserialize<'de> for PhoneContactCatalog {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PermanentPhoneNumberRule {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PhoneContactRecord {
-    #[serde(deserialize_with = "required_phone_contact_id")]
     pub contact_id: String,
-    #[serde(deserialize_with = "optional_phone_trainer_class")]
     pub trainer_class: Option<String>,
-    #[serde(deserialize_with = "optional_phone_trainer_label")]
     pub trainer_label: Option<String>,
     pub lines: Vec<String>,
     pub primary_label: String,
-    #[serde(deserialize_with = "optional_phone_map_constant")]
     pub map_constant: Option<String>,
     pub callee_time_mask: u8,
-    #[serde(deserialize_with = "optional_phone_callee_script")]
     pub callee_script: Option<String>,
     pub caller_time_mask: u8,
-    #[serde(deserialize_with = "optional_phone_caller_script")]
     pub caller_script: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for PhoneContactRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawRecord {
+            #[serde(deserialize_with = "required_phone_contact_id")]
+            contact_id: String,
+            #[serde(deserialize_with = "optional_phone_trainer_class")]
+            trainer_class: Option<String>,
+            #[serde(deserialize_with = "optional_phone_trainer_label")]
+            trainer_label: Option<String>,
+            lines: Vec<String>,
+            primary_label: String,
+            #[serde(deserialize_with = "optional_phone_map_constant")]
+            map_constant: Option<String>,
+            callee_time_mask: u8,
+            #[serde(deserialize_with = "optional_phone_callee_script")]
+            callee_script: Option<String>,
+            caller_time_mask: u8,
+            #[serde(deserialize_with = "optional_phone_caller_script")]
+            caller_script: Option<String>,
+        }
+
+        let raw = RawRecord::deserialize(deserializer)?;
+        if raw.lines.is_empty() || raw.lines.iter().any(|line| line.trim().is_empty()) {
+            return Err(serde::de::Error::custom(format!(
+                "phone contact {} must declare nonempty dialogue lines",
+                raw.contact_id
+            )));
+        }
+        if raw.primary_label.trim().is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "phone contact {} must declare a nonempty primaryLabel",
+                raw.contact_id
+            )));
+        }
+        let expected_primary = raw
+            .lines
+            .first()
+            .expect("checked nonempty lines")
+            .trim_end_matches(':')
+            .trim();
+        if expected_primary != raw.primary_label {
+            return Err(serde::de::Error::custom(format!(
+                "phone contact {} primaryLabel {:?} does not match first line {:?}",
+                raw.contact_id,
+                raw.primary_label,
+                raw.lines.first().expect("checked nonempty lines")
+            )));
+        }
+
+        Ok(Self {
+            contact_id: raw.contact_id,
+            trainer_class: raw.trainer_class,
+            trainer_label: raw.trainer_label,
+            lines: raw.lines,
+            primary_label: raw.primary_label,
+            map_constant: raw.map_constant,
+            callee_time_mask: raw.callee_time_mask,
+            callee_script: raw.callee_script,
+            caller_time_mask: raw.caller_time_mask,
+            caller_script: raw.caller_script,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptPhoneCommand {
+    #[serde(deserialize_with = "required_script_phone_command_token")]
     pub command: String,
+    #[serde(deserialize_with = "required_phone_contact_id")]
     pub contact_id: String,
+    #[serde(deserialize_with = "required_phone_source_script")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptPhoneCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptPhoneCommand {
+            #[serde(default, deserialize_with = "required_script_phone_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_phone_contact_id")]
+            contact_id: String,
+            #[serde(deserialize_with = "required_phone_source_script")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptPhoneCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            contact_id: raw.contact_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_phone_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +212,8 @@ pub enum ScriptPhoneError {
         "script phone command '{command}' references whitespace-padded contact id '{contact_id}'"
     )]
     PaddedContact { command: String, contact_id: String },
+    #[error("script phone source script '{source_script}' is invalid")]
+    InvalidSourceScript { source_script: String },
     #[error("script phone command 'askforphonenumber' requires an explicit accepted/refused input")]
     MissingPhoneChoice,
     #[error("saved phone number '{contact_id}' is not present in the modpack phone catalog")]
@@ -430,6 +535,7 @@ pub fn validate_script_phone_command(
     catalog: &PhoneContactCatalog,
 ) -> Result<(), ScriptPhoneError> {
     validate_script_phone_command_token(&command.command)?;
+    validate_phone_source_script(&command.source_script)?;
     match command.command.as_str() {
         "askforphonenumber" | "checkcellnum" => {
             validate_contact_id(&command.command, &command.contact_id, catalog)
@@ -453,7 +559,8 @@ pub fn script_phone_command_issues(
                     | ScriptPhoneError::UnknownCommand { .. }
                     | ScriptPhoneError::UnknownContact { .. }
                     | ScriptPhoneError::EmptyContact { .. }
-                    | ScriptPhoneError::PaddedContact { .. }),
+                    | ScriptPhoneError::PaddedContact { .. }
+                    | ScriptPhoneError::InvalidSourceScript { .. }),
                 ) => Some(ScriptPhoneCommandIssue {
                     source_script: command.source_script.clone(),
                     command_index: command.command_index,
@@ -464,6 +571,24 @@ pub fn script_phone_command_issues(
             },
         )
         .collect()
+}
+
+fn validate_script_phone_command_shape(command: &ScriptPhoneCommand) -> Result<(), String> {
+    validate_script_phone_command_token(&command.command).map_err(|error| error.to_string())?;
+    validate_phone_source_script(&command.source_script).map_err(|error| error.to_string())?;
+    if command.contact_id.is_empty() {
+        return Err(format!(
+            "script phone command {} references empty contact id",
+            command.command
+        ));
+    }
+    if !is_exact_phone_token(&command.contact_id) {
+        return Err(format!(
+            "script phone command {} references invalid contact id {}",
+            command.command, command.contact_id
+        ));
+    }
+    Ok(())
 }
 
 fn validate_script_phone_command_token(command: &str) -> Result<(), ScriptPhoneError> {
@@ -530,9 +655,44 @@ fn is_exact_phone_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn is_exact_phone_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn validate_phone_source_script(source_script: &str) -> Result<(), ScriptPhoneError> {
+    if is_exact_phone_label_token(source_script) {
+        Ok(())
+    } else {
+        Err(ScriptPhoneError::InvalidSourceScript {
+            source_script: source_script.to_string(),
+        })
+    }
+}
+
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+fn required_script_phone_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_script_phone_command_token(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_phone_source_script<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_phone_source_script(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 fn required_phone_contact_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -860,6 +1020,11 @@ mod tests {
             command("askforphonenumber", "PHONE MOM"),
             command("fallbackphone", "PHONE_MOM"),
             command("askforphonenumber", "legacy_phone_mom"),
+            {
+                let mut command = command("checkcellnum", "PHONE_MOM");
+                command.source_script = "fallback_script".to_string();
+                command
+            },
         ];
 
         assert_eq!(
@@ -933,6 +1098,14 @@ mod tests {
                         contact_id: "legacy_phone_mom".to_string(),
                     },
                 },
+                ScriptPhoneCommandIssue {
+                    source_script: "fallback_script".to_string(),
+                    command_index: 8,
+                    contact_id: "PHONE_MOM".to_string(),
+                    error: ScriptPhoneError::InvalidSourceScript {
+                        source_script: "fallback_script".to_string(),
+                    },
+                },
             ]
         );
     }
@@ -969,6 +1142,22 @@ mod tests {
             ScriptPhoneInputs::default(),
         )
         .expect("check missing");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+
+        let mut invalid_source = command("checkcellnum", "PHONE_MOM");
+        invalid_source.source_script = "legacy_script".to_string();
+        assert_eq!(
+            apply_script_phone_command(
+                &mut state,
+                invalid_source,
+                &catalog(),
+                &permanent,
+                ScriptPhoneInputs::default(),
+            ),
+            Err(ScriptPhoneError::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+            })
+        );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
     }
 
@@ -1129,6 +1318,31 @@ mod tests {
             ),
             Err(ScriptPhoneError::InvalidPermanentContact { .. })
         ));
+    }
+
+    #[test]
+    fn script_phone_command_json_rejects_reserved_pack_tokens() {
+        for (field, value) in [
+            ("command", serde_json::json!("fallbackphone")),
+            ("contact_id", serde_json::json!("legacy_phone_mom")),
+            ("source_script", serde_json::json!("fallback_script")),
+        ] {
+            let mut payload = serde_json::json!({
+                "command": "checkcellnum",
+                "contact_id": "PHONE_MOM",
+                "source_script": "PhoneScript",
+                "command_index": 8
+            });
+            payload[field] = value;
+
+            let error = serde_json::from_value::<ScriptPhoneCommand>(payload)
+                .expect_err("reserved phone command tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains("phone"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

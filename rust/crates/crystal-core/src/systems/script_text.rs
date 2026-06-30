@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{
     GameState, ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait, ScriptYesNoPrompt,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextCommand {
     #[serde(deserialize_with = "required_script_text_command_token")]
@@ -18,6 +18,37 @@ pub struct ScriptTextCommand {
     pub command_index: usize,
 }
 
+impl<'de> Deserialize<'de> for ScriptTextCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptTextCommand {
+            #[serde(default, deserialize_with = "required_script_text_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_label_token")]
+            text_label: Option<String>,
+            #[serde(deserialize_with = "required_script_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptTextCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            text_label: raw.text_label,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_text_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextBody {
@@ -26,13 +57,45 @@ pub struct ScriptTextBody {
     pub commands: Vec<ScriptTextBodyCommand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptTextBodyCommand {
     #[serde(deserialize_with = "required_script_text_command_token")]
     pub command: String,
     pub args: Vec<String>,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptTextBodyCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptTextBodyCommand {
+            #[serde(default, deserialize_with = "required_script_text_command_token")]
+            command: String,
+            args: Vec<String>,
+            command_index: usize,
+        }
+
+        let raw = RawScriptTextBodyCommand::deserialize(deserializer)?;
+        if !raw.command.is_empty() {
+            validate_fixed_arg_command_shape(
+                "script text body",
+                &text_body_command_arg_counts(),
+                &raw.command,
+                raw.args.len(),
+            )
+            .map_err(D::Error::custom)?;
+        }
+        Ok(Self {
+            command: raw.command,
+            args: raw.args,
+            command_index: raw.command_index,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,13 +106,43 @@ pub struct ScriptMenuDefinition {
     pub commands: Vec<ScriptMenuCommand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMenuCommand {
     #[serde(deserialize_with = "required_script_text_command_token")]
     pub command: String,
     pub args: Vec<String>,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptMenuCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptMenuCommand {
+            #[serde(deserialize_with = "required_script_text_command_token")]
+            command: String,
+            args: Vec<String>,
+            command_index: usize,
+        }
+
+        let raw = RawScriptMenuCommand::deserialize(deserializer)?;
+        validate_variable_arg_command_shape(
+            "script menu",
+            &menu_definition_command_arg_counts(),
+            &raw.command,
+            raw.args.len(),
+        )
+        .map_err(D::Error::custom)?;
+        Ok(Self {
+            command: raw.command,
+            args: raw.args,
+            command_index: raw.command_index,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +196,27 @@ pub enum ScriptMenuDefinitionIssue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsmTextCatalogIssue {
     InvalidText { label: String },
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct AsmTextTable(pub BTreeMap<String, String>);
+
+impl<'de> Deserialize<'de> for AsmTextTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        if values.is_empty() {
+            return Err(D::Error::custom("ASM text table must not be empty"));
+        }
+        if let Some(issue) = asm_text_catalog_issues(&values).into_iter().next() {
+            return Err(D::Error::custom(format!(
+                "invalid ASM text table entry: {issue:?}"
+            )));
+        }
+        Ok(Self(values))
+    }
 }
 
 pub fn asm_text_catalog_issues(asm_text: &BTreeMap<String, String>) -> Vec<AsmTextCatalogIssue> {
@@ -160,6 +274,8 @@ pub enum ScriptTextCommandError {
     UnknownTextLabel { command: String, text_label: String },
     #[error("script text command '{command}' has unexpected text label")]
     UnexpectedTextLabel { command: String },
+    #[error("script text source script '{source_script}' is not exact pack syntax")]
+    InvalidSourceScript { source_script: String },
 }
 
 pub const SCRIPT_TEXT_NO_LABEL_COMMANDS: &[&str] = &[
@@ -170,11 +286,37 @@ pub const SCRIPT_TEXT_NO_LABEL_COMMANDS: &[&str] = &[
     "yesorno",
 ];
 
-pub const SCRIPT_TEXT_LABEL_COMMANDS: &[&str] = &["writetext", "jumptext", "jumptextfaceplayer"];
+pub const SCRIPT_TEXT_LABEL_COMMANDS: &[&str] = &[
+    "writetext",
+    "farwritetext",
+    "jumptext",
+    "jumptextfaceplayer",
+    "farjumptext",
+];
 
 pub fn is_known_script_text_command(command: &str) -> bool {
     SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command)
         || SCRIPT_TEXT_LABEL_COMMANDS.contains(&command)
+}
+
+fn validate_script_text_command_shape(command: &ScriptTextCommand) -> Result<(), String> {
+    if !is_known_script_text_command(&command.command) {
+        return Err(format!("unknown script text command {}", command.command));
+    }
+    if SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&command.command.as_str()) {
+        if command.text_label.is_some() {
+            return Err(format!(
+                "script text command {} must not declare text_label",
+                command.command
+            ));
+        }
+    } else if command.text_label.is_none() {
+        return Err(format!(
+            "script text command {} requires text_label",
+            command.command
+        ));
+    }
+    Ok(())
 }
 
 pub fn script_text_command_issues(
@@ -301,14 +443,20 @@ pub fn script_menu_definition_issues(
 pub fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("text", 1),
+        ("text_start", 0),
+        ("text_block", 1),
         ("line", 1),
         ("para", 1),
         ("cont", 1),
+        ("next", 1),
         ("done", 0),
+        ("text_end", 0),
         ("prompt", 0),
+        ("text_promptbutton", 0),
         ("text_ram", 1),
         ("text_decimal", 3),
         ("text_far", 1),
+        ("sound_item", 0),
         ("sound_dex_fanfare_50_79", 0),
         ("sound_dex_fanfare_80_109", 0),
         ("sound_dex_fanfare_140_169", 0),
@@ -326,6 +474,44 @@ pub fn menu_definition_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<u
     ])
 }
 
+fn validate_fixed_arg_command_shape(
+    section: &str,
+    counts: &BTreeMap<&'static str, usize>,
+    command: &str,
+    actual: usize,
+) -> Result<(), String> {
+    let Some(expected) = counts.get(command) else {
+        return Err(format!(
+            "{section} command {command:?} is not a Crystal command"
+        ));
+    };
+    if *expected != actual {
+        return Err(format!(
+            "{section} command {command} has {actual} args, expected {expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_variable_arg_command_shape(
+    section: &str,
+    counts: &BTreeMap<&'static str, BTreeSet<usize>>,
+    command: &str,
+    actual: usize,
+) -> Result<(), String> {
+    let Some(expected) = counts.get(command) else {
+        return Err(format!(
+            "{section} command {command:?} is not a Crystal command"
+        ));
+    };
+    if !expected.contains(&actual) {
+        return Err(format!(
+            "{section} command {command} has {actual} args, expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn resolve_script_text_command(
     command: ScriptTextCommand,
     text_labels: &BTreeSet<String>,
@@ -333,6 +519,11 @@ pub fn resolve_script_text_command(
     if !is_exact_script_text_command_token(&command.command) {
         return Err(ScriptTextCommandError::InvalidCommand {
             command: command.command,
+        });
+    }
+    if !is_exact_nonempty_label(&command.source_script) {
+        return Err(ScriptTextCommandError::InvalidSourceScript {
+            source_script: command.source_script,
         });
     }
     match command.command.as_str() {
@@ -365,14 +556,15 @@ pub fn resolve_script_text_command(
                 command_index: command.command_index,
             })
         }
-        "writetext" | "jumptext" | "jumptextfaceplayer" => {
+        "writetext" | "farwritetext" | "jumptext" | "jumptextfaceplayer" | "farjumptext" => {
             let text_label = require_known_text_label(&command, text_labels)?.to_string();
             Ok(ScriptTextAction::Write {
                 command: command.command.clone(),
                 text_label,
                 face_player: command.command == "jumptextfaceplayer",
                 closes_text: command.command == "jumptext"
-                    || command.command == "jumptextfaceplayer",
+                    || command.command == "jumptextfaceplayer"
+                    || command.command == "farjumptext",
                 source_script: command.source_script,
                 command_index: command.command_index,
             })
@@ -559,7 +751,9 @@ fn is_exact_nonempty_label(value: &str) -> bool {
 fn is_exact_script_text_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
-        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         && !has_reserved_pack_prefix(value)
 }
 
@@ -632,12 +826,22 @@ mod tests {
         assert!(SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&"opentext"));
         assert!(SCRIPT_TEXT_NO_LABEL_COMMANDS.contains(&"yesorno"));
         assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"writetext"));
+        assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"farwritetext"));
         assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"jumptextfaceplayer"));
+        assert!(SCRIPT_TEXT_LABEL_COMMANDS.contains(&"farjumptext"));
         assert!(is_known_script_text_command("jumptext"));
+        assert!(is_known_script_text_command("farwritetext"));
+        assert!(is_known_script_text_command("farjumptext"));
         assert!(!is_known_script_text_command("JumpText"));
         assert!(!is_known_script_text_command("text"));
         assert_eq!(text_body_command_arg_counts()["text"], 1);
+        assert_eq!(text_body_command_arg_counts()["text_start"], 0);
+        assert_eq!(text_body_command_arg_counts()["text_block"], 1);
+        assert_eq!(text_body_command_arg_counts()["text_promptbutton"], 0);
+        assert_eq!(text_body_command_arg_counts()["text_end"], 0);
+        assert_eq!(text_body_command_arg_counts()["next"], 1);
         assert_eq!(text_body_command_arg_counts()["text_decimal"], 3);
+        assert_eq!(text_body_command_arg_counts()["sound_item"], 0);
         assert_eq!(
             text_body_command_arg_counts()["sound_dex_fanfare_230_plus"],
             0
@@ -819,12 +1023,36 @@ mod tests {
             }
         );
         assert_eq!(
+            resolve_script_text_command(command("farwritetext", Some("GreetingText")), &labels())
+                .expect("far write"),
+            ScriptTextAction::Write {
+                command: "farwritetext".to_string(),
+                text_label: "GreetingText".to_string(),
+                face_player: false,
+                closes_text: false,
+                source_script: "TextScript".to_string(),
+                command_index: 3,
+            }
+        );
+        assert_eq!(
             resolve_script_text_command(command("jumptextfaceplayer", Some("SignText")), &labels())
                 .expect("jump face"),
             ScriptTextAction::Write {
                 command: "jumptextfaceplayer".to_string(),
                 text_label: "SignText".to_string(),
                 face_player: true,
+                closes_text: true,
+                source_script: "TextScript".to_string(),
+                command_index: 3,
+            }
+        );
+        assert_eq!(
+            resolve_script_text_command(command("farjumptext", Some("SignText")), &labels())
+                .expect("far jump text"),
+            ScriptTextAction::Write {
+                command: "farjumptext".to_string(),
+                text_label: "SignText".to_string(),
+                face_player: false,
                 closes_text: true,
                 source_script: "TextScript".to_string(),
                 command_index: 3,
@@ -898,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_jumptextfaceplayer_as_write_that_closes_text() {
+    fn applies_jumptext_variants_as_writes_that_close_text() {
         let mut state = GameState::default();
         apply_script_text_command(
             &mut state,
@@ -922,6 +1150,28 @@ mod tests {
         );
         assert!(state.script_runtime.text_events[0].face_player);
         assert!(state.script_runtime.text_events[0].closes_text);
+
+        apply_script_text_command(
+            &mut state,
+            command("farjumptext", Some("GreetingText")),
+            &labels(),
+        )
+        .expect("far jump text");
+
+        assert_eq!(
+            state.script_runtime.pending_text_label.as_deref(),
+            Some("GreetingText")
+        );
+        assert_eq!(
+            state.script_runtime.pending_text_wait,
+            Some(ScriptTextWait {
+                command: "farjumptext".to_string(),
+                source_script: "TextScript".to_string(),
+                command_index: 3,
+            })
+        );
+        assert!(!state.script_runtime.text_events[1].face_player);
+        assert!(state.script_runtime.text_events[1].closes_text);
     }
 
     #[test]
@@ -979,6 +1229,19 @@ mod tests {
         assert!(state.script_runtime.text_events.is_empty());
         assert!(!state.script_runtime.text_window_open);
         assert_eq!(state.script_runtime.pending_text_label, None);
+
+        let mut malformed_source = command("opentext", None);
+        malformed_source.source_script = "fallback_script".to_string();
+        let error = apply_script_text_command(&mut state, malformed_source, &labels())
+            .expect_err("reserved source script rejected");
+        assert_eq!(
+            error,
+            ScriptTextCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            }
+        );
+        assert!(state.script_runtime.text_events.is_empty());
+        assert!(!state.script_runtime.text_window_open);
     }
 
     #[test]

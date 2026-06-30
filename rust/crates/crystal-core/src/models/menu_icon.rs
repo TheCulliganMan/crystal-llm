@@ -1,5 +1,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize, de::Error as _};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct MenuIconTable(pub BTreeMap<String, String>);
+
+impl<'de> Deserialize<'de> for MenuIconTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        if values.is_empty() {
+            return Err(D::Error::custom("menu icon table must not be empty"));
+        }
+        for (species_id, icon) in &values {
+            if !is_exact_nonempty_menu_icon_token(species_id) {
+                return Err(D::Error::custom(format!(
+                    "invalid menu icon species id: {species_id}"
+                )));
+            }
+            if !is_exact_nonempty_menu_icon_token(icon) {
+                return Err(D::Error::custom(format!(
+                    "invalid menu icon value for species id: {species_id}"
+                )));
+            }
+        }
+        Ok(Self(values))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuIconCatalogIssue {
     InvalidSpeciesId { species_id: String },

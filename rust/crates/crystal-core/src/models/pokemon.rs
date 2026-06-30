@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::move_data::Move;
 use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_experience};
@@ -46,7 +46,7 @@ pub fn max_move_pp(base_pp: u8, pp_ups: u8) -> u8 {
     base_pp.saturating_add((base_pp / 5).saturating_mul(pp_ups.min(3)))
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dv {
     pub attack: u8,
@@ -54,6 +54,34 @@ pub struct Dv {
     pub speed: u8,
     pub special: u8,
     pub hp: u8,
+}
+
+impl<'de> Deserialize<'de> for Dv {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDv {
+            attack: u8,
+            defense: u8,
+            speed: u8,
+            special: u8,
+            hp: u8,
+        }
+
+        let raw = RawDv::deserialize(deserializer)?;
+        let dvs = Self {
+            attack: raw.attack,
+            defense: raw.defense,
+            speed: raw.speed,
+            special: raw.special,
+            hp: raw.hp,
+        };
+        validate_dvs(dvs).map_err(serde::de::Error::custom)?;
+        Ok(dvs)
+    }
 }
 
 impl Dv {
@@ -92,7 +120,7 @@ impl Dv {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseStats {
     pub hp: u16,
@@ -101,6 +129,36 @@ pub struct BaseStats {
     pub speed: u16,
     pub special_attack: u16,
     pub special_defense: u16,
+}
+
+impl<'de> Deserialize<'de> for BaseStats {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBaseStats {
+            hp: u16,
+            attack: u16,
+            defense: u16,
+            speed: u16,
+            special_attack: u16,
+            special_defense: u16,
+        }
+
+        let raw = RawBaseStats::deserialize(deserializer)?;
+        let stats = Self {
+            hp: raw.hp,
+            attack: raw.attack,
+            defense: raw.defense,
+            speed: raw.speed,
+            special_attack: raw.special_attack,
+            special_defense: raw.special_defense,
+        };
+        validate_base_stats(stats).map_err(serde::de::Error::custom)?;
+        Ok(stats)
+    }
 }
 
 impl BaseStats {
@@ -135,41 +193,105 @@ impl BaseStats {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokemonSpecies {
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub id: String,
     pub int_id: u16,
     pub base_stats: BaseStats,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub type1: PokemonType,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub type2: PokemonType,
     pub catch_rate: u8,
     pub base_exp: u16,
-    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub item1: Option<String>,
-    #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub item2: Option<String>,
     pub gender_ratio: u8,
     pub unknown1: u8,
     pub step_cycles_to_hatch: u8,
     pub unknown2: u8,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub growth_rate: GrowthRate,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub egg_group1: EggGroup,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub egg_group2: EggGroup,
-    #[serde(deserialize_with = "required_pokemon_token_vec")]
     pub tmhm_learnset: Vec<String>,
-    #[serde(deserialize_with = "required_pokemon_token")]
     pub ability: Ability,
     pub pic_size: u8,
     pub front_pic: u16,
     pub back_pic: u16,
     pub weight: u16,
+}
+
+impl<'de> Deserialize<'de> for PokemonSpecies {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSpecies {
+            #[serde(deserialize_with = "required_pokemon_token")]
+            id: String,
+            int_id: u16,
+            base_stats: BaseStats,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            type1: PokemonType,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            type2: PokemonType,
+            catch_rate: u8,
+            base_exp: u16,
+            #[serde(deserialize_with = "required_nullable_pokemon_token")]
+            item1: Option<String>,
+            #[serde(deserialize_with = "required_nullable_pokemon_token")]
+            item2: Option<String>,
+            gender_ratio: u8,
+            unknown1: u8,
+            step_cycles_to_hatch: u8,
+            unknown2: u8,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            growth_rate: GrowthRate,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            egg_group1: EggGroup,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            egg_group2: EggGroup,
+            #[serde(deserialize_with = "required_pokemon_token_vec")]
+            tmhm_learnset: Vec<String>,
+            #[serde(deserialize_with = "required_pokemon_token")]
+            ability: Ability,
+            pic_size: u8,
+            front_pic: u16,
+            back_pic: u16,
+            weight: u16,
+        }
+
+        let raw = RawSpecies::deserialize(deserializer)?;
+        let species = Self {
+            id: raw.id,
+            int_id: raw.int_id,
+            base_stats: raw.base_stats,
+            type1: raw.type1,
+            type2: raw.type2,
+            catch_rate: raw.catch_rate,
+            base_exp: raw.base_exp,
+            item1: raw.item1,
+            item2: raw.item2,
+            gender_ratio: raw.gender_ratio,
+            unknown1: raw.unknown1,
+            step_cycles_to_hatch: raw.step_cycles_to_hatch,
+            unknown2: raw.unknown2,
+            growth_rate: raw.growth_rate,
+            egg_group1: raw.egg_group1,
+            egg_group2: raw.egg_group2,
+            tmhm_learnset: raw.tmhm_learnset,
+            ability: raw.ability,
+            pic_size: raw.pic_size,
+            front_pic: raw.front_pic,
+            back_pic: raw.back_pic,
+            weight: raw.weight,
+        };
+        species
+            .validate_compiled_shape()
+            .map_err(serde::de::Error::custom)?;
+        Ok(species)
+    }
 }
 
 fn required_pokemon_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -265,15 +387,78 @@ impl PokemonSpecies {
             weight: 0,
         }
     }
+
+    pub fn validate_compiled_shape(&self) -> Result<(), String> {
+        validate_exact_token("pokemon.species.id", &self.id)?;
+        validate_base_stats(self.base_stats)?;
+        if self.int_id == 0 {
+            return Err(format!("pokemon.species {} has zero int_id", self.id));
+        }
+        if self.catch_rate == 0 {
+            return Err(format!("pokemon.species {} has zero catch_rate", self.id));
+        }
+        if self.base_exp == 0 {
+            return Err(format!("pokemon.species {} has zero base_exp", self.id));
+        }
+        if self.step_cycles_to_hatch == 0 {
+            return Err(format!(
+                "pokemon.species {} has zero step_cycles_to_hatch",
+                self.id
+            ));
+        }
+        if self.pic_size > 0x77 {
+            return Err(format!(
+                "pokemon.species {} pic_size {} is outside packed 4-bit dimensions",
+                self.id, self.pic_size
+            ));
+        }
+        validate_exact_token("pokemon.species.type1", &self.type1)?;
+        validate_exact_token("pokemon.species.type2", &self.type2)?;
+        validate_exact_token("pokemon.species.growth_rate", &self.growth_rate)?;
+        validate_exact_token("pokemon.species.egg_group1", &self.egg_group1)?;
+        validate_exact_token("pokemon.species.egg_group2", &self.egg_group2)?;
+        validate_exact_token("pokemon.species.ability", &self.ability)?;
+        for (index, move_id) in self.tmhm_learnset.iter().enumerate() {
+            validate_exact_token(&format!("pokemon.species.tmhm_learnset[{index}]"), move_id)?;
+        }
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedMove {
     #[serde(deserialize_with = "required_pokemon_token")]
     pub name: String,
     pub current_pp: u8,
     pub pp_ups: u8,
+}
+
+impl<'de> Deserialize<'de> for LearnedMove {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLearnedMove {
+            #[serde(deserialize_with = "required_pokemon_token")]
+            name: String,
+            current_pp: u8,
+            pp_ups: u8,
+        }
+
+        let raw = RawLearnedMove::deserialize(deserializer)?;
+        let learned_move = Self {
+            name: raw.name,
+            current_pp: raw.current_pp,
+            pp_ups: raw.pp_ups,
+        };
+        learned_move
+            .validate_saved_state(0)
+            .map_err(serde::de::Error::custom)?;
+        Ok(learned_move)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -290,7 +475,7 @@ pub enum PokemonBuildError {
     Experience(#[from] ExperienceError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pokemon {
     pub species: PokemonSpecies,
@@ -326,6 +511,90 @@ pub struct Pokemon {
     pub speed: u16,
     pub special_attack: u16,
     pub special_defense: u16,
+}
+
+impl<'de> Deserialize<'de> for Pokemon {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPokemon {
+            species: PokemonSpecies,
+            nickname: String,
+            #[serde(deserialize_with = "required_nullable_pokemon_token")]
+            item: Option<String>,
+            moves: Vec<LearnedMove>,
+            #[serde(deserialize_with = "required_nullable_pokemon_token")]
+            status: Option<String>,
+            level: u8,
+            hp: u16,
+            max_hp: u16,
+            dvs: Dv,
+            sleep_turns: u8,
+            flinching: bool,
+            rampage_turns: u8,
+            confusion_turns: u8,
+            perish_song_turns: u8,
+            focus_energy: bool,
+            original_trainer_name: String,
+            original_trainer_id: u16,
+            experience: i32,
+            hp_exp: u16,
+            attack_exp: u16,
+            defense_exp: u16,
+            speed_exp: u16,
+            special_exp: u16,
+            happiness: u8,
+            turns_in_battle: u16,
+            stat_boosts: BTreeMap<Stat, i8>,
+            attack: u16,
+            defense: u16,
+            speed: u16,
+            special_attack: u16,
+            special_defense: u16,
+        }
+
+        let raw = RawPokemon::deserialize(deserializer)?;
+        let pokemon = Self {
+            species: raw.species,
+            nickname: raw.nickname,
+            item: raw.item,
+            moves: raw.moves,
+            status: raw.status,
+            level: raw.level,
+            hp: raw.hp,
+            max_hp: raw.max_hp,
+            dvs: raw.dvs,
+            sleep_turns: raw.sleep_turns,
+            flinching: raw.flinching,
+            rampage_turns: raw.rampage_turns,
+            confusion_turns: raw.confusion_turns,
+            perish_song_turns: raw.perish_song_turns,
+            focus_energy: raw.focus_energy,
+            original_trainer_name: raw.original_trainer_name,
+            original_trainer_id: raw.original_trainer_id,
+            experience: raw.experience,
+            hp_exp: raw.hp_exp,
+            attack_exp: raw.attack_exp,
+            defense_exp: raw.defense_exp,
+            speed_exp: raw.speed_exp,
+            special_exp: raw.special_exp,
+            happiness: raw.happiness,
+            turns_in_battle: raw.turns_in_battle,
+            stat_boosts: raw.stat_boosts,
+            attack: raw.attack,
+            defense: raw.defense,
+            speed: raw.speed,
+            special_attack: raw.special_attack,
+            special_defense: raw.special_defense,
+        };
+        pokemon
+            .validate_saved_state()
+            .map_err(serde::de::Error::custom)?;
+        Ok(pokemon)
+    }
 }
 
 impl Pokemon {
@@ -504,6 +773,22 @@ fn validate_dvs(dvs: Dv) -> Result<(), String> {
             "pokemon.dvs.hp {} does not match derived HP DV {}",
             dvs.hp, expected_hp
         ));
+    }
+    Ok(())
+}
+
+fn validate_base_stats(stats: BaseStats) -> Result<(), String> {
+    for (field, value) in [
+        ("hp", stats.hp),
+        ("attack", stats.attack),
+        ("defense", stats.defense),
+        ("speed", stats.speed),
+        ("special_attack", stats.special_attack),
+        ("special_defense", stats.special_defense),
+    ] {
+        if value == 0 {
+            return Err(format!("pokemon.base_stats.{field} must be nonzero"));
+        }
     }
     Ok(())
 }

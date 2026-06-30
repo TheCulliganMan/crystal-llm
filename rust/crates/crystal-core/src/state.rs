@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
@@ -41,7 +41,7 @@ const BATTLE_TOWER_MOBILE_FLAGS: &[&str] = &[
     "function10387b",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameState {
     pub options: Options,
@@ -75,6 +75,7 @@ pub struct GameState {
     pub map_object_overrides: BTreeMap<String, OverworldObjectMapMemory>,
     pub joypad: JoypadMemory,
     pub fishing: FishingMemory,
+    pub swarms: SwarmMemory,
     pub step_events: StepEventCounters,
     pub time: TimeState,
     pub unused_two_day_timer: UnusedTwoDayTimerState,
@@ -102,6 +103,142 @@ pub struct GameState {
     pub frame_counter: u64,
     pub rng_seed: u32,
     pub has_seen_intro: bool,
+}
+
+impl<'de> Deserialize<'de> for GameState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawGameState {
+            options: Options,
+            player_name: String,
+            player_id: u16,
+            party: PartyState,
+            storage: PokemonStorage,
+            bag: Bag,
+            money: u32,
+            moms_money: u32,
+            coins: u16,
+            pokedex: PokedexState,
+            link_battle_stats: LinkBattleStats,
+            badges: Badges,
+            overworld: OverworldMemory,
+            battle: BattleMemory,
+            battle_result: u8,
+            battle_active_party_index: Option<usize>,
+            battle_active_enemy_party_index: Option<usize>,
+            battle_rewarded_enemy_party_indices: BTreeSet<usize>,
+            battle_escape_attempts: u8,
+            battle_player_stat_drop_guard_turns: u8,
+            repel_steps_remaining: u16,
+            active_repel_item: Option<String>,
+            dig_warp_map_name: Option<String>,
+            dig_warp_index: Option<u16>,
+            last_spawn_identifier: Option<u16>,
+            kenji_break_timer: u8,
+            player_palette_id: u8,
+            map_block_overrides: BTreeMap<String, BTreeMap<(u16, u16), u16>>,
+            map_object_overrides: BTreeMap<String, OverworldObjectMapMemory>,
+            joypad: JoypadMemory,
+            fishing: FishingMemory,
+            swarms: SwarmMemory,
+            step_events: StepEventCounters,
+            time: TimeState,
+            unused_two_day_timer: UnusedTwoDayTimerState,
+            lucky_number_show_flag: bool,
+            lucky_number_day: Option<u8>,
+            lucky_id_number: u16,
+            current_pc_box: usize,
+            roaming_pokemon: Vec<RoamingPokemonState>,
+            mystery_gift_unlocked: bool,
+            mystery_gift: MysteryGiftState,
+            blue_card_balance: u8,
+            buenas_password: BuenasPasswordState,
+            pending_special_battle_type: Option<String>,
+            magikarp_record: MagikarpRecordState,
+            day_care: DayCareState,
+            bug_contest: BugContestState,
+            link_session: LinkSessionState,
+            battle_tower: BattleTowerState,
+            mobile_link: MobileLinkState,
+            gs_healings: u16,
+            trainer_rankings_healings: u16,
+            scenes: SceneMemory,
+            flags: EventFlagMemory,
+            script_runtime: ScriptRuntimeMemory,
+            frame_counter: u64,
+            rng_seed: u32,
+            has_seen_intro: bool,
+        }
+
+        let raw = RawGameState::deserialize(deserializer)?;
+        let state = Self {
+            options: raw.options,
+            player_name: raw.player_name,
+            player_id: raw.player_id,
+            party: raw.party,
+            storage: raw.storage,
+            bag: raw.bag,
+            money: raw.money,
+            moms_money: raw.moms_money,
+            coins: raw.coins,
+            pokedex: raw.pokedex,
+            link_battle_stats: raw.link_battle_stats,
+            badges: raw.badges,
+            overworld: raw.overworld,
+            battle: raw.battle,
+            battle_result: raw.battle_result,
+            battle_active_party_index: raw.battle_active_party_index,
+            battle_active_enemy_party_index: raw.battle_active_enemy_party_index,
+            battle_rewarded_enemy_party_indices: raw.battle_rewarded_enemy_party_indices,
+            battle_escape_attempts: raw.battle_escape_attempts,
+            battle_player_stat_drop_guard_turns: raw.battle_player_stat_drop_guard_turns,
+            repel_steps_remaining: raw.repel_steps_remaining,
+            active_repel_item: raw.active_repel_item,
+            dig_warp_map_name: raw.dig_warp_map_name,
+            dig_warp_index: raw.dig_warp_index,
+            last_spawn_identifier: raw.last_spawn_identifier,
+            kenji_break_timer: raw.kenji_break_timer,
+            player_palette_id: raw.player_palette_id,
+            map_block_overrides: raw.map_block_overrides,
+            map_object_overrides: raw.map_object_overrides,
+            joypad: raw.joypad,
+            fishing: raw.fishing,
+            swarms: raw.swarms,
+            step_events: raw.step_events,
+            time: raw.time,
+            unused_two_day_timer: raw.unused_two_day_timer,
+            lucky_number_show_flag: raw.lucky_number_show_flag,
+            lucky_number_day: raw.lucky_number_day,
+            lucky_id_number: raw.lucky_id_number,
+            current_pc_box: raw.current_pc_box,
+            roaming_pokemon: raw.roaming_pokemon,
+            mystery_gift_unlocked: raw.mystery_gift_unlocked,
+            mystery_gift: raw.mystery_gift,
+            blue_card_balance: raw.blue_card_balance,
+            buenas_password: raw.buenas_password,
+            pending_special_battle_type: raw.pending_special_battle_type,
+            magikarp_record: raw.magikarp_record,
+            day_care: raw.day_care,
+            bug_contest: raw.bug_contest,
+            link_session: raw.link_session,
+            battle_tower: raw.battle_tower,
+            mobile_link: raw.mobile_link,
+            gs_healings: raw.gs_healings,
+            trainer_rankings_healings: raw.trainer_rankings_healings,
+            scenes: raw.scenes,
+            flags: raw.flags,
+            script_runtime: raw.script_runtime,
+            frame_counter: raw.frame_counter,
+            rng_seed: raw.rng_seed,
+            has_seen_intro: raw.has_seen_intro,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl Default for GameState {
@@ -138,6 +275,7 @@ impl Default for GameState {
             map_object_overrides: BTreeMap::new(),
             joypad: JoypadMemory::default(),
             fishing: FishingMemory::default(),
+            swarms: SwarmMemory::default(),
             step_events: StepEventCounters::default(),
             time: TimeState::default(),
             unused_two_day_timer: UnusedTwoDayTimerState::default(),
@@ -169,12 +307,36 @@ impl Default for GameState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnusedTwoDayTimerState {
     pub active: bool,
     pub remaining_days: u8,
     pub start_day: u8,
+}
+
+impl<'de> Deserialize<'de> for UnusedTwoDayTimerState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawUnusedTwoDayTimerState {
+            active: bool,
+            remaining_days: u8,
+            start_day: u8,
+        }
+
+        let raw = RawUnusedTwoDayTimerState::deserialize(deserializer)?;
+        let state = Self {
+            active: raw.active,
+            remaining_days: raw.remaining_days,
+            start_day: raw.start_day,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl UnusedTwoDayTimerState {
@@ -192,7 +354,7 @@ impl UnusedTwoDayTimerState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkSessionState {
     pub link_mode: u8,
@@ -205,6 +367,44 @@ pub struct LinkSessionState {
     pub failed_link_to_past: bool,
     pub quick_save_requested: bool,
     pub active_room: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LinkSessionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkSessionState {
+            link_mode: u8,
+            player_link_action: u8,
+            chosen_cable_club_room: u8,
+            other_player_link_mode: u8,
+            serial_connection_status: LinkSerialConnectionStatus,
+            friend_ready: bool,
+            last_result: bool,
+            failed_link_to_past: bool,
+            quick_save_requested: bool,
+            active_room: Option<String>,
+        }
+
+        let raw = RawLinkSessionState::deserialize(deserializer)?;
+        let state = Self {
+            link_mode: raw.link_mode,
+            player_link_action: raw.player_link_action,
+            chosen_cable_club_room: raw.chosen_cable_club_room,
+            other_player_link_mode: raw.other_player_link_mode,
+            serial_connection_status: raw.serial_connection_status,
+            friend_ready: raw.friend_ready,
+            last_result: raw.last_result,
+            failed_link_to_past: raw.failed_link_to_past,
+            quick_save_requested: raw.quick_save_requested,
+            active_room: raw.active_room,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,7 +454,7 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleTowerState {
     pub challenge_state: u8,
@@ -279,6 +479,68 @@ pub struct BattleTowerState {
     pub last_sprite_constant: Option<String>,
     pub selected_party_indexes: Vec<usize>,
     pub mobile_flags: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for BattleTowerState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleTowerState {
+            challenge_state: u8,
+            beaten_trainers: u8,
+            trainer_history: Vec<u8>,
+            level_group: u8,
+            reward_item: String,
+            reward_given: bool,
+            quick_saved: bool,
+            explanation_read: bool,
+            save_file_flags: u8,
+            gs_ball_flag: bool,
+            record_streaks: Vec<u8>,
+            record_outcomes: Vec<bool>,
+            record_days: Vec<u8>,
+            record_state: u8,
+            record_last_day: Option<u8>,
+            record_reset_counter: u8,
+            leaderboard_acknowledged: bool,
+            last_rule_failure: Option<String>,
+            loaded_trainer_id: Option<String>,
+            last_sprite_constant: Option<String>,
+            selected_party_indexes: Vec<usize>,
+            mobile_flags: BTreeSet<String>,
+        }
+
+        let raw = RawBattleTowerState::deserialize(deserializer)?;
+        let state = Self {
+            challenge_state: raw.challenge_state,
+            beaten_trainers: raw.beaten_trainers,
+            trainer_history: raw.trainer_history,
+            level_group: raw.level_group,
+            reward_item: raw.reward_item,
+            reward_given: raw.reward_given,
+            quick_saved: raw.quick_saved,
+            explanation_read: raw.explanation_read,
+            save_file_flags: raw.save_file_flags,
+            gs_ball_flag: raw.gs_ball_flag,
+            record_streaks: raw.record_streaks,
+            record_outcomes: raw.record_outcomes,
+            record_days: raw.record_days,
+            record_state: raw.record_state,
+            record_last_day: raw.record_last_day,
+            record_reset_counter: raw.record_reset_counter,
+            leaderboard_acknowledged: raw.leaderboard_acknowledged,
+            last_rule_failure: raw.last_rule_failure,
+            loaded_trainer_id: raw.loaded_trainer_id,
+            last_sprite_constant: raw.last_sprite_constant,
+            selected_party_indexes: raw.selected_party_indexes,
+            mobile_flags: raw.mobile_flags,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl Default for BattleTowerState {
@@ -386,7 +648,7 @@ impl BattleTowerState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MobileLinkState {
     pub mode: Option<String>,
@@ -399,12 +661,70 @@ pub struct MobileLinkState {
     pub terminated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MobileBattleTowerRecord {
     pub streak: u8,
     pub outcome: String,
     pub day: u8,
+}
+
+impl<'de> Deserialize<'de> for MobileLinkState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMobileLinkState {
+            mode: Option<String>,
+            adapter_status: String,
+            adapter_secondary_status: String,
+            battle_timer: [u8; 3],
+            login_password: String,
+            handshakes: u32,
+            leaderboard: Vec<MobileBattleTowerRecord>,
+            terminated: bool,
+        }
+
+        let raw = RawMobileLinkState::deserialize(deserializer)?;
+        let state = Self {
+            mode: raw.mode,
+            adapter_status: raw.adapter_status,
+            adapter_secondary_status: raw.adapter_secondary_status,
+            battle_timer: raw.battle_timer,
+            login_password: raw.login_password,
+            handshakes: raw.handshakes,
+            leaderboard: raw.leaderboard,
+            terminated: raw.terminated,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
+}
+
+impl<'de> Deserialize<'de> for MobileBattleTowerRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMobileBattleTowerRecord {
+            streak: u8,
+            outcome: String,
+            day: u8,
+        }
+
+        let raw = RawMobileBattleTowerRecord::deserialize(deserializer)?;
+        let record = Self {
+            streak: raw.streak,
+            outcome: raw.outcome,
+            day: raw.day,
+        };
+        record.validate_saved_state(0).map_err(D::Error::custom)?;
+        Ok(record)
+    }
 }
 
 impl MobileLinkState {
@@ -501,7 +821,7 @@ impl MobileBattleTowerRecord {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BugContestState {
     pub park_balls_remaining: u8,
@@ -516,6 +836,48 @@ pub struct BugContestState {
     pub selected_contestant_flags: Vec<String>,
     pub last_rank: Option<u8>,
     pub last_result: Option<u8>,
+}
+
+impl<'de> Deserialize<'de> for BugContestState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBugContestState {
+            park_balls_remaining: u8,
+            timer_active: bool,
+            timer_minutes_remaining: u8,
+            timer_seconds_remaining: u8,
+            party_backup: Vec<Pokemon>,
+            second_party_species: Option<String>,
+            caught_mon: Option<Pokemon>,
+            caught_species: Option<String>,
+            caught_level: Option<u8>,
+            selected_contestant_flags: Vec<String>,
+            last_rank: Option<u8>,
+            last_result: Option<u8>,
+        }
+
+        let raw = RawBugContestState::deserialize(deserializer)?;
+        let state = Self {
+            park_balls_remaining: raw.park_balls_remaining,
+            timer_active: raw.timer_active,
+            timer_minutes_remaining: raw.timer_minutes_remaining,
+            timer_seconds_remaining: raw.timer_seconds_remaining,
+            party_backup: raw.party_backup,
+            second_party_species: raw.second_party_species,
+            caught_mon: raw.caught_mon,
+            caught_species: raw.caught_species,
+            caught_level: raw.caught_level,
+            selected_contestant_flags: raw.selected_contestant_flags,
+            last_rank: raw.last_rank,
+            last_result: raw.last_result,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl BugContestState {
@@ -577,7 +939,7 @@ impl BugContestState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagikarpRecordState {
     pub current_feet: u8,
@@ -587,6 +949,34 @@ pub struct MagikarpRecordState {
     pub best_owner_name: String,
 }
 
+impl<'de> Deserialize<'de> for MagikarpRecordState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMagikarpRecordState {
+            current_feet: u8,
+            current_inches: u8,
+            best_feet: u8,
+            best_inches: u8,
+            best_owner_name: String,
+        }
+
+        let raw = RawMagikarpRecordState::deserialize(deserializer)?;
+        let state = Self {
+            current_feet: raw.current_feet,
+            current_inches: raw.current_inches,
+            best_feet: raw.best_feet,
+            best_inches: raw.best_inches,
+            best_owner_name: raw.best_owner_name,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
+}
+
 impl MagikarpRecordState {
     fn validate_saved_state(&self) -> Result<(), String> {
         validate_inches_field("magikarp_record.current_inches", self.current_inches)?;
@@ -594,7 +984,7 @@ impl MagikarpRecordState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DayCareState {
     pub man: DayCareResidentState,
@@ -606,7 +996,7 @@ pub struct DayCareState {
     pub last_interaction: Option<DayCareInteractionState>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DayCareResidentState {
     pub pokemon: Option<Pokemon>,
@@ -616,7 +1006,7 @@ pub struct DayCareResidentState {
     pub active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DayCareInteractionState {
     pub caretaker: String,
@@ -625,6 +1015,98 @@ pub struct DayCareInteractionState {
     pub pokemon: Option<String>,
     pub level: Option<u8>,
     pub reason: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DayCareState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDayCareState {
+            man: DayCareResidentState,
+            lady: DayCareResidentState,
+            compatibility_score: u8,
+            egg_present: bool,
+            steps_until_next_egg: u16,
+            steps_since_last_egg: u8,
+            last_interaction: Option<DayCareInteractionState>,
+        }
+
+        let raw = RawDayCareState::deserialize(deserializer)?;
+        let state = Self {
+            man: raw.man,
+            lady: raw.lady,
+            compatibility_score: raw.compatibility_score,
+            egg_present: raw.egg_present,
+            steps_until_next_egg: raw.steps_until_next_egg,
+            steps_since_last_egg: raw.steps_since_last_egg,
+            last_interaction: raw.last_interaction,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
+}
+
+impl<'de> Deserialize<'de> for DayCareResidentState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDayCareResidentState {
+            pokemon: Option<Pokemon>,
+            initial_experience: i32,
+            initial_level: u8,
+            steps: u32,
+            active: bool,
+        }
+
+        let raw = RawDayCareResidentState::deserialize(deserializer)?;
+        let state = Self {
+            pokemon: raw.pokemon,
+            initial_experience: raw.initial_experience,
+            initial_level: raw.initial_level,
+            steps: raw.steps,
+            active: raw.active,
+        };
+        state
+            .validate_saved_state("day_care.resident")
+            .map_err(D::Error::custom)?;
+        Ok(state)
+    }
+}
+
+impl<'de> Deserialize<'de> for DayCareInteractionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDayCareInteractionState {
+            caretaker: String,
+            action: String,
+            success: bool,
+            pokemon: Option<String>,
+            level: Option<u8>,
+            reason: Option<String>,
+        }
+
+        let raw = RawDayCareInteractionState::deserialize(deserializer)?;
+        let state = Self {
+            caretaker: raw.caretaker,
+            action: raw.action,
+            success: raw.success,
+            pokemon: raw.pokemon,
+            level: raw.level,
+            reason: raw.reason,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl DayCareState {
@@ -875,11 +1357,33 @@ fn validate_day_care_pokemon_and_reason(
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MysteryGiftState {
     pub stored_item: Option<String>,
     pub backup_item: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MysteryGiftState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMysteryGiftState {
+            stored_item: Option<String>,
+            backup_item: Option<String>,
+        }
+
+        let raw = RawMysteryGiftState::deserialize(deserializer)?;
+        let state = Self {
+            stored_item: raw.stored_item,
+            backup_item: raw.backup_item,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl MysteryGiftState {
@@ -928,13 +1432,39 @@ where
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuenasPasswordState {
     pub category_index: usize,
     pub option_index: usize,
     pub generation_day: u8,
     pub generated: bool,
+}
+
+impl<'de> Deserialize<'de> for BuenasPasswordState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBuenasPasswordState {
+            category_index: usize,
+            option_index: usize,
+            generation_day: u8,
+            generated: bool,
+        }
+
+        let raw = RawBuenasPasswordState::deserialize(deserializer)?;
+        let state = Self {
+            category_index: raw.category_index,
+            option_index: raw.option_index,
+            generation_day: raw.generation_day,
+            generated: raw.generated,
+        };
+        state.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl BuenasPasswordState {
@@ -961,7 +1491,7 @@ impl BuenasPasswordState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoamingPokemonState {
     pub species: String,
@@ -970,6 +1500,36 @@ pub struct RoamingPokemonState {
     pub map_number: u16,
     pub hp: u16,
     pub dvs: u16,
+}
+
+impl<'de> Deserialize<'de> for RoamingPokemonState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRoamingPokemonState {
+            species: String,
+            level: u8,
+            map_group: u16,
+            map_number: u16,
+            hp: u16,
+            dvs: u16,
+        }
+
+        let raw = RawRoamingPokemonState::deserialize(deserializer)?;
+        let state = Self {
+            species: raw.species,
+            level: raw.level,
+            map_group: raw.map_group,
+            map_number: raw.map_number,
+            hp: raw.hp,
+            dvs: raw.dvs,
+        };
+        state.validate_saved_state(0).map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl RoamingPokemonState {
@@ -1053,7 +1613,7 @@ where
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldObjectMapMemory {
     pub objects: BTreeMap<String, OverworldObjectMemory>,
@@ -1061,6 +1621,36 @@ pub struct OverworldObjectMapMemory {
     pub following: Option<OverworldFollowMemory>,
     pub last_talked_object_identifier: Option<String>,
     pub player_hidden: bool,
+}
+
+impl<'de> Deserialize<'de> for OverworldObjectMapMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOverworldObjectMapMemory {
+            objects: BTreeMap<String, OverworldObjectMemory>,
+            hidden_object_identifiers: BTreeSet<String>,
+            following: Option<OverworldFollowMemory>,
+            last_talked_object_identifier: Option<String>,
+            player_hidden: bool,
+        }
+
+        let raw = RawOverworldObjectMapMemory::deserialize(deserializer)?;
+        let memory = Self {
+            objects: raw.objects,
+            hidden_object_identifiers: raw.hidden_object_identifiers,
+            following: raw.following,
+            last_talked_object_identifier: raw.last_talked_object_identifier,
+            player_hidden: raw.player_hidden,
+        };
+        memory
+            .validate_saved_state("overworld_object_map")
+            .map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 impl OverworldObjectMapMemory {
@@ -1139,7 +1729,7 @@ pub struct OverworldFollowMemory {
     pub follower_object_id: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BattleMemory {
     #[default]
@@ -1177,6 +1767,122 @@ pub enum BattleMemory {
         ai_item_switch_flags: u32,
         ai_layers: Vec<String>,
     },
+}
+
+impl<'de> Deserialize<'de> for BattleMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
+        enum RawBattleMemory {
+            Inactive,
+            Wild {
+                battle_type: String,
+                map_name: String,
+                enemy_pokemon: Pokemon,
+                enemy_party: Vec<Pokemon>,
+            },
+            StaticWild {
+                battle_type: String,
+                species: String,
+                level: u8,
+                source_script: String,
+                enemy_pokemon: Pokemon,
+                enemy_party: Vec<Pokemon>,
+            },
+            Trainer {
+                battle_type: String,
+                trainer_class: String,
+                trainer_id: String,
+                trainer_name: String,
+                event_flag: String,
+                seen_text: String,
+                win_text: String,
+                loss_text: String,
+                callback: String,
+                source_script: String,
+                enemy_pokemon: Pokemon,
+                enemy_party: Vec<Pokemon>,
+                reward: u32,
+                encounter_music: String,
+                ai_move_flags: u32,
+                ai_item_switch_flags: u32,
+                ai_layers: Vec<String>,
+            },
+        }
+
+        let raw = RawBattleMemory::deserialize(deserializer)?;
+        let memory = match raw {
+            RawBattleMemory::Inactive => Self::Inactive,
+            RawBattleMemory::Wild {
+                battle_type,
+                map_name,
+                enemy_pokemon,
+                enemy_party,
+            } => Self::Wild {
+                battle_type,
+                map_name,
+                enemy_pokemon,
+                enemy_party,
+            },
+            RawBattleMemory::StaticWild {
+                battle_type,
+                species,
+                level,
+                source_script,
+                enemy_pokemon,
+                enemy_party,
+            } => Self::StaticWild {
+                battle_type,
+                species,
+                level,
+                source_script,
+                enemy_pokemon,
+                enemy_party,
+            },
+            RawBattleMemory::Trainer {
+                battle_type,
+                trainer_class,
+                trainer_id,
+                trainer_name,
+                event_flag,
+                seen_text,
+                win_text,
+                loss_text,
+                callback,
+                source_script,
+                enemy_pokemon,
+                enemy_party,
+                reward,
+                encounter_music,
+                ai_move_flags,
+                ai_item_switch_flags,
+                ai_layers,
+            } => Self::Trainer {
+                battle_type,
+                trainer_class,
+                trainer_id,
+                trainer_name,
+                event_flag,
+                seen_text,
+                win_text,
+                loss_text,
+                callback,
+                source_script,
+                enemy_pokemon,
+                enemy_party,
+                reward,
+                encounter_music,
+                ai_move_flags,
+                ai_item_switch_flags,
+                ai_layers,
+            },
+        };
+        memory.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 impl BattleMemory {
@@ -1314,7 +2020,7 @@ fn validate_battle_enemy_party_state(
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OverworldMemory {
     #[default]
@@ -1325,6 +2031,43 @@ pub enum OverworldMemory {
         facing: Direction,
         mode: MovementMode,
     },
+}
+
+impl<'de> Deserialize<'de> for OverworldMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
+        enum RawOverworldMemory {
+            Inactive,
+            Active {
+                map_name: String,
+                tile: TilePosition,
+                facing: Direction,
+                mode: MovementMode,
+            },
+        }
+
+        let raw = RawOverworldMemory::deserialize(deserializer)?;
+        let memory = match raw {
+            RawOverworldMemory::Inactive => Self::Inactive,
+            RawOverworldMemory::Active {
+                map_name,
+                tile,
+                facing,
+                mode,
+            } => Self::Active {
+                map_name,
+                tile,
+                facing,
+                mode,
+            },
+        };
+        memory.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 impl OverworldMemory {
@@ -1359,7 +2102,7 @@ impl OverworldMemory {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeMemory {
     pub script_value: Option<String>,
@@ -1389,6 +2132,9 @@ pub struct ScriptRuntimeMemory {
     pub map_music_restart_disabled: bool,
     pub map_music_requested: bool,
     pub window_open: bool,
+    pub player_input_locked: bool,
+    pub all_input_locked: bool,
+    pub script_stop_requested: bool,
     pub item_notify_queued: bool,
     pub warp_sound_queued: bool,
     pub teleport_from_queued: bool,
@@ -1428,6 +2174,162 @@ pub struct ScriptRuntimeMemory {
     pub shop_events: Vec<ScriptShopRuntimeEvent>,
     pub pending_shop: Option<ScriptShopRequest>,
     pub item_use_events: Vec<ItemUseRuntimeEvent>,
+}
+
+impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptRuntimeMemory {
+            script_value: Option<String>,
+            variables: BTreeMap<String, String>,
+            variable_writes: Vec<ScriptRuntimeVariableWrite>,
+            memory: BTreeMap<String, String>,
+            effects: Vec<ScriptRuntimeEffect>,
+            named_buffers: BTreeMap<String, String>,
+            asm_directives: Vec<ScriptRuntimeAsmDirective>,
+            numeric_buffer_writes: Vec<ScriptRuntimeNumericBufferWrite>,
+            elevator_floors: Vec<ScriptRuntimeElevatorFloor>,
+            stone_table_entries: Vec<ScriptRuntimeStoneTableEntry>,
+            decoration_descriptions: Vec<ScriptRuntimeDecorationDescription>,
+            variable_sprites: BTreeMap<String, String>,
+            phone_numbers: BTreeSet<String>,
+            special_phone_calls: Vec<String>,
+            pending_delays: Vec<ScriptRuntimeDelay>,
+            pending_earthquakes: Vec<ScriptRuntimeEarthquake>,
+            pending_emotes: Vec<ScriptRuntimeEmote>,
+            command_queue: Vec<ScriptRuntimeQueuedCommand>,
+            stack: Vec<String>,
+            last_special_routine: Option<String>,
+            last_talked_object: Option<String>,
+            active_menu: Option<String>,
+            active_pokemon_picture: Option<String>,
+            menu_coords: Option<[i16; 4]>,
+            map_music_restart_disabled: bool,
+            map_music_requested: bool,
+            window_open: bool,
+            player_input_locked: bool,
+            all_input_locked: bool,
+            script_stop_requested: bool,
+            item_notify_queued: bool,
+            warp_sound_queued: bool,
+            teleport_from_queued: bool,
+            hall_of_fame_requested: bool,
+            credits_requested: bool,
+            reset_requested: bool,
+            menu_2d_requested: bool,
+            version_check_requested: bool,
+            blackout_mod: Option<String>,
+            battle_tower_text: Option<String>,
+            completed_trades: Vec<String>,
+            catch_tutorials: Vec<String>,
+            checked_mail_targets: Vec<String>,
+            given_mail_targets: Vec<String>,
+            audio_events: Vec<ScriptAudioRuntimeEvent>,
+            current_music: Option<String>,
+            pending_music_fade: Option<ScriptMusicFade>,
+            waiting_for_sound_effect: bool,
+            graphics_events: Vec<ScriptGraphicsRuntimeEvent>,
+            pending_screen_fade: Option<ScriptScreenFade>,
+            money_events: Vec<ScriptMoneyRuntimeEvent>,
+            map_events: Vec<ScriptMapRuntimeEvent>,
+            pending_script_warp: Option<ScriptWarpRequest>,
+            pending_map_load: Option<ScriptMapLoadRequest>,
+            pending_map_refresh: Option<ScriptMapRefreshRequest>,
+            warp_check_requested: bool,
+            text_events: Vec<ScriptTextRuntimeEvent>,
+            text_window_open: bool,
+            pending_text_label: Option<String>,
+            pending_text_wait: Option<ScriptTextWait>,
+            pending_yes_no: Option<ScriptYesNoPrompt>,
+            control_events: Vec<ScriptControlRuntimeEvent>,
+            next_script: Option<String>,
+            call_stack: Vec<ScriptReturnFrame>,
+            deferred_scripts: Vec<String>,
+            script_ended: Option<ScriptEndState>,
+            shop_events: Vec<ScriptShopRuntimeEvent>,
+            pending_shop: Option<ScriptShopRequest>,
+            item_use_events: Vec<ItemUseRuntimeEvent>,
+        }
+
+        let raw = RawScriptRuntimeMemory::deserialize(deserializer)?;
+        let memory = Self {
+            script_value: raw.script_value,
+            variables: raw.variables,
+            variable_writes: raw.variable_writes,
+            memory: raw.memory,
+            effects: raw.effects,
+            named_buffers: raw.named_buffers,
+            asm_directives: raw.asm_directives,
+            numeric_buffer_writes: raw.numeric_buffer_writes,
+            elevator_floors: raw.elevator_floors,
+            stone_table_entries: raw.stone_table_entries,
+            decoration_descriptions: raw.decoration_descriptions,
+            variable_sprites: raw.variable_sprites,
+            phone_numbers: raw.phone_numbers,
+            special_phone_calls: raw.special_phone_calls,
+            pending_delays: raw.pending_delays,
+            pending_earthquakes: raw.pending_earthquakes,
+            pending_emotes: raw.pending_emotes,
+            command_queue: raw.command_queue,
+            stack: raw.stack,
+            last_special_routine: raw.last_special_routine,
+            last_talked_object: raw.last_talked_object,
+            active_menu: raw.active_menu,
+            active_pokemon_picture: raw.active_pokemon_picture,
+            menu_coords: raw.menu_coords,
+            map_music_restart_disabled: raw.map_music_restart_disabled,
+            map_music_requested: raw.map_music_requested,
+            window_open: raw.window_open,
+            player_input_locked: raw.player_input_locked,
+            all_input_locked: raw.all_input_locked,
+            script_stop_requested: raw.script_stop_requested,
+            item_notify_queued: raw.item_notify_queued,
+            warp_sound_queued: raw.warp_sound_queued,
+            teleport_from_queued: raw.teleport_from_queued,
+            hall_of_fame_requested: raw.hall_of_fame_requested,
+            credits_requested: raw.credits_requested,
+            reset_requested: raw.reset_requested,
+            menu_2d_requested: raw.menu_2d_requested,
+            version_check_requested: raw.version_check_requested,
+            blackout_mod: raw.blackout_mod,
+            battle_tower_text: raw.battle_tower_text,
+            completed_trades: raw.completed_trades,
+            catch_tutorials: raw.catch_tutorials,
+            checked_mail_targets: raw.checked_mail_targets,
+            given_mail_targets: raw.given_mail_targets,
+            audio_events: raw.audio_events,
+            current_music: raw.current_music,
+            pending_music_fade: raw.pending_music_fade,
+            waiting_for_sound_effect: raw.waiting_for_sound_effect,
+            graphics_events: raw.graphics_events,
+            pending_screen_fade: raw.pending_screen_fade,
+            money_events: raw.money_events,
+            map_events: raw.map_events,
+            pending_script_warp: raw.pending_script_warp,
+            pending_map_load: raw.pending_map_load,
+            pending_map_refresh: raw.pending_map_refresh,
+            warp_check_requested: raw.warp_check_requested,
+            text_events: raw.text_events,
+            text_window_open: raw.text_window_open,
+            pending_text_label: raw.pending_text_label,
+            pending_text_wait: raw.pending_text_wait,
+            pending_yes_no: raw.pending_yes_no,
+            control_events: raw.control_events,
+            next_script: raw.next_script,
+            call_stack: raw.call_stack,
+            deferred_scripts: raw.deferred_scripts,
+            script_ended: raw.script_ended,
+            shop_events: raw.shop_events,
+            pending_shop: raw.pending_shop,
+            item_use_events: raw.item_use_events,
+        };
+        memory.validate().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 impl ScriptRuntimeMemory {
@@ -2699,7 +3601,9 @@ fn validate_graphics_event_payload(
         if event.frames != Some(8) {
             return Err(format!(
                 "graphics_events[{index}].frames {} must be 8 for ScreenFade",
-                event.frames.unwrap_or_default()
+                event
+                    .frames
+                    .expect("screen fade frames presence is validated before exact value check")
             ));
         }
     } else if has_fade_payload {
@@ -5031,27 +5935,31 @@ fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> 
                 ));
             }
             match event.command.as_str() {
-                "writetext" => {
+                "writetext" | "farwritetext" => {
                     if event.face_player {
                         return Err(format!(
-                            "text_events[{index}].face_player must be false for writetext"
+                            "text_events[{index}].face_player must be false for {}",
+                            event.command
                         ));
                     }
                     if event.closes_text {
                         return Err(format!(
-                            "text_events[{index}].closes_text must be false for writetext"
+                            "text_events[{index}].closes_text must be false for {}",
+                            event.command
                         ));
                     }
                 }
-                "jumptext" => {
+                "jumptext" | "farjumptext" => {
                     if event.face_player {
                         return Err(format!(
-                            "text_events[{index}].face_player must be false for jumptext"
+                            "text_events[{index}].face_player must be false for {}",
+                            event.command
                         ));
                     }
                     if !event.closes_text {
                         return Err(format!(
-                            "text_events[{index}].closes_text must be true for jumptext"
+                            "text_events[{index}].closes_text must be true for {}",
+                            event.command
                         ));
                     }
                 }
@@ -5301,8 +6209,9 @@ fn text_runtime_command_shape(command: &str) -> Option<(ScriptTextRuntimeKind, b
             Some((ScriptTextRuntimeKind::WaitButton, false, false, false))
         }
         "yesorno" => Some((ScriptTextRuntimeKind::YesNo, false, false, false)),
-        "writetext" => Some((ScriptTextRuntimeKind::Write, false, false, true)),
+        "writetext" | "farwritetext" => Some((ScriptTextRuntimeKind::Write, false, false, true)),
         "jumptext" => Some((ScriptTextRuntimeKind::Write, false, true, true)),
+        "farjumptext" => Some((ScriptTextRuntimeKind::Write, false, true, true)),
         "jumptextfaceplayer" => Some((ScriptTextRuntimeKind::Write, true, true, true)),
         _ => None,
     }
@@ -5311,7 +6220,7 @@ fn text_runtime_command_shape(command: &str) -> Option<(ScriptTextRuntimeKind, b
 fn validate_pending_text_wait_command(command: &str) -> Result<(), String> {
     if matches!(
         command,
-        "promptbutton" | "waitbutton" | "jumptext" | "jumptextfaceplayer"
+        "promptbutton" | "waitbutton" | "jumptext" | "jumptextfaceplayer" | "farjumptext"
     ) {
         Ok(())
     } else {
@@ -5342,7 +6251,7 @@ pub fn saved_pending_text_wait_command_args(
 ) -> Result<Option<Vec<String>>, ScriptTextWaitCommandError> {
     match wait.command.as_str() {
         "promptbutton" | "waitbutton" => Ok(Some(Vec::new())),
-        "jumptext" | "jumptextfaceplayer" => {
+        "jumptext" | "jumptextfaceplayer" | "farjumptext" => {
             let Some(text_label) = pending_text_label else {
                 return Err(ScriptTextWaitCommandError::MissingPendingTextLabel {
                     path: path.to_string(),
@@ -5428,12 +6337,40 @@ fn is_exact_script_runtime_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemUseRuntimeEvent {
     pub item_id: String,
     pub context: String,
     pub consumed: bool,
+}
+
+impl<'de> Deserialize<'de> for ItemUseRuntimeEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawItemUseRuntimeEvent {
+            item_id: String,
+            context: String,
+            consumed: bool,
+        }
+
+        let raw = RawItemUseRuntimeEvent::deserialize(deserializer)?;
+        let event = Self {
+            item_id: raw.item_id,
+            context: raw.context,
+            consumed: raw.consumed,
+        };
+        validate_script_runtime_token("item_use_event.item_id", &event.item_id)
+            .map_err(D::Error::custom)?;
+        validate_script_runtime_token("item_use_event.context", &event.context)
+            .map_err(D::Error::custom)?;
+        validate_item_use_event_context(0, &event.context).map_err(D::Error::custom)?;
+        Ok(event)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5737,7 +6674,7 @@ pub struct ScriptEndState {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptShopRuntimeEvent {
     pub mart_type: String,
@@ -5747,7 +6684,35 @@ pub struct ScriptShopRuntimeEvent {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ScriptShopRuntimeEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptShopRuntimeEvent {
+            mart_type: String,
+            mart_id: String,
+            inventory: Vec<String>,
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptShopRuntimeEvent::deserialize(deserializer)?;
+        let event = Self {
+            mart_type: raw.mart_type,
+            mart_id: raw.mart_id,
+            inventory: raw.inventory,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_shop_runtime_event("shop_event", &event).map_err(D::Error::custom)?;
+        Ok(event)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptShopRequest {
     pub mart_type: String,
@@ -5757,7 +6722,35 @@ pub struct ScriptShopRequest {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ScriptShopRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptShopRequest {
+            mart_type: String,
+            mart_id: String,
+            inventory: Vec<String>,
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptShopRequest::deserialize(deserializer)?;
+        let request = Self {
+            mart_type: raw.mart_type,
+            mart_id: raw.mart_id,
+            inventory: raw.inventory,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_shop_request("shop_request", &request).map_err(D::Error::custom)?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeDelay {
     pub command: String,
@@ -5766,7 +6759,37 @@ pub struct ScriptRuntimeDelay {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ScriptRuntimeDelay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptRuntimeDelay {
+            command: String,
+            frames: u16,
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptRuntimeDelay::deserialize(deserializer)?;
+        let delay = Self {
+            command: raw.command,
+            frames: raw.frames,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_runtime_token("pending_delay.command", &delay.command)
+            .map_err(D::Error::custom)?;
+        validate_script_runtime_label("pending_delay.source_script", &delay.source_script)
+            .map_err(D::Error::custom)?;
+        validate_delay_payload(0, &delay).map_err(D::Error::custom)?;
+        Ok(delay)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeEarthquake {
     pub parameter: u16,
@@ -5776,7 +6799,40 @@ pub struct ScriptRuntimeEarthquake {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ScriptRuntimeEarthquake {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptRuntimeEarthquake {
+            parameter: u16,
+            shake_frames: u16,
+            sleep_frames: u16,
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptRuntimeEarthquake::deserialize(deserializer)?;
+        let earthquake = Self {
+            parameter: raw.parameter,
+            shake_frames: raw.shake_frames,
+            sleep_frames: raw.sleep_frames,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_runtime_label(
+            "pending_earthquake.source_script",
+            &earthquake.source_script,
+        )
+        .map_err(D::Error::custom)?;
+        validate_earthquake_payload(0, &earthquake).map_err(D::Error::custom)?;
+        Ok(earthquake)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeEmote {
     pub emote: String,
@@ -5784,6 +6840,39 @@ pub struct ScriptRuntimeEmote {
     pub duration: u16,
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptRuntimeEmote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptRuntimeEmote {
+            emote: String,
+            object: String,
+            duration: u16,
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptRuntimeEmote::deserialize(deserializer)?;
+        let emote = Self {
+            emote: raw.emote,
+            object: raw.object,
+            duration: raw.duration,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_runtime_token("pending_emote.emote", &emote.emote)
+            .map_err(D::Error::custom)?;
+        validate_script_runtime_token("pending_emote.object", &emote.object)
+            .map_err(D::Error::custom)?;
+        validate_script_runtime_label("pending_emote.source_script", &emote.source_script)
+            .map_err(D::Error::custom)?;
+        Ok(emote)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5833,6 +6922,15 @@ impl GameState {
         self.flags
             .validate()
             .map_err(|error| format!("invalid saved event flags: {error}"))?;
+        self.swarms
+            .validate_saved_state()
+            .map_err(|error| format!("invalid saved swarm memory: {error}"))?;
+        self.fishing
+            .validate_saved_state()
+            .map_err(|error| format!("invalid saved fishing memory: {error}"))?;
+        self.joypad
+            .validate_saved_state()
+            .map_err(|error| format!("invalid saved joypad memory: {error}"))?;
         self.script_runtime
             .validate()
             .map_err(|error| format!("invalid saved script runtime: {error}"))?;
@@ -6116,11 +7214,33 @@ fn validate_joypad_mask(mask: u8) -> Result<(), GameStateFrameError> {
     Ok(())
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventFlagMemory {
     pub event_flags: BTreeMap<String, bool>,
     pub engine_flags: BTreeMap<String, bool>,
+}
+
+impl<'de> Deserialize<'de> for EventFlagMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEventFlagMemory {
+            event_flags: BTreeMap<String, bool>,
+            engine_flags: BTreeMap<String, bool>,
+        }
+
+        let raw = RawEventFlagMemory::deserialize(deserializer)?;
+        let memory = Self {
+            event_flags: raw.event_flags,
+            engine_flags: raw.engine_flags,
+        };
+        memory.validate().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -6296,13 +7416,39 @@ fn is_exact_flag_name(flag_name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneMemory {
     pub current_map_name: String,
     pub scene_name: String,
     pub map_scenes: BTreeMap<String, String>,
     pub map_scene_indices: BTreeMap<String, usize>,
+}
+
+impl<'de> Deserialize<'de> for SceneMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSceneMemory {
+            current_map_name: String,
+            scene_name: String,
+            map_scenes: BTreeMap<String, String>,
+            map_scene_indices: BTreeMap<String, usize>,
+        }
+
+        let raw = RawSceneMemory::deserialize(deserializer)?;
+        let memory = Self {
+            current_map_name: raw.current_map_name,
+            scene_name: raw.scene_name,
+            map_scenes: raw.map_scenes,
+            map_scene_indices: raw.map_scene_indices,
+        };
+        memory.validate().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6758,7 +7904,7 @@ pub enum FishingRodState {
     Battle,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FishingMemory {
     pub rod_state: FishingRodState,
@@ -6767,6 +7913,167 @@ pub struct FishingMemory {
     pub result: u8,
     pub daily_flags1: u8,
     pub swarm_flag: u8,
+}
+
+impl<'de> Deserialize<'de> for FishingMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFishingMemory {
+            rod_state: FishingRodState,
+            rod_index: Option<u8>,
+            bites_remaining: u8,
+            result: u8,
+            daily_flags1: u8,
+            swarm_flag: u8,
+        }
+
+        let raw = RawFishingMemory::deserialize(deserializer)?;
+        let memory = Self {
+            rod_state: raw.rod_state,
+            rod_index: raw.rod_index,
+            bites_remaining: raw.bites_remaining,
+            result: raw.result,
+            daily_flags1: raw.daily_flags1,
+            swarm_flag: raw.swarm_flag,
+        };
+        memory.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
+}
+
+impl FishingMemory {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        match self.rod_state {
+            FishingRodState::Idle => {
+                if self.rod_index.is_some() {
+                    return Err("fishing.rod_index cannot be saved while idle".to_string());
+                }
+                if self.bites_remaining != 0 {
+                    return Err(format!(
+                        "fishing.bites_remaining {} cannot be saved while idle",
+                        self.bites_remaining
+                    ));
+                }
+                if self.result != 0 {
+                    return Err(format!(
+                        "fishing.result {} cannot be saved while idle",
+                        self.result
+                    ));
+                }
+            }
+            FishingRodState::Waiting | FishingRodState::Bite | FishingRodState::Battle => {
+                let Some(rod_index) = self.rod_index else {
+                    return Err(format!(
+                        "fishing.rod_index is required for {:?}",
+                        self.rod_state
+                    ));
+                };
+                if rod_index > 2 {
+                    return Err(format!(
+                        "fishing.rod_index {rod_index} is outside Crystal rod range 0..2"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwarmMemory {
+    pub active: BTreeMap<String, SwarmMapTarget>,
+}
+
+impl<'de> Deserialize<'de> for SwarmMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSwarmMemory {
+            active: BTreeMap<String, SwarmMapTarget>,
+        }
+
+        let raw = RawSwarmMemory::deserialize(deserializer)?;
+        let memory = Self { active: raw.active };
+        memory.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwarmMapTarget {
+    pub map_id: String,
+    pub map_group: Option<u16>,
+    pub map_number: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for SwarmMapTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSwarmMapTarget {
+            map_id: String,
+            map_group: Option<u16>,
+            map_number: Option<u16>,
+        }
+
+        let raw = RawSwarmMapTarget::deserialize(deserializer)?;
+        let target = Self {
+            map_id: raw.map_id,
+            map_group: raw.map_group,
+            map_number: raw.map_number,
+        };
+        validate_script_runtime_token("swarms.active map_id", &target.map_id)
+            .map_err(D::Error::custom)?;
+        match (target.map_group, target.map_number) {
+            (Some(_), Some(_)) | (None, None) => Ok(target),
+            (Some(_), None) => Err(D::Error::custom(
+                "swarms target has map_group without map_number",
+            )),
+            (None, Some(_)) => Err(D::Error::custom(
+                "swarms target has map_number without map_group",
+            )),
+        }
+    }
+}
+
+impl SwarmMemory {
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        for (swarm_token, target) in &self.active {
+            validate_script_runtime_token("swarms.active token", swarm_token)?;
+            validate_script_runtime_token("swarms.active map_id", &target.map_id)?;
+            match (target.map_group, target.map_number) {
+                (Some(_), Some(_)) => {}
+                (None, None) => {
+                    return Err(format!(
+                        "swarms.active {swarm_token} is missing map_group and map_number"
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(format!(
+                        "swarms.active {swarm_token} has map_group without map_number"
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(format!(
+                        "swarms.active {swarm_token} has map_number without map_group"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6785,7 +8092,7 @@ impl Default for Badges {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoypadMemory {
     pub h_joypad_released: u8,
@@ -6798,7 +8105,71 @@ pub struct JoypadMemory {
     pub h_joy_last: u8,
 }
 
+impl<'de> Deserialize<'de> for JoypadMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawJoypadMemory {
+            h_joypad_released: u8,
+            h_joypad_pressed: u8,
+            h_joypad_down: u8,
+            h_joypad_sum: u8,
+            h_joy_released: u8,
+            h_joy_pressed: u8,
+            h_joy_down: u8,
+            h_joy_last: u8,
+        }
+
+        let raw = RawJoypadMemory::deserialize(deserializer)?;
+        let memory = Self {
+            h_joypad_released: raw.h_joypad_released,
+            h_joypad_pressed: raw.h_joypad_pressed,
+            h_joypad_down: raw.h_joypad_down,
+            h_joypad_sum: raw.h_joypad_sum,
+            h_joy_released: raw.h_joy_released,
+            h_joy_pressed: raw.h_joy_pressed,
+            h_joy_down: raw.h_joy_down,
+            h_joy_last: raw.h_joy_last,
+        };
+        memory.validate_saved_state().map_err(D::Error::custom)?;
+        Ok(memory)
+    }
+}
+
 impl JoypadMemory {
+    fn validate_saved_state(&self) -> Result<(), String> {
+        validate_joypad_mask(self.h_joypad_released).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joypad_pressed).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joypad_down).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joypad_sum).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joy_released).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joy_pressed).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joy_down).map_err(|error| error.to_string())?;
+        validate_joypad_mask(self.h_joy_last).map_err(|error| error.to_string())?;
+        if self.h_joypad_down != self.h_joy_down {
+            return Err(format!(
+                "joypad h_joypad_down {:#010b} does not match h_joy_down {:#010b}",
+                self.h_joypad_down, self.h_joy_down
+            ));
+        }
+        if self.h_joypad_pressed != self.h_joy_pressed {
+            return Err(format!(
+                "joypad h_joypad_pressed {:#010b} does not match h_joy_pressed {:#010b}",
+                self.h_joypad_pressed, self.h_joy_pressed
+            ));
+        }
+        if self.h_joypad_released != self.h_joy_released {
+            return Err(format!(
+                "joypad h_joypad_released {:#010b} does not match h_joy_released {:#010b}",
+                self.h_joypad_released, self.h_joy_released
+            ));
+        }
+        Ok(())
+    }
+
     pub fn apply_mask(&mut self, mask: u8) -> GameEvent {
         let previous = self.h_joypad_down;
         let pressed = (mask ^ previous) & mask;
@@ -6818,13 +8189,39 @@ impl JoypadMemory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GameCommand {
     Joypad { mask: u8 },
     AdvanceFrame,
     OpenMenu,
     CloseMenu,
+}
+
+impl<'de> Deserialize<'de> for GameCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+        enum RawGameCommand {
+            Joypad { mask: u8 },
+            AdvanceFrame,
+            OpenMenu,
+            CloseMenu,
+        }
+
+        match RawGameCommand::deserialize(deserializer)? {
+            RawGameCommand::Joypad { mask } => {
+                validate_joypad_mask(mask).map_err(D::Error::custom)?;
+                Ok(Self::Joypad { mask })
+            }
+            RawGameCommand::AdvanceFrame => Ok(Self::AdvanceFrame),
+            RawGameCommand::OpenMenu => Ok(Self::OpenMenu),
+            RawGameCommand::CloseMenu => Ok(Self::CloseMenu),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7674,7 +9071,15 @@ mod tests {
         );
 
         state = GameState::default();
-        state.storage.party.pokemon[1] = Some(pokemon.clone());
+        let party_gap_pokemon = Pokemon::new_for_tests(
+            crate::models::PokemonSpecies::new_for_tests(
+                "CHIKORITA",
+                crate::models::BaseStats::new(45, 49, 65, 45, 49, 65),
+            ),
+            5,
+            crate::models::Dv::from_non_hp(1, 2, 3, 4),
+        );
+        state.storage.party.pokemon[1] = Some(party_gap_pokemon);
         assert_eq!(
             state.validate_saved_state(),
             Err("invalid saved storage: party slot 1 is filled after empty slot 0".to_string())
@@ -10482,6 +11887,34 @@ mod tests {
         );
 
         let mut text_event = text_event;
+        text_event.command = "farwritetext".to_string();
+        text_event.face_player = false;
+        text_event.closes_text = false;
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(text_event.clone());
+        assert_eq!(runtime.validate(), Ok(()));
+        assert_eq!(
+            saved_text_runtime_event_command_args(
+                "script_runtime.text_events[0].source_script",
+                &text_event
+            ),
+            Ok(Some(vec!["GreetingText".to_string()]))
+        );
+
+        text_event.command = "farjumptext".to_string();
+        text_event.face_player = false;
+        text_event.closes_text = true;
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_events.push(text_event.clone());
+        assert_eq!(runtime.validate(), Ok(()));
+        assert_eq!(
+            saved_text_runtime_event_command_args(
+                "script_runtime.text_events[0].source_script",
+                &text_event
+            ),
+            Ok(Some(vec!["GreetingText".to_string()]))
+        );
+
         text_event.command = "customtextcommand".to_string();
         assert_eq!(
             saved_text_runtime_event_command_args(
@@ -10630,6 +12063,18 @@ mod tests {
                 command_index: 12,
                 command: "jumptextfaceplayer".to_string(),
             })
+        );
+        let far_wait = ScriptTextWait {
+            command: "farjumptext".to_string(),
+            ..wait
+        };
+        assert_eq!(
+            saved_pending_text_wait_command_args(
+                "script_runtime.pending_text_wait.source_script",
+                &far_wait,
+                Some("GreetingText"),
+            ),
+            Ok(Some(vec!["GreetingText".to_string()]))
         );
 
         runtime = ScriptRuntimeMemory::default();

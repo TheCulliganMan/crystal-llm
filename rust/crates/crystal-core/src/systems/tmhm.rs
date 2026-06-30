@@ -40,6 +40,8 @@ pub enum TmHmLearnError {
     InvalidReplacementSlot { slot: usize },
     #[error("saved bag.tm_hm has {slots} slots, compiled TM/HM max index is {max_index}")]
     SavedTmHmSlotsExceedCompiledMax { slots: usize, max_index: usize },
+    #[error("saved bag.tm_hm has {slots} slots, fewer than compiled TM/HM max index {max_index}")]
+    SavedTmHmSlotsBelowCompiledMax { slots: usize, max_index: usize },
     #[error("saved bag.tm_hm has {slots} slots, but compiled pack has no TM/HM items")]
     SavedTmHmSlotsWithoutCompiledItems { slots: usize },
     #[error("saved bag.tm_hm[{index}] has no compiled TM/HM item with matching tmhm_index")]
@@ -142,20 +144,23 @@ pub fn validate_saved_tmhm_references(
                 max_index,
             });
         }
+        Some(max_index) if tm_hm.len() < max_index + 1 => {
+            return Err(TmHmLearnError::SavedTmHmSlotsBelowCompiledMax {
+                slots: tm_hm.len(),
+                max_index,
+            });
+        }
         None if !tm_hm.is_empty() => {
             return Err(TmHmLearnError::SavedTmHmSlotsWithoutCompiledItems { slots: tm_hm.len() });
         }
         _ => {}
     }
-    for (index, owned) in tm_hm.iter().enumerate() {
-        if !owned {
-            continue;
-        }
+    for index in 0..tm_hm.len() {
         let matches = items
             .values()
             .filter(|item| item.pocket == ITEM_POCKET_TM_HM && item.tmhm_index == Some(index))
             .count();
-        if matches == 0 {
+        if tm_hm[index] && matches == 0 {
             return Err(TmHmLearnError::SavedTmHmMissingCompiledItem { index });
         }
         if matches > 1 {

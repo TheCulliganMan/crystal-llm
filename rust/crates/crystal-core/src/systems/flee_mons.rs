@@ -15,14 +15,39 @@ impl<'de> Deserialize<'de> for FleeMonTables {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawFleeMonTables {
-            buckets: BTreeMap<String, Vec<String>>,
+            buckets: Option<BTreeMap<String, Vec<String>>>,
+            #[serde(default)]
+            always: Vec<String>,
+            #[serde(default)]
+            often: Vec<String>,
+            #[serde(default)]
+            sometimes: Vec<String>,
         }
 
         let raw = RawFleeMonTables::deserialize(deserializer)?;
-        for (bucket_id, species) in &raw.buckets {
+        let mut buckets = raw.buckets.unwrap_or_default();
+        if !raw.always.is_empty() {
+            buckets.insert("always".to_string(), raw.always);
+        }
+        if !raw.often.is_empty() {
+            buckets.insert("often".to_string(), raw.often);
+        }
+        if !raw.sometimes.is_empty() {
+            buckets.insert("sometimes".to_string(), raw.sometimes);
+        }
+        if buckets.is_empty() {
+            return Err(serde::de::Error::missing_field("buckets"));
+        }
+
+        for (bucket_id, species) in &buckets {
             if !is_exact_nonempty_flee_mon_bucket(bucket_id) {
                 return Err(serde::de::Error::custom(format!(
                     "flee mons bucket id must be exact lowercase ASCII/underscore, found {bucket_id:?}"
+                )));
+            }
+            if species.is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "flee mons bucket {bucket_id:?} must not be empty"
                 )));
             }
             for species_id in species {
@@ -35,7 +60,7 @@ impl<'de> Deserialize<'de> for FleeMonTables {
         }
 
         Ok(Self {
-            buckets: raw.buckets,
+            buckets,
         })
     }
 }

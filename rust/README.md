@@ -18,6 +18,28 @@ The port should move file by file from the game runtime surfaces under
 `vendor/pokecrystal`. Do not port MCP, web routes, agent workflows, or desktop
 packaging.
 
+## Play
+
+The playable target is the Bevy shell. It reads one definitive compiled pack and
+starts either a new game from a spawn id or an existing Rust save:
+
+```sh
+cargo run -p crystal-bevy --features bevy-shell -- \
+  --pack <assets/data relative .crystalpack> \
+  --spawn <spawn-id> \
+  --save-path /tmp/pokecrystal.crystalsave
+```
+
+```sh
+cargo run -p crystal-bevy --features bevy-shell -- \
+  --pack <assets/data relative .crystalpack> \
+  --load-save /tmp/pokecrystal.crystalsave \
+  --save-path /tmp/pokecrystal.crystalsave
+```
+
+Use `--list-spawns` with the same `--pack` to print compiled spawn ids. The
+launcher has no stdin command shell and no web, MCP, agent, or Electron surface.
+
 ## Verification
 
 Run focused checks from this directory:

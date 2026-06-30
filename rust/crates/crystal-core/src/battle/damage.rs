@@ -1,15 +1,37 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::battle::stats::{BattleStatMultiplierTables, apply_stage};
 use crate::models::{Move, Pokemon, PokemonType, Stat};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeMultiplier {
     pub numerator: u16,
     pub denominator: u16,
+}
+
+impl<'de> Deserialize<'de> for TypeMultiplier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTypeMultiplier {
+            numerator: u16,
+            denominator: u16,
+        }
+
+        let raw = RawTypeMultiplier::deserialize(deserializer)?;
+        let multiplier = Self {
+            numerator: raw.numerator,
+            denominator: raw.denominator,
+        };
+        validate_type_multiplier("type multiplier", multiplier).map_err(D::Error::custom)?;
+        Ok(multiplier)
+    }
 }
 
 impl TypeMultiplier {
@@ -63,11 +85,33 @@ impl Weather {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeatherModifiers {
     pub type_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
     pub move_effect_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+}
+
+impl<'de> Deserialize<'de> for WeatherModifiers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawWeatherModifiers {
+            type_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+            move_effect_modifiers: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+        }
+
+        let raw = RawWeatherModifiers::deserialize(deserializer)?;
+        let modifiers = Self {
+            type_modifiers: raw.type_modifiers,
+            move_effect_modifiers: raw.move_effect_modifiers,
+        };
+        modifiers.validate_shape().map_err(D::Error::custom)?;
+        Ok(modifiers)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,11 +227,33 @@ fn push_type_multiplier_issue(
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeEffectivenessTable {
     pub matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
     pub foresight_matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+}
+
+impl<'de> Deserialize<'de> for TypeEffectivenessTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTypeEffectivenessTable {
+            matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+            foresight_matchups: BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+        }
+
+        let raw = RawTypeEffectivenessTable::deserialize(deserializer)?;
+        let table = Self {
+            matchups: raw.matchups,
+            foresight_matchups: raw.foresight_matchups,
+        };
+        table.validate_shape().map_err(D::Error::custom)?;
+        Ok(table)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,11 +399,33 @@ fn push_type_effectiveness_entry_issues(
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeCategories {
     pub physical: Vec<String>,
     pub special: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for TypeCategories {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTypeCategories {
+            physical: Vec<String>,
+            special: Vec<String>,
+        }
+
+        let raw = RawTypeCategories::deserialize(deserializer)?;
+        let categories = Self {
+            physical: raw.physical,
+            special: raw.special,
+        };
+        categories.validate_shape().map_err(D::Error::custom)?;
+        Ok(categories)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +508,120 @@ fn is_exact_battle_damage_token(value: &str) -> bool {
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+fn validate_type_multiplier(subject: &str, multiplier: TypeMultiplier) -> Result<(), String> {
+    if multiplier.denominator == 0 {
+        return Err(format!("{subject} denominator must be nonzero"));
+    }
+    Ok(())
+}
+
+impl WeatherModifiers {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.type_modifiers.is_empty() {
+            return Err("weather type_modifiers must be explicit".to_string());
+        }
+        if self.move_effect_modifiers.is_empty() {
+            return Err("weather move_effect_modifiers must be explicit".to_string());
+        }
+        for (weather, type_modifiers) in &self.type_modifiers {
+            validate_exact_damage_token("weather type_modifiers weather", weather)?;
+            if type_modifiers.is_empty() {
+                return Err(format!(
+                    "weather {weather} type_modifiers must not be empty"
+                ));
+            }
+            for (move_type, multiplier) in type_modifiers {
+                validate_exact_damage_token("weather type modifier move type", move_type)?;
+                validate_type_multiplier("weather type modifier", *multiplier)?;
+            }
+        }
+        for (weather, effect_modifiers) in &self.move_effect_modifiers {
+            validate_exact_damage_token("weather move_effect_modifiers weather", weather)?;
+            if effect_modifiers.is_empty() {
+                return Err(format!(
+                    "weather {weather} move_effect_modifiers must not be empty"
+                ));
+            }
+            for (move_effect, multiplier) in effect_modifiers {
+                validate_exact_damage_token("weather move effect modifier", move_effect)?;
+                validate_type_multiplier("weather move effect modifier", *multiplier)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TypeEffectivenessTable {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.matchups.is_empty() {
+            return Err("type effectiveness matchups must be explicit".to_string());
+        }
+        if self.foresight_matchups.is_empty() {
+            return Err("type effectiveness foresight_matchups must be explicit".to_string());
+        }
+        validate_type_effectiveness_shape("matchups", &self.matchups)?;
+        validate_type_effectiveness_shape("foresight_matchups", &self.foresight_matchups)?;
+        Ok(())
+    }
+}
+
+fn validate_type_effectiveness_shape(
+    table_name: &str,
+    table: &BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+) -> Result<(), String> {
+    for (attacker, defenders) in table {
+        validate_exact_damage_token("type effectiveness attacker", attacker)?;
+        if defenders.is_empty() {
+            return Err(format!(
+                "type effectiveness {table_name} attacker {attacker} has no defenders"
+            ));
+        }
+        for (defender, multiplier) in defenders {
+            validate_exact_damage_token("type effectiveness defender", defender)?;
+            validate_type_multiplier("type effectiveness matchup", *multiplier)?;
+        }
+    }
+    Ok(())
+}
+
+impl TypeCategories {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.physical.is_empty() {
+            return Err("type_categories physical must be explicit".to_string());
+        }
+        if self.special.is_empty() {
+            return Err("type_categories special must be explicit".to_string());
+        }
+        let mut physical = BTreeSet::new();
+        for type_id in &self.physical {
+            validate_exact_damage_token("physical type category", type_id)?;
+            if !physical.insert(type_id.as_str()) {
+                return Err(format!("physical type category {type_id} is duplicated"));
+            }
+        }
+        let mut special = BTreeSet::new();
+        for type_id in &self.special {
+            validate_exact_damage_token("special type category", type_id)?;
+            if !special.insert(type_id.as_str()) {
+                return Err(format!("special type category {type_id} is duplicated"));
+            }
+            if physical.contains(type_id.as_str()) {
+                return Err(format!(
+                    "type category {type_id} cannot be both physical and special"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_exact_damage_token(subject: &str, value: &str) -> Result<(), String> {
+    if !is_exact_battle_damage_token(value) {
+        return Err(format!("{subject} {value:?} is not exact"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize, de::Error as _};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BattleAnimationCatalogIssue {
     InvalidAnimation {
@@ -52,6 +54,66 @@ pub fn battle_animation_catalog_issues(
     issues
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct BattleAnimationCommandTable(pub BTreeMap<String, Vec<String>>);
+
+impl<'de> Deserialize<'de> for BattleAnimationCommandTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let animations = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+        if animations.is_empty() {
+            return Err(D::Error::custom(
+                "battle animation command table must not be empty",
+            ));
+        }
+        for (label, commands) in &animations {
+            if !is_exact_nonempty_battle_animation_token(label) {
+                return Err(D::Error::custom(format!(
+                    "battle animation label must be an exact animation token, found {label:?}"
+                )));
+            }
+            if commands.is_empty() {
+                return Err(D::Error::custom(format!(
+                    "battle animation {label:?} must declare at least one command"
+                )));
+            }
+            for command in commands {
+                if !is_exact_nonempty_battle_animation_command(command) {
+                    return Err(D::Error::custom(format!(
+                        "battle animation command for {label:?} must be exact nonempty text, found {command:?}"
+                    )));
+                }
+            }
+        }
+        Ok(Self(animations))
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct BattleAnimationTable(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for BattleAnimationTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = Vec::<String>::deserialize(deserializer)?;
+        if entries.is_empty() {
+            return Err(D::Error::custom("battle animation table must not be empty"));
+        }
+        for (index, label) in entries.iter().enumerate() {
+            if !is_exact_nonempty_battle_animation_token(label) {
+                return Err(D::Error::custom(format!(
+                    "battle animation table entry {index} must be an exact animation token, found {label:?}"
+                )));
+            }
+        }
+        Ok(Self(entries))
+    }
+}
+
 fn is_exact_nonempty_battle_animation_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
@@ -59,6 +121,10 @@ fn is_exact_nonempty_battle_animation_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_nonempty_battle_animation_command(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value && !has_reserved_pack_prefix(value)
 }
 
 fn has_reserved_pack_prefix(value: &str) -> bool {

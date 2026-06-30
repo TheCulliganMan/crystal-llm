@@ -1,10 +1,36 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fraction {
     pub numerator: i32,
     pub denominator: i32,
+}
+
+impl<'de> Deserialize<'de> for Fraction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFraction {
+            numerator: i32,
+            denominator: i32,
+        }
+
+        let raw = RawFraction::deserialize(deserializer)?;
+        if raw.denominator <= 0 {
+            return Err(D::Error::custom(format!(
+                "fraction denominator {} must be positive",
+                raw.denominator
+            )));
+        }
+        Ok(Self {
+            numerator: raw.numerator,
+            denominator: raw.denominator,
+        })
+    }
 }
 
 impl Fraction {
@@ -24,11 +50,34 @@ impl Fraction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleStatMultiplier {
     pub numerator: i32,
     pub denominator: i32,
+}
+
+impl<'de> Deserialize<'de> for BattleStatMultiplier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleStatMultiplier {
+            numerator: i32,
+            denominator: i32,
+        }
+
+        let raw = RawBattleStatMultiplier::deserialize(deserializer)?;
+        let multiplier = Self {
+            numerator: raw.numerator,
+            denominator: raw.denominator,
+        };
+        validate_battle_stat_multiplier(BattleStatMultiplierTableKind::Stat, 0, multiplier)
+            .map_err(|issue| D::Error::custom(format!("{issue:?}")))?;
+        Ok(multiplier)
+    }
 }
 
 impl BattleStatMultiplier {
@@ -37,11 +86,38 @@ impl BattleStatMultiplier {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleStatMultiplierTables {
     pub stat: Vec<BattleStatMultiplier>,
     pub accuracy: Vec<BattleStatMultiplier>,
+}
+
+impl<'de> Deserialize<'de> for BattleStatMultiplierTables {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleStatMultiplierTables {
+            stat: Vec<BattleStatMultiplier>,
+            accuracy: Vec<BattleStatMultiplier>,
+        }
+
+        let raw = RawBattleStatMultiplierTables::deserialize(deserializer)?;
+        let tables = Self {
+            stat: raw.stat,
+            accuracy: raw.accuracy,
+        };
+        let issues = battle_stat_multiplier_table_issues(&tables, true);
+        if let Some(issue) = issues.first() {
+            return Err(D::Error::custom(format!(
+                "invalid battle stat multiplier tables: {issue:?}"
+            )));
+        }
+        Ok(tables)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,21 +197,32 @@ fn push_battle_stat_multiplier_table_issues(
     }
     for (index, entry) in entries.iter().enumerate() {
         let stage = index as i8 - 6;
-        if entry.numerator <= 0 {
-            issues.push(BattleStatMultiplierTableIssue::InvalidNumerator {
-                table,
-                stage,
-                numerator: entry.numerator,
-            });
-        }
-        if entry.denominator <= 0 {
-            issues.push(BattleStatMultiplierTableIssue::InvalidDenominator {
-                table,
-                stage,
-                denominator: entry.denominator,
-            });
+        if let Err(issue) = validate_battle_stat_multiplier(table, stage, *entry) {
+            issues.push(issue);
         }
     }
+}
+
+fn validate_battle_stat_multiplier(
+    table: BattleStatMultiplierTableKind,
+    stage: i8,
+    entry: BattleStatMultiplier,
+) -> Result<(), BattleStatMultiplierTableIssue> {
+    if entry.numerator <= 0 {
+        return Err(BattleStatMultiplierTableIssue::InvalidNumerator {
+            table,
+            stage,
+            numerator: entry.numerator,
+        });
+    }
+    if entry.denominator <= 0 {
+        return Err(BattleStatMultiplierTableIssue::InvalidDenominator {
+            table,
+            stage,
+            denominator: entry.denominator,
+        });
+    }
+    Ok(())
 }
 
 pub fn stage_multiplier(tables: &BattleStatMultiplierTables, stage: i8) -> Option<Fraction> {

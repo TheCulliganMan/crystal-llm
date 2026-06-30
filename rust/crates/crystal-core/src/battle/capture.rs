@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::battle::start::deactivate_battle;
@@ -8,7 +8,7 @@ use crate::models::{Bag, CaptureStorageLocation, Item, PokedexState, Pokemon, Po
 use crate::random::Random;
 use crate::state::{BattleMemory, GameState};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureRules {
     pub fast_ball_species: BTreeSet<String>,
@@ -18,7 +18,40 @@ pub struct CaptureRules {
     pub status_bonus: BTreeMap<String, u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for CaptureRules {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCaptureRules {
+            #[serde(default)]
+            fast_ball_species: BTreeSet<String>,
+            #[serde(default)]
+            heavy_ball_modifiers: BTreeMap<String, i16>,
+            #[serde(default)]
+            ball_rules: BTreeMap<String, CaptureBallRule>,
+            #[serde(default)]
+            guaranteed_capture_balls: BTreeSet<String>,
+            #[serde(default)]
+            status_bonus: BTreeMap<String, u8>,
+        }
+
+        let raw = RawCaptureRules::deserialize(deserializer)?;
+        let rules = Self {
+            fast_ball_species: raw.fast_ball_species,
+            heavy_ball_modifiers: raw.heavy_ball_modifiers,
+            ball_rules: raw.ball_rules,
+            guaranteed_capture_balls: raw.guaranteed_capture_balls,
+            status_bonus: raw.status_bonus,
+        };
+        rules.validate_shape().map_err(D::Error::custom)?;
+        Ok(rules)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureBallRule {
     pub multiplier_numerator: u16,
@@ -30,6 +63,42 @@ pub struct CaptureBallRule {
     pub require_same_species: bool,
     pub require_same_gender: bool,
     pub require_fast_species: bool,
+}
+
+impl<'de> Deserialize<'de> for CaptureBallRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCaptureBallRule {
+            multiplier_numerator: u16,
+            multiplier_denominator: u16,
+            battle_type: String,
+            skip_hp_calc: bool,
+            use_heavy_ball_weight_modifier: bool,
+            use_level_ball_multiplier: bool,
+            require_same_species: bool,
+            require_same_gender: bool,
+            require_fast_species: bool,
+        }
+
+        let raw = RawCaptureBallRule::deserialize(deserializer)?;
+        let rule = Self {
+            multiplier_numerator: raw.multiplier_numerator,
+            multiplier_denominator: raw.multiplier_denominator,
+            battle_type: raw.battle_type,
+            skip_hp_calc: raw.skip_hp_calc,
+            use_heavy_ball_weight_modifier: raw.use_heavy_ball_weight_modifier,
+            use_level_ball_multiplier: raw.use_level_ball_multiplier,
+            require_same_species: raw.require_same_species,
+            require_same_gender: raw.require_same_gender,
+            require_fast_species: raw.require_fast_species,
+        };
+        rule.validate_shape().map_err(D::Error::custom)?;
+        Ok(rule)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,11 +158,54 @@ pub enum CaptureWobbleProbabilityIssue {
     IncompleteTable,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureWobbleProbability {
     pub catch_rate: u8,
     pub chance: u8,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct CaptureWobbleProbabilityTable(pub Vec<CaptureWobbleProbability>);
+
+impl<'de> Deserialize<'de> for CaptureWobbleProbabilityTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let probabilities = Vec::<CaptureWobbleProbability>::deserialize(deserializer)?;
+        if let Some(issue) = capture_wobble_probability_issues(&probabilities, true)
+            .into_iter()
+            .next()
+        {
+            return Err(D::Error::custom(format!(
+                "invalid capture wobble probability table: {issue:?}"
+            )));
+        }
+        Ok(Self(probabilities))
+    }
+}
+
+impl<'de> Deserialize<'de> for CaptureWobbleProbability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCaptureWobbleProbability {
+            catch_rate: u8,
+            chance: u8,
+        }
+
+        let raw = RawCaptureWobbleProbability::deserialize(deserializer)?;
+        let probability = Self {
+            catch_rate: raw.catch_rate,
+            chance: raw.chance,
+        };
+        probability.validate_shape().map_err(D::Error::custom)?;
+        Ok(probability)
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -106,6 +218,8 @@ pub enum CaptureError {
     MissingHeavyBallModifier(String),
     #[error("invalid capture ball '{0}'")]
     InvalidBall(String),
+    #[error("invalid capture context {field} '{value}'")]
+    InvalidCaptureContext { field: String, value: String },
     #[error("unknown capture ball '{0}'")]
     UnknownBall(String),
     #[error("invalid capture ball rule for '{ball_id}': {message}")]
@@ -122,7 +236,7 @@ pub enum CaptureUseError {
     Capture(#[from] CaptureError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureAttemptContext {
     pub ball_id: String,
@@ -134,11 +248,66 @@ pub struct CaptureAttemptContext {
     pub enemy_gender: Option<String>,
 }
 
+impl<'de> Deserialize<'de> for CaptureAttemptContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCaptureAttemptContext {
+            ball_id: String,
+            battle_type: String,
+            trainer_battle: bool,
+            #[serde(deserialize_with = "required_nullable_string")]
+            player_gender: Option<String>,
+            #[serde(deserialize_with = "required_nullable_string")]
+            enemy_gender: Option<String>,
+        }
+
+        let raw = RawCaptureAttemptContext::deserialize(deserializer)?;
+        let context = Self {
+            ball_id: raw.ball_id,
+            battle_type: raw.battle_type,
+            trainer_battle: raw.trainer_battle,
+            player_gender: raw.player_gender,
+            enemy_gender: raw.enemy_gender,
+        };
+        validate_capture_attempt_context(&context).map_err(serde::de::Error::custom)?;
+        Ok(context)
+    }
+}
+
 fn required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+pub fn validate_capture_attempt_context(
+    context: &CaptureAttemptContext,
+) -> Result<(), CaptureError> {
+    validate_capture_ball_id(&context.ball_id)?;
+    validate_capture_context_token("battle type", &context.battle_type)?;
+    if let Some(gender) = context.player_gender.as_deref() {
+        validate_capture_context_token("player gender", gender)?;
+    }
+    if let Some(gender) = context.enemy_gender.as_deref() {
+        validate_capture_context_token("enemy gender", gender)?;
+    }
+    Ok(())
+}
+
+fn validate_capture_context_token(field: &str, value: &str) -> Result<(), CaptureError> {
+    if is_exact_capture_token(value) {
+        Ok(())
+    } else {
+        Err(CaptureError::InvalidCaptureContext {
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
 }
 
 impl CaptureAttemptContext {
@@ -186,7 +355,7 @@ pub fn resolve_capture_attempt(
     wobble_probabilities: &[CaptureWobbleProbability],
     rng: &mut Random,
 ) -> Result<CaptureOutcome, CaptureError> {
-    validate_capture_ball_id(&context.ball_id)?;
+    validate_capture_attempt_context(context)?;
     require_capture_runtime_rules(rules, wobble_probabilities)?;
     if context.trainer_battle {
         return Ok(CaptureOutcome {
@@ -394,6 +563,64 @@ fn is_exact_capture_token(value: &str) -> bool {
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+impl CaptureRules {
+    fn validate_shape(&self) -> Result<(), String> {
+        for species in &self.fast_ball_species {
+            validate_exact_capture_shape_token("fast ball species", species)?;
+        }
+        for species in self.heavy_ball_modifiers.keys() {
+            validate_exact_capture_shape_token("heavy ball species", species)?;
+        }
+        for (ball_id, rule) in &self.ball_rules {
+            validate_capture_ball_rule_shape(ball_id, rule).map_err(|error| error.to_string())?;
+        }
+        for ball_id in &self.guaranteed_capture_balls {
+            validate_exact_capture_shape_token("guaranteed capture ball", ball_id)?;
+        }
+        for (status, bonus) in &self.status_bonus {
+            validate_exact_capture_shape_token("capture status bonus", status)?;
+            if *bonus == 0 {
+                return Err(format!(
+                    "capture status bonus for {status} must be positive"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CaptureBallRule {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.multiplier_denominator == 0 {
+            return Err("capture ball rule multiplier denominator must be nonzero".to_string());
+        }
+        if self.multiplier_numerator == 0 {
+            return Err("capture ball rule multiplier numerator must be nonzero".to_string());
+        }
+        if !self.battle_type.is_empty() {
+            validate_exact_capture_shape_token("capture battle type", &self.battle_type)?;
+        }
+        Ok(())
+    }
+}
+
+impl CaptureWobbleProbability {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.catch_rate == 0 {
+            return Err("capture wobble catch_rate must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_exact_capture_shape_token(subject: &str, value: &str) -> Result<(), String> {
+    if is_exact_capture_token(value) {
+        Ok(())
+    } else {
+        Err(format!("{subject} {value:?} is not exact"))
+    }
 }
 
 pub fn validate_capture_ball_rule_shape(
@@ -1898,5 +2125,85 @@ mod tests {
 
         assert_eq!(explicit_nulls.player_gender, None);
         assert_eq!(explicit_nulls.enemy_gender, None);
+    }
+
+    #[test]
+    fn capture_context_json_validates_exact_runtime_tokens() {
+        let invalid_ball = serde_json::from_value::<CaptureAttemptContext>(serde_json::json!({
+            "ball_id": "POKE BALL",
+            "battle_type": "BATTLETYPE_NORMAL",
+            "trainer_battle": false,
+            "player_gender": null,
+            "enemy_gender": null
+        }))
+        .expect_err("capture context ball id must be exact during decode")
+        .to_string();
+        assert!(
+            invalid_ball.contains("invalid capture ball 'POKE BALL'"),
+            "{invalid_ball}"
+        );
+
+        let invalid_battle_type =
+            serde_json::from_value::<CaptureAttemptContext>(serde_json::json!({
+                "ball_id": "POKE_BALL",
+                "battle_type": "BATTLETYPE NORMAL",
+                "trainer_battle": false,
+                "player_gender": null,
+                "enemy_gender": null
+            }))
+            .expect_err("capture context battle type must be exact during decode")
+            .to_string();
+        assert!(
+            invalid_battle_type.contains("invalid capture context battle type"),
+            "{invalid_battle_type}"
+        );
+
+        let invalid_gender = serde_json::from_value::<CaptureAttemptContext>(serde_json::json!({
+            "ball_id": "LOVE_BALL",
+            "battle_type": "BATTLETYPE_NORMAL",
+            "trainer_battle": false,
+            "player_gender": "male trainer",
+            "enemy_gender": "female"
+        }))
+        .expect_err("capture context gender values must be exact during decode")
+        .to_string();
+        assert!(
+            invalid_gender.contains("invalid capture context player gender"),
+            "{invalid_gender}"
+        );
+    }
+
+    #[test]
+    fn capture_resolution_validates_context_before_rules_or_rng() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 100, 5, 10, 20);
+        let context = CaptureAttemptContext {
+            ball_id: "POKE_BALL".to_string(),
+            battle_type: "BATTLETYPE NORMAL".to_string(),
+            trainer_battle: false,
+            player_gender: None,
+            enemy_gender: None,
+        };
+        let mut rng = Random::new(1);
+        let seed_before = rng.seed();
+
+        let error = resolve_capture_attempt(
+            &player,
+            &enemy,
+            &context,
+            &CaptureRules::default(),
+            &[],
+            &mut rng,
+        )
+        .expect_err("malformed context must fail before missing rules or rng mutation");
+
+        assert_eq!(
+            error,
+            CaptureError::InvalidCaptureContext {
+                field: "battle type".to_string(),
+                value: "BATTLETYPE NORMAL".to_string(),
+            }
+        );
+        assert_eq!(rng.seed(), seed_before);
     }
 }

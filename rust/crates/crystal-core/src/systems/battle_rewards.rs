@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::battle::start::{
@@ -17,13 +17,39 @@ use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_e
 use crate::systems::learnsets::{LearnsetError, SpeciesLearnsets, level_up_moves_for_species};
 use crate::world::encounters::TimeOfDay;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleRewardRules {
     pub max_level: u8,
     pub wild_exp_divisor: i32,
     pub trainer_exp_numerator: i32,
     pub trainer_exp_denominator: i32,
+}
+
+impl<'de> Deserialize<'de> for BattleRewardRules {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleRewardRules {
+            max_level: u8,
+            wild_exp_divisor: i32,
+            trainer_exp_numerator: i32,
+            trainer_exp_denominator: i32,
+        }
+
+        let raw = RawBattleRewardRules::deserialize(deserializer)?;
+        let rules = Self {
+            max_level: raw.max_level,
+            wild_exp_divisor: raw.wild_exp_divisor,
+            trainer_exp_numerator: raw.trainer_exp_numerator,
+            trainer_exp_denominator: raw.trainer_exp_denominator,
+        };
+        rules.validate_shape().map_err(D::Error::custom)?;
+        Ok(rules)
+    }
 }
 
 impl Default for BattleRewardRules {
@@ -34,6 +60,18 @@ impl Default for BattleRewardRules {
             trainer_exp_numerator: 0,
             trainer_exp_denominator: 0,
         }
+    }
+}
+
+impl BattleRewardRules {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self == &Self::default() {
+            return Ok(());
+        }
+        if let Some(issue) = battle_reward_rules_issues(self).into_iter().next() {
+            return Err(format!("invalid battle reward rules: {issue:?}"));
+        }
+        Ok(())
     }
 }
 
@@ -469,6 +507,11 @@ fn require_battle_reward_rules(rules: &BattleRewardRules) -> Result<(), BattleRe
     if rules == &BattleRewardRules::default() {
         return Err(BattleRewardError::MissingRules);
     }
+    if let Some(issue) = battle_reward_rules_issues(rules).into_iter().next() {
+        return Err(BattleRewardError::InvalidRule {
+            field: issue.field().subject().to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -662,6 +705,63 @@ mod tests {
                 TimeOfDay::Day,
             ),
             Err(BattleRewardError::MissingRules)
+        );
+        assert_eq!(player, player_before);
+    }
+
+    #[test]
+    fn reward_application_rejects_partial_invalid_rules_before_battle_state() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        let player_before = player.clone();
+        let defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [("CHIKORITA".to_string(), Vec::new())]
+                .into_iter()
+                .collect(),
+        );
+        let invalid_rules = BattleRewardRules {
+            max_level: 0,
+            wild_exp_divisor: 7,
+            trainer_exp_numerator: 3,
+            trainer_exp_denominator: 2,
+        };
+
+        assert_eq!(
+            apply_wild_battle_rewards(
+                &invalid_rules,
+                &mut player,
+                &defeated,
+                &species,
+                &BTreeMap::new(),
+                &learnsets,
+                &growth_rates,
+                &evolutions,
+                TimeOfDay::Day,
+            ),
+            Err(BattleRewardError::InvalidRule {
+                field: "battle_reward_rules:max_level".to_string(),
+            })
         );
         assert_eq!(player, player_before);
     }

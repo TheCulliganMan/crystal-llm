@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{
     GameState, ScriptMapLoadRequest, ScriptMapRefreshRequest, ScriptMapRuntimeEvent,
@@ -9,7 +9,7 @@ use crate::state::{
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::PlayerMovementState;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMapCommand {
     #[serde(deserialize_with = "required_script_map_command_token")]
@@ -25,6 +25,47 @@ pub struct ScriptMapCommand {
     #[serde(deserialize_with = "required_script_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptMapCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptMapCommand {
+            #[serde(default, deserialize_with = "required_script_map_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_map_token")]
+            target_map: Option<String>,
+            x: Option<u16>,
+            y: Option<u16>,
+            #[serde(deserialize_with = "required_nullable_script_map_token")]
+            facing: Option<String>,
+            #[serde(deserialize_with = "required_nullable_script_map_token")]
+            map_setup: Option<String>,
+            #[serde(deserialize_with = "required_script_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptMapCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            target_map: raw.target_map,
+            x: raw.x,
+            y: raw.y,
+            facing: raw.facing,
+            map_setup: raw.map_setup,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_map_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +105,8 @@ pub enum ScriptMapAction {
 pub enum ScriptMapCommandError {
     #[error("script map command '{command}' is not exact pack syntax")]
     InvalidCommand { command: String },
+    #[error("script map command source script '{source_script}' is invalid")]
+    InvalidSourceScript { source_script: String },
     #[error("unknown script map command '{command}'")]
     UnknownCommand { command: String },
     #[error("script map command '{command}' is missing a target map")]
@@ -131,11 +174,100 @@ pub fn is_known_script_map_command(command: &str) -> bool {
         || SCRIPT_MAP_REFRESH_COMMANDS.contains(&command)
 }
 
+fn validate_script_map_command_shape(command: &ScriptMapCommand) -> Result<(), String> {
+    if !is_known_script_map_command(&command.command) {
+        return Err(format!("unknown script map command {}", command.command));
+    }
+    match command.command.as_str() {
+        "warp" => {
+            if is_no_warp_sentinel(command) {
+                reject_facing(command).map_err(|error| error.to_string())?;
+                reject_map_setup(command).map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            require_warp_destination_shape(command)?;
+            reject_facing(command).map_err(|error| error.to_string())?;
+            reject_map_setup(command).map_err(|error| error.to_string())?;
+        }
+        "warpfacing" => {
+            require_warp_destination_shape(command)?;
+            let facing = command.facing.as_deref().ok_or_else(|| {
+                ScriptMapCommandError::MissingFacing {
+                    command: command.command.clone(),
+                }
+                .to_string()
+            })?;
+            parse_script_warp_facing(facing).map_err(|error| error.to_string())?;
+            reject_map_setup(command).map_err(|error| error.to_string())?;
+        }
+        "warpcheck" | "reloadmap" | "reloadmappart" | "reloadmapafterbattle" | "refreshmap" => {
+            reject_warp_destination(command).map_err(|error| error.to_string())?;
+            reject_facing(command).map_err(|error| error.to_string())?;
+            reject_map_setup(command).map_err(|error| error.to_string())?;
+        }
+        "newloadmap" => {
+            reject_warp_destination(command).map_err(|error| error.to_string())?;
+            reject_facing(command).map_err(|error| error.to_string())?;
+            require_map_setup(command).map_err(|error| error.to_string())?;
+        }
+        "reanchormap" => {
+            reject_warp_destination(command).map_err(|error| error.to_string())?;
+            reject_facing(command).map_err(|error| error.to_string())?;
+            if let Some(map_setup) = command
+                .map_setup
+                .as_deref()
+                .filter(|map_setup| !is_exact_nonempty_token(map_setup))
+            {
+                return Err(format!(
+                    "script map command reanchormap has invalid map setup {map_setup}"
+                ));
+            }
+        }
+        _ => unreachable!("known script map command was not handled"),
+    }
+    Ok(())
+}
+
+fn require_warp_destination_shape(command: &ScriptMapCommand) -> Result<(), String> {
+    let Some(target_map) = command.target_map.as_deref() else {
+        return Err(ScriptMapCommandError::MissingTargetMap {
+            command: command.command.clone(),
+        }
+        .to_string());
+    };
+    if target_map == "NONE" {
+        return Err(ScriptMapCommandError::MalformedNoWarpSentinel {
+            command: command.command.clone(),
+        }
+        .to_string());
+    }
+    if command.x.is_none() || command.y.is_none() {
+        return Err(ScriptMapCommandError::MissingCoordinates {
+            command: command.command.clone(),
+        }
+        .to_string());
+    }
+    if command.x.is_some_and(|x| i16::try_from(x).is_err())
+        || command.y.is_some_and(|y| i16::try_from(y).is_err())
+    {
+        return Err(ScriptMapCommandError::CoordinatesOutOfRange {
+            command: command.command.clone(),
+        }
+        .to_string());
+    }
+    Ok(())
+}
+
 pub fn script_map_command_issues(
     command: &ScriptMapCommand,
     map_ids: &BTreeSet<String>,
 ) -> Vec<ScriptMapCommandError> {
     let mut issues = Vec::new();
+    if !is_exact_script_label_token(&command.source_script) {
+        issues.push(ScriptMapCommandError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+        });
+    }
     if !is_exact_script_map_command_token(&command.command) {
         issues.push(ScriptMapCommandError::InvalidCommand {
             command: command.command.clone(),
@@ -191,6 +323,11 @@ pub fn resolve_script_map_command(
     command: ScriptMapCommand,
     map_ids: &BTreeSet<String>,
 ) -> Result<ScriptMapAction, ScriptMapCommandError> {
+    if !is_exact_script_label_token(&command.source_script) {
+        return Err(ScriptMapCommandError::InvalidSourceScript {
+            source_script: command.source_script,
+        });
+    }
     if !is_exact_script_map_command_token(&command.command) {
         return Err(ScriptMapCommandError::InvalidCommand {
             command: command.command,
@@ -648,7 +785,7 @@ fn is_exact_nonempty_token(value: &str) -> bool {
         && value.trim() == value
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
         && !has_reserved_pack_prefix(value)
 }
 
@@ -1313,5 +1450,43 @@ mod tests {
         ));
         assert!(state.script_runtime.map_events.is_empty());
         assert_eq!(state.script_runtime.pending_script_warp, None);
+    }
+
+    #[test]
+    fn invalid_script_map_source_does_not_mutate_runtime_state() {
+        let mut state = GameState::default();
+        state.script_runtime.pending_map_refresh = Some(ScriptMapRefreshRequest {
+            command: "refreshmap".to_string(),
+            map_setup: None,
+            source_script: "PreviousScript".to_string(),
+            command_index: 1,
+        });
+        let mut refresh = command("refreshmap");
+        refresh.source_script = "fallback_script".to_string();
+
+        assert_eq!(
+            script_map_command_issues(&refresh, &maps()),
+            vec![ScriptMapCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            }]
+        );
+        assert_eq!(
+            apply_script_map_command(&mut state, refresh, &maps()),
+            Err(ScriptMapCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+
+        assert!(state.script_runtime.map_events.is_empty());
+        assert_eq!(state.script_runtime.pending_script_warp, None);
+        assert_eq!(
+            state.script_runtime.pending_map_refresh,
+            Some(ScriptMapRefreshRequest {
+                command: "refreshmap".to_string(),
+                map_setup: None,
+                source_script: "PreviousScript".to_string(),
+                command_index: 1,
+            })
+        );
     }
 }

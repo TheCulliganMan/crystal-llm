@@ -22,6 +22,7 @@ const TEST_CONTENT_PACK_CATEGORIES = [
   "wild_encounters",
   "field_encounters",
   "runtime_spawn_points",
+  "fly_destinations",
   "runtime_map_metadata",
   "flee_mons",
   "roaming_pokemon",
@@ -135,6 +136,15 @@ describe("export-core-content-pack", () => {
     jest.restoreAllMocks();
     jest.spyOn(fs, "writeFileSync").mockImplementation(() => undefined);
     jest.spyOn(fs, "rmSync").mockImplementation(() => undefined);
+    jest.spyOn(fs, "existsSync").mockImplementation((pathLike) =>
+      String(pathLike).endsWith(".mid"),
+    );
+    jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
+      if (String(pathLike).endsWith(".mid")) {
+        return Buffer.from("MThd0000");
+      }
+      throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
+    });
   });
 
   it("rejects generated content pack file stems instead of normalizing them", () => {
@@ -285,6 +295,79 @@ describe("export-core-content-pack", () => {
       }),
     ).toThrow(
       "Audio asset SFX_TACKLE path must end with SFX_TACKLE.mid: content-packs/core-modular/sfx/SFX_POUND.mid",
+    );
+  });
+
+  it("rejects audio metadata when the generated MIDI payload is missing", () => {
+    mockStrictIndexAndEmptyMapBlocks();
+    jest.spyOn(fs, "existsSync").mockImplementation(() => false);
+
+    expect(() =>
+      exportCoreContentPack({
+        pokemonData: [],
+        movesData: {},
+        learnsetsData: {},
+        levelUpMovesData: {},
+        eggMovesData: {},
+        evolutions: [],
+        wildEncounters: [],
+        mapDimensions: {},
+        mapAttributes: {},
+        items: [],
+        trainers: [],
+        pokedex: [],
+        npcData: {},
+        pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+        audioAssets: {
+          MUSIC_ROUTE_29: {
+            id: "MUSIC_ROUTE_29",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+            kind: "music",
+            source: "midi",
+          },
+        },
+      }),
+    ).toThrow(
+      "Audio asset MUSIC_ROUTE_29 is missing generated MIDI file: content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+    );
+  });
+
+  it("rejects generated audio payloads that are not MIDI files", () => {
+    mockStrictIndexAndEmptyMapBlocks();
+    jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
+      if (String(pathLike).endsWith(".mid")) {
+        return Buffer.from("NOPE");
+      }
+      throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
+    });
+
+    expect(() =>
+      exportCoreContentPack({
+        pokemonData: [],
+        movesData: {},
+        learnsetsData: {},
+        levelUpMovesData: {},
+        eggMovesData: {},
+        evolutions: [],
+        wildEncounters: [],
+        mapDimensions: {},
+        mapAttributes: {},
+        items: [],
+        trainers: [],
+        pokedex: [],
+        npcData: {},
+        pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+        audioAssets: {
+          MUSIC_ROUTE_29: {
+            id: "MUSIC_ROUTE_29",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+            kind: "music",
+            source: "midi",
+          },
+        },
+      }),
+    ).toThrow(
+      "Audio asset MUSIC_ROUTE_29 generated MIDI file must start with MThd: content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
     );
   });
 
@@ -578,31 +661,20 @@ describe("export-core-content-pack", () => {
       "content-packs/core-modular",
       ".json",
     );
-    expect(fs.rmSync).toHaveBeenCalledWith(
-      "/mock/assets/data/content-packs/core-modular/music",
-      {
-        recursive: true,
-        force: true,
-      },
+    expect(mockRemoveMatchingOutputs).toHaveBeenCalledWith(
+      "content-packs/core-modular/music",
+      ".json",
     );
-    expect(fs.rmSync).toHaveBeenCalledWith(
-      "/mock/assets/data/content-packs/core-modular/sfx",
-      {
-        recursive: true,
-        force: true,
-      },
+    expect(mockRemoveMatchingOutputs).toHaveBeenCalledWith(
+      "content-packs/core-modular/sfx",
+      ".json",
     );
-    expect(fs.rmSync).toHaveBeenCalledWith(
-      "/mock/assets/data/content-packs/core-modular/cries",
-      {
-        recursive: true,
-        force: true,
-      },
+    expect(mockRemoveMatchingOutputs).toHaveBeenCalledWith(
+      "content-packs/core-modular/cries",
+      ".json",
     );
-    expect(mockEnsureDir).toHaveBeenCalledWith(
-      "/mock/assets/data/content-packs/core-modular/music",
-    );
-    expect(fs.writeFileSync).toHaveBeenCalledWith(
+    expect(fs.rmSync).not.toHaveBeenCalled();
+    expect(fs.writeFileSync).not.toHaveBeenCalledWith(
       "/mock/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
       expect.any(Buffer),
     );

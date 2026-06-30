@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::party::Party;
 use super::pokemon::Pokemon;
@@ -6,7 +6,7 @@ use super::pokemon::Pokemon;
 pub const MAX_PC_BOXES: usize = 14;
 pub const MAX_BOX_MONS: usize = 20;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PcBox {
     pub name: String,
@@ -16,6 +16,40 @@ pub struct PcBox {
     pub original_trainer_ids: [u16; MAX_BOX_MONS],
     pub count: usize,
     pub slot_species: [u16; MAX_BOX_MONS + 1],
+}
+
+impl<'de> Deserialize<'de> for PcBox {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPcBox {
+            name: String,
+            pokemon: [Option<Pokemon>; MAX_BOX_MONS],
+            nicknames: [String; MAX_BOX_MONS],
+            original_trainer_names: [String; MAX_BOX_MONS],
+            original_trainer_ids: [u16; MAX_BOX_MONS],
+            count: usize,
+            slot_species: [u16; MAX_BOX_MONS + 1],
+        }
+
+        let raw = RawPcBox::deserialize(deserializer)?;
+        let pc_box = Self {
+            name: raw.name,
+            pokemon: raw.pokemon,
+            nicknames: raw.nicknames,
+            original_trainer_names: raw.original_trainer_names,
+            original_trainer_ids: raw.original_trainer_ids,
+            count: raw.count,
+            slot_species: raw.slot_species,
+        };
+        pc_box
+            .validate_metadata()
+            .map_err(serde::de::Error::custom)?;
+        Ok(pc_box)
+    }
 }
 
 impl PcBox {
@@ -139,11 +173,35 @@ fn validate_pc_box_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokemonStorage {
     pub party: Party,
     pub pc_boxes: Vec<PcBox>,
+}
+
+impl<'de> Deserialize<'de> for PokemonStorage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPokemonStorage {
+            party: Party,
+            pc_boxes: Vec<PcBox>,
+        }
+
+        let raw = RawPokemonStorage::deserialize(deserializer)?;
+        let storage = Self {
+            party: raw.party,
+            pc_boxes: raw.pc_boxes,
+        };
+        storage
+            .validate_metadata()
+            .map_err(serde::de::Error::custom)?;
+        Ok(storage)
+    }
 }
 
 impl Default for PokemonStorage {

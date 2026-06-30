@@ -1,6 +1,52 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct SpritePaletteDefaultTable(pub BTreeMap<String, i64>);
+
+impl<'de> Deserialize<'de> for SpritePaletteDefaultTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, i64>::deserialize(deserializer)?;
+        if values.is_empty() {
+            return Err(D::Error::custom(
+                "sprite palette default table must not be empty",
+            ));
+        }
+        if let Some(issue) = sprite_palette_default_issues(&values).into_iter().next() {
+            return Err(D::Error::custom(format!(
+                "invalid sprite palette default table entry: {issue:?}"
+            )));
+        }
+        Ok(Self(values))
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct PokegearTownMapPaletteTable(pub BTreeMap<String, Vec<String>>);
+
+impl<'de> Deserialize<'de> for PokegearTownMapPaletteTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+        if values.is_empty() {
+            return Err(D::Error::custom(
+                "Pokegear town map palette table must not be empty",
+            ));
+        }
+        if let Some(issue) = pokegear_town_map_palette_issues(&values).into_iter().next() {
+            return Err(D::Error::custom(format!(
+                "invalid Pokegear town map palette table entry: {issue:?}"
+            )));
+        }
+        Ok(Self(values))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpritePaletteDefaultIssue {

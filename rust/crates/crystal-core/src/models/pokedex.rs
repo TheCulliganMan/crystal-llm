@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::pokemon::{Pokemon, PokemonSpecies};
 
@@ -87,6 +87,35 @@ pub fn pokedex_entry_catalog_issues(
     issues
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimePokedexEntryTable(pub BTreeMap<String, RuntimePokedexEntry>);
+
+impl<'de> Deserialize<'de> for RuntimePokedexEntryTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = BTreeMap::<String, RuntimePokedexEntry>::deserialize(deserializer)?;
+        if entries.is_empty() {
+            return Err(D::Error::custom("pokedex entry table must not be empty"));
+        }
+        for (species_id, entry) in &entries {
+            if !is_exact_nonempty_pokedex_id(species_id) {
+                return Err(D::Error::custom(format!(
+                    "pokedex entry key must be exact species id, found {species_id:?}"
+                )));
+            }
+            if entry.species != *species_id {
+                return Err(D::Error::custom(format!(
+                    "pokedex entry key {species_id:?} must match record species {:?}",
+                    entry.species
+                )));
+            }
+        }
+        Ok(Self(entries))
+    }
+}
+
 fn is_exact_nonempty_pokedex_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
@@ -153,11 +182,33 @@ where
     Ok(values)
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PokedexState {
     pub seen_species: BTreeSet<String>,
     pub caught_species: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for PokedexState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPokedexState {
+            seen_species: BTreeSet<String>,
+            caught_species: BTreeSet<String>,
+        }
+
+        let raw = RawPokedexState::deserialize(deserializer)?;
+        let state = Self {
+            seen_species: raw.seen_species,
+            caught_species: raw.caught_species,
+        };
+        state.validate_shape().map_err(D::Error::custom)?;
+        Ok(state)
+    }
 }
 
 impl PokedexState {
@@ -192,6 +243,25 @@ impl PokedexState {
 
     pub fn caught_count(&self) -> usize {
         self.caught_species.len()
+    }
+
+    fn validate_shape(&self) -> Result<(), String> {
+        for species in &self.seen_species {
+            if !is_exact_nonempty_pokedex_id(species) {
+                return Err(format!("pokedex seen species {species:?} is not exact"));
+            }
+        }
+        for species in &self.caught_species {
+            if !is_exact_nonempty_pokedex_id(species) {
+                return Err(format!("pokedex caught species {species:?} is not exact"));
+            }
+            if !self.seen_species.contains(species) {
+                return Err(format!(
+                    "pokedex caught species {species} is not present in seen species"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

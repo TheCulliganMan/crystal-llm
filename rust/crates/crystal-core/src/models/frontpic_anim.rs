@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 pub const FRONTPIC_ANIM_FRAME_COMMAND: &str = "frame";
 pub const FRONTPIC_ANIM_SET_REPEAT_COMMAND: &str = "setrepeat";
@@ -13,7 +13,7 @@ pub const FRONTPIC_ANIM_COMMANDS: &[&str] = &[
     FRONTPIC_ANIM_END_COMMAND,
 ];
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontpicAnimCommand {
     #[serde(deserialize_with = "required_frontpic_command_kind")]
@@ -24,10 +24,77 @@ pub struct FrontpicAnimCommand {
     pub target: Option<u16>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FrontpicAnimCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFrontpicAnimCommand {
+            #[serde(deserialize_with = "required_frontpic_command_kind")]
+            kind: String,
+            frame: Option<u16>,
+            duration: Option<u16>,
+            count: Option<u16>,
+            target: Option<u16>,
+        }
+
+        let raw = RawFrontpicAnimCommand::deserialize(deserializer)?;
+        let command = Self {
+            kind: raw.kind,
+            frame: raw.frame,
+            duration: raw.duration,
+            count: raw.count,
+            target: raw.target,
+        };
+        if let Some(issue) = frontpic_anim_command_issue(&command) {
+            return Err(D::Error::custom(format!(
+                "invalid frontpic animation command: {issue:?}"
+            )));
+        }
+        Ok(command)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontpicAnimProgram {
     pub commands: Vec<FrontpicAnimCommand>,
+}
+
+impl<'de> Deserialize<'de> for FrontpicAnimProgram {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFrontpicAnimProgram {
+            commands: Vec<FrontpicAnimCommand>,
+        }
+
+        let raw = RawFrontpicAnimProgram::deserialize(deserializer)?;
+        if raw.commands.is_empty() {
+            return Err(D::Error::custom(
+                "frontpic animation program must contain commands",
+            ));
+        }
+        for (index, command) in raw.commands.iter().enumerate() {
+            if command.kind == FRONTPIC_ANIM_DO_REPEAT_COMMAND
+                && command
+                    .target
+                    .is_some_and(|target| usize::from(target) >= raw.commands.len())
+            {
+                return Err(D::Error::custom(format!(
+                    "frontpic animation command {index} repeats to out-of-range target"
+                )));
+            }
+        }
+        Ok(Self {
+            commands: raw.commands,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +227,36 @@ pub fn frontpic_anim_catalog_issues(
         }
     }
     issues
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct FrontpicAnimProgramTable(pub BTreeMap<String, FrontpicAnimProgram>);
+
+impl<'de> Deserialize<'de> for FrontpicAnimProgramTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let programs = BTreeMap::<String, FrontpicAnimProgram>::deserialize(deserializer)?;
+        if programs.is_empty() {
+            return Err(D::Error::custom(
+                "frontpic animation table must not be empty",
+            ));
+        }
+        for (species_id, program) in &programs {
+            if !is_exact_nonempty_frontpic_token(species_id) {
+                return Err(D::Error::custom(format!(
+                    "frontpic animation species id must be exact ASCII alphanumeric/underscore, found {species_id:?}"
+                )));
+            }
+            if program.commands.is_empty() {
+                return Err(D::Error::custom(format!(
+                    "frontpic animation program for {species_id:?} must not be empty"
+                )));
+            }
+        }
+        Ok(Self(programs))
+    }
 }
 
 fn is_exact_nonempty_frontpic_token(value: &str) -> bool {

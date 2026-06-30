@@ -1,17 +1,52 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::world::map::OverworldMapData;
 
 pub const CHANGE_BLOCK_COORD_STRIDE: u16 = 2;
+pub const SCRIPT_BLOCK_CHANGE_COMMANDS: &[&str] = &["changeblock"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub fn is_known_script_block_change_command(command: &str) -> bool {
+    SCRIPT_BLOCK_CHANGE_COMMANDS.contains(&command)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptBlockChange {
     pub x: u16,
     pub y: u16,
     pub block_id: u16,
+    #[serde(deserialize_with = "required_script_block_label_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptBlockChange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptBlockChange {
+            x: u16,
+            y: u16,
+            block_id: u16,
+            #[serde(deserialize_with = "required_script_block_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptBlockChange::deserialize(deserializer)?;
+        let change = Self {
+            x: raw.x,
+            y: raw.y,
+            block_id: raw.block_id,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        validate_script_block_change_shape(&change).map_err(D::Error::custom)?;
+        Ok(change)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +66,15 @@ pub struct ScriptBlockChangeOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum ScriptBlockError {
+    InvalidSourceScript {
+        source_script: String,
+    },
+    UnalignedCoordinates {
+        source_script: String,
+        command_index: usize,
+        x: u16,
+        y: u16,
+    },
     OutOfBounds {
         map_name: String,
         x: u16,
@@ -42,6 +86,16 @@ pub enum ScriptBlockError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptBlockChangeIssue {
+    InvalidSourceScript {
+        source_script: String,
+        command_index: usize,
+    },
+    UnalignedCoordinates {
+        source_script: String,
+        command_index: usize,
+        x: u16,
+        y: u16,
+    },
     OutOfBounds {
         source_script: String,
         command_index: usize,
@@ -58,6 +112,16 @@ pub enum ScriptBlockChangeIssue {
     },
 }
 
+fn validate_script_block_change_shape(change: &ScriptBlockChange) -> Result<(), String> {
+    if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+        return Err(format!(
+            "script block change at ({}, {}) is not aligned to stride {}",
+            change.x, change.y, CHANGE_BLOCK_COORD_STRIDE
+        ));
+    }
+    Ok(())
+}
+
 pub fn script_block_change_issues(
     changes: &[ScriptBlockChange],
     width: u16,
@@ -67,6 +131,20 @@ pub fn script_block_change_issues(
     let expected_blocks = width as usize * height as usize;
     let mut issues = Vec::new();
     for change in changes {
+        if !is_exact_script_block_label_token(&change.source_script) {
+            issues.push(ScriptBlockChangeIssue::InvalidSourceScript {
+                source_script: change.source_script.clone(),
+                command_index: change.command_index,
+            });
+        }
+        if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+            issues.push(ScriptBlockChangeIssue::UnalignedCoordinates {
+                source_script: change.source_script.clone(),
+                command_index: change.command_index,
+                x: change.x,
+                y: change.y,
+            });
+        }
         let metatile_x = change.x / CHANGE_BLOCK_COORD_STRIDE;
         let metatile_y = change.y / CHANGE_BLOCK_COORD_STRIDE;
         if metatile_x >= width || metatile_y >= height {
@@ -95,6 +173,19 @@ pub fn apply_script_block_change(
     map: &mut OverworldMapData,
     change: ScriptBlockChange,
 ) -> Result<ScriptBlockChangeOutcome, ScriptBlockError> {
+    if !is_exact_script_block_label_token(&change.source_script) {
+        return Err(ScriptBlockError::InvalidSourceScript {
+            source_script: change.source_script,
+        });
+    }
+    if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+        return Err(ScriptBlockError::UnalignedCoordinates {
+            source_script: change.source_script,
+            command_index: change.command_index,
+            x: change.x,
+            y: change.y,
+        });
+    }
     let metatile_x = change.x / CHANGE_BLOCK_COORD_STRIDE;
     let metatile_y = change.y / CHANGE_BLOCK_COORD_STRIDE;
     let index = map
@@ -119,6 +210,32 @@ pub fn apply_script_block_change(
         source_script: change.source_script,
         command_index: change.command_index,
     })
+}
+
+fn is_exact_script_block_label_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && !has_reserved_pack_prefix(value)
+}
+
+fn required_script_block_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_block_label_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script block label must be exact visible ASCII, found {value:?}"
+        )))
+    }
+}
+
+fn has_reserved_pack_prefix(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("fallback") || value.starts_with("legacy")
 }
 
 #[cfg(test)]
@@ -165,6 +282,16 @@ mod tests {
     }
 
     #[test]
+    fn exported_script_block_command_set_is_exact() {
+        assert!(SCRIPT_BLOCK_CHANGE_COMMANDS.contains(&"changeblock"));
+        assert!(is_known_script_block_change_command("changeblock"));
+        assert!(!is_known_script_block_change_command("ChangeBlock"));
+        assert!(!is_known_script_block_change_command(
+            "fallback_changeblock"
+        ));
+    }
+
+    #[test]
     fn changes_exact_in_bounds_block() {
         let mut map = map();
         let outcome =
@@ -198,8 +325,50 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unaligned_coordinates_without_flooring_or_mutating_map() {
+        let mut map = map();
+        let original = map.metatile_ids.clone();
+        let error = apply_script_block_change(&mut map, change(3, 2, 0x2e))
+            .expect_err("odd changeblock coordinate is malformed");
+
+        assert_eq!(
+            error,
+            ScriptBlockError::UnalignedCoordinates {
+                source_script: "DoorScript".to_string(),
+                command_index: 7,
+                x: 3,
+                y: 2,
+            }
+        );
+        assert_eq!(map.metatile_ids, original);
+    }
+
+    #[test]
+    fn rejects_invalid_source_script_without_mutating_map() {
+        let mut map = map();
+        let original = map.metatile_ids.clone();
+        let mut change = change(2, 2, 0x2e);
+        change.source_script = "legacy_script".to_string();
+
+        assert_eq!(
+            script_block_change_issues(&[change.clone()], 3, 2, 6),
+            vec![ScriptBlockChangeIssue::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+                command_index: 7,
+            }]
+        );
+        assert_eq!(
+            apply_script_block_change(&mut map, change),
+            Err(ScriptBlockError::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+            })
+        );
+        assert_eq!(map.metatile_ids, original);
+    }
+
+    #[test]
     fn script_block_change_issues_validate_bounds_and_exact_block_count() {
-        let changes = vec![change(6, 0, 0x2e), change(0, 2, 0x2f)];
+        let changes = vec![change(6, 0, 0x2e), change(0, 2, 0x2f), change(3, 2, 0x30)];
 
         assert_eq!(
             script_block_change_issues(&changes, 3, 2, 5),
@@ -224,18 +393,48 @@ mod tests {
                     actual_blocks: 5,
                     expected_blocks: 6,
                 },
+                ScriptBlockChangeIssue::UnalignedCoordinates {
+                    source_script: "DoorScript".to_string(),
+                    command_index: 7,
+                    x: 3,
+                    y: 2,
+                },
+                ScriptBlockChangeIssue::MapSizeMismatch {
+                    source_script: "DoorScript".to_string(),
+                    command_index: 7,
+                    actual_blocks: 5,
+                    expected_blocks: 6,
+                },
             ]
         );
 
         assert!(
             script_block_change_issues(&changes, 3, 2, 0)
                 .iter()
-                .all(|issue| matches!(issue, ScriptBlockChangeIssue::OutOfBounds { .. }))
+                .all(|issue| matches!(
+                    issue,
+                    ScriptBlockChangeIssue::OutOfBounds { .. }
+                        | ScriptBlockChangeIssue::UnalignedCoordinates { .. }
+                ))
         );
     }
 
     #[test]
     fn script_block_error_json_rejects_unknown_fallback_fields() {
+        let command_error = serde_json::from_value::<ScriptBlockChange>(serde_json::json!({
+            "x": 2,
+            "y": 2,
+            "block_id": 46,
+            "source_script": "fallback_script",
+            "command_index": 7
+        }))
+        .expect_err("script block changes must reject fallback source labels")
+        .to_string();
+        assert!(
+            command_error.contains("script block label"),
+            "{command_error}"
+        );
+
         let error = serde_json::from_value::<ScriptBlockError>(serde_json::json!({
             "OutOfBounds": {
                 "map_name": "RUINS_OF_ALPH",

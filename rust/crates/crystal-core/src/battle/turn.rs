@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::battle::damage::{
     DamageCalculationError, DamageContext, DamageResult, TypeCategories, TypeEffectivenessTable,
@@ -14,9 +14,7 @@ use crate::state::GameState;
 use crate::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
 };
-use crate::systems::battle_items::{
-    BattleItemError, BattleItemOutcome, apply_active_battle_item_effect,
-};
+use crate::systems::battle_items::{BattleItemOutcome, apply_active_battle_item_effect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -70,13 +68,54 @@ impl BattleCombatState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BattleAction {
     Move { slot: usize },
     Switch { party_index: usize },
     Item { item_id: String },
     Run,
+}
+
+impl<'de> Deserialize<'de> for BattleAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
+        enum RawBattleAction {
+            Move { slot: usize },
+            Switch { party_index: usize },
+            Item { item_id: String },
+            Run,
+        }
+
+        match RawBattleAction::deserialize(deserializer)? {
+            RawBattleAction::Move { slot } => {
+                if slot >= 4 {
+                    return Err(D::Error::custom(format!(
+                        "battle move slot {slot} is outside Crystal move range 0..3"
+                    )));
+                }
+                Ok(Self::Move { slot })
+            }
+            RawBattleAction::Switch { party_index } => {
+                if party_index >= crate::models::PARTY_SIZE {
+                    return Err(D::Error::custom(format!(
+                        "battle switch party index {party_index} is outside party range"
+                    )));
+                }
+                Ok(Self::Switch { party_index })
+            }
+            RawBattleAction::Item { item_id } => {
+                validate_battle_turn_item_id(BattleSide::Player, &item_id)
+                    .map_err(|error| D::Error::custom(format!("{error:?}")))?;
+                Ok(Self::Item { item_id })
+            }
+            RawBattleAction::Run => Ok(Self::Run),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +133,7 @@ pub struct BattleTurnOutcome {
     pub events: Vec<BattleEvent>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePriorityTable {
     pub base_priority: i8,
@@ -102,11 +141,67 @@ pub struct MovePriorityTable {
     pub move_priorities: Vec<MovePriorityOverride>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for MovePriorityTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMovePriorityTable {
+            base_priority: i8,
+            effect_priorities: BTreeMap<String, i8>,
+            move_priorities: Vec<MovePriorityOverride>,
+        }
+
+        let raw = RawMovePriorityTable::deserialize(deserializer)?;
+        let table = Self {
+            base_priority: raw.base_priority,
+            effect_priorities: raw.effect_priorities,
+            move_priorities: raw.move_priorities,
+        };
+        table.validate_shape().map_err(D::Error::custom)?;
+        Ok(table)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePriorityOverride {
     pub r#move: String,
     pub priority: i8,
+}
+
+impl<'de> Deserialize<'de> for MovePriorityOverride {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMovePriorityOverride {
+            r#move: String,
+            priority: i8,
+        }
+
+        let raw = RawMovePriorityOverride::deserialize(deserializer)?;
+        if !is_exact_battle_turn_token(&raw.r#move) {
+            return Err(D::Error::custom(format!(
+                "move priority id {:?} is not exact",
+                raw.r#move
+            )));
+        }
+        if raw.priority < 0 {
+            return Err(D::Error::custom(format!(
+                "move priority {} for {} must be nonnegative",
+                raw.priority, raw.r#move
+            )));
+        }
+        Ok(Self {
+            r#move: raw.r#move,
+            priority: raw.priority,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +226,9 @@ pub enum MovePriorityTableIssue {
         move_name: String,
     },
     UnknownMovePriority {
+        move_name: String,
+    },
+    DuplicateMovePriority {
         move_name: String,
     },
     InvalidMovePriority {
@@ -181,6 +279,7 @@ pub fn move_priority_table_issues(
         }
     }
 
+    let mut seen_move_priorities = std::collections::BTreeSet::new();
     for entry in &priorities.move_priorities {
         if !is_exact_battle_turn_token(&entry.r#move) {
             issues.push(MovePriorityTableIssue::InvalidMovePriorityId {
@@ -188,6 +287,11 @@ pub fn move_priority_table_issues(
             });
         } else if !moves.contains_key(&entry.r#move) {
             issues.push(MovePriorityTableIssue::UnknownMovePriority {
+                move_name: entry.r#move.clone(),
+            });
+        }
+        if !seen_move_priorities.insert(entry.r#move.as_str()) {
+            issues.push(MovePriorityTableIssue::DuplicateMovePriority {
                 move_name: entry.r#move.clone(),
             });
         }
@@ -214,6 +318,42 @@ fn is_exact_battle_turn_token(value: &str) -> bool {
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.starts_with("fallback") || value.starts_with("legacy")
+}
+
+impl MovePriorityTable {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.base_priority < 0 {
+            return Err(format!(
+                "move priority base_priority {} must be nonnegative",
+                self.base_priority
+            ));
+        }
+        if self.effect_priorities.is_empty() {
+            return Err("move priority effect_priorities must be explicit".to_string());
+        }
+        for (move_effect, priority) in &self.effect_priorities {
+            if !is_exact_battle_turn_token(move_effect) {
+                return Err(format!(
+                    "move priority effect id {move_effect:?} is not exact"
+                ));
+            }
+            if *priority < 0 {
+                return Err(format!(
+                    "move priority effect {move_effect} has negative priority {priority}"
+                ));
+            }
+        }
+        let mut seen_moves = std::collections::BTreeSet::new();
+        for entry in &self.move_priorities {
+            if !seen_moves.insert(entry.r#move.as_str()) {
+                return Err(format!(
+                    "move priority override {} is duplicated",
+                    entry.r#move
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +386,7 @@ pub enum BattleTurnError {
     BattleItem {
         side: BattleSide,
         item_id: String,
-        error: BattleItemError,
+        error: String,
     },
     UnsupportedRunAction {
         side: BattleSide,
@@ -323,6 +463,10 @@ pub enum BattleEvent {
     BattleItemEffect {
         side: BattleSide,
         outcome: BattleItemOutcome,
+    },
+    RunAttempt {
+        side: BattleSide,
+        outcome: BattleEscapeAttempt,
     },
 }
 
@@ -468,6 +612,75 @@ pub fn resolve_wild_battle_run(
     .map_err(BattleTurnError::BattleEscape)
 }
 
+pub fn resolve_wild_battle_turn_with_items(
+    mut state: BattleCombatState,
+    input: BattleTurnInput,
+    moves: &BTreeMap<String, Move>,
+    items: &BTreeMap<String, Item>,
+    move_priorities: &MovePriorityTable,
+    stat_multipliers: &BattleStatMultiplierTables,
+    type_categories: &TypeCategories,
+    type_effectiveness: &TypeEffectivenessTable,
+    weather_modifiers: &WeatherModifiers,
+    escape_rules: &BattleEscapeRules,
+    attempts_before: u8,
+    rng: &mut Random,
+) -> Result<BattleTurnOutcome, BattleTurnError> {
+    if matches!(input.enemy, BattleAction::Run) {
+        return Err(BattleTurnError::UnsupportedRunAction {
+            side: BattleSide::Enemy,
+        });
+    }
+    if !matches!(input.player, BattleAction::Run) {
+        return resolve_battle_turn_with_items(
+            state,
+            input,
+            moves,
+            items,
+            move_priorities,
+            stat_multipliers,
+            type_categories,
+            type_effectiveness,
+            weather_modifiers,
+            rng,
+        );
+    }
+
+    let mut events = Vec::new();
+    let escape =
+        resolve_wild_battle_run(&state, escape_rules, attempts_before, stat_multipliers, rng)?;
+    events.push(BattleEvent::RunAttempt {
+        side: BattleSide::Player,
+        outcome: escape.clone(),
+    });
+    let order = if escape.escaped {
+        vec![BattleSide::Player]
+    } else {
+        execute_action(
+            &mut state,
+            BattleSide::Enemy,
+            &input.enemy,
+            moves,
+            items,
+            stat_multipliers,
+            type_categories,
+            type_effectiveness,
+            weather_modifiers,
+            rng,
+            &mut events,
+        )?;
+        vec![BattleSide::Player, BattleSide::Enemy]
+    };
+
+    state.turn = state.turn.saturating_add(1);
+    state.rng_seed_after = rng.seed();
+    Ok(BattleTurnOutcome {
+        state,
+        order,
+        events,
+    })
+}
+
 pub fn determine_turn_order(
     state: &BattleCombatState,
     input: &BattleTurnInput,
@@ -585,7 +798,7 @@ fn execute_item(
             BattleTurnError::BattleItem {
                 side,
                 item_id: item_id.to_string(),
-                error,
+                error: error.to_string(),
             }
         })?;
     events.push(BattleEvent::BattleItemEffect { side, outcome });
@@ -1100,51 +1313,59 @@ mod tests {
 
     fn type_effectiveness_table() -> TypeEffectivenessTable {
         TypeEffectivenessTable {
-            matchups: vec![
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: crate::battle::damage::TypeMultiplier::one(),
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("ELECTRIC"),
-                    multiplier: crate::battle::damage::TypeMultiplier::one(),
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("FIGHTING"),
-                    multiplier: crate::battle::damage::TypeMultiplier::one(),
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("NORMAL"),
-                    defender: pokemon_type("FLYING"),
-                    multiplier: crate::battle::damage::TypeMultiplier::one(),
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("ELECTRIC"),
-                    defender: pokemon_type("ROCK"),
-                    multiplier: crate::battle::damage::TypeMultiplier::one(),
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("FIGHTING"),
-                    defender: pokemon_type("NORMAL"),
-                    multiplier: crate::battle::damage::TypeMultiplier {
-                        numerator: 2,
-                        denominator: 1,
-                    },
-                },
-                crate::battle::damage::TypeEffectivenessEntry {
-                    attacker: pokemon_type("ELECTRIC"),
-                    defender: pokemon_type("GROUND"),
-                    multiplier: crate::battle::damage::TypeMultiplier::zero(),
-                },
-            ],
-            foresight_matchups: vec![crate::battle::damage::TypeEffectivenessEntry {
-                attacker: pokemon_type("NORMAL"),
-                defender: pokemon_type("GHOST"),
-                multiplier: crate::battle::damage::TypeMultiplier::zero(),
-            }],
+            matchups: BTreeMap::from([
+                (
+                    pokemon_type("NORMAL"),
+                    BTreeMap::from([
+                        (
+                            pokemon_type("NORMAL"),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
+                        (
+                            pokemon_type("ELECTRIC"),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
+                        (
+                            pokemon_type("FIGHTING"),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
+                        (
+                            pokemon_type("FLYING"),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
+                    ]),
+                ),
+                (
+                    pokemon_type("ELECTRIC"),
+                    BTreeMap::from([
+                        (
+                            pokemon_type("ROCK"),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
+                        (
+                            pokemon_type("GROUND"),
+                            crate::battle::damage::TypeMultiplier::zero(),
+                        ),
+                    ]),
+                ),
+                (
+                    pokemon_type("FIGHTING"),
+                    BTreeMap::from([(
+                        pokemon_type("NORMAL"),
+                        crate::battle::damage::TypeMultiplier {
+                            numerator: 2,
+                            denominator: 1,
+                        },
+                    )]),
+                ),
+            ]),
+            foresight_matchups: BTreeMap::from([(
+                pokemon_type("NORMAL"),
+                BTreeMap::from([(
+                    pokemon_type("GHOST"),
+                    crate::battle::damage::TypeMultiplier::zero(),
+                )]),
+            )]),
         }
     }
 
@@ -1919,7 +2140,107 @@ mod tests {
     }
 
     #[test]
-    fn run_action_is_an_explicit_error_not_noop() {
+    fn wild_battle_turn_run_can_escape_before_enemy_action() {
+        let player = pokemon("RATTATA", 999, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("PIDGEY", 10, pokemon_type("NORMAL"), "TACKLE");
+        let moves = [(
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        )]
+        .into_iter()
+        .collect();
+        let mut rng = Random::new(1);
+
+        let outcome = resolve_wild_battle_turn_with_items(
+            BattleCombatState::new(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Run,
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &BTreeMap::new(),
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &BattleEscapeRules {
+                player_speed_multiplier: 32,
+                enemy_speed_divisor: 4,
+                failed_attempt_bonus: 30,
+                rng_roll_values: 256,
+            },
+            2,
+            &mut rng,
+        )
+        .expect("run resolves through wild escape rules");
+
+        assert_eq!(outcome.order, vec![BattleSide::Player]);
+        assert_eq!(outcome.state.turn, 1);
+        assert!(matches!(
+            &outcome.events[..],
+            [BattleEvent::RunAttempt {
+                side: BattleSide::Player,
+                outcome
+            }] if outcome.escaped && outcome.attempts_before == 2
+        ));
+    }
+
+    #[test]
+    fn failed_wild_battle_turn_run_allows_enemy_action() {
+        let player = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("PIDGEY", 999, pokemon_type("NORMAL"), "TACKLE");
+        let moves = [(
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        )]
+        .into_iter()
+        .collect();
+        let mut rng = Random::new(1);
+
+        let outcome = resolve_wild_battle_turn_with_items(
+            BattleCombatState::new(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Run,
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &BTreeMap::new(),
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &BattleEscapeRules {
+                player_speed_multiplier: 1,
+                enemy_speed_divisor: 1,
+                failed_attempt_bonus: 0,
+                rng_roll_values: 256,
+            },
+            0,
+            &mut rng,
+        )
+        .expect("failed run still resolves the enemy action");
+
+        assert_eq!(outcome.order, vec![BattleSide::Player, BattleSide::Enemy]);
+        assert!(matches!(
+            outcome.events.first(),
+            Some(BattleEvent::RunAttempt {
+                side: BattleSide::Player,
+                outcome
+            }) if !outcome.escaped && outcome.attempts_after == 1
+        ));
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::MoveSelected {
+                side: BattleSide::Enemy,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn enemy_run_action_is_an_explicit_error_not_noop() {
         let player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
         let enemy = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "TACKLE");
         let moves = [(
@@ -1930,25 +2251,33 @@ mod tests {
         .collect();
         let mut rng = Random::new(1);
 
-        let run_error = resolve_battle_turn(
+        let run_error = resolve_wild_battle_turn_with_items(
             BattleCombatState::new(player, enemy, rng.seed()),
             BattleTurnInput {
-                player: BattleAction::Run,
-                enemy: BattleAction::Move { slot: 0 },
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Run,
             },
             &moves,
+            &BTreeMap::new(),
             &move_priorities(),
             &stat_multipliers(),
             &type_categories(),
             &type_effectiveness_table(),
             &weather_modifiers(),
+            &BattleEscapeRules {
+                player_speed_multiplier: 32,
+                enemy_speed_divisor: 4,
+                failed_attempt_bonus: 30,
+                rng_roll_values: 256,
+            },
+            0,
             &mut rng,
         )
-        .expect_err("run must be handled by explicit escape runtime");
+        .expect_err("enemy run is not a Crystal battle command");
         assert_eq!(
             run_error,
             BattleTurnError::UnsupportedRunAction {
-                side: BattleSide::Player
+                side: BattleSide::Enemy
             }
         );
     }

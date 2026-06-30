@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{EventFlagError, GameState};
 use crate::systems::script_runtime::script_label_parent;
@@ -10,7 +10,7 @@ use crate::world::{
     movement::move_by_stride,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptObjectCommand {
     #[serde(deserialize_with = "required_script_object_command_token")]
@@ -33,6 +33,55 @@ pub struct ScriptObjectCommand {
     pub command_index: usize,
 }
 
+impl<'de> Deserialize<'de> for ScriptObjectCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptObjectCommand {
+            #[serde(default, deserialize_with = "required_script_object_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            object_id: Option<String>,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            target_object_id: Option<String>,
+            x: Option<u16>,
+            y: Option<u16>,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            direction: Option<String>,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            movement: Option<String>,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            emote: Option<String>,
+            duration: Option<u16>,
+            #[serde(deserialize_with = "required_script_label_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptObjectCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            object_id: raw.object_id,
+            target_object_id: raw.target_object_id,
+            x: raw.x,
+            y: raw.y,
+            direction: raw.direction,
+            movement: raw.movement,
+            emote: raw.emote,
+            duration: raw.duration,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_object_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMovement {
@@ -43,7 +92,7 @@ pub struct ScriptMovement {
     pub steps: Vec<ScriptMovementStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptMovementStep {
     #[serde(deserialize_with = "required_script_object_command_token")]
@@ -52,6 +101,40 @@ pub struct ScriptMovementStep {
     pub direction: Option<String>,
     pub duration: Option<u16>,
     pub index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptMovementStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptMovementStep {
+            #[serde(default, deserialize_with = "required_script_object_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_object_token")]
+            direction: Option<String>,
+            duration: Option<u16>,
+            index: usize,
+        }
+
+        let raw = RawScriptMovementStep::deserialize(deserializer)?;
+        let step = Self {
+            command: raw.command,
+            direction: raw.direction,
+            duration: raw.duration,
+            index: raw.index,
+        };
+        if !step.command.is_empty()
+            && let Some(issue) = script_movement_step_issues(&step).into_iter().next()
+        {
+            return Err(D::Error::custom(format!(
+                "invalid movement step: {issue:?}"
+            )));
+        }
+        Ok(step)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +183,10 @@ pub enum ScriptObjectCommandError {
     MissingTargetObjectId { command: String },
     #[error("unknown script object '{object_id}'")]
     UnknownObject { object_id: String },
+    #[error("script object id '{object_id}' is not an exact pack token")]
+    InvalidObjectId { object_id: String },
+    #[error("script object source script '{source_script}' is invalid")]
+    InvalidSourceScript { source_script: String },
     #[error("object '{object_id}' has no initialized facing")]
     MissingObjectFacing { object_id: String },
     #[error("object '{object_id}' cannot be hidden or shown with event flag '{event_flag}'")]
@@ -115,6 +202,8 @@ pub enum ScriptObjectCommandError {
     UnknownDirection { direction: String },
     #[error("applymovement for '{object_id}' is missing a movement label")]
     MissingMovement { object_id: String },
+    #[error("movement label '{movement}' is not an exact pack token")]
+    InvalidMovement { movement: String },
     #[error("applymovementlasttalked requires a last talked object")]
     MissingLastTalkedObject,
     #[error("movement '{movement}' is not the command movement '{expected}'")]
@@ -150,6 +239,10 @@ pub enum ScriptMovementStepIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptObjectCommandIssue {
+    InvalidSourceScript {
+        source_script: String,
+        command_index: usize,
+    },
     InvalidCommand {
         source_script: String,
         command_index: usize,
@@ -271,6 +364,7 @@ pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
     "set_sliding",
     "remove_sliding",
     "teleport_from",
+    "teleport_to",
     "skyfall_top",
     "tree_shake",
     "hide_object",
@@ -298,6 +392,7 @@ pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "set_sliding",
     "remove_sliding",
     "teleport_from",
+    "teleport_to",
     "skyfall_top",
     "tree_shake",
     "hide_object",
@@ -318,6 +413,188 @@ pub fn is_known_script_movement_command(command: &str) -> bool {
     SCRIPT_MOVEMENT_COMMANDS.contains(&command)
 }
 
+fn validate_script_object_command_shape(command: &ScriptObjectCommand) -> Result<(), String> {
+    if !is_known_script_object_command(&command.command) {
+        return Err(format!("unknown script object command {}", command.command));
+    }
+    match command.command.as_str() {
+        command_name if SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&command_name) => {
+            reject_object_payload(command, command_name)?;
+        }
+        command_name if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            reject_coordinates(command, command_name)?;
+            reject_target_object_id(command, command_name)?;
+            reject_direction(command, command_name)?;
+            reject_movement(command, command_name)?;
+            reject_emote(command, command_name)?;
+        }
+        command_name if SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            if command.x.is_none() || command.y.is_none() {
+                return Err(format!(
+                    "script object command {command_name} requires x and y"
+                ));
+            }
+            reject_target_object_id(command, command_name)?;
+            reject_direction(command, command_name)?;
+            reject_movement(command, command_name)?;
+            reject_emote(command, command_name)?;
+        }
+        command_name if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            let direction = command.direction.as_deref().ok_or_else(|| {
+                format!("script object command {command_name} requires direction")
+            })?;
+            parse_script_direction(direction).map_err(|error| error.to_string())?;
+            reject_coordinates(command, command_name)?;
+            reject_target_object_id(command, command_name)?;
+            reject_movement(command, command_name)?;
+            reject_emote(command, command_name)?;
+        }
+        command_name if SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            require_target_object_id_shape(command, command_name)?;
+            reject_coordinates(command, command_name)?;
+            reject_direction(command, command_name)?;
+            reject_movement(command, command_name)?;
+            reject_emote(command, command_name)?;
+        }
+        "applymovement" => {
+            require_object_id_shape(command, "applymovement")?;
+            require_movement_shape(command, "applymovement")?;
+            reject_coordinates(command, "applymovement")?;
+            reject_target_object_id(command, "applymovement")?;
+            reject_direction(command, "applymovement")?;
+            reject_emote(command, "applymovement")?;
+        }
+        "applymovementlasttalked" => {
+            require_movement_shape(command, "applymovementlasttalked")?;
+            reject_object_id(command, "applymovementlasttalked")?;
+            reject_coordinates(command, "applymovementlasttalked")?;
+            reject_target_object_id(command, "applymovementlasttalked")?;
+            reject_direction(command, "applymovementlasttalked")?;
+            reject_emote(command, "applymovementlasttalked")?;
+        }
+        command_name if SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            if command.emote.is_none() || command.duration.is_none() {
+                return Err(format!(
+                    "script object command {command_name} requires emote and duration"
+                ));
+            }
+            reject_coordinates(command, command_name)?;
+            reject_target_object_id(command, command_name)?;
+            reject_direction(command, command_name)?;
+            reject_movement(command, command_name)?;
+        }
+        _ => unreachable!("known script object command was not handled"),
+    }
+    Ok(())
+}
+
+fn require_object_id_shape(
+    command: &ScriptObjectCommand,
+    command_name: &str,
+) -> Result<(), String> {
+    command
+        .object_id
+        .as_deref()
+        .ok_or_else(|| format!("script object command {command_name} requires object_id"))?;
+    Ok(())
+}
+
+fn require_target_object_id_shape(
+    command: &ScriptObjectCommand,
+    command_name: &str,
+) -> Result<(), String> {
+    command
+        .target_object_id
+        .as_deref()
+        .ok_or_else(|| format!("script object command {command_name} requires target_object_id"))?;
+    Ok(())
+}
+
+fn require_movement_shape(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    command
+        .movement
+        .as_deref()
+        .ok_or_else(|| format!("script object command {command_name} requires movement"))?;
+    Ok(())
+}
+
+fn reject_object_payload(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    reject_object_id(command, command_name)?;
+    reject_coordinates(command, command_name)?;
+    reject_target_object_id(command, command_name)?;
+    reject_direction(command, command_name)?;
+    reject_movement(command, command_name)?;
+    reject_emote(command, command_name)
+}
+
+fn reject_object_id(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    if command.object_id.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare object_id"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_target_object_id(
+    command: &ScriptObjectCommand,
+    command_name: &str,
+) -> Result<(), String> {
+    if command.target_object_id.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare target_object_id"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_coordinates(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    if command.x.is_some() || command.y.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare coordinates"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_direction(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    if command.direction.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare direction"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_movement(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    if command.movement.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare movement"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_emote(command: &ScriptObjectCommand, command_name: &str) -> Result<(), String> {
+    if command.emote.is_some() || command.duration.is_some() {
+        Err(format!(
+            "script object command {command_name} must not declare emote payload"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn script_object_command_issues(
     command: &ScriptObjectCommand,
     object_event_flags: &BTreeMap<String, String>,
@@ -325,6 +602,12 @@ pub fn script_object_command_issues(
     movements: &BTreeSet<(String, Option<String>)>,
 ) -> Vec<ScriptObjectCommandIssue> {
     let mut issues = Vec::new();
+    if !is_exact_script_label_token(&command.source_script) {
+        issues.push(ScriptObjectCommandIssue::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+    }
     if !is_exact_script_object_command_token(&command.command) {
         issues.push(ScriptObjectCommandIssue::InvalidCommand {
             source_script: command.source_script.clone(),
@@ -534,14 +817,16 @@ fn is_exact_script_object_token(value: &str) -> bool {
         && value.trim() == value
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
         && !has_reserved_pack_prefix(value)
 }
 
 fn is_exact_script_object_command_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
-        && value.bytes().all(|byte| byte.is_ascii_lowercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         && !has_reserved_pack_prefix(value)
 }
 
@@ -629,6 +914,18 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
     value.starts_with("fallback") || value.starts_with("legacy")
 }
 
+fn validate_script_object_command_source(
+    command: &ScriptObjectCommand,
+) -> Result<(), ScriptObjectCommandError> {
+    if is_exact_script_label_token(&command.source_script) {
+        Ok(())
+    } else {
+        Err(ScriptObjectCommandError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+        })
+    }
+}
+
 pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
     let command = step.command.as_str();
     if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
@@ -657,6 +954,7 @@ pub fn apply_script_object_mutation(
     session: &mut OverworldSession,
     command: &ScriptObjectCommand,
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    validate_script_object_command_source(command)?;
     match command.command.as_str() {
         "appear" => apply_visibility_command(state, session, command, false),
         "disappear" => apply_visibility_command(state, session, command, true),
@@ -676,6 +974,16 @@ pub fn apply_script_movement(
     command: &ScriptObjectCommand,
     movement: &ScriptMovement,
 ) -> Result<ScriptMovementOutcome, ScriptObjectCommandError> {
+    validate_script_object_command_source(command)?;
+    if let Some(source_script) = movement
+        .source_script
+        .as_deref()
+        .filter(|source_script| !is_exact_script_label_token(source_script))
+    {
+        return Err(ScriptObjectCommandError::InvalidSourceScript {
+            source_script: source_script.to_string(),
+        });
+    }
     if command.command != "applymovement" && command.command != "applymovementlasttalked" {
         return Err(ScriptObjectCommandError::NotObjectMutation {
             command: command.command.clone(),
@@ -689,6 +997,14 @@ pub fn apply_script_movement(
             .ok_or_else(|| ScriptObjectCommandError::MissingMovement {
                 object_id: object_id.clone(),
             })?;
+    if !is_exact_script_object_token(&expected) {
+        return Err(ScriptObjectCommandError::InvalidMovement { movement: expected });
+    }
+    if !is_exact_script_object_token(&movement.label) {
+        return Err(ScriptObjectCommandError::InvalidMovement {
+            movement: movement.label.clone(),
+        });
+    }
     if movement.label != expected {
         return Err(ScriptObjectCommandError::WrongMovement {
             movement: movement.label.clone(),
@@ -758,7 +1074,8 @@ pub fn apply_script_movement(
                 };
                 steps_applied += 1;
             }
-            "teleport_from" | "skyfall_top" | "tree_shake" | "hide_object" | "show_object" => {
+            "teleport_from" | "teleport_to" | "skyfall_top" | "tree_shake" | "hide_object"
+            | "show_object" => {
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
@@ -1192,6 +1509,14 @@ fn resolve_script_object_id(
     session: &OverworldSession,
     object_id: &str,
 ) -> Result<String, ScriptObjectCommandError> {
+    if object_id != "LAST_TALKED"
+        && object_id != "PLAYER"
+        && !is_exact_script_object_token(object_id)
+    {
+        return Err(ScriptObjectCommandError::InvalidObjectId {
+            object_id: object_id.to_string(),
+        });
+    }
     if object_id == "LAST_TALKED" {
         return session
             .last_talked_object_identifier
@@ -1708,6 +2033,48 @@ mod tests {
     }
 
     #[test]
+    fn object_mutation_rejects_invalid_source_before_state_or_session_changes() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "VERMILIONCITY_BIG_SNORLAX",
+            "EVENT_VERMILION_CITY_SNORLAX",
+            2,
+            3,
+        )]);
+        let mut disappear = command("disappear", "VERMILIONCITY_BIG_SNORLAX");
+        disappear.source_script = "fallback_script".to_string();
+
+        assert_eq!(
+            script_object_command_issues(
+                &disappear,
+                &BTreeMap::from([(
+                    "VERMILIONCITY_BIG_SNORLAX".to_string(),
+                    "EVENT_VERMILION_CITY_SNORLAX".to_string()
+                )]),
+                &BTreeSet::from(["EVENT_VERMILION_CITY_SNORLAX".to_string()]),
+                &BTreeSet::new(),
+            ),
+            vec![ScriptObjectCommandIssue::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+                command_index: 3,
+            }]
+        );
+        assert_eq!(
+            apply_script_object_mutation(&mut state, &mut session, &disappear),
+            Err(ScriptObjectCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("EVENT_VERMILION_CITY_SNORLAX"),
+            Ok(false)
+        );
+        assert!(session.is_object_visible(&session.objects[0]));
+    }
+
+    #[test]
     fn disappear_and_appear_mutate_temporary_object_visibility() {
         let mut state = GameState::default();
         let mut session = session(vec![object("BATTLETOWER1F_RECEPTIONIST", "-1", 2, 3)]);
@@ -1786,6 +2153,26 @@ mod tests {
                 object_id: "vermilioncity_big_snorlax".to_string()
             }
         );
+
+        let error = apply_script_object_mutation(
+            &mut state,
+            &mut session,
+            &command("disappear", "VERMILION CITY_BIG_SNORLAX"),
+        )
+        .expect_err("malformed object ids are rejected before lookup");
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::InvalidObjectId {
+                object_id: "VERMILION CITY_BIG_SNORLAX".to_string(),
+            }
+        );
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("EVENT_VERMILION_CITY_SNORLAX"),
+            Ok(false)
+        );
+        assert!(session.is_object_visible(&session.objects[0]));
     }
 
     #[test]
@@ -1962,6 +2349,71 @@ mod tests {
     }
 
     #[test]
+    fn applymovement_rejects_malformed_matching_label_before_mutating_session() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(1, 1);
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("Player Walks".to_string());
+        let movement = ScriptMovement {
+            label: "Player Walks".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("UP".to_string()),
+                duration: None,
+                index: 0,
+            }],
+        };
+
+        assert_eq!(
+            apply_script_movement(&mut session, &command, &movement),
+            Err(ScriptObjectCommandError::InvalidMovement {
+                movement: "Player Walks".to_string(),
+            })
+        );
+        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+    }
+
+    #[test]
+    fn applymovement_rejects_invalid_source_before_mutating_session() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(1, 1);
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("PlayerWalks".to_string());
+        let movement = ScriptMovement {
+            label: "PlayerWalks".to_string(),
+            source_script: Some("legacy_script".to_string()),
+            steps: vec![ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("UP".to_string()),
+                duration: None,
+                index: 0,
+            }],
+        };
+
+        assert_eq!(
+            apply_script_movement(&mut session, &command, &movement),
+            Err(ScriptObjectCommandError::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+            })
+        );
+        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+
+        command.source_script = "fallback_script".to_string();
+        let movement = ScriptMovement {
+            source_script: None,
+            ..movement
+        };
+        assert_eq!(
+            apply_script_movement(&mut session, &command, &movement),
+            Err(ScriptObjectCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+    }
+
+    #[test]
     fn applymovementlasttalked_uses_recorded_exact_object_identifier() {
         let mut session = session(vec![object(
             "POKECENTER2F_RECEPTIONIST",
@@ -2107,22 +2559,28 @@ mod tests {
                     index: 0,
                 },
                 ScriptMovementStep {
-                    command: "skyfall_top".to_string(),
+                    command: "teleport_to".to_string(),
                     direction: None,
                     duration: None,
                     index: 1,
                 },
                 ScriptMovementStep {
-                    command: "tree_shake".to_string(),
+                    command: "skyfall_top".to_string(),
                     direction: None,
                     duration: None,
                     index: 2,
                 },
                 ScriptMovementStep {
-                    command: "step_end".to_string(),
+                    command: "tree_shake".to_string(),
                     direction: None,
                     duration: None,
                     index: 3,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 4,
                 },
             ],
         };
@@ -2138,12 +2596,16 @@ mod tests {
                     index: 0,
                 },
                 ScriptMovementEffect {
-                    command: "skyfall_top".to_string(),
+                    command: "teleport_to".to_string(),
                     index: 1,
                 },
                 ScriptMovementEffect {
-                    command: "tree_shake".to_string(),
+                    command: "skyfall_top".to_string(),
                     index: 2,
+                },
+                ScriptMovementEffect {
+                    command: "tree_shake".to_string(),
+                    index: 3,
                 },
             ]
         );

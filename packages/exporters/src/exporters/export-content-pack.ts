@@ -27,6 +27,7 @@ import type { ExportedPokemonEvolutionData } from "./export-evolutions";
 import type { ExportedFieldEncounterData } from "./export-field-encounters";
 import type { ExportedFishingCatalog } from "./export-fishing";
 import type { ExportedFieldMoveCatalog } from "./export-field-moves";
+import type { ExportedFlyDestinationTable } from "./export-fly-destinations";
 import type { ExportedBattleRewardRules } from "./export-battle-reward-rules";
 import type { ExportedBattleEscapeRules } from "./export-battle-escape-rules";
 import type { ExportedStepEventRules } from "./export-step-event-rules";
@@ -50,6 +51,7 @@ const CONTENT_PACK_CATEGORIES = [
   "wild_encounters",
   "field_encounters",
   "runtime_spawn_points",
+  "fly_destinations",
   "runtime_map_metadata",
   "flee_mons",
   "roaming_pokemon",
@@ -148,6 +150,7 @@ export type CoreExportPayload = {
   fieldEncounters?: ExportedFieldEncounterData[];
   fishing?: ExportedFishingCatalog;
   fieldMoves?: ExportedFieldMoveCatalog;
+  flyDestinations?: ExportedFlyDestinationTable;
   fruitTrees?: ExportedFruitTreeCatalog;
   runtimeSpawnPoints?: unknown;
   runtimeMapMetadata?: unknown;
@@ -446,17 +449,9 @@ const writePackEntry = <T>(
   return relativePath;
 };
 
-const SILENT_MIDI_BYTES = Buffer.from(
-  "4d546864000000060000000100604d54726b0000000400ff2f00",
-  "hex",
-);
-
 const clearGeneratedAudioOutputs = (): void => {
   for (const directory of ["music", "sfx", "cries"]) {
-    fs.rmSync(joinPath(getDataDir(), CORE_PACK_PATH, directory), {
-      recursive: true,
-      force: true,
-    });
+    removeMatchingOutputs(`${CORE_PACK_PATH}/${directory}`, ".json");
   }
 };
 
@@ -523,8 +518,17 @@ const writeAudioAssetFile = (
     );
   }
   const absolutePath = joinPath(getDataDir(), asset.path);
-  ensureDir(absolutePath.split("/").slice(0, -1).join("/"));
-  fs.writeFileSync(absolutePath, SILENT_MIDI_BYTES);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(
+      `Audio asset ${asset.id} is missing generated MIDI file: ${asset.path}`,
+    );
+  }
+  const bytes = fs.readFileSync(absolutePath);
+  if (!bytes.subarray(0, 4).equals(Buffer.from("MThd"))) {
+    throw new Error(
+      `Audio asset ${asset.id} generated MIDI file must start with MThd: ${asset.path}`,
+    );
+  }
   const metadataPath = asset.path.replace(/\.mid$/, ".json");
   writeJsonToTargets(metadataPath, { [asset.id]: asset }, { indent: 2 });
   files.push(metadataPath);
@@ -934,6 +938,14 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       "runtime_spawn_points",
       "spawn_points",
       payload.runtimeSpawnPoints,
+    );
+  }
+  if (payload.flyDestinations) {
+    writeCorePackEntry(
+      files.fly_destinations,
+      "fly_destinations",
+      "fly_destinations",
+      payload.flyDestinations,
     );
   }
   if (payload.runtimeMapMetadata) {
@@ -1474,6 +1486,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "map_scripts", prefix: "map-script" },
     { category: "map_blocks", prefix: "map-block" },
     { category: "runtime_spawn_points", prefix: "runtime-spawn-points" },
+    { category: "fly_destinations", prefix: "fly-destinations" },
     { category: "runtime_map_metadata", prefix: "runtime-map-metadata" },
     { category: "flee_mons", prefix: "flee-mons" },
     { category: "roaming_pokemon", prefix: "roaming-pokemon" },

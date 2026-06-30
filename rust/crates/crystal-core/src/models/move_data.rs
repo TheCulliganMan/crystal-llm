@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::pokemon::{PokemonType, Stat};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Move {
     #[serde(deserialize_with = "required_move_token")]
@@ -18,6 +18,55 @@ pub struct Move {
     pub effect_chance: u8,
     pub stat: Option<Stat>,
     pub amount: Option<i8>,
+}
+
+impl<'de> Deserialize<'de> for Move {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMove {
+            #[serde(deserialize_with = "required_move_token")]
+            name: String,
+            #[serde(rename = "type")]
+            #[serde(deserialize_with = "required_move_token")]
+            move_type: PokemonType,
+            power: u16,
+            accuracy: u8,
+            pp: u8,
+            #[serde(deserialize_with = "required_move_token")]
+            effect: String,
+            effect_chance: u8,
+            stat: Option<Stat>,
+            amount: Option<i8>,
+        }
+
+        let raw = RawMove::deserialize(deserializer)?;
+        let move_data = Self {
+            name: raw.name,
+            move_type: raw.move_type,
+            power: raw.power,
+            accuracy: raw.accuracy,
+            pp: raw.pp,
+            effect: raw.effect,
+            effect_chance: raw.effect_chance,
+            stat: raw.stat,
+            amount: raw.amount,
+        };
+        move_data.validate_shape().map_err(D::Error::custom)?;
+        Ok(move_data)
+    }
+}
+
+impl Move {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.pp == 0 {
+            return Err(format!("move {} must have positive PP", self.name));
+        }
+        Ok(())
+    }
 }
 
 fn required_move_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -102,6 +151,29 @@ pub fn move_name_catalog_issues(
     }
 
     issues
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct MoveNameTable(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for MoveNameTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        if names.is_empty() {
+            return Err(D::Error::custom("move names table must not be empty"));
+        }
+        for (index, name) in names.iter().enumerate() {
+            if !is_valid_move_payload_token(name) {
+                return Err(D::Error::custom(format!(
+                    "move names table entry {index} must be an exact move token, found {name:?}"
+                )));
+            }
+        }
+        Ok(Self(names))
+    }
 }
 
 fn is_exact_nonempty_move_token(value: &str) -> bool {

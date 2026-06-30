@@ -21,6 +21,7 @@ pub mod script_items;
 pub mod script_objects;
 pub mod script_runtime;
 pub mod script_scenes;
+pub mod script_swarms;
 pub mod script_text;
 pub mod script_variables;
 pub mod script_warps;

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::battle::turn::BattleAction;
@@ -8,7 +8,7 @@ use crate::input::{
     B_PAD_A, B_PAD_B, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_SELECT, B_PAD_START, B_PAD_UP,
 };
 use crate::models::{PARTY_SIZE, Party, Pokemon};
-use crate::save::{SaveModpackIdentity, validate_pack_content_hash};
+use crate::save::{SaveGameSummary, SaveModpackIdentity, validate_pack_content_hash};
 use crate::state::{GameCommand, GameEvent, GameState, GameStateFrameError};
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
@@ -25,11 +25,28 @@ const LINK_MESSAGE_PAYLOAD_HASH_OFFSET: usize = LINK_MESSAGE_PAYLOAD_LENGTH_OFFS
 const LINK_MESSAGE_HEADER_LEN: usize = LINK_MESSAGE_PAYLOAD_HASH_OFFSET + 4;
 const BATTLE_MOVE_SLOTS: usize = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerIdentity {
     id: PlayerId,
     display_name: String,
+}
+
+impl<'de> Deserialize<'de> for PlayerIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPlayerIdentity {
+            id: PlayerId,
+            display_name: String,
+        }
+
+        let raw = RawPlayerIdentity::deserialize(deserializer)?;
+        PlayerIdentity::new(raw.id, raw.display_name).map_err(serde::de::Error::custom)
+    }
 }
 
 impl PlayerIdentity {
@@ -75,13 +92,39 @@ impl PlayerIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkSessionIdentity {
     protocol_version: u16,
     session_id: SessionId,
     modpack: SaveModpackIdentity,
     pack_content_hash: String,
+}
+
+impl<'de> Deserialize<'de> for LinkSessionIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkSessionIdentity {
+            protocol_version: u16,
+            session_id: SessionId,
+            modpack: SaveModpackIdentity,
+            pack_content_hash: String,
+        }
+
+        let raw = RawLinkSessionIdentity::deserialize(deserializer)?;
+        let session = Self {
+            protocol_version: raw.protocol_version,
+            session_id: raw.session_id,
+            modpack: raw.modpack,
+            pack_content_hash: raw.pack_content_hash,
+        };
+        session.validate().map_err(serde::de::Error::custom)?;
+        Ok(session)
+    }
 }
 
 impl LinkSessionIdentity {
@@ -193,11 +236,28 @@ fn has_reserved_session_id_prefix(value: &str) -> bool {
     lowered.starts_with("fallback") || lowered.starts_with("legacy")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkHello {
     session: LinkSessionIdentity,
     player: PlayerIdentity,
+}
+
+impl<'de> Deserialize<'de> for LinkHello {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkHello {
+            session: LinkSessionIdentity,
+            player: PlayerIdentity,
+        }
+
+        let raw = RawLinkHello::deserialize(deserializer)?;
+        LinkHello::from_session(raw.session, raw.player).map_err(serde::de::Error::custom)
+    }
 }
 
 impl LinkHello {
@@ -341,11 +401,47 @@ pub enum AcceptPlayerResult {
     Duplicate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkLobby {
     session: LinkSessionIdentity,
     players: BTreeMap<PlayerId, PlayerIdentity>,
+}
+
+impl<'de> Deserialize<'de> for LinkLobby {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkLobby {
+            session: LinkSessionIdentity,
+            players: BTreeMap<PlayerId, PlayerIdentity>,
+        }
+
+        let raw = RawLinkLobby::deserialize(deserializer)?;
+        raw.session.validate().map_err(serde::de::Error::custom)?;
+        if raw.players.is_empty() {
+            return Err(serde::de::Error::custom(
+                LinkHandshakeError::UnknownPlayer { player_id: 0 },
+            ));
+        }
+        for (player_id, player) in &raw.players {
+            if *player_id != player.id() {
+                return Err(serde::de::Error::custom(
+                    LinkHandshakeError::InvalidPlayerIdentity {
+                        player_id: *player_id,
+                    },
+                ));
+            }
+            player.validate().map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            session: raw.session,
+            players: raw.players,
+        })
+    }
 }
 
 impl LinkLobby {
@@ -408,6 +504,13 @@ impl LinkLobby {
         LockstepBuffer::new(self.player_ids())
     }
 
+    pub fn validate_save_checkpoint(
+        &self,
+        checkpoint: &SaveCheckpointFrame,
+    ) -> Result<(), SaveCheckpointFrameError> {
+        checkpoint.validate_for_players(self.player_ids())
+    }
+
     pub fn battle_action_buffer(&self) -> Result<BattleActionSyncBuffer, BattleSyncError> {
         BattleActionSyncBuffer::from_lobby(self)
     }
@@ -429,7 +532,7 @@ pub enum PresenceEntityType {
     Ai,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldPresence {
     user_id: String,
@@ -439,6 +542,37 @@ pub struct OverworldPresence {
     tile: TilePosition,
     direction: Direction,
     updated_at_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for OverworldPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOverworldPresence {
+            user_id: String,
+            player_name: String,
+            entity_type: PresenceEntityType,
+            map_name: String,
+            tile: TilePosition,
+            direction: Direction,
+            updated_at_ms: u64,
+        }
+
+        let raw = RawOverworldPresence::deserialize(deserializer)?;
+        OverworldPresence::new(
+            raw.user_id,
+            raw.player_name,
+            raw.entity_type,
+            raw.map_name,
+            raw.tile,
+            raw.direction,
+            raw.updated_at_ms,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl OverworldPresence {
@@ -532,7 +666,7 @@ pub enum MultiplayerInteractionKind {
     Trade,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplayerInteractionRequest {
     request_id: String,
@@ -541,6 +675,35 @@ pub struct MultiplayerInteractionRequest {
     to_user_id: String,
     kind: MultiplayerInteractionKind,
     timestamp_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for MultiplayerInteractionRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMultiplayerInteractionRequest {
+            request_id: String,
+            from_user_id: String,
+            from_player_name: String,
+            to_user_id: String,
+            kind: MultiplayerInteractionKind,
+            timestamp_ms: u64,
+        }
+
+        let raw = RawMultiplayerInteractionRequest::deserialize(deserializer)?;
+        MultiplayerInteractionRequest::new(
+            raw.request_id,
+            raw.from_user_id,
+            raw.from_player_name,
+            raw.to_user_id,
+            raw.kind,
+            raw.timestamp_ms,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl MultiplayerInteractionRequest {
@@ -623,7 +786,7 @@ impl MultiplayerInteractionRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplayerInteractionResponse {
     request_id: String,
@@ -632,6 +795,35 @@ pub struct MultiplayerInteractionResponse {
     kind: MultiplayerInteractionKind,
     accepted: bool,
     timestamp_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for MultiplayerInteractionResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMultiplayerInteractionResponse {
+            request_id: String,
+            from_user_id: String,
+            to_user_id: String,
+            kind: MultiplayerInteractionKind,
+            accepted: bool,
+            timestamp_ms: u64,
+        }
+
+        let raw = RawMultiplayerInteractionResponse::deserialize(deserializer)?;
+        MultiplayerInteractionResponse::new(
+            raw.request_id,
+            raw.from_user_id,
+            raw.to_user_id,
+            raw.kind,
+            raw.accepted,
+            raw.timestamp_ms,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl MultiplayerInteractionResponse {
@@ -722,6 +914,8 @@ pub enum MultiplayerMessageError {
     InvalidTile { field: &'static str, x: i16, y: i16 },
     #[error("{field} source and target user ids must be different")]
     SameInteractionUser { field: &'static str },
+    #[error("{field} frame must be positive but got {frame}")]
+    InvalidFrame { field: &'static str, frame: u64 },
     #[error("{message}")]
     InvalidLinkHandshake { message: String },
     #[error("{message}")]
@@ -889,12 +1083,31 @@ fn is_exact_multiplayer_user_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleRngState {
     hardware_divider: u16,
     h_random_add: u8,
     h_random_sub: u8,
+}
+
+impl<'de> Deserialize<'de> for BattleRngState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleRngState {
+            hardware_divider: u16,
+            h_random_add: u8,
+            h_random_sub: u8,
+        }
+
+        let raw = RawBattleRngState::deserialize(deserializer)?;
+        BattleRngState::new(raw.hardware_divider, raw.h_random_add, raw.h_random_sub)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl BattleRngState {
@@ -960,12 +1173,36 @@ pub enum BattleRngError {
     InvalidHardwareDivider,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerInputFrame {
     player_id: PlayerId,
     frame: u64,
     joypad_mask: u8,
+}
+
+impl<'de> Deserialize<'de> for PlayerInputFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPlayerInputFrame {
+            player_id: PlayerId,
+            frame: u64,
+            joypad_mask: u8,
+        }
+
+        let raw = RawPlayerInputFrame::deserialize(deserializer)?;
+        let input = Self {
+            player_id: raw.player_id,
+            frame: raw.frame,
+            joypad_mask: raw.joypad_mask,
+        };
+        input.validate().map_err(serde::de::Error::custom)?;
+        Ok(input)
+    }
 }
 
 impl PlayerInputFrame {
@@ -1018,6 +1255,240 @@ impl PlayerInputFrame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenuChoiceFrame {
+    player_id: PlayerId,
+    frame: u64,
+    menu_id: String,
+    option_index: usize,
+    verticalmenu_command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for MenuChoiceFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMenuChoiceFrame {
+            player_id: PlayerId,
+            frame: u64,
+            menu_id: String,
+            option_index: usize,
+            verticalmenu_command_index: usize,
+        }
+
+        let raw = RawMenuChoiceFrame::deserialize(deserializer)?;
+        let choice = Self {
+            player_id: raw.player_id,
+            frame: raw.frame,
+            menu_id: raw.menu_id,
+            option_index: raw.option_index,
+            verticalmenu_command_index: raw.verticalmenu_command_index,
+        };
+        choice.validate().map_err(serde::de::Error::custom)?;
+        Ok(choice)
+    }
+}
+
+impl MenuChoiceFrame {
+    pub fn new(
+        player_id: PlayerId,
+        frame: Frame,
+        menu_id: impl Into<String>,
+        option_index: usize,
+        verticalmenu_command_index: usize,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let choice = Self {
+            player_id,
+            frame: frame.0,
+            menu_id: menu_id.into(),
+            option_index,
+            verticalmenu_command_index,
+        };
+        choice.validate()?;
+        Ok(choice)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        if self.player_id == 0 {
+            return Err(MultiplayerMessageError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
+        if self.frame == 0 {
+            return Err(MultiplayerMessageError::InvalidFrame {
+                field: "menu_choice.frame",
+                frame: self.frame,
+            });
+        }
+        validate_multiplayer_token("menu_choice.menu_id", &self.menu_id)?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        player_id: PlayerId,
+        frame: u64,
+        menu_id: impl Into<String>,
+        option_index: usize,
+        verticalmenu_command_index: usize,
+    ) -> Self {
+        Self {
+            player_id,
+            frame,
+            menu_id: menu_id.into(),
+            option_index,
+            verticalmenu_command_index,
+        }
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub fn menu_id(&self) -> &str {
+        &self.menu_id
+    }
+
+    pub const fn option_index(&self) -> usize {
+        self.option_index
+    }
+
+    pub const fn verticalmenu_command_index(&self) -> usize {
+        self.verticalmenu_command_index
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenuChoiceResultFrame {
+    choice: MenuChoiceFrame,
+    checksum: StateChecksumFrame,
+    script_value: String,
+}
+
+impl<'de> Deserialize<'de> for MenuChoiceResultFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMenuChoiceResultFrame {
+            choice: MenuChoiceFrame,
+            checksum: StateChecksumFrame,
+            script_value: String,
+        }
+
+        let raw = RawMenuChoiceResultFrame::deserialize(deserializer)?;
+        MenuChoiceResultFrame::new(raw.choice, raw.checksum, raw.script_value)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl MenuChoiceResultFrame {
+    pub fn new(
+        choice: MenuChoiceFrame,
+        checksum: StateChecksumFrame,
+        script_value: impl Into<String>,
+    ) -> Result<Self, MenuChoiceResultFrameError> {
+        let result = Self {
+            choice,
+            checksum,
+            script_value: script_value.into(),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    pub fn validate(&self) -> Result<(), MenuChoiceResultFrameError> {
+        self.choice
+            .validate()
+            .map_err(|error| MenuChoiceResultFrameError::InvalidChoice {
+                message: error.to_string(),
+            })?;
+        self.checksum
+            .validate()
+            .map_err(|error| MenuChoiceResultFrameError::InvalidChecksum {
+                message: error.to_string(),
+            })?;
+        if self.choice.player_id() != self.checksum.player_id() {
+            return Err(MenuChoiceResultFrameError::PlayerChecksumMismatch {
+                choice_player_id: self.choice.player_id(),
+                checksum_player_id: self.checksum.player_id(),
+            });
+        }
+        if self.checksum.frame() < self.choice.frame() {
+            return Err(MenuChoiceResultFrameError::ResultBeforeChoice {
+                choice_frame: self.choice.frame(),
+                checksum_frame: self.checksum.frame(),
+            });
+        }
+        validate_multiplayer_text("menu_choice_result.script_value", &self.script_value).map_err(
+            |error| MenuChoiceResultFrameError::InvalidScriptValue {
+                message: error.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        choice: MenuChoiceFrame,
+        checksum: StateChecksumFrame,
+        script_value: impl Into<String>,
+    ) -> Self {
+        Self {
+            choice,
+            checksum,
+            script_value: script_value.into(),
+        }
+    }
+
+    pub const fn choice(&self) -> &MenuChoiceFrame {
+        &self.choice
+    }
+
+    pub const fn checksum(&self) -> &StateChecksumFrame {
+        &self.checksum
+    }
+
+    pub fn script_value(&self) -> &str {
+        &self.script_value
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum MenuChoiceResultFrameError {
+    #[error("menu choice result choice is invalid: {message}")]
+    InvalidChoice { message: String },
+    #[error("menu choice result checksum is invalid: {message}")]
+    InvalidChecksum { message: String },
+    #[error(
+        "menu choice result player {choice_player_id} does not match checksum player {checksum_player_id}"
+    )]
+    PlayerChecksumMismatch {
+        choice_player_id: PlayerId,
+        checksum_player_id: PlayerId,
+    },
+    #[error(
+        "menu choice result checksum frame {checksum_frame} is before choice frame {choice_frame}"
+    )]
+    ResultBeforeChoice {
+        choice_frame: u64,
+        checksum_frame: u64,
+    },
+    #[error("menu choice result script value is invalid: {message}")]
+    InvalidScriptValue { message: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateChecksum {
@@ -1039,12 +1510,36 @@ impl StateChecksum {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateChecksumFrame {
     player_id: PlayerId,
     frame: u64,
     hash: u32,
+}
+
+impl<'de> Deserialize<'de> for StateChecksumFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawStateChecksumFrame {
+            player_id: PlayerId,
+            frame: u64,
+            hash: u32,
+        }
+
+        let raw = RawStateChecksumFrame::deserialize(deserializer)?;
+        let frame = Self {
+            player_id: raw.player_id,
+            frame: raw.frame,
+            hash: raw.hash,
+        };
+        frame.validate().map_err(serde::de::Error::custom)?;
+        Ok(frame)
+    }
 }
 
 impl StateChecksumFrame {
@@ -1107,19 +1602,65 @@ pub enum StateChecksumError {
     Encode(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandChecksumResult {
     pub events: Vec<GameEvent>,
     pub checksum: StateChecksumFrame,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for CommandChecksumResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCommandChecksumResult {
+            events: Vec<GameEvent>,
+            checksum: StateChecksumFrame,
+        }
+
+        let raw = RawCommandChecksumResult::deserialize(deserializer)?;
+        validate_command_checksum_events(&raw.events).map_err(serde::de::Error::custom)?;
+        raw.checksum.validate().map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            events: raw.events,
+            checksum: raw.checksum,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCommandPayload {
     schema: String,
     bytes: Vec<u8>,
     hash: u32,
+}
+
+impl<'de> Deserialize<'de> for RuntimeCommandPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRuntimeCommandPayload {
+            schema: String,
+            bytes: Vec<u8>,
+            hash: u32,
+        }
+
+        let raw = RawRuntimeCommandPayload::deserialize(deserializer)?;
+        let payload = Self {
+            schema: raw.schema,
+            bytes: raw.bytes,
+            hash: raw.hash,
+        };
+        payload.validate().map_err(serde::de::Error::custom)?;
+        Ok(payload)
+    }
 }
 
 impl RuntimeCommandPayload {
@@ -1173,13 +1714,33 @@ impl RuntimeCommandPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCommandFrame {
     player_id: PlayerId,
     sequence: u64,
     payload: RuntimeCommandPayload,
     expected_state: StateChecksum,
+}
+
+impl<'de> Deserialize<'de> for RuntimeCommandFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRuntimeCommandFrame {
+            player_id: PlayerId,
+            sequence: u64,
+            payload: RuntimeCommandPayload,
+            expected_state: StateChecksum,
+        }
+
+        let raw = RawRuntimeCommandFrame::deserialize(deserializer)?;
+        RuntimeCommandFrame::new(raw.player_id, raw.sequence, raw.payload, raw.expected_state)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RuntimeCommandFrame {
@@ -1256,12 +1817,31 @@ impl RuntimeCommandFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCommandResultFrame {
     request: RuntimeCommandFrame,
     checksum: StateChecksumFrame,
     result_tag: String,
+}
+
+impl<'de> Deserialize<'de> for RuntimeCommandResultFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRuntimeCommandResultFrame {
+            request: RuntimeCommandFrame,
+            checksum: StateChecksumFrame,
+            result_tag: String,
+        }
+
+        let raw = RawRuntimeCommandResultFrame::deserialize(deserializer)?;
+        RuntimeCommandResultFrame::new(raw.request, raw.checksum, raw.result_tag)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RuntimeCommandResultFrame {
@@ -1328,10 +1908,141 @@ impl RuntimeCommandResultFrame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRuntimeCommandFrame {
+    session: LinkSessionIdentity,
+    command: RuntimeCommandFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionRuntimeCommandFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionRuntimeCommandFrame {
+            session: LinkSessionIdentity,
+            command: RuntimeCommandFrame,
+        }
+
+        let raw = RawSessionRuntimeCommandFrame::deserialize(deserializer)?;
+        SessionRuntimeCommandFrame::new(raw.session, raw.command).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionRuntimeCommandFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        command: RuntimeCommandFrame,
+    ) -> Result<Self, RuntimeCommandFrameError> {
+        let frame = Self { session, command };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeCommandFrameError> {
+        self.session
+            .validate()
+            .map_err(|error| RuntimeCommandFrameError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        self.command.validate()
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        command: RuntimeCommandFrame,
+    ) -> Self {
+        Self { session, command }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn command(&self) -> &RuntimeCommandFrame {
+        &self.command
+    }
+
+    pub fn into_command(self) -> RuntimeCommandFrame {
+        self.command
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRuntimeCommandResultFrame {
+    session: LinkSessionIdentity,
+    result: RuntimeCommandResultFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionRuntimeCommandResultFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionRuntimeCommandResultFrame {
+            session: LinkSessionIdentity,
+            result: RuntimeCommandResultFrame,
+        }
+
+        let raw = RawSessionRuntimeCommandResultFrame::deserialize(deserializer)?;
+        SessionRuntimeCommandResultFrame::new(raw.session, raw.result)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionRuntimeCommandResultFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        result: RuntimeCommandResultFrame,
+    ) -> Result<Self, RuntimeCommandFrameError> {
+        let frame = Self { session, result };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeCommandFrameError> {
+        self.session
+            .validate()
+            .map_err(|error| RuntimeCommandFrameError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        self.result.validate()
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        result: RuntimeCommandResultFrame,
+    ) -> Self {
+        Self { session, result }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn result(&self) -> &RuntimeCommandResultFrame {
+        &self.result
+    }
+
+    pub fn into_result(self) -> RuntimeCommandResultFrame {
+        self.result
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RuntimeCommandFrameError {
     #[error("runtime command player id {player_id} is not a valid link identity")]
     InvalidPlayerIdentity { player_id: PlayerId },
+    #[error("runtime command session is invalid: {message}")]
+    InvalidSession { message: String },
     #[error("{field} must be exact and non-empty")]
     InvalidToken { field: &'static str },
     #[error("runtime command payload must be non-empty")]
@@ -1363,6 +2074,281 @@ pub enum RuntimeCommandFrameError {
         expected_frame: u64,
         result_frame: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSaveSummaryFrame {
+    session: LinkSessionIdentity,
+    summary: SaveGameSummary,
+}
+
+impl<'de> Deserialize<'de> for SessionSaveSummaryFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionSaveSummaryFrame {
+            session: LinkSessionIdentity,
+            summary: SaveGameSummary,
+        }
+
+        let raw = RawSessionSaveSummaryFrame::deserialize(deserializer)?;
+        SessionSaveSummaryFrame::new(raw.session, raw.summary).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionSaveSummaryFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        summary: SaveGameSummary,
+    ) -> Result<Self, SessionSaveSummaryFrameError> {
+        let frame = Self { session, summary };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), SessionSaveSummaryFrameError> {
+        self.session
+            .validate()
+            .map_err(|error| SessionSaveSummaryFrameError::InvalidSession {
+                message: error.to_string(),
+            })?;
+        self.summary
+            .validate()
+            .map_err(|error| SessionSaveSummaryFrameError::InvalidSummary {
+                message: error.to_string(),
+            })?;
+        if self.summary.modpack().id() != self.session.modpack().id() {
+            return Err(SessionSaveSummaryFrameError::ModpackIdMismatch {
+                expected: self.session.modpack().id().to_string(),
+                actual: self.summary.modpack().id().to_string(),
+            });
+        }
+        if self.summary.modpack().hash() != self.session.modpack().hash() {
+            return Err(SessionSaveSummaryFrameError::ModpackHashMismatch {
+                expected: self.session.modpack().hash().to_string(),
+                actual: self.summary.modpack().hash().to_string(),
+            });
+        }
+        if self.summary.pack_content_hash() != self.session.pack_content_hash() {
+            return Err(SessionSaveSummaryFrameError::PackContentHashMismatch {
+                expected: self.session.pack_content_hash().to_string(),
+                actual: self.summary.pack_content_hash().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(session: LinkSessionIdentity, summary: SaveGameSummary) -> Self {
+        Self { session, summary }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn summary(&self) -> &SaveGameSummary {
+        &self.summary
+    }
+
+    pub fn into_summary(self) -> SaveGameSummary {
+        self.summary
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SessionSaveSummaryFrameError {
+    #[error("save summary session is invalid: {message}")]
+    InvalidSession { message: String },
+    #[error("save summary is invalid: {message}")]
+    InvalidSummary { message: String },
+    #[error("save summary modpack id {actual} does not match session modpack id {expected}")]
+    ModpackIdMismatch { expected: String, actual: String },
+    #[error("save summary modpack hash {actual} does not match session modpack hash {expected}")]
+    ModpackHashMismatch { expected: String, actual: String },
+    #[error(
+        "save summary pack content hash {actual} does not match session pack content hash {expected}"
+    )]
+    PackContentHashMismatch { expected: String, actual: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveCheckpointFrame {
+    summary: SaveGameSummary,
+    checksum: StateChecksumFrame,
+}
+
+impl<'de> Deserialize<'de> for SaveCheckpointFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveCheckpointFrame {
+            summary: SaveGameSummary,
+            checksum: StateChecksumFrame,
+        }
+
+        let raw = RawSaveCheckpointFrame::deserialize(deserializer)?;
+        SaveCheckpointFrame::new(raw.summary, raw.checksum).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SaveCheckpointFrame {
+    pub fn new(
+        summary: SaveGameSummary,
+        checksum: StateChecksumFrame,
+    ) -> Result<Self, SaveCheckpointFrameError> {
+        let frame = Self { summary, checksum };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), SaveCheckpointFrameError> {
+        self.summary
+            .validate()
+            .map_err(|error| SaveCheckpointFrameError::InvalidSummary {
+                message: error.to_string(),
+            })?;
+        self.checksum
+            .validate()
+            .map_err(|error| SaveCheckpointFrameError::InvalidChecksum {
+                message: error.to_string(),
+            })?;
+        if self.summary.state_frame() != self.checksum.frame() {
+            return Err(SaveCheckpointFrameError::FrameMismatch {
+                summary_frame: self.summary.state_frame(),
+                checksum_frame: self.checksum.frame(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_players(
+        &self,
+        players: impl IntoIterator<Item = PlayerId>,
+    ) -> Result<(), SaveCheckpointFrameError> {
+        self.validate()?;
+        let player_id = self.checksum.player_id();
+        if !players.into_iter().any(|candidate| candidate == player_id) {
+            return Err(SaveCheckpointFrameError::UnknownPlayer { player_id });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(summary: SaveGameSummary, checksum: StateChecksumFrame) -> Self {
+        Self { summary, checksum }
+    }
+
+    pub const fn summary(&self) -> &SaveGameSummary {
+        &self.summary
+    }
+
+    pub const fn checksum(&self) -> &StateChecksumFrame {
+        &self.checksum
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSaveCheckpointFrame {
+    session: LinkSessionIdentity,
+    checkpoint: SaveCheckpointFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionSaveCheckpointFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionSaveCheckpointFrame {
+            session: LinkSessionIdentity,
+            checkpoint: SaveCheckpointFrame,
+        }
+
+        let raw = RawSessionSaveCheckpointFrame::deserialize(deserializer)?;
+        SessionSaveCheckpointFrame::new(raw.session, raw.checkpoint)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionSaveCheckpointFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        checkpoint: SaveCheckpointFrame,
+    ) -> Result<Self, SaveCheckpointFrameError> {
+        let frame = Self {
+            session,
+            checkpoint,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), SaveCheckpointFrameError> {
+        let summary =
+            SessionSaveSummaryFrame::new(self.session.clone(), self.checkpoint.summary().clone())
+                .map_err(|error| SaveCheckpointFrameError::InvalidSessionSummary {
+                message: error.to_string(),
+            })?;
+        summary
+            .validate()
+            .map_err(|error| SaveCheckpointFrameError::InvalidSessionSummary {
+                message: error.to_string(),
+            })?;
+        self.checkpoint.validate()
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        checkpoint: SaveCheckpointFrame,
+    ) -> Self {
+        Self {
+            session,
+            checkpoint,
+        }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn checkpoint(&self) -> &SaveCheckpointFrame {
+        &self.checkpoint
+    }
+
+    pub fn into_checkpoint(self) -> SaveCheckpointFrame {
+        self.checkpoint
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SaveCheckpointFrameError {
+    #[error("save checkpoint summary is invalid: {message}")]
+    InvalidSummary { message: String },
+    #[error("save checkpoint checksum is invalid: {message}")]
+    InvalidChecksum { message: String },
+    #[error("save checkpoint session summary is invalid: {message}")]
+    InvalidSessionSummary { message: String },
+    #[error(
+        "save checkpoint summary frame {summary_frame} does not match checksum frame {checksum_frame}"
+    )]
+    FrameMismatch {
+        summary_frame: u64,
+        checksum_frame: u64,
+    },
+    #[error("save checkpoint player {player_id} is not in the declared link roster")]
+    UnknownPlayer { player_id: PlayerId },
 }
 
 fn validate_runtime_command_token(
@@ -1416,13 +2402,33 @@ fn state_checksum_binary_config() -> impl bincode::config::Config {
         .with_fixed_int_encoding()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleActionFrame {
     player_id: PlayerId,
     turn: u64,
     action: BattleAction,
     state_hash: String,
+}
+
+impl<'de> Deserialize<'de> for BattleActionFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleActionFrame {
+            player_id: PlayerId,
+            turn: u64,
+            action: BattleAction,
+            state_hash: String,
+        }
+
+        let raw = RawBattleActionFrame::deserialize(deserializer)?;
+        BattleActionFrame::new(raw.player_id, raw.turn, raw.action, raw.state_hash)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl BattleActionFrame {
@@ -1606,10 +2612,23 @@ pub enum InputJournalError {
     InvalidStartChecksum { message: String },
     #[error("input journal terminal checksum is invalid: {message}")]
     InvalidTerminalChecksum { message: String },
-    #[error("input journal terminal checksum frame {actual} does not match expected frame {expected}")]
+    #[error(
+        "input journal terminal checksum frame {actual} does not match expected frame {expected}"
+    )]
     TerminalChecksumFrameMismatch { expected: u64, actual: u64 },
+    #[error(
+        "input journal terminal checksum hash {actual:#010x} does not match expected hash {expected:#010x}"
+    )]
+    TerminalChecksumHashMismatch { expected: u32, actual: u32 },
     #[error("input journal terminal checksum player {player_id} is not in the declared roster")]
     TerminalChecksumUnknownPlayer { player_id: PlayerId },
+    #[error(
+        "input journal terminal checksum player {actual} does not match expected player {expected}"
+    )]
+    TerminalChecksumPlayerMismatch {
+        expected: PlayerId,
+        actual: PlayerId,
+    },
     #[error("input journal frame is invalid: {message}")]
     InvalidFrame { message: String },
     #[error("input journal player {player_id} is not in the declared roster")]
@@ -1624,8 +2643,81 @@ pub enum InputJournalError {
     FrameCursorOverflow { frame: u64 },
     #[error("failed to encode input journal for deterministic fingerprint: {message}")]
     Encode { message: String },
-    #[error("input journal fingerprint {actual} does not match deterministic fingerprint {expected}")]
+    #[error(
+        "input journal fingerprint {actual} does not match deterministic fingerprint {expected}"
+    )]
     FingerprintMismatch { expected: String, actual: String },
+    #[error("deterministic replay command {sequence} is invalid: {message}")]
+    InvalidRuntimeCommand { sequence: u64, message: String },
+    #[error("deterministic replay command result {sequence} is invalid: {message}")]
+    InvalidRuntimeCommandResult { sequence: u64, message: String },
+    #[error(
+        "deterministic replay menu choice result {menu_id}:{option_index} is invalid: {message}"
+    )]
+    InvalidMenuChoiceResult {
+        menu_id: String,
+        option_index: usize,
+        message: String,
+    },
+    #[error("deterministic replay command {sequence} session does not match input journal session")]
+    RuntimeCommandSessionMismatch { sequence: u64 },
+    #[error(
+        "deterministic replay command result {sequence} session does not match input journal session"
+    )]
+    RuntimeCommandResultSessionMismatch { sequence: u64 },
+    #[error(
+        "deterministic replay command {sequence} expected frame {frame} is outside journal frames {start}..={terminal}"
+    )]
+    RuntimeCommandFrameOutsideJournal {
+        sequence: u64,
+        frame: u64,
+        start: u64,
+        terminal: u64,
+    },
+    #[error(
+        "deterministic replay command result {sequence} checksum frame {frame} is outside journal frames {start}..={terminal}"
+    )]
+    RuntimeCommandResultFrameOutsideJournal {
+        sequence: u64,
+        frame: u64,
+        start: u64,
+        terminal: u64,
+    },
+    #[error(
+        "deterministic replay menu choice {menu_id}:{option_index} frame {frame} is outside journal frames {start}..={terminal}"
+    )]
+    MenuChoiceFrameOutsideJournal {
+        menu_id: String,
+        option_index: usize,
+        frame: u64,
+        start: u64,
+        terminal: u64,
+    },
+    #[error("save resume replay checkpoint is invalid: {message}")]
+    InvalidSaveCheckpoint { message: String },
+    #[error("save resume replay session does not match input journal session")]
+    SaveReplaySessionMismatch,
+    #[error(
+        "save resume replay checkpoint frame {checkpoint_frame} does not match journal start frame {journal_frame}"
+    )]
+    SaveReplayStartFrameMismatch {
+        checkpoint_frame: u64,
+        journal_frame: u64,
+    },
+    #[error(
+        "save resume replay checkpoint player {checkpoint_player_id} does not match journal start player {journal_player_id}"
+    )]
+    SaveReplayStartPlayerMismatch {
+        checkpoint_player_id: PlayerId,
+        journal_player_id: PlayerId,
+    },
+    #[error(
+        "save resume replay checkpoint hash {checkpoint_hash:#010x} does not match journal start hash {journal_hash:#010x}"
+    )]
+    SaveReplayStartHashMismatch {
+        checkpoint_hash: u32,
+        journal_hash: u32,
+    },
 }
 
 pub type TradeId = String;
@@ -1637,11 +2729,29 @@ pub enum InsertTradeFrameResult {
     Conflict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeParticipants {
     trade_id: TradeId,
     players: [PlayerId; 2],
+}
+
+impl<'de> Deserialize<'de> for TradeParticipants {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTradeParticipants {
+            trade_id: TradeId,
+            players: [PlayerId; 2],
+        }
+
+        let raw = RawTradeParticipants::deserialize(deserializer)?;
+        TradeParticipants::new(raw.trade_id, raw.players[0], raw.players[1])
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TradeParticipants {
@@ -1687,13 +2797,33 @@ impl TradeParticipants {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeOffer {
     trade_id: TradeId,
     player_id: PlayerId,
     party_slot: usize,
     pokemon: Pokemon,
+}
+
+impl<'de> Deserialize<'de> for TradeOffer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTradeOffer {
+            trade_id: TradeId,
+            player_id: PlayerId,
+            party_slot: usize,
+            pokemon: Pokemon,
+        }
+
+        let raw = RawTradeOffer::deserialize(deserializer)?;
+        TradeOffer::new(raw.trade_id, raw.player_id, raw.party_slot, raw.pokemon)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TradeOffer {
@@ -1785,12 +2915,31 @@ impl TradeOffer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfirmation {
     trade_id: TradeId,
     player_id: PlayerId,
     confirm: bool,
+}
+
+impl<'de> Deserialize<'de> for TradeConfirmation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTradeConfirmation {
+            trade_id: TradeId,
+            player_id: PlayerId,
+            confirm: bool,
+        }
+
+        let raw = RawTradeConfirmation::deserialize(deserializer)?;
+        TradeConfirmation::new(raw.trade_id, raw.player_id, raw.confirm)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TradeConfirmation {
@@ -1839,19 +2988,55 @@ impl TradeConfirmation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeReplacement {
     party_slot: usize,
     received: Pokemon,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for TradeReplacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTradeReplacement {
+            party_slot: usize,
+            received: Pokemon,
+        }
+
+        let raw = RawTradeReplacement::deserialize(deserializer)?;
+        TradeReplacement::new(raw.party_slot, raw.received).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeOutcome {
     trade_id: TradeId,
     cancelled: bool,
     replacements: BTreeMap<PlayerId, TradeReplacement>,
+}
+
+impl<'de> Deserialize<'de> for TradeOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTradeOutcome {
+            trade_id: TradeId,
+            cancelled: bool,
+            replacements: BTreeMap<PlayerId, TradeReplacement>,
+        }
+
+        let raw = RawTradeOutcome::deserialize(deserializer)?;
+        TradeOutcome::new(raw.trade_id, raw.cancelled, raw.replacements)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TradeOutcome {
@@ -2038,12 +3223,30 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
     value.starts_with("fallback") || value.starts_with("legacy")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkByteFrame {
     player_id: PlayerId,
     byte: u8,
     clock: u64,
+}
+
+impl<'de> Deserialize<'de> for LinkByteFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkByteFrame {
+            player_id: PlayerId,
+            byte: u8,
+            clock: u64,
+        }
+
+        let raw = RawLinkByteFrame::deserialize(deserializer)?;
+        LinkByteFrame::new(raw.player_id, raw.byte, raw.clock).map_err(serde::de::Error::custom)
+    }
 }
 
 impl LinkByteFrame {
@@ -2091,13 +3294,33 @@ impl LinkByteFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkClockSyncFrame {
     player_id: PlayerId,
     t0: u64,
     t1: u64,
     t2: u64,
+}
+
+impl<'de> Deserialize<'de> for LinkClockSyncFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkClockSyncFrame {
+            player_id: PlayerId,
+            t0: u64,
+            t1: u64,
+            t2: u64,
+        }
+
+        let raw = RawLinkClockSyncFrame::deserialize(deserializer)?;
+        LinkClockSyncFrame::new(raw.player_id, raw.t0, raw.t1, raw.t2)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl LinkClockSyncFrame {
@@ -2273,8 +3496,11 @@ impl LinkCableState {
 
     pub fn send_byte(&mut self, byte: u8) -> LinkByteFrame {
         self.local_clock = self.local_clock.saturating_add(1);
-        LinkByteFrame::new(self.local_player, byte, self.local_clock)
-            .expect("saturating local clock is nonzero")
+        LinkByteFrame {
+            player_id: self.local_player,
+            byte,
+            clock: self.local_clock,
+        }
     }
 
     pub fn send_bytes(&mut self, bytes: impl IntoIterator<Item = u8>) -> Vec<LinkByteFrame> {
@@ -2327,13 +3553,12 @@ impl LinkCableState {
 
     pub fn sync_frame(&mut self, now_tick: u64) -> LinkClockSyncFrame {
         self.local_clock = self.local_clock.saturating_add(1).max(now_tick);
-        LinkClockSyncFrame::new(
-            self.local_player,
-            self.local_clock,
-            self.local_clock,
-            self.local_clock,
-        )
-        .expect("local link clock sync frame is monotonic")
+        LinkClockSyncFrame {
+            player_id: self.local_player,
+            t0: self.local_clock,
+            t1: self.local_clock,
+            t2: self.local_clock,
+        }
     }
 
     pub fn receive_sync_frame(
@@ -2461,12 +3686,21 @@ impl TradeSyncBuffer {
         let mut replacements = BTreeMap::new();
         if !cancelled {
             for player_id in self.participants.players() {
-                let other_player = self
-                    .participants
-                    .other_player(player_id)
-                    .expect("participant has peer");
-                let local_offer = self.offers.get(&player_id).expect("ready offer");
-                let remote_offer = self.offers.get(&other_player).expect("ready offer");
+                let Some(other_player) = self.participants.other_player(player_id) else {
+                    return Err(TradeError::TradeNotReady {
+                        trade_id: self.participants.trade_id().to_string(),
+                    });
+                };
+                let Some(local_offer) = self.offers.get(&player_id) else {
+                    return Err(TradeError::TradeNotReady {
+                        trade_id: self.participants.trade_id().to_string(),
+                    });
+                };
+                let Some(remote_offer) = self.offers.get(&other_player) else {
+                    return Err(TradeError::TradeNotReady {
+                        trade_id: self.participants.trade_id().to_string(),
+                    });
+                };
                 replacements.insert(
                     player_id,
                     TradeReplacement::new(
@@ -2522,11 +3756,28 @@ pub enum InsertChecksumResult {
     Conflict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockstepFrame {
     frame: u64,
     inputs: BTreeMap<PlayerId, u8>,
+}
+
+impl<'de> Deserialize<'de> for LockstepFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLockstepFrame {
+            frame: u64,
+            inputs: BTreeMap<PlayerId, u8>,
+        }
+
+        let raw = RawLockstepFrame::deserialize(deserializer)?;
+        LockstepFrame::new(raw.frame, raw.inputs).map_err(serde::de::Error::custom)
+    }
 }
 
 impl LockstepFrame {
@@ -2576,7 +3827,7 @@ impl LockstepFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeterministicInputJournal {
     session: LinkSessionIdentity,
@@ -2584,6 +3835,33 @@ pub struct DeterministicInputJournal {
     start_checksum: StateChecksumFrame,
     terminal_checksum: StateChecksumFrame,
     frames: Vec<LockstepFrame>,
+}
+
+impl<'de> Deserialize<'de> for DeterministicInputJournal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDeterministicInputJournal {
+            session: LinkSessionIdentity,
+            players: BTreeSet<PlayerId>,
+            start_checksum: StateChecksumFrame,
+            terminal_checksum: StateChecksumFrame,
+            frames: Vec<LockstepFrame>,
+        }
+
+        let raw = RawDeterministicInputJournal::deserialize(deserializer)?;
+        DeterministicInputJournal::new(
+            raw.session,
+            raw.players,
+            raw.start_checksum,
+            raw.terminal_checksum,
+            raw.frames,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl DeterministicInputJournal {
@@ -2611,16 +3889,16 @@ impl DeterministicInputJournal {
             .map_err(|error| InputJournalError::InvalidSession {
                 message: error.to_string(),
             })?;
-        self.start_checksum
-            .validate()
-            .map_err(|error| InputJournalError::InvalidStartChecksum {
+        self.start_checksum.validate().map_err(|error| {
+            InputJournalError::InvalidStartChecksum {
                 message: error.to_string(),
-            })?;
-        self.terminal_checksum
-            .validate()
-            .map_err(|error| InputJournalError::InvalidTerminalChecksum {
+            }
+        })?;
+        self.terminal_checksum.validate().map_err(|error| {
+            InputJournalError::InvalidTerminalChecksum {
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         if self.players.is_empty() {
             return Err(InputJournalError::InvalidFrame {
                 message: LockstepSyncError::EmptyRoster.to_string(),
@@ -2675,11 +3953,12 @@ impl DeterministicInputJournal {
                     });
                 }
             }
-            expected_frame = expected_frame
-                .checked_add(1)
-                .ok_or(InputJournalError::FrameCursorOverflow {
-                    frame: frame.frame(),
-                })?;
+            expected_frame =
+                expected_frame
+                    .checked_add(1)
+                    .ok_or(InputJournalError::FrameCursorOverflow {
+                        frame: frame.frame(),
+                    })?;
         }
         if self.terminal_checksum.frame() != expected_frame {
             return Err(InputJournalError::TerminalChecksumFrameMismatch {
@@ -2712,10 +3991,11 @@ impl DeterministicInputJournal {
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, InputJournalError> {
         self.validate()?;
-        bincode::serde::encode_to_vec(self, link_message_binary_config())
-            .map_err(|error| InputJournalError::Encode {
+        bincode::serde::encode_to_vec(self, link_message_binary_config()).map_err(|error| {
+            InputJournalError::Encode {
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     pub fn fingerprint(&self) -> Result<u32, InputJournalError> {
@@ -2731,11 +4011,33 @@ impl DeterministicInputJournal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeterministicInputJournalFrame {
     fingerprint: String,
     journal: DeterministicInputJournal,
+}
+
+impl<'de> Deserialize<'de> for DeterministicInputJournalFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDeterministicInputJournalFrame {
+            fingerprint: String,
+            journal: DeterministicInputJournal,
+        }
+
+        let raw = RawDeterministicInputJournalFrame::deserialize(deserializer)?;
+        let frame = Self {
+            fingerprint: raw.fingerprint,
+            journal: raw.journal,
+        };
+        frame.validate().map_err(serde::de::Error::custom)?;
+        Ok(frame)
+    }
 }
 
 impl DeterministicInputJournalFrame {
@@ -2772,12 +4074,308 @@ impl DeterministicInputJournalFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeterministicReplayBundle {
+    input_journal: DeterministicInputJournalFrame,
+    runtime_commands: Vec<SessionRuntimeCommandFrame>,
+    runtime_results: Vec<SessionRuntimeCommandResultFrame>,
+    menu_results: Vec<MenuChoiceResultFrame>,
+    terminal_checksum: StateChecksumFrame,
+}
+
+impl<'de> Deserialize<'de> for DeterministicReplayBundle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDeterministicReplayBundle {
+            input_journal: DeterministicInputJournalFrame,
+            runtime_commands: Vec<SessionRuntimeCommandFrame>,
+            runtime_results: Vec<SessionRuntimeCommandResultFrame>,
+            menu_results: Vec<MenuChoiceResultFrame>,
+            terminal_checksum: StateChecksumFrame,
+        }
+
+        let raw = RawDeterministicReplayBundle::deserialize(deserializer)?;
+        DeterministicReplayBundle::new(
+            raw.input_journal,
+            raw.runtime_commands,
+            raw.runtime_results,
+            raw.menu_results,
+            raw.terminal_checksum,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl DeterministicReplayBundle {
+    pub fn new(
+        input_journal: DeterministicInputJournalFrame,
+        runtime_commands: Vec<SessionRuntimeCommandFrame>,
+        runtime_results: Vec<SessionRuntimeCommandResultFrame>,
+        menu_results: Vec<MenuChoiceResultFrame>,
+        terminal_checksum: StateChecksumFrame,
+    ) -> Result<Self, InputJournalError> {
+        let bundle = Self {
+            input_journal,
+            runtime_commands,
+            runtime_results,
+            menu_results,
+            terminal_checksum,
+        };
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
+    pub fn validate(&self) -> Result<(), InputJournalError> {
+        self.input_journal.validate()?;
+        self.terminal_checksum.validate().map_err(|error| {
+            InputJournalError::InvalidTerminalChecksum {
+                message: error.to_string(),
+            }
+        })?;
+        let journal = self.input_journal.journal();
+        if self.terminal_checksum.frame() != journal.terminal_checksum().frame() {
+            return Err(InputJournalError::TerminalChecksumFrameMismatch {
+                expected: journal.terminal_checksum().frame(),
+                actual: self.terminal_checksum.frame(),
+            });
+        }
+        if self.terminal_checksum.player_id() != journal.terminal_checksum().player_id() {
+            return Err(InputJournalError::TerminalChecksumPlayerMismatch {
+                expected: journal.terminal_checksum().player_id(),
+                actual: self.terminal_checksum.player_id(),
+            });
+        }
+        if self.terminal_checksum.hash() != journal.terminal_checksum().hash() {
+            return Err(InputJournalError::TerminalChecksumHashMismatch {
+                expected: journal.terminal_checksum().hash(),
+                actual: self.terminal_checksum.hash(),
+            });
+        }
+        let start = journal.start_checksum().frame();
+        let terminal = journal.terminal_checksum().frame();
+        for command in &self.runtime_commands {
+            command
+                .validate()
+                .map_err(|error| InputJournalError::InvalidRuntimeCommand {
+                    sequence: command.command().sequence(),
+                    message: error.to_string(),
+                })?;
+            if !link_session_identity_matches(command.session(), journal.session()) {
+                return Err(InputJournalError::RuntimeCommandSessionMismatch {
+                    sequence: command.command().sequence(),
+                });
+            }
+            let frame = command.command().expected_state().frame();
+            if frame < start || frame > terminal {
+                return Err(InputJournalError::RuntimeCommandFrameOutsideJournal {
+                    sequence: command.command().sequence(),
+                    frame,
+                    start,
+                    terminal,
+                });
+            }
+        }
+        for result in &self.runtime_results {
+            result
+                .validate()
+                .map_err(|error| InputJournalError::InvalidRuntimeCommandResult {
+                    sequence: result.result().request().sequence(),
+                    message: error.to_string(),
+                })?;
+            if !link_session_identity_matches(result.session(), journal.session()) {
+                return Err(InputJournalError::RuntimeCommandResultSessionMismatch {
+                    sequence: result.result().request().sequence(),
+                });
+            }
+            let frame = result.result().checksum().frame();
+            if frame < start || frame > terminal {
+                return Err(InputJournalError::RuntimeCommandResultFrameOutsideJournal {
+                    sequence: result.result().request().sequence(),
+                    frame,
+                    start,
+                    terminal,
+                });
+            }
+        }
+        for result in &self.menu_results {
+            result
+                .validate()
+                .map_err(|error| InputJournalError::InvalidMenuChoiceResult {
+                    menu_id: result.choice().menu_id().to_string(),
+                    option_index: result.choice().option_index(),
+                    message: error.to_string(),
+                })?;
+            let choice_frame = result.choice().frame();
+            if choice_frame < start || choice_frame > terminal {
+                return Err(InputJournalError::MenuChoiceFrameOutsideJournal {
+                    menu_id: result.choice().menu_id().to_string(),
+                    option_index: result.choice().option_index(),
+                    frame: choice_frame,
+                    start,
+                    terminal,
+                });
+            }
+            let checksum_frame = result.checksum().frame();
+            if checksum_frame < start || checksum_frame > terminal {
+                return Err(InputJournalError::MenuChoiceFrameOutsideJournal {
+                    menu_id: result.choice().menu_id().to_string(),
+                    option_index: result.choice().option_index(),
+                    frame: checksum_frame,
+                    start,
+                    terminal,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn input_journal(&self) -> &DeterministicInputJournalFrame {
+        &self.input_journal
+    }
+
+    pub fn runtime_commands(&self) -> &[SessionRuntimeCommandFrame] {
+        &self.runtime_commands
+    }
+
+    pub fn runtime_results(&self) -> &[SessionRuntimeCommandResultFrame] {
+        &self.runtime_results
+    }
+
+    pub fn menu_results(&self) -> &[MenuChoiceResultFrame] {
+        &self.menu_results
+    }
+
+    pub fn terminal_checksum(&self) -> &StateChecksumFrame {
+        &self.terminal_checksum
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveResumeReplayBundle {
+    checkpoint: SessionSaveCheckpointFrame,
+    replay: DeterministicReplayBundle,
+}
+
+impl<'de> Deserialize<'de> for SaveResumeReplayBundle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveResumeReplayBundle {
+            checkpoint: SessionSaveCheckpointFrame,
+            replay: DeterministicReplayBundle,
+        }
+
+        let raw = RawSaveResumeReplayBundle::deserialize(deserializer)?;
+        SaveResumeReplayBundle::new(raw.checkpoint, raw.replay).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SaveResumeReplayBundle {
+    pub fn new(
+        checkpoint: SessionSaveCheckpointFrame,
+        replay: DeterministicReplayBundle,
+    ) -> Result<Self, InputJournalError> {
+        let bundle = Self { checkpoint, replay };
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
+    pub fn validate(&self) -> Result<(), InputJournalError> {
+        self.checkpoint
+            .validate()
+            .map_err(|error| InputJournalError::InvalidSaveCheckpoint {
+                message: error.to_string(),
+            })?;
+        self.replay.validate()?;
+        let journal = self.replay.input_journal().journal();
+        if !link_session_identity_matches(self.checkpoint.session(), journal.session()) {
+            return Err(InputJournalError::SaveReplaySessionMismatch);
+        }
+        let checkpoint = self.checkpoint.checkpoint().checksum();
+        let start = journal.start_checksum();
+        if checkpoint.frame() != start.frame() {
+            return Err(InputJournalError::SaveReplayStartFrameMismatch {
+                checkpoint_frame: checkpoint.frame(),
+                journal_frame: start.frame(),
+            });
+        }
+        if checkpoint.player_id() != start.player_id() {
+            return Err(InputJournalError::SaveReplayStartPlayerMismatch {
+                checkpoint_player_id: checkpoint.player_id(),
+                journal_player_id: start.player_id(),
+            });
+        }
+        if checkpoint.hash() != start.hash() {
+            return Err(InputJournalError::SaveReplayStartHashMismatch {
+                checkpoint_hash: checkpoint.hash(),
+                journal_hash: start.hash(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        checkpoint: SessionSaveCheckpointFrame,
+        replay: DeterministicReplayBundle,
+    ) -> Self {
+        Self { checkpoint, replay }
+    }
+
+    pub const fn checkpoint(&self) -> &SessionSaveCheckpointFrame {
+        &self.checkpoint
+    }
+
+    pub const fn replay(&self) -> &DeterministicReplayBundle {
+        &self.replay
+    }
+}
+
+fn link_session_identity_matches(
+    expected: &LinkSessionIdentity,
+    actual: &LinkSessionIdentity,
+) -> bool {
+    expected.protocol_version() == actual.protocol_version()
+        && expected.session_id() == actual.session_id()
+        && expected.modpack().id() == actual.modpack().id()
+        && expected.modpack().hash() == actual.modpack().hash()
+        && expected.pack_content_hash() == actual.pack_content_hash()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleActionTurn {
     turn: u64,
     actions: BTreeMap<PlayerId, BattleAction>,
     state_hashes: BTreeMap<PlayerId, String>,
+}
+
+impl<'de> Deserialize<'de> for BattleActionTurn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleActionTurn {
+            turn: u64,
+            actions: BTreeMap<PlayerId, BattleAction>,
+            state_hashes: BTreeMap<PlayerId, String>,
+        }
+
+        let raw = RawBattleActionTurn::deserialize(deserializer)?;
+        BattleActionTurn::new(raw.turn, raw.actions, raw.state_hashes)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl BattleActionTurn {
@@ -2949,10 +4547,7 @@ impl BattleActionSyncBuffer {
             return None;
         }
         let state_hashes = self.state_hashes.get(&turn)?.clone();
-        Some(
-            BattleActionTurn::new(turn, self.actions.get(&turn)?.clone(), state_hashes)
-                .expect("battle action buffer stores validated state hashes"),
-        )
+        BattleActionTurn::new(turn, self.actions.get(&turn)?.clone(), state_hashes).ok()
     }
 
     pub fn next_ready_turn(&self, after_turn: u64) -> Option<BattleActionTurn> {
@@ -3053,10 +4648,7 @@ impl LockstepBuffer {
         if !self.is_frame_ready(frame) {
             return None;
         }
-        Some(
-            LockstepFrame::new(frame, self.inputs.get(&frame)?.clone())
-                .expect("lockstep buffer stores validated input masks"),
-        )
+        LockstepFrame::new(frame, self.inputs.get(&frame)?.clone()).ok()
     }
 
     pub fn next_ready_frame(&self, after_frame: u64) -> Option<LockstepFrame> {
@@ -3136,13 +4728,39 @@ fn validate_lockstep_roster_identities(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeterministicLockstep {
     local_player_id: PlayerId,
     players: BTreeSet<PlayerId>,
     next_frame: u64,
     previous_local_joypad_mask: u8,
+}
+
+impl<'de> Deserialize<'de> for DeterministicLockstep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDeterministicLockstep {
+            local_player_id: PlayerId,
+            players: BTreeSet<PlayerId>,
+            next_frame: u64,
+            previous_local_joypad_mask: u8,
+        }
+
+        let raw = RawDeterministicLockstep::deserialize(deserializer)?;
+        let lockstep = Self {
+            local_player_id: raw.local_player_id,
+            players: raw.players,
+            next_frame: raw.next_frame,
+            previous_local_joypad_mask: raw.previous_local_joypad_mask,
+        };
+        lockstep.validate().map_err(serde::de::Error::custom)?;
+        Ok(lockstep)
+    }
 }
 
 impl DeterministicLockstep {
@@ -3331,7 +4949,7 @@ impl AppliedLockstepFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LinkMessage {
     Hello(LinkHello),
@@ -3342,7 +4960,13 @@ pub enum LinkMessage {
     LinkByte(LinkByteFrame),
     LinkClockSync(LinkClockSyncFrame),
     Input(PlayerInputFrame),
+    MenuChoice(MenuChoiceFrame),
+    MenuChoiceResult(MenuChoiceResultFrame),
     InputJournal(DeterministicInputJournalFrame),
+    DeterministicReplay(DeterministicReplayBundle),
+    SaveResumeReplay(SaveResumeReplayBundle),
+    SaveSummary(SaveGameSummary),
+    SaveCheckpoint(SaveCheckpointFrame),
     StateHash(StateChecksumFrame),
     CommandChecksum(CommandChecksumResult),
     RuntimeCommand(RuntimeCommandFrame),
@@ -3351,6 +4975,74 @@ pub enum LinkMessage {
     InteractionRequest(MultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
     Disconnect { player_id: PlayerId, reason: String },
+}
+
+impl<'de> Deserialize<'de> for LinkMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+        enum RawLinkMessage {
+            Hello(LinkHello),
+            RngInit { state: BattleRngState },
+            BattleAction(BattleActionFrame),
+            TradeOffer(TradeOffer),
+            TradeConfirmation(TradeConfirmation),
+            LinkByte(LinkByteFrame),
+            LinkClockSync(LinkClockSyncFrame),
+            Input(PlayerInputFrame),
+            MenuChoice(MenuChoiceFrame),
+            MenuChoiceResult(MenuChoiceResultFrame),
+            InputJournal(DeterministicInputJournalFrame),
+            DeterministicReplay(DeterministicReplayBundle),
+            SaveResumeReplay(SaveResumeReplayBundle),
+            SaveSummary(SaveGameSummary),
+            SaveCheckpoint(SaveCheckpointFrame),
+            StateHash(StateChecksumFrame),
+            CommandChecksum(CommandChecksumResult),
+            RuntimeCommand(RuntimeCommandFrame),
+            RuntimeCommandResult(RuntimeCommandResultFrame),
+            Presence(OverworldPresence),
+            InteractionRequest(MultiplayerInteractionRequest),
+            InteractionResponse(MultiplayerInteractionResponse),
+            Disconnect { player_id: PlayerId, reason: String },
+        }
+
+        let raw = RawLinkMessage::deserialize(deserializer)?;
+        let message = match raw {
+            RawLinkMessage::Hello(hello) => Self::Hello(hello),
+            RawLinkMessage::RngInit { state } => Self::RngInit { state },
+            RawLinkMessage::BattleAction(action) => Self::BattleAction(action),
+            RawLinkMessage::TradeOffer(offer) => Self::TradeOffer(offer),
+            RawLinkMessage::TradeConfirmation(confirmation) => {
+                Self::TradeConfirmation(confirmation)
+            }
+            RawLinkMessage::LinkByte(frame) => Self::LinkByte(frame),
+            RawLinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame),
+            RawLinkMessage::Input(input) => Self::Input(input),
+            RawLinkMessage::MenuChoice(choice) => Self::MenuChoice(choice),
+            RawLinkMessage::MenuChoiceResult(result) => Self::MenuChoiceResult(result),
+            RawLinkMessage::InputJournal(journal) => Self::InputJournal(journal),
+            RawLinkMessage::DeterministicReplay(bundle) => Self::DeterministicReplay(bundle),
+            RawLinkMessage::SaveResumeReplay(bundle) => Self::SaveResumeReplay(bundle),
+            RawLinkMessage::SaveSummary(summary) => Self::SaveSummary(summary),
+            RawLinkMessage::SaveCheckpoint(checkpoint) => Self::SaveCheckpoint(checkpoint),
+            RawLinkMessage::StateHash(frame) => Self::StateHash(frame),
+            RawLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result),
+            RawLinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command),
+            RawLinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result),
+            RawLinkMessage::Presence(presence) => Self::Presence(presence),
+            RawLinkMessage::InteractionRequest(request) => Self::InteractionRequest(request),
+            RawLinkMessage::InteractionResponse(response) => Self::InteractionResponse(response),
+            RawLinkMessage::Disconnect { player_id, reason } => {
+                Self::Disconnect { player_id, reason }
+            }
+        };
+        message.validate().map_err(serde::de::Error::custom)?;
+        Ok(message)
+    }
 }
 
 impl LinkMessage {
@@ -3402,7 +5094,41 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::MenuChoice(choice) => choice.validate(),
+            Self::MenuChoiceResult(result) => {
+                result
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
+                        message: error.to_string(),
+                    })
+            }
             Self::InputJournal(journal_frame) => journal_frame.validate().map_err(|error| {
+                MultiplayerMessageError::InvalidLockstepFrame {
+                    message: error.to_string(),
+                }
+            }),
+            Self::DeterministicReplay(bundle) => {
+                bundle
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
+                        message: error.to_string(),
+                    })
+            }
+            Self::SaveResumeReplay(bundle) => {
+                bundle
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLockstepFrame {
+                        message: error.to_string(),
+                    })
+            }
+            Self::SaveSummary(summary) => {
+                summary
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
+                        message: error.to_string(),
+                    })
+            }
+            Self::SaveCheckpoint(checkpoint) => checkpoint.validate().map_err(|error| {
                 MultiplayerMessageError::InvalidLockstepFrame {
                     message: error.to_string(),
                 }
@@ -3487,27 +5213,28 @@ pub fn decode_link_message_bytes(bytes: &[u8]) -> Result<LinkMessage, Multiplaye
     {
         return Err(MultiplayerMessageError::InvalidBinaryMagic);
     }
-    let version = u16::from_be_bytes(
-        bytes[LINK_MESSAGE_VERSION_OFFSET..LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET]
-            .try_into()
-            .expect("version slice length"),
-    );
+    let version = u16::from_be_bytes([
+        bytes[LINK_MESSAGE_VERSION_OFFSET],
+        bytes[LINK_MESSAGE_VERSION_OFFSET + 1],
+    ]);
     if version != LINK_PROTOCOL_VERSION {
         return Err(MultiplayerMessageError::BinaryVersionMismatch {
             expected: LINK_PROTOCOL_VERSION,
             actual: version,
         });
     }
-    let expected_len = u32::from_be_bytes(
-        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET..LINK_MESSAGE_PAYLOAD_HASH_OFFSET]
-            .try_into()
-            .expect("length slice length"),
-    ) as usize;
-    let expected_hash = u32::from_be_bytes(
-        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET..LINK_MESSAGE_HEADER_LEN]
-            .try_into()
-            .expect("hash slice length"),
-    );
+    let expected_len = u32::from_be_bytes([
+        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET],
+        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET + 1],
+        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET + 2],
+        bytes[LINK_MESSAGE_PAYLOAD_LENGTH_OFFSET + 3],
+    ]) as usize;
+    let expected_hash = u32::from_be_bytes([
+        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET],
+        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET + 1],
+        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET + 2],
+        bytes[LINK_MESSAGE_PAYLOAD_HASH_OFFSET + 3],
+    ]);
     let payload = &bytes[LINK_MESSAGE_HEADER_LEN..];
     if payload.len() != expected_len {
         return Err(MultiplayerMessageError::BinaryLengthMismatch {
@@ -3615,6 +5342,25 @@ mod tests {
         PlayerIdentity::new(id, format!("P{id}")).expect("player")
     }
 
+    fn save_summary(
+        modpack: SaveModpackIdentity,
+        pack_content_hash: &str,
+        frame: u64,
+    ) -> SaveGameSummary {
+        serde_json::from_value(serde_json::json!({
+            "format_version": crate::save::SAVE_FORMAT_VERSION,
+            "modpack": {
+                "id": modpack.id(),
+                "hash": modpack.hash()
+            },
+            "pack_content_hash": pack_content_hash,
+            "created_frame": frame,
+            "saved_frame": frame,
+            "state_frame": frame
+        }))
+        .expect("save summary")
+    }
+
     fn confirmation(trade_id: &str, player_id: PlayerId, confirm: bool) -> TradeConfirmation {
         TradeConfirmation::new(trade_id, player_id, confirm).expect("trade confirmation")
     }
@@ -3653,16 +5399,102 @@ mod tests {
     }
 
     #[test]
+    fn link_messages_serialize_exact_menu_choices_as_transport_neutral_payloads() {
+        let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
+        let message = LinkMessage::MenuChoice(choice.clone());
+        let json = serde_json::to_string(&message).expect("serialize menu choice");
+
+        assert_eq!(
+            json,
+            r#"{"type":"menu_choice","player_id":2,"frame":144,"menu_id":"RuntimeMenu","option_index":1,"verticalmenu_command_index":4}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize menu choice"),
+            message
+        );
+        assert_eq!(choice.player_id(), 2);
+        assert_eq!(choice.frame(), 144);
+        assert_eq!(choice.menu_id(), "RuntimeMenu");
+        assert_eq!(choice.option_index(), 1);
+        assert_eq!(choice.verticalmenu_command_index(), 4);
+        assert_eq!(message.validate(), Ok(()));
+        assert_eq!(
+            MenuChoiceFrame::new(0, Frame(144), "RuntimeMenu", 1, 4),
+            Err(MultiplayerMessageError::InvalidPlayerIdentity { player_id: 0 })
+        );
+        assert_eq!(
+            MenuChoiceFrame::new(2, Frame(0), "RuntimeMenu", 1, 4),
+            Err(MultiplayerMessageError::InvalidFrame {
+                field: "menu_choice.frame",
+                frame: 0
+            })
+        );
+        assert_eq!(
+            MenuChoiceFrame::new(2, Frame(144), "Runtime Menu", 1, 4),
+            Err(MultiplayerMessageError::InvalidText {
+                field: "menu_choice.menu_id"
+            })
+        );
+    }
+
+    #[test]
+    fn link_messages_serialize_menu_choice_results_with_state_checksum() {
+        let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
+        let result = MenuChoiceResultFrame::new(
+            choice.clone(),
+            StateChecksumFrame::new(2, Frame(145), 0xaabb_ccdd),
+            "2",
+        )
+        .expect("menu choice result");
+        let message = LinkMessage::MenuChoiceResult(result.clone());
+        let json = serde_json::to_string(&message).expect("serialize menu choice result");
+
+        assert!(json.contains(r#""type":"menu_choice_result""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize menu choice result"),
+            message
+        );
+        assert_eq!(result.choice(), &choice);
+        assert_eq!(result.checksum().player_id(), 2);
+        assert_eq!(result.checksum().frame(), 145);
+        assert_eq!(result.script_value(), "2");
+        assert_eq!(message.validate(), Ok(()));
+        assert_eq!(
+            MenuChoiceResultFrame::new(
+                choice.clone(),
+                StateChecksumFrame::new(3, Frame(145), 0xaabb_ccdd),
+                "2",
+            ),
+            Err(MenuChoiceResultFrameError::PlayerChecksumMismatch {
+                choice_player_id: 2,
+                checksum_player_id: 3
+            })
+        );
+        assert_eq!(
+            MenuChoiceResultFrame::new(
+                choice,
+                StateChecksumFrame::new(2, Frame(143), 0xaabb_ccdd),
+                "2",
+            ),
+            Err(MenuChoiceResultFrameError::ResultBeforeChoice {
+                choice_frame: 144,
+                checksum_frame: 143
+            })
+        );
+    }
+
+    #[test]
     fn link_messages_serialize_input_journals_as_transport_neutral_payloads() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let journal = DeterministicInputJournal::new(
             session,
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
-            vec![LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)]))
-                .expect("lockstep frame")],
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)]))
+                    .expect("lockstep frame"),
+            ],
         )
         .expect("journal");
         let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
@@ -3871,6 +5703,482 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_frames_can_be_bound_to_exact_link_session_identity() {
+        let session =
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
+            .expect("runtime payload");
+        let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(144, 0xaabb_ccdd))
+            .expect("runtime command");
+        let bound_command = SessionRuntimeCommandFrame::new(session.clone(), command.clone())
+            .expect("bound command");
+
+        assert_eq!(bound_command.session(), &session);
+        assert_eq!(bound_command.command(), &command);
+        let json = serde_json::to_string(&bound_command).expect("serialize bound command");
+        assert!(json.contains(r#""session_id":"session-1""#));
+        assert!(json.contains(r#""pack_content_hash":"1234abcd""#));
+        assert_eq!(
+            serde_json::from_str::<SessionRuntimeCommandFrame>(&json)
+                .expect("deserialize bound command"),
+            bound_command
+        );
+
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionRuntimeCommandFrame::new_unchecked_for_tests(invalid_session, command);
+        assert!(matches!(
+            invalid_bound.validate(),
+            Err(RuntimeCommandFrameError::InvalidSession { .. })
+        ));
+    }
+
+    #[test]
+    fn runtime_command_result_frames_can_be_bound_to_exact_link_session_identity() {
+        let session =
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
+            .expect("runtime payload");
+        let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(144, 0xaabb_ccdd))
+            .expect("runtime command");
+        let result = RuntimeCommandResultFrame::new(
+            command.clone(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbcc_ddee),
+            "ok",
+        )
+        .expect("runtime command result");
+        let bound_result = SessionRuntimeCommandResultFrame::new(session.clone(), result.clone())
+            .expect("bound result");
+
+        assert_eq!(bound_result.session(), &session);
+        assert_eq!(bound_result.result(), &result);
+        let json = serde_json::to_string(&bound_result).expect("serialize bound result");
+        assert!(json.contains(r#""session_id":"session-1""#));
+        assert!(json.contains(r#""result_tag":"ok""#));
+        assert_eq!(
+            serde_json::from_str::<SessionRuntimeCommandResultFrame>(&json)
+                .expect("deserialize bound result"),
+            bound_result
+        );
+
+        let invalid_result = RuntimeCommandResultFrame::new_unchecked_for_tests(
+            command,
+            StateChecksumFrame::new(3, Frame(145), 0xbbcc_ddee),
+            "ok",
+        );
+        let invalid_bound =
+            SessionRuntimeCommandResultFrame::new_unchecked_for_tests(session, invalid_result);
+        assert!(matches!(
+            invalid_bound.validate(),
+            Err(RuntimeCommandFrameError::PlayerChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn save_summaries_can_be_bound_to_exact_link_session_identity() {
+        let modpack = modpack("core-modular", "1234abcd");
+        let session = session("session-1", modpack.clone()).expect("session identity");
+        let summary = save_summary(modpack, pack_content_hash(), 144);
+        let bound =
+            SessionSaveSummaryFrame::new(session.clone(), summary.clone()).expect("bound summary");
+
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.summary(), &summary);
+        let json = serde_json::to_string(&bound).expect("serialize bound summary");
+        assert!(json.contains(r#""session_id":"session-1""#));
+        assert!(json.contains(r#""saved_frame":144"#));
+        assert_eq!(
+            serde_json::from_str::<SessionSaveSummaryFrame>(&json)
+                .expect("deserialize bound summary"),
+            bound
+        );
+        assert_eq!(LinkMessage::SaveSummary(summary).validate(), Ok(()));
+
+        let other_summary = save_summary(
+            SaveModpackIdentity::new("core-modular", "ffffffff").expect("other identity"),
+            pack_content_hash(),
+            144,
+        );
+        let invalid = SessionSaveSummaryFrame::new_unchecked_for_tests(session, other_summary);
+        assert!(matches!(
+            invalid.validate(),
+            Err(SessionSaveSummaryFrameError::ModpackHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn save_checkpoints_bind_summary_to_state_checksum_and_session() {
+        let modpack = modpack("core-modular", "1234abcd");
+        let session = session("session-1", modpack.clone()).expect("session identity");
+        let summary = save_summary(modpack, pack_content_hash(), 144);
+        let checksum = StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd);
+        let checkpoint =
+            SaveCheckpointFrame::new(summary.clone(), checksum.clone()).expect("checkpoint");
+        let bound = SessionSaveCheckpointFrame::new(session.clone(), checkpoint.clone())
+            .expect("bound checkpoint");
+
+        assert_eq!(checkpoint.summary(), &summary);
+        assert_eq!(checkpoint.checksum(), &checksum);
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.checkpoint(), &checkpoint);
+        assert_eq!(
+            LinkMessage::SaveCheckpoint(checkpoint.clone()).validate(),
+            Ok(())
+        );
+        assert_eq!(checkpoint.validate_for_players([1, 2]), Ok(()));
+        let mut lobby = LinkLobby::new(session.clone(), player(1)).expect("lobby");
+        lobby
+            .accept_hello(LinkHello::from_session(session.clone(), player(2)).expect("hello"))
+            .expect("accept checkpoint player");
+        assert_eq!(lobby.validate_save_checkpoint(&checkpoint), Ok(()));
+        assert_eq!(
+            checkpoint.validate_for_players([1]),
+            Err(SaveCheckpointFrameError::UnknownPlayer { player_id: 2 })
+        );
+
+        let wrong_frame = SaveCheckpointFrame::new_unchecked_for_tests(
+            summary,
+            StateChecksumFrame::new(2, Frame(145), 0xaabb_ccdd),
+        );
+        assert_eq!(
+            wrong_frame.validate(),
+            Err(SaveCheckpointFrameError::FrameMismatch {
+                summary_frame: 144,
+                checksum_frame: 145,
+            })
+        );
+    }
+
+    #[test]
+    fn deterministic_replay_bundle_binds_journal_commands_results_and_terminal_checksum() {
+        let session =
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let journal = DeterministicInputJournal::new(
+            session.clone(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+                LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
+            .expect("runtime payload");
+        let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(5, 0xaabb_ccdd))
+            .expect("runtime command");
+        let bound_command = SessionRuntimeCommandFrame::new(session.clone(), command.clone())
+            .expect("bound command");
+        let result = RuntimeCommandResultFrame::new(
+            command,
+            StateChecksumFrame::new(2, Frame(6), 0xbbcc_ddee),
+            "ok",
+        )
+        .expect("runtime result");
+        let bound_result =
+            SessionRuntimeCommandResultFrame::new(session, result).expect("bound result");
+        let menu_result = MenuChoiceResultFrame::new(
+            MenuChoiceFrame::new(1, Frame(5), "RuntimeMenu", 1, 4).expect("menu choice"),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            "2",
+        )
+        .expect("menu result");
+        let bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            vec![bound_command.clone()],
+            vec![bound_result.clone()],
+            vec![menu_result.clone()],
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay bundle");
+
+        assert_eq!(bundle.input_journal(), &journal_frame);
+        assert_eq!(bundle.runtime_commands(), &[bound_command]);
+        assert_eq!(bundle.runtime_results(), &[bound_result]);
+        assert_eq!(bundle.menu_results(), &[menu_result]);
+        assert_eq!(
+            bundle.terminal_checksum(),
+            journal_frame.journal().terminal_checksum()
+        );
+        let json = serde_json::to_string(&bundle).expect("serialize bundle");
+        assert!(json.contains(r#""input_journal""#));
+        assert!(json.contains(r#""runtime_commands""#));
+        assert_eq!(
+            serde_json::from_str::<DeterministicReplayBundle>(&json).expect("deserialize bundle"),
+            bundle
+        );
+    }
+
+    #[test]
+    fn save_resume_replay_binds_checkpoint_to_journal_start_state() {
+        let modpack = modpack("core-modular", "1234abcd");
+        let session = session("session-1", modpack.clone()).expect("session identity");
+        let checkpoint = SessionSaveCheckpointFrame::new(
+            session.clone(),
+            SaveCheckpointFrame::new(
+                save_summary(modpack, pack_content_hash(), 4),
+                StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            )
+            .expect("checkpoint"),
+        )
+        .expect("session checkpoint");
+        let journal = DeterministicInputJournal::new(
+            session.clone(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+                LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let replay = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay");
+        let resume =
+            SaveResumeReplayBundle::new(checkpoint.clone(), replay.clone()).expect("resume replay");
+
+        assert_eq!(resume.checkpoint(), &checkpoint);
+        assert_eq!(resume.replay(), &replay);
+        assert_eq!(LinkMessage::SaveResumeReplay(resume).validate(), Ok(()));
+    }
+
+    #[test]
+    fn save_resume_replay_rejects_session_and_start_checksum_mismatches() {
+        let modpack = modpack("core-modular", "1234abcd");
+        let session = session("session-1", modpack.clone()).expect("session identity");
+        let other_session = session("session-2", modpack.clone()).expect("other session");
+        let checkpoint = SessionSaveCheckpointFrame::new(
+            session.clone(),
+            SaveCheckpointFrame::new(
+                save_summary(modpack.clone(), pack_content_hash(), 4),
+                StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            )
+            .expect("checkpoint"),
+        )
+        .expect("session checkpoint");
+        let journal = DeterministicInputJournal::new(
+            session.clone(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
+            vec![LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4")],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let replay = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        )
+        .expect("replay");
+
+        let wrong_session_checkpoint =
+            SessionSaveCheckpointFrame::new(other_session, checkpoint.checkpoint().clone())
+                .expect("wrong session checkpoint");
+        assert_eq!(
+            SaveResumeReplayBundle::new(wrong_session_checkpoint, replay.clone()),
+            Err(InputJournalError::SaveReplaySessionMismatch)
+        );
+
+        let wrong_hash_checkpoint = SessionSaveCheckpointFrame::new(
+            session.clone(),
+            SaveCheckpointFrame::new(
+                save_summary(modpack.clone(), pack_content_hash(), 4),
+                StateChecksumFrame::new(1, Frame(4), 0xdddd_ccbb),
+            )
+            .expect("wrong hash checkpoint"),
+        )
+        .expect("wrong hash session checkpoint");
+        assert_eq!(
+            SaveResumeReplayBundle::new(wrong_hash_checkpoint, replay.clone()),
+            Err(InputJournalError::SaveReplayStartHashMismatch {
+                checkpoint_hash: 0xdddd_ccbb,
+                journal_hash: 0xaabb_ccdd,
+            })
+        );
+
+        let wrong_player_checkpoint = SessionSaveCheckpointFrame::new(
+            session,
+            SaveCheckpointFrame::new(
+                save_summary(modpack, pack_content_hash(), 4),
+                StateChecksumFrame::new(2, Frame(4), 0xaabb_ccdd),
+            )
+            .expect("wrong player checkpoint"),
+        )
+        .expect("wrong player session checkpoint");
+        assert_eq!(
+            SaveResumeReplayBundle::new(wrong_player_checkpoint, replay),
+            Err(InputJournalError::SaveReplayStartPlayerMismatch {
+                checkpoint_player_id: 2,
+                journal_player_id: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn deterministic_replay_bundle_rejects_wrong_session_and_out_of_range_commands() {
+        let session =
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let other_session =
+            session("session-2", modpack("core-modular", "1234abcd")).expect("other session");
+        let journal = DeterministicInputJournal::new(
+            session.clone(),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+                LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
+            .expect("runtime payload");
+        let command_before =
+            RuntimeCommandFrame::new(2, 7, payload.clone(), StateChecksum::new(3, 0xaabb_ccdd))
+                .expect("runtime command");
+        let wrong_session_command =
+            SessionRuntimeCommandFrame::new(other_session, command_before.clone())
+                .expect("bound command");
+        let wrong_session_bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            vec![wrong_session_command],
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        );
+
+        assert_eq!(
+            wrong_session_bundle,
+            Err(InputJournalError::RuntimeCommandSessionMismatch { sequence: 7 })
+        );
+
+        let out_of_range_command =
+            SessionRuntimeCommandFrame::new(session, command_before).expect("bound command");
+        let out_of_range_bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            vec![out_of_range_command],
+            Vec::new(),
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        );
+
+        assert_eq!(
+            out_of_range_bundle,
+            Err(InputJournalError::RuntimeCommandFrameOutsideJournal {
+                sequence: 7,
+                frame: 3,
+                start: 4,
+                terminal: 6,
+            })
+        );
+
+        let out_of_range_menu = MenuChoiceResultFrame::new(
+            MenuChoiceFrame::new(1, Frame(3), "RuntimeMenu", 1, 4).expect("menu choice"),
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            "2",
+        )
+        .expect("menu result");
+        let out_of_range_menu_bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            Vec::new(),
+            vec![out_of_range_menu],
+            journal_frame.journal().terminal_checksum().clone(),
+        );
+
+        assert_eq!(
+            out_of_range_menu_bundle,
+            Err(InputJournalError::MenuChoiceFrameOutsideJournal {
+                menu_id: "RuntimeMenu".to_string(),
+                option_index: 1,
+                frame: 3,
+                start: 4,
+                terminal: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn deterministic_replay_bundle_rejects_terminal_checksum_hash_mismatch() {
+        let session =
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let journal = DeterministicInputJournal::new(
+            session,
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+                LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let bundle = DeterministicReplayBundle::new(
+            journal_frame,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            StateChecksumFrame::new(1, Frame(6), 0xcccc_dddd),
+        );
+
+        assert_eq!(
+            bundle,
+            Err(InputJournalError::TerminalChecksumHashMismatch {
+                expected: 0xbbcc_ddee,
+                actual: 0xcccc_dddd,
+            })
+        );
+
+        let journal = DeterministicInputJournal::new(
+            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity"),
+            [1, 2],
+            StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
+            StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
+            vec![
+                LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
+                LockstepFrame::new(5, BTreeMap::from([(1, 0x00), (2, 0x80)])).expect("frame 5"),
+            ],
+        )
+        .expect("journal");
+        let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
+        let bundle = DeterministicReplayBundle::new(
+            journal_frame,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            StateChecksumFrame::new(2, Frame(6), 0xbbcc_ddee),
+        );
+
+        assert_eq!(
+            bundle,
+            Err(InputJournalError::TerminalChecksumPlayerMismatch {
+                expected: 1,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
     fn game_state_checksum_uses_authoritative_serialized_state() {
         let mut state = crate::state::GameState::default();
         state.frame_counter = 144;
@@ -3973,8 +6281,8 @@ mod tests {
 
     #[test]
     fn hello_message_carries_protocol_and_exact_modpack_identity() {
-        let hello = hello("session-1", modpack("core-modular", "1234abcd"), player(1))
-            .expect("hello");
+        let hello =
+            hello("session-1", modpack("core-modular", "1234abcd"), player(1)).expect("hello");
         let message = LinkMessage::Hello(hello.clone());
         let json = serde_json::to_string(&message).expect("serialize hello");
 
@@ -3986,6 +6294,55 @@ mod tests {
             message
         );
         assert_eq!(hello.session().modpack().id(), "core-modular");
+    }
+
+    #[test]
+    fn hello_json_deserialization_validates_exact_handshake_identity() {
+        let invalid_player = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "hello",
+            "session": {
+                "protocol_version": 1,
+                "session_id": "session-1",
+                "modpack": {
+                    "id": "core-modular",
+                    "hash": "1234abcd"
+                },
+                "pack_content_hash": "01020304"
+            },
+            "player": {
+                "id": 0,
+                "display_name": "P1"
+            }
+        }))
+        .expect_err("hello JSON must validate player identity during decode")
+        .to_string();
+        assert!(
+            invalid_player.contains("not a valid link identity"),
+            "{invalid_player}"
+        );
+
+        let invalid_session = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "hello",
+            "session": {
+                "protocol_version": 1,
+                "session_id": " legacy-session",
+                "modpack": {
+                    "id": "core-modular",
+                    "hash": "1234abcd"
+                },
+                "pack_content_hash": "01020304"
+            },
+            "player": {
+                "id": 1,
+                "display_name": "P1"
+            }
+        }))
+        .expect_err("hello JSON must validate session identity during decode")
+        .to_string();
+        assert!(
+            invalid_session.contains("link session id"),
+            "{invalid_session}"
+        );
     }
 
     #[test]
@@ -4075,16 +6432,14 @@ mod tests {
 
     #[test]
     fn link_handshake_requires_exact_session_protocol_and_modpack_identity() {
-        let local = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("local");
-        let matching = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-            .expect("matching");
+        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
+        let matching =
+            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("matching");
 
         validate_link_hello(&local, &matching).expect("matching hello");
 
-        let wrong_session =
-            hello("session-2", modpack("core-modular", "1234abcd"), player(2))
-                .expect("wrong session");
+        let wrong_session = hello("session-2", modpack("core-modular", "1234abcd"), player(2))
+            .expect("wrong session");
         assert_eq!(
             validate_link_hello(&local, &wrong_session),
             Err(LinkHandshakeError::SessionMismatch {
@@ -4094,8 +6449,7 @@ mod tests {
         );
 
         let wrong_hash =
-            hello("session-1", modpack("core-modular", "ffffffff"), player(2))
-                .expect("wrong hash");
+            hello("session-1", modpack("core-modular", "ffffffff"), player(2)).expect("wrong hash");
         assert_eq!(
             validate_link_hello(&local, &wrong_hash),
             Err(LinkHandshakeError::ModpackHashMismatch {
@@ -4105,12 +6459,8 @@ mod tests {
         );
 
         let wrong_content_hash = LinkHello::from_session(
-            LinkSessionIdentity::new(
-                "session-1",
-                modpack("core-modular", "1234abcd"),
-                "ffffffff",
-            )
-            .expect("wrong content hash session"),
+            LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"), "ffffffff")
+                .expect("wrong content hash session"),
             player(2),
         )
         .expect("wrong content hash");
@@ -4122,9 +6472,8 @@ mod tests {
             })
         );
 
-        let case_changed =
-            hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
-                .expect("case changed");
+        let case_changed = hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
+            .expect("case changed");
         assert_eq!(
             validate_link_hello(&local, &case_changed),
             Err(LinkHandshakeError::ModpackIdMismatch {
@@ -4145,10 +6494,8 @@ mod tests {
 
     #[test]
     fn link_session_identity_validation_owns_protocol_and_modpack_comparison() {
-        let local = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("local");
-        let matching = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("matching");
+        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
+        let matching = session("session-1", modpack("core-modular", "1234abcd")).expect("matching");
         validate_link_session_identity(&local, &matching).expect("matching session");
 
         let protocol_drift = LinkSessionIdentity::new_unchecked_for_tests(
@@ -4165,8 +6512,8 @@ mod tests {
             })
         );
 
-        let other_pack = session("session-1", modpack("other-pack", "1234abcd"))
-            .expect("other pack");
+        let other_pack =
+            session("session-1", modpack("other-pack", "1234abcd")).expect("other pack");
         assert_eq!(
             validate_link_session_identity(&local, &other_pack),
             Err(LinkHandshakeError::ModpackIdMismatch {
@@ -4224,8 +6571,7 @@ mod tests {
             })
         );
 
-        let local = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("local");
+        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
         let bypassed = LinkHello::new_unchecked_for_tests(
             local.clone(),
             PlayerIdentity::new_unchecked_for_tests(3, ""),
@@ -4273,22 +6619,19 @@ mod tests {
             Err(LinkHandshakeError::MissingSessionId)
         );
         assert_eq!(
-            session(" session-1", modpack.clone())
-                .and_then(|session| session.validate()),
+            session(" session-1", modpack.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: " session-1".to_string(),
             })
         );
         assert_eq!(
-            session("session 1", modpack.clone())
-                .and_then(|session| session.validate()),
+            session("session 1", modpack.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: "session 1".to_string(),
             })
         );
         assert_eq!(
-            session("fallback-session", modpack.clone())
-                .and_then(|session| session.validate()),
+            session("fallback-session", modpack.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::ReservedSessionId {
                 session_id: "fallback-session".to_string(),
             })
@@ -4330,8 +6673,7 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_protocol_drift() {
-        let local = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("local");
+        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION + 1,
@@ -4353,8 +6695,7 @@ mod tests {
 
     #[test]
     fn link_lobby_accepts_matching_hellos_in_player_id_order() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session.clone(), player(3)).expect("lobby");
 
         assert_eq!(
@@ -4379,11 +6720,10 @@ mod tests {
 
     #[test]
     fn link_lobby_duplicate_same_player_is_idempotent() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let hello = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-            .expect("hello");
+        let hello =
+            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello");
 
         assert_eq!(
             lobby.accept_hello(hello.clone()),
@@ -4395,11 +6735,10 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_conflicting_player_identity() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let original = hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-            .expect("original");
+        let original =
+            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("original");
         let conflict = hello(
             "session-1",
             modpack("core-modular", "1234abcd"),
@@ -4420,12 +6759,10 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_case_changed_modpack_id_before_roster_insert() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let case_changed =
-            hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
-                .expect("case changed");
+        let case_changed = hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
+            .expect("case changed");
 
         assert_eq!(
             lobby.accept_hello(case_changed),
@@ -4439,13 +6776,11 @@ mod tests {
 
     #[test]
     fn link_lobby_creates_lockstep_buffer_for_accepted_roster() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-                    .expect("hello"),
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
             )
             .expect("accept");
 
@@ -4471,8 +6806,7 @@ mod tests {
 
     #[test]
     fn link_lobby_exports_local_hello_for_registered_player_only() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let lobby = LinkLobby::new(session.clone(), player(1)).expect("lobby");
 
         assert_eq!(
@@ -4487,13 +6821,11 @@ mod tests {
 
     #[test]
     fn battle_action_sync_waits_for_roster_and_orders_exact_actions() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-                    .expect("hello"),
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
             )
             .expect("accept");
         let mut sync = lobby.battle_action_buffer().expect("battle action buffer");
@@ -4900,13 +7232,11 @@ mod tests {
 
     #[test]
     fn trade_sync_swaps_confirmed_party_slots_without_item_id_coercion() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-                    .expect("hello"),
+                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
             )
             .expect("accept");
 
@@ -5040,8 +7370,7 @@ mod tests {
 
     #[test]
     fn trade_sync_rejects_unknown_players_wrong_trade_ids_and_empty_slots() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let lobby = LinkLobby::new(session, player(1)).expect("lobby");
 
         assert_eq!(
@@ -5266,8 +7595,7 @@ mod tests {
 
     #[test]
     fn link_cable_from_lobby_requires_accepted_players() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let lobby = LinkLobby::new(session, player(1)).expect("lobby");
 
         assert_eq!(
@@ -5478,8 +7806,7 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_records_pack_bound_contiguous_lockstep_frames() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
         let frames = vec![
             LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
@@ -5526,8 +7853,7 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_rejects_missing_players_and_frame_gaps() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
 
         assert_eq!(
@@ -5561,8 +7887,7 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_requires_explicit_terminal_checksum_frame() {
-        let session = session("session-1", modpack("core-modular", "1234abcd"))
-            .expect("session");
+        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
 
         assert_eq!(
             DeterministicInputJournal::new(
@@ -5570,8 +7895,7 @@ mod tests {
                 [1, 2],
                 StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
                 StateChecksumFrame::new(1, Frame(4), 0xbbcc_ddee),
-                vec![LockstepFrame::new(4, BTreeMap::from([(1, 0), (2, 0)]))
-                    .expect("frame")]
+                vec![LockstepFrame::new(4, BTreeMap::from([(1, 0), (2, 0)])).expect("frame")]
             ),
             Err(InputJournalError::TerminalChecksumFrameMismatch {
                 expected: 5,
@@ -5976,6 +8300,22 @@ mod tests {
                 field: "presence user id",
             })
         );
+        let namespaced_user_decode = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "presence",
+            "user_id": "link:u1",
+            "player_name": "CHRIS",
+            "entity_type": "player",
+            "map_name": "ROUTE_29",
+            "tile": { "x": 10, "y": 12 },
+            "direction": "up",
+            "updated_at_ms": 1234
+        }))
+        .expect_err("presence JSON must validate user id during decode")
+        .to_string();
+        assert!(
+            namespaced_user_decode.contains("presence user id"),
+            "{namespaced_user_decode}"
+        );
         let reserved_user = OverworldPresence::new_unchecked_for_tests(
             "fallback-user",
             "CHRIS",
@@ -6034,6 +8374,21 @@ mod tests {
                 field: "interaction request target user id",
             })
         );
+        let namespaced_target_decode = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "interaction_request",
+            "request_id": "request-1",
+            "from_user_id": "u1",
+            "from_player_name": "CHRIS",
+            "to_user_id": "link:u2",
+            "kind": "trade",
+            "timestamp_ms": 1234
+        }))
+        .expect_err("interaction request JSON must validate target user id during decode")
+        .to_string();
+        assert!(
+            namespaced_target_decode.contains("interaction request target user id"),
+            "{namespaced_target_decode}"
+        );
         let self_request = MultiplayerInteractionRequest::new_unchecked_for_tests(
             "request-1",
             "u1",
@@ -6062,6 +8417,21 @@ mod tests {
             Err(MultiplayerMessageError::InvalidText {
                 field: "interaction response target user id",
             })
+        );
+        let malformed_response_decode = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "interaction_response",
+            "request_id": "request-1",
+            "from_user_id": "u2",
+            "to_user_id": " u1",
+            "kind": "trade",
+            "accepted": true,
+            "timestamp_ms": 1235
+        }))
+        .expect_err("interaction response JSON must validate target user id during decode")
+        .to_string();
+        assert!(
+            malformed_response_decode.contains("interaction response target user id"),
+            "{malformed_response_decode}"
         );
         let self_response = MultiplayerInteractionResponse::new_unchecked_for_tests(
             "request-1",

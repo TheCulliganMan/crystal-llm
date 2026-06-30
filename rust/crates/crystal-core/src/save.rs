@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -209,12 +209,36 @@ impl SaveMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveGame {
     format_version: u16,
     metadata: SaveMetadata,
     state: GameState,
+}
+
+impl<'de> Deserialize<'de> for SaveGame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveGame {
+            format_version: u16,
+            metadata: SaveMetadata,
+            state: GameState,
+        }
+
+        let raw = RawSaveGame::deserialize(deserializer)?;
+        let save = Self {
+            format_version: raw.format_version,
+            metadata: raw.metadata,
+            state: raw.state,
+        };
+        save.validate().map_err(serde::de::Error::custom)?;
+        Ok(save)
+    }
 }
 
 impl SaveGame {
@@ -260,6 +284,163 @@ impl SaveGame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveGameSummary {
+    format_version: u16,
+    modpack: SaveModpackIdentity,
+    pack_content_hash: String,
+    created_frame: u64,
+    saved_frame: u64,
+    state_frame: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveSlotSummary {
+    slot_id: String,
+    path: PathBuf,
+    summary: SaveGameSummary,
+}
+
+impl SaveSlotSummary {
+    fn new(path: PathBuf, summary: SaveGameSummary) -> Result<Self, SaveError> {
+        validate_save_path(&path)?;
+        let file_stem = path
+            .file_stem()
+            .and_then(|file_stem| file_stem.to_str())
+            .ok_or_else(|| {
+                SaveError::InvalidIdentity(format!(
+                    "save slot path {} must have a UTF-8 slot id",
+                    path.display()
+                ))
+            })?;
+        validate_save_slot_id(file_stem)?;
+        Ok(Self {
+            slot_id: file_stem.to_string(),
+            path,
+            summary,
+        })
+    }
+
+    pub fn slot_id(&self) -> &str {
+        &self.slot_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn summary(&self) -> &SaveGameSummary {
+        &self.summary
+    }
+}
+
+impl<'de> Deserialize<'de> for SaveGameSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSaveGameSummary {
+            format_version: u16,
+            modpack: SaveModpackIdentity,
+            pack_content_hash: String,
+            created_frame: u64,
+            saved_frame: u64,
+            state_frame: u64,
+        }
+
+        let raw = RawSaveGameSummary::deserialize(deserializer)?;
+        let summary = Self {
+            format_version: raw.format_version,
+            modpack: raw.modpack,
+            pack_content_hash: raw.pack_content_hash,
+            created_frame: raw.created_frame,
+            saved_frame: raw.saved_frame,
+            state_frame: raw.state_frame,
+        };
+        summary.validate().map_err(serde::de::Error::custom)?;
+        Ok(summary)
+    }
+}
+
+impl SaveGameSummary {
+    pub fn new(
+        modpack: SaveModpackIdentity,
+        pack_content_hash: String,
+        state: &GameState,
+    ) -> Result<Self, SaveError> {
+        let summary = Self {
+            format_version: SAVE_FORMAT_VERSION,
+            modpack,
+            pack_content_hash,
+            created_frame: state.frame_counter,
+            saved_frame: state.frame_counter,
+            state_frame: state.frame_counter,
+        };
+        summary.validate()?;
+        Ok(summary)
+    }
+
+    pub fn from_save(save: &SaveGame) -> Result<Self, SaveError> {
+        save.validate()?;
+        Ok(Self {
+            format_version: save.format_version,
+            modpack: save.metadata.modpack.clone(),
+            pack_content_hash: save.metadata.pack_content_hash.clone(),
+            created_frame: save.metadata.created_frame,
+            saved_frame: save.metadata.saved_frame,
+            state_frame: save.state.frame_counter,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), SaveError> {
+        if self.format_version != SAVE_FORMAT_VERSION {
+            return Err(SaveError::UnsupportedVersion(self.format_version));
+        }
+        self.modpack.validate()?;
+        validate_pack_content_hash(&self.pack_content_hash)?;
+        if self.created_frame > self.saved_frame {
+            return Err(SaveError::InvalidIdentity(format!(
+                "save summary created_frame {} cannot exceed saved_frame {}",
+                self.created_frame, self.saved_frame
+            )));
+        }
+        if self.saved_frame != self.state_frame {
+            return Err(SaveError::FrameMismatch {
+                metadata_frame: self.saved_frame,
+                state_frame: self.state_frame,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub fn modpack(&self) -> &SaveModpackIdentity {
+        &self.modpack
+    }
+
+    pub fn pack_content_hash(&self) -> &str {
+        &self.pack_content_hash
+    }
+
+    pub fn created_frame(&self) -> u64 {
+        self.created_frame
+    }
+
+    pub fn saved_frame(&self) -> u64 {
+        self.saved_frame
+    }
+
+    pub fn state_frame(&self) -> u64 {
+        self.state_frame
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SaveError {
     #[error("save path {path} must use .{expected}")]
@@ -286,6 +467,12 @@ pub enum SaveError {
     },
     #[error("failed to create save directory {path}: {source}")]
     CreateDirectory {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read save directory {path}: {source}")]
+    ReadDirectory {
         path: String,
         #[source]
         source: std::io::Error,
@@ -394,6 +581,52 @@ pub fn read_save_game_for_modpack(
     Ok(save)
 }
 
+pub fn read_save_game_summary(path: impl AsRef<Path>) -> Result<SaveGameSummary, SaveError> {
+    let save = read_save_game(path)?;
+    SaveGameSummary::from_save(&save)
+}
+
+pub fn read_save_game_summary_for_modpack(
+    path: impl AsRef<Path>,
+    expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
+) -> Result<SaveGameSummary, SaveError> {
+    let save = read_save_game_for_modpack(path, expected, expected_pack_content_hash)?;
+    SaveGameSummary::from_save(&save)
+}
+
+pub fn list_save_game_summaries_for_modpack(
+    directory: impl AsRef<Path>,
+    expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
+) -> Result<Vec<SaveSlotSummary>, SaveError> {
+    let directory = directory.as_ref();
+    validate_save_directory_path(directory)?;
+    expected.validate()?;
+    validate_pack_content_hash(expected_pack_content_hash)?;
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|source| SaveError::ReadDirectory {
+        path: directory.display().to_string(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| SaveError::ReadDirectory {
+            path: directory.display().to_string(),
+            source,
+        })?;
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    let mut summaries = Vec::with_capacity(paths.len());
+    for path in paths {
+        validate_save_path(&path)?;
+        let summary =
+            read_save_game_summary_for_modpack(&path, expected, expected_pack_content_hash)?;
+        summaries.push(SaveSlotSummary::new(path, summary)?);
+    }
+    Ok(summaries)
+}
+
 fn read_save_game_bytes(
     bytes: &[u8],
     source_name: impl Into<String>,
@@ -457,6 +690,17 @@ pub fn read_save_game_bytes_for_modpack(
     let save = read_save_game_bytes(bytes, source_name)?;
     assert_save_matches_modpack(&save, expected, expected_pack_content_hash)?;
     Ok(save)
+}
+
+pub fn read_save_game_summary_bytes_for_modpack(
+    bytes: &[u8],
+    source_name: impl Into<String>,
+    expected: &SaveModpackIdentity,
+    expected_pack_content_hash: &str,
+) -> Result<SaveGameSummary, SaveError> {
+    let save =
+        read_save_game_bytes_for_modpack(bytes, source_name, expected, expected_pack_content_hash)?;
+    SaveGameSummary::from_save(&save)
 }
 
 pub fn assert_save_matches_modpack(
@@ -529,6 +773,42 @@ fn validate_save_path(path: &Path) -> Result<(), SaveError> {
     }
 }
 
+fn validate_save_directory_path(path: &Path) -> Result<(), SaveError> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "parent-directory",
+        });
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir))
+    {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "current-directory",
+        });
+    }
+    Ok(())
+}
+
+fn validate_save_slot_id(slot_id: &str) -> Result<(), SaveError> {
+    if slot_id.is_empty()
+        || slot_id.trim() != slot_id
+        || !slot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(SaveError::InvalidIdentity(format!(
+            "save slot id '{slot_id}' must be exact ASCII using only letters, numbers, underscores, hyphens, or dots"
+        )));
+    }
+    Ok(())
+}
+
 fn save_binary_config() -> impl bincode::config::Config {
     bincode::config::standard()
         .with_little_endian()
@@ -558,6 +838,12 @@ mod tests {
         ))
     }
 
+    fn temp_save_dir(name: &str) -> std::path::PathBuf {
+        let path = temp_save_path(name);
+        std::fs::create_dir_all(&path).expect("create temp save dir");
+        path
+    }
+
     #[test]
     fn save_game_round_trips_as_binary_artifact() {
         let path = temp_save_path("slot.crystalsave");
@@ -576,13 +862,119 @@ mod tests {
         assert_eq!(loaded_for_pack, loaded);
         assert_eq!(loaded.metadata.modpack, modpack);
         assert_eq!(loaded.metadata.saved_frame, 42);
+        let summary = read_save_game_summary_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("read exact save summary");
+        let direct_summary =
+            SaveGameSummary::new(modpack.clone(), pack_content_hash().to_string(), &state)
+                .expect("direct save summary");
+        assert_eq!(summary.format_version(), SAVE_FORMAT_VERSION);
+        assert_eq!(direct_summary, summary);
+        assert_eq!(summary.modpack(), &modpack);
+        assert_eq!(summary.pack_content_hash(), pack_content_hash());
+        assert_eq!(summary.created_frame(), 42);
+        assert_eq!(summary.saved_frame(), 42);
+        assert_eq!(summary.state_frame(), 42);
         let bytes = std::fs::read(&path).expect("read raw save");
+        let summary_from_bytes = read_save_game_summary_bytes_for_modpack(
+            &bytes,
+            "slot.crystalsave",
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("read exact save summary bytes");
+        assert_eq!(summary_from_bytes, summary);
         assert!(bytes.starts_with(SAVE_MAGIC));
         assert_eq!(
             u16::from_be_bytes([bytes[SAVE_VERSION_OFFSET], bytes[SAVE_VERSION_OFFSET + 1]]),
             SAVE_FORMAT_VERSION
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_slot_index_lists_only_exact_pack_bound_crystalsaves() {
+        let directory = temp_save_dir("slot-index");
+        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let mut first_state = GameState::default();
+        first_state.frame_counter = 12;
+        let mut second_state = GameState::default();
+        second_state.frame_counter = 18;
+
+        write_save_game_for_modpack(
+            directory.join("b-slot.crystalsave"),
+            second_state.clone(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write second save");
+        write_save_game_for_modpack(
+            directory.join("a-slot.crystalsave"),
+            first_state.clone(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write first save");
+
+        let slots = list_save_game_summaries_for_modpack(&directory, &modpack, pack_content_hash())
+            .expect("list exact save slots");
+
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].slot_id(), "a-slot");
+        assert_eq!(slots[0].path(), directory.join("a-slot.crystalsave"));
+        assert_eq!(slots[0].summary().state_frame(), 12);
+        assert_eq!(slots[1].slot_id(), "b-slot");
+        assert_eq!(slots[1].path(), directory.join("b-slot.crystalsave"));
+        assert_eq!(slots[1].summary().state_frame(), 18);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn save_slot_index_rejects_invalid_or_incompatible_entries() {
+        let directory = temp_save_dir("slot-index-invalid");
+        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let other_modpack = SaveModpackIdentity::new("other-pack", "1234abcd").expect("identity");
+
+        write_save_game_for_modpack(
+            directory.join("slot.crystalsave"),
+            GameState::default(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write save");
+        std::fs::write(directory.join("notes.txt"), b"not a save").expect("write invalid entry");
+
+        assert!(matches!(
+            list_save_game_summaries_for_modpack(&directory, &modpack, pack_content_hash()),
+            Err(SaveError::InvalidExtension { .. })
+        ));
+        std::fs::remove_file(directory.join("notes.txt")).expect("remove invalid entry");
+
+        write_save_game_for_modpack(
+            directory.join("other.crystalsave"),
+            GameState::default(),
+            &other_modpack,
+            pack_content_hash(),
+        )
+        .expect("write incompatible save");
+        assert!(matches!(
+            list_save_game_summaries_for_modpack(&directory, &modpack, pack_content_hash()),
+            Err(SaveError::ModpackIdMismatch { .. })
+        ));
+        std::fs::remove_file(directory.join("other.crystalsave"))
+            .expect("remove incompatible save");
+
+        write_save_game_for_modpack(
+            directory.join("bad slot.crystalsave"),
+            GameState::default(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write invalid slot name save");
+        assert!(matches!(
+            list_save_game_summaries_for_modpack(&directory, &modpack, pack_content_hash()),
+            Err(SaveError::InvalidIdentity(message)) if message.contains("save slot id")
+        ));
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -796,6 +1188,27 @@ mod tests {
     }
 
     #[test]
+    fn save_game_deserialize_rejects_invalid_frame_without_later_fixup() {
+        let mut save = test_save(
+            GameState::default(),
+            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+        );
+        save.metadata.saved_frame = 7;
+        let payload =
+            bincode::serde::encode_to_vec(&save, save_binary_config()).expect("encode save");
+
+        let error =
+            bincode::serde::decode_from_slice::<SaveGame, _>(&payload, save_binary_config())
+                .expect_err("invalid save frame must fail during SaveGame deserialize")
+                .0
+                .to_string();
+        assert!(
+            error.contains("save frame mismatch") || error.contains("saved_frame"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn save_json_payloads_reject_unknown_fields_without_identity_fallbacks() {
         let identity_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
             "id": "core-modular",
@@ -897,7 +1310,21 @@ mod tests {
 
         let bytes = { encode_save_game_bytes(&save).expect("encode framed save") };
         assert!(matches!(
-            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, pack_content_hash()),
+            read_save_game_bytes_for_modpack(
+                &bytes,
+                "slot.crystalsave",
+                &expected,
+                pack_content_hash()
+            ),
+            Err(SaveError::ModpackHashMismatch { .. })
+        ));
+        assert!(matches!(
+            read_save_game_summary_bytes_for_modpack(
+                &bytes,
+                "slot.crystalsave",
+                &expected,
+                pack_content_hash()
+            ),
             Err(SaveError::ModpackHashMismatch { .. })
         ));
         assert!(matches!(
@@ -914,6 +1341,13 @@ mod tests {
 
         assert!(matches!(
             assert_save_matches_modpack(&save, &expected, pack_content_hash()),
+            Err(SaveError::FrameMismatch {
+                metadata_frame: 9,
+                state_frame: 0
+            })
+        ));
+        assert!(matches!(
+            SaveGameSummary::from_save(&save),
             Err(SaveError::FrameMismatch {
                 metadata_frame: 9,
                 state_frame: 0
@@ -955,9 +1389,8 @@ mod tests {
     #[test]
     fn save_validation_rejects_invalid_saved_state_identifiers() {
         let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
-        let mut save_json =
-            serde_json::to_value(test_save(GameState::default(), expected.clone()))
-                .expect("save json");
+        let mut save_json = serde_json::to_value(test_save(GameState::default(), expected.clone()))
+            .expect("save json");
         save_json["state"]["flags"]["event_flags"]["EVENT_BAD FLAG"] = serde_json::json!(true);
         let save: SaveGame = serde_json::from_value(save_json).expect("decode exact save shape");
 
@@ -967,8 +1400,13 @@ mod tests {
         );
 
         let bytes = { encode_save_game_bytes(&save).expect("encode framed save") };
-        let error = read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, pack_content_hash())
-            .expect_err("binary save load must validate decoded state");
+        let error = read_save_game_bytes_for_modpack(
+            &bytes,
+            "slot.crystalsave",
+            &expected,
+            pack_content_hash(),
+        )
+        .expect_err("binary save load must validate decoded state");
         assert!(
             matches!(error, SaveError::InvalidState(message) if message.contains("EVENT_BAD FLAG"))
         );

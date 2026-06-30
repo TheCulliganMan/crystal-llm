@@ -8,12 +8,28 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bevy = { version = "0.14", optional = true, default-features = false, features = [
+    "bevy_asset",
+    "bevy_audio",
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_winit",
+    "multi_threaded",
+    "x11",
+] }
 crystal-assets = { path = "../crystal-assets" }
 crystal-audio = { path = "../crystal-audio" }
 crystal-core = { path = "../crystal-core" }
 crystal-net = { path = "../crystal-net" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+default = ["bevy-shell"]
+bevy-shell = ["dep:bevy"]
 
 [dev-dependencies]
 crystal-assets = { path = "../crystal-assets", features = ["test-fixtures"] }

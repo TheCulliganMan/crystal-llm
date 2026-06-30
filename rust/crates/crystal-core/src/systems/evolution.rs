@@ -267,9 +267,55 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
     value.starts_with("fallback") || value.starts_with("legacy")
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct EvolutionTable(pub BTreeMap<String, Vec<EvolutionEntry>>);
+
+impl<'de> Deserialize<'de> for EvolutionTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let table = BTreeMap::<String, Vec<EvolutionEntry>>::deserialize(deserializer)?;
+        for (source_species_id, entries) in &table {
+            validate_evolution_pack_token("evolution source species", source_species_id)
+                .map_err(serde::de::Error::custom)?;
+            for (index, entry) in entries.iter().enumerate() {
+                validate_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].method"),
+                    &entry.method,
+                )
+                .map_err(serde::de::Error::custom)?;
+                validate_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].species"),
+                    &entry.species,
+                )
+                .map_err(serde::de::Error::custom)?;
+                validate_optional_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].item"),
+                    entry.item.as_deref(),
+                )
+                .map_err(serde::de::Error::custom)?;
+                validate_optional_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].held_item"),
+                    entry.held_item.as_deref(),
+                )
+                .map_err(serde::de::Error::custom)?;
+                validate_optional_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].happiness"),
+                    entry.happiness.as_deref(),
+                )
+                .map_err(serde::de::Error::custom)?;
+                validate_optional_evolution_pack_token(
+                    &format!("{source_species_id}[{index}].stat_ratio"),
+                    entry.stat_ratio.as_deref(),
+                )
+                .map_err(serde::de::Error::custom)?;
+            }
+        }
+        Ok(Self(table))
+    }
+}
 
 impl EvolutionTable {
     pub fn entries_for(&self, species_id: &str) -> Result<&[EvolutionEntry], EvolutionError> {
@@ -317,6 +363,23 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+fn validate_optional_evolution_pack_token(field: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_evolution_pack_token(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_evolution_pack_token(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_nonempty_evolution_token(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be exact ASCII alphanumeric/underscore/dash, found {value:?}"
+        ))
+    }
 }
 
 impl EvolutionEntry {
@@ -1448,6 +1511,68 @@ mod tests {
             table_error.contains("invalid type") || table_error.contains("invalid value"),
             "{table_error}"
         );
+    }
+
+    #[test]
+    fn evolution_table_json_rejects_malformed_pack_tokens() {
+        for (field, value, expected) in [
+            (
+                "source",
+                serde_json::json!("fallback_bulbasaur"),
+                "evolution source species",
+            ),
+            (
+                "method",
+                serde_json::json!("legacy_level"),
+                "BULBASAUR[0].method",
+            ),
+            (
+                "species",
+                serde_json::json!("fallback_ivysaur"),
+                "BULBASAUR[0].species",
+            ),
+            (
+                "item",
+                serde_json::json!("legacy_leaf_stone"),
+                "BULBASAUR[0].item",
+            ),
+            (
+                "held_item",
+                serde_json::json!("fallback_trade_item"),
+                "BULBASAUR[0].held_item",
+            ),
+            (
+                "happiness",
+                serde_json::json!("legacy_happiness"),
+                "BULBASAUR[0].happiness",
+            ),
+            (
+                "stat_ratio",
+                serde_json::json!("fallback_stat_ratio"),
+                "BULBASAUR[0].stat_ratio",
+            ),
+        ] {
+            let entry = evolution_entry_json();
+            let payload = if field == "source" {
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    value.as_str().expect("source string").to_string(),
+                    serde_json::json!([entry]),
+                );
+                serde_json::Value::Object(payload)
+            } else {
+                let mut entry = entry;
+                entry[field] = value;
+                serde_json::json!({ "BULBASAUR": [entry] })
+            };
+            let error = serde_json::from_value::<EvolutionTable>(payload)
+                .expect_err("malformed evolution tokens must fail during JSON load")
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{field} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

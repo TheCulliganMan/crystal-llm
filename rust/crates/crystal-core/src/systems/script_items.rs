@@ -8,6 +8,8 @@ use crate::state::GameState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemGrant {
+    #[serde(default, deserialize_with = "required_script_item_grant_command")]
+    pub command: String,
     #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
     pub quantity: u16,
@@ -20,6 +22,8 @@ pub struct ScriptItemGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemAccess {
+    #[serde(default, deserialize_with = "required_script_item_access_command")]
+    pub command: String,
     #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
     #[serde(deserialize_with = "required_script_label_token")]
@@ -67,6 +71,9 @@ pub struct ScriptItemTakeOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum ScriptItemGrantError {
+    InvalidCommand { command: String },
+    InvalidItem { item_id: String },
+    InvalidSourceScript { source_script: String },
     UnknownItem { item_id: String },
     InvalidQuantity,
     Bag { error: String },
@@ -75,6 +82,9 @@ pub enum ScriptItemGrantError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum ScriptItemAccessError {
+    InvalidCommand { command: String },
+    InvalidItem { item_id: String },
+    InvalidSourceScript { source_script: String },
     UnknownItem { item_id: String },
     Bag { error: String },
 }
@@ -82,6 +92,7 @@ pub enum ScriptItemAccessError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptItemGrantIssue {
+    InvalidCommand { command: String },
     InvalidItem { item_id: String },
     UnknownItem { item_id: String },
     InvalidQuantity,
@@ -90,11 +101,49 @@ pub enum ScriptItemGrantIssue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptItemAccessIssue {
+    InvalidCommand { command: String },
     InvalidItem { item_id: String },
     UnknownItem { item_id: String },
 }
 
 pub const SCRIPT_ITEM_FROM_MEMORY_ID: &str = "ITEM_FROM_MEM";
+pub const SCRIPT_ITEM_GRANT_COMMANDS: &[&str] = &["giveitem", "verbosegiveitem"];
+pub const SCRIPT_ITEM_CHECK_COMMANDS: &[&str] = &["checkitem"];
+pub const SCRIPT_ITEM_TAKE_COMMANDS: &[&str] = &["takeitem"];
+
+pub fn is_known_script_item_grant_command(command: &str) -> bool {
+    SCRIPT_ITEM_GRANT_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_item_check_command(command: &str) -> bool {
+    SCRIPT_ITEM_CHECK_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_item_take_command(command: &str) -> bool {
+    SCRIPT_ITEM_TAKE_COMMANDS.contains(&command)
+}
+
+pub fn is_known_script_item_access_command(command: &str) -> bool {
+    is_known_script_item_check_command(command) || is_known_script_item_take_command(command)
+}
+
+pub fn validate_script_item_grant_command(command: &str) -> Result<(), String> {
+    validate_exact_script_item_command(command)?;
+    if is_known_script_item_grant_command(command) {
+        Ok(())
+    } else {
+        Err(format!("unknown script item grant command '{command}'"))
+    }
+}
+
+pub fn validate_script_item_access_command(command: &str) -> Result<(), String> {
+    validate_exact_script_item_command(command)?;
+    if is_known_script_item_access_command(command) {
+        Ok(())
+    } else {
+        Err(format!("unknown script item access command '{command}'"))
+    }
+}
 
 pub fn script_item_grant_issues(
     grant: &ScriptItemGrant,
@@ -103,6 +152,11 @@ pub fn script_item_grant_issues(
     let mut issues = Vec::new();
     if grant.quantity == 0 {
         issues.push(ScriptItemGrantIssue::InvalidQuantity);
+    }
+    if validate_script_item_grant_command(&grant.command).is_err() {
+        issues.push(ScriptItemGrantIssue::InvalidCommand {
+            command: grant.command.clone(),
+        });
     }
     if !is_exact_script_item_token(&grant.item_id) {
         issues.push(ScriptItemGrantIssue::InvalidItem {
@@ -122,7 +176,11 @@ pub fn script_item_access_issues(
     access: &ScriptItemAccess,
     item_catalog: &BTreeMap<String, Item>,
 ) -> Vec<ScriptItemAccessIssue> {
-    if !is_exact_script_item_token(&access.item_id) {
+    if validate_script_item_access_command(&access.command).is_err() {
+        vec![ScriptItemAccessIssue::InvalidCommand {
+            command: access.command.clone(),
+        }]
+    } else if !is_exact_script_item_token(&access.item_id) {
         vec![ScriptItemAccessIssue::InvalidItem {
             item_id: access.item_id.clone(),
         }]
@@ -144,6 +202,20 @@ fn is_exact_script_item_token(value: &str) -> bool {
         && !has_reserved_pack_prefix(value)
 }
 
+fn validate_exact_script_item_command(command: &str) -> Result<(), String> {
+    if command.is_empty()
+        || command.trim() != command
+        || !command.bytes().all(|byte| byte.is_ascii_lowercase())
+        || has_reserved_pack_prefix(command)
+    {
+        Err(format!(
+            "script item command must be exact lowercase ASCII, found {command:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn is_exact_script_label_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
@@ -163,6 +235,24 @@ where
             "script item token must be exact ASCII alphanumeric/underscore, found {value:?}"
         )))
     }
+}
+
+fn required_script_item_grant_command<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_script_item_grant_command(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn required_script_item_access_command<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_script_item_access_command(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 fn required_script_label_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -189,6 +279,7 @@ pub fn grant_script_item(
     item_catalog: &BTreeMap<String, Item>,
     grant: ScriptItemGrant,
 ) -> Result<ScriptItemGrantOutcome, ScriptItemGrantError> {
+    validate_script_item_grant_for_runtime(&grant)?;
     if grant.quantity == 0 {
         return Err(ScriptItemGrantError::InvalidQuantity);
     }
@@ -227,6 +318,7 @@ pub fn check_script_item(
     item_catalog: &BTreeMap<String, Item>,
     access: ScriptItemAccess,
 ) -> Result<ScriptItemCheckOutcome, ScriptItemAccessError> {
+    validate_script_item_access_for_runtime(&access)?;
     let item =
         item_catalog
             .get(&access.item_id)
@@ -246,6 +338,7 @@ pub fn take_script_item(
     item_catalog: &BTreeMap<String, Item>,
     access: ScriptItemAccess,
 ) -> Result<ScriptItemTakeOutcome, ScriptItemAccessError> {
+    validate_script_item_access_for_runtime(&access)?;
     let item =
         item_catalog
             .get(&access.item_id)
@@ -262,6 +355,48 @@ pub fn take_script_item(
         command_index: access.command_index,
         removed,
     })
+}
+
+fn validate_script_item_grant_for_runtime(
+    grant: &ScriptItemGrant,
+) -> Result<(), ScriptItemGrantError> {
+    if validate_script_item_grant_command(&grant.command).is_err() {
+        return Err(ScriptItemGrantError::InvalidCommand {
+            command: grant.command.clone(),
+        });
+    }
+    if !is_exact_script_item_token(&grant.item_id) {
+        return Err(ScriptItemGrantError::InvalidItem {
+            item_id: grant.item_id.clone(),
+        });
+    }
+    if !is_exact_script_label_token(&grant.source_script) {
+        return Err(ScriptItemGrantError::InvalidSourceScript {
+            source_script: grant.source_script.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_script_item_access_for_runtime(
+    access: &ScriptItemAccess,
+) -> Result<(), ScriptItemAccessError> {
+    if validate_script_item_access_command(&access.command).is_err() {
+        return Err(ScriptItemAccessError::InvalidCommand {
+            command: access.command.clone(),
+        });
+    }
+    if !is_exact_script_item_token(&access.item_id) {
+        return Err(ScriptItemAccessError::InvalidItem {
+            item_id: access.item_id.clone(),
+        });
+    }
+    if !is_exact_script_label_token(&access.source_script) {
+        return Err(ScriptItemAccessError::InvalidSourceScript {
+            source_script: access.source_script.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -318,20 +453,41 @@ mod tests {
 
     fn grant(item_id: &str, quantity: u16) -> ScriptItemGrant {
         ScriptItemGrant {
+            command: "giveitem".to_string(),
             item_id: item_id.to_string(),
             quantity,
             source_script: "GiftScript".to_string(),
             command_index: 3,
-            verbose: true,
+            verbose: false,
         }
     }
 
     fn access(item_id: &str) -> ScriptItemAccess {
         ScriptItemAccess {
+            command: "checkitem".to_string(),
             item_id: item_id.to_string(),
             source_script: "GateScript".to_string(),
             command_index: 7,
         }
+    }
+
+    #[test]
+    fn exported_script_item_command_sets_are_exact() {
+        assert!(SCRIPT_ITEM_GRANT_COMMANDS.contains(&"giveitem"));
+        assert!(SCRIPT_ITEM_GRANT_COMMANDS.contains(&"verbosegiveitem"));
+        assert!(SCRIPT_ITEM_CHECK_COMMANDS.contains(&"checkitem"));
+        assert!(SCRIPT_ITEM_TAKE_COMMANDS.contains(&"takeitem"));
+        assert!(is_known_script_item_grant_command("giveitem"));
+        assert!(is_known_script_item_grant_command("verbosegiveitem"));
+        assert!(is_known_script_item_check_command("checkitem"));
+        assert!(is_known_script_item_take_command("takeitem"));
+        assert!(is_known_script_item_access_command("checkitem"));
+        assert!(is_known_script_item_access_command("takeitem"));
+        assert!(validate_script_item_grant_command("giveitem").is_ok());
+        assert!(validate_script_item_access_command("takeitem").is_ok());
+        assert!(validate_script_item_grant_command("GiveItem").is_err());
+        assert!(validate_script_item_access_command("fallback_takeitem").is_err());
+        assert!(validate_script_item_access_command("giveitem").is_err());
     }
 
     #[test]
@@ -349,7 +505,7 @@ mod tests {
                 quantity: 1,
                 source_script: "GiftScript".to_string(),
                 command_index: 3,
-                verbose: true,
+                verbose: false,
             }
         );
         assert_eq!(state.bag.quantity(&items["POTION"]), 1);
@@ -382,6 +538,44 @@ mod tests {
 
         assert_eq!(error, ScriptItemGrantError::InvalidQuantity);
         assert_eq!(state.bag.quantity(&items["POTION"]), 0);
+    }
+
+    #[test]
+    fn runtime_item_commands_reject_invalid_shape_before_bag_mutation() {
+        let mut state = GameState::default();
+        let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
+        state.bag.add_item(&items["POTION"], 1).expect("seed item");
+
+        let mut invalid_grant = grant("POTION", 1);
+        invalid_grant.source_script = "legacy_script".to_string();
+        assert_eq!(
+            grant_script_item(&mut state, &items, invalid_grant),
+            Err(ScriptItemGrantError::InvalidSourceScript {
+                source_script: "legacy_script".to_string(),
+            })
+        );
+        assert_eq!(state.bag.quantity(&items["POTION"]), 1);
+
+        let mut invalid_grant = grant("POTION", 1);
+        invalid_grant.command = "fallbackgive".to_string();
+        assert_eq!(
+            grant_script_item(&mut state, &items, invalid_grant),
+            Err(ScriptItemGrantError::InvalidCommand {
+                command: "fallbackgive".to_string(),
+            })
+        );
+        assert_eq!(state.bag.quantity(&items["POTION"]), 1);
+
+        let mut invalid_access = access("POTION");
+        invalid_access.command = "takeitem".to_string();
+        invalid_access.source_script = "fallback_script".to_string();
+        assert_eq!(
+            take_script_item(&mut state, &items, invalid_access),
+            Err(ScriptItemAccessError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+        assert_eq!(state.bag.quantity(&items["POTION"]), 1);
     }
 
     #[test]
@@ -450,11 +644,12 @@ mod tests {
             ("source_script", serde_json::json!("legacy_script")),
         ] {
             let mut payload = serde_json::json!({
+                "command": "giveitem",
                 "item_id": "POTION",
                 "quantity": 1,
                 "source_script": ".branch@GiftScript",
                 "command_index": 3,
-                "verbose": true
+                "verbose": false
             });
             payload[field] = value;
 
@@ -473,6 +668,7 @@ mod tests {
             ("source_script", serde_json::json!("fallback_script")),
         ] {
             let mut payload = serde_json::json!({
+                "command": "checkitem",
                 "item_id": "PASS",
                 "source_script": ".branch@GateScript",
                 "command_index": 7
@@ -587,7 +783,7 @@ mod tests {
                 quantity: 1,
                 source_script: "GiftScript".to_string(),
                 command_index: 3,
-                verbose: true,
+                verbose: false,
             }
         );
         assert_eq!(state.bag.items["POTION"], MAX_ITEM_STACK);
@@ -610,7 +806,7 @@ mod tests {
                 quantity: 1,
                 source_script: "GiftScript".to_string(),
                 command_index: 3,
-                verbose: true,
+                verbose: false,
             }
         );
         assert_eq!(state.bag.quantity(&items["TM_MUD_SLAP"]), 1);

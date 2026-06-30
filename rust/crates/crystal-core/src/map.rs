@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,41 +12,109 @@ pub struct MapConnection {
     pub offset: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapAttributes {
-    #[serde(deserialize_with = "required_map_token")]
     pub tileset_name: String,
     pub border_block: u8,
     pub width: u16,
     pub height: u16,
     pub connections: Vec<MapConnection>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub time_of_day: Option<String>,
     pub phone_service: u8,
     pub phone_flag: bool,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub environment: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub location: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub music: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub palette: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub fishing_group: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_constant: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_group_constant: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub blocks_label: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_scripts_label: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub map_events_label: Option<String>,
-    #[serde(deserialize_with = "required_nullable_map_token")]
     pub connection_flags: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MapAttributes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMapAttributes {
+            #[serde(deserialize_with = "required_map_token")]
+            tileset_name: String,
+            border_block: u8,
+            width: u16,
+            height: u16,
+            connections: Vec<MapConnection>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            time_of_day: Option<String>,
+            phone_service: u8,
+            phone_flag: bool,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            environment: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            location: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_expression_token")]
+            music: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            palette: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            fishing_group: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            map_constant: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            map_group_constant: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            blocks_label: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            map_scripts_label: Option<String>,
+            #[serde(deserialize_with = "required_nullable_map_token")]
+            map_events_label: Option<String>,
+            #[serde(deserialize_with = "required_nullable_connection_flags_token")]
+            connection_flags: Option<String>,
+        }
+
+        let raw = RawMapAttributes::deserialize(deserializer)?;
+        let attributes = Self {
+            tileset_name: raw.tileset_name,
+            border_block: raw.border_block,
+            width: raw.width,
+            height: raw.height,
+            connections: raw.connections,
+            time_of_day: raw.time_of_day,
+            phone_service: raw.phone_service,
+            phone_flag: raw.phone_flag,
+            environment: raw.environment,
+            location: raw.location,
+            music: raw.music,
+            palette: raw.palette,
+            fishing_group: raw.fishing_group,
+            map_constant: raw.map_constant,
+            map_group_constant: raw.map_group_constant,
+            blocks_label: raw.blocks_label,
+            map_scripts_label: raw.map_scripts_label,
+            map_events_label: raw.map_events_label,
+            connection_flags: raw.connection_flags,
+        };
+        attributes.validate().map_err(D::Error::custom)?;
+        Ok(attributes)
+    }
+}
+
+impl MapAttributes {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.width == 0 {
+            return Err(format!("map {} has width 0", self.tileset_name));
+        }
+        if self.height == 0 {
+            return Err(format!("map {} has height 0", self.tileset_name));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +175,7 @@ pub struct MapSceneTable {
     pub scenes: Vec<MapScene>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapScriptSectionCommand {
     #[serde(deserialize_with = "required_map_token")]
@@ -117,7 +185,38 @@ pub struct MapScriptSectionCommand {
     pub command_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for MapScriptSectionCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMapScriptSectionCommand {
+            #[serde(deserialize_with = "required_map_token")]
+            command: String,
+            #[serde(deserialize_with = "required_map_token_vec")]
+            args: Vec<String>,
+            command_index: usize,
+        }
+
+        let raw = RawMapScriptSectionCommand::deserialize(deserializer)?;
+        validate_map_section_command_shape(
+            "map script",
+            &map_script_section_command_arg_counts(),
+            &raw.command,
+            raw.args.len(),
+        )
+        .map_err(D::Error::custom)?;
+        Ok(Self {
+            command: raw.command,
+            args: raw.args,
+            command_index: raw.command_index,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapEventSectionCommand {
     #[serde(deserialize_with = "required_map_token")]
@@ -125,6 +224,37 @@ pub struct MapEventSectionCommand {
     #[serde(deserialize_with = "required_map_token_vec")]
     pub args: Vec<String>,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for MapEventSectionCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMapEventSectionCommand {
+            #[serde(deserialize_with = "required_map_token")]
+            command: String,
+            #[serde(deserialize_with = "required_map_token_vec")]
+            args: Vec<String>,
+            command_index: usize,
+        }
+
+        let raw = RawMapEventSectionCommand::deserialize(deserializer)?;
+        validate_map_section_command_shape(
+            "map event",
+            &map_event_section_command_arg_counts(),
+            &raw.command,
+            raw.args.len(),
+        )
+        .map_err(D::Error::custom)?;
+        Ok(Self {
+            command: raw.command,
+            args: raw.args,
+            command_index: raw.command_index,
+        })
+    }
 }
 
 fn required_map_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -153,6 +283,56 @@ where
         ))),
         None => Ok(None),
     }
+}
+
+fn required_nullable_connection_flags_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(value) if is_exact_connection_flags_token(&value) => Ok(Some(value)),
+        Some(value) => Err(serde::de::Error::custom(format!(
+            "connection flags token must be exact ASCII uppercase/underscore/pipe syntax, found {value:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn required_nullable_map_expression_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(value) if is_exact_map_expression_token(&value) => Ok(Some(value)),
+        Some(value) => Err(serde::de::Error::custom(format!(
+            "map expression token must be exact ASCII uppercase/underscore/pipe syntax, found {value:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn is_exact_connection_flags_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'|' | b' '))
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_map_expression_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'|' | b' '))
+        && !has_reserved_pack_prefix(value)
 }
 
 fn required_empty_or_map_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -217,6 +397,25 @@ pub fn map_event_section_command_arg_counts() -> BTreeMap<&'static str, BTreeSet
         ("def_object_events", BTreeSet::from([0])),
         ("object_event", BTreeSet::from([13])),
     ])
+}
+
+fn validate_map_section_command_shape(
+    section: &str,
+    counts: &BTreeMap<&'static str, BTreeSet<usize>>,
+    command: &str,
+    actual_arg_count: usize,
+) -> Result<(), String> {
+    let Some(expected) = counts.get(command) else {
+        return Err(format!(
+            "{section} command {command:?} is not a Crystal command"
+        ));
+    };
+    if !expected.contains(&actual_arg_count) {
+        return Err(format!(
+            "{section} command {command} has {actual_arg_count} args, expected {expected:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

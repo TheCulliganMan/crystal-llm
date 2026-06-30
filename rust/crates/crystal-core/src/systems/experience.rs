@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrowthRateCurve {
     #[serde(deserialize_with = "required_growth_rate_token")]
@@ -13,6 +13,49 @@ pub struct GrowthRateCurve {
     pub quadratic: i32,
     pub linear: i32,
     pub constant: i32,
+}
+
+impl<'de> Deserialize<'de> for GrowthRateCurve {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawGrowthRateCurve {
+            #[serde(deserialize_with = "required_growth_rate_token")]
+            id: String,
+            numerator: i32,
+            denominator: i32,
+            quadratic: i32,
+            linear: i32,
+            constant: i32,
+        }
+
+        let raw = RawGrowthRateCurve::deserialize(deserializer)?;
+        let curve = Self {
+            id: raw.id,
+            numerator: raw.numerator,
+            denominator: raw.denominator,
+            quadratic: raw.quadratic,
+            linear: raw.linear,
+            constant: raw.constant,
+        };
+        curve.validate_shape().map_err(D::Error::custom)?;
+        Ok(curve)
+    }
+}
+
+impl GrowthRateCurve {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.denominator == 0 {
+            return Err(format!(
+                "growth-rate curve {} has zero denominator",
+                self.id
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub type GrowthRateCatalog = BTreeMap<String, GrowthRateCurve>;
@@ -135,7 +178,6 @@ where
     }
 }
 
-#[cfg(test)]
 pub fn crystal_growth_rate_catalog_for_tests() -> GrowthRateCatalog {
     [
         ("GROWTH_MEDIUM_FAST", 1, 1, 0, 0, 0),

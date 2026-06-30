@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::item::{
     ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item,
@@ -12,7 +12,7 @@ pub const BALL_POCKET_CAPACITY: usize = 12;
 pub const KEY_ITEM_POCKET_CAPACITY: usize = 25;
 pub const PC_ITEM_CAPACITY: usize = 50;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bag {
     pub items: BTreeMap<String, u16>,
@@ -20,6 +20,34 @@ pub struct Bag {
     pub balls: BTreeMap<String, u16>,
     pub key_items: BTreeMap<String, u16>,
     pub tm_hm: Vec<bool>,
+}
+
+impl<'de> Deserialize<'de> for Bag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBag {
+            items: BTreeMap<String, u16>,
+            pc_items: BTreeMap<String, u16>,
+            balls: BTreeMap<String, u16>,
+            key_items: BTreeMap<String, u16>,
+            tm_hm: Vec<bool>,
+        }
+
+        let raw = RawBag::deserialize(deserializer)?;
+        let bag = Self {
+            items: raw.items,
+            pc_items: raw.pc_items,
+            balls: raw.balls,
+            key_items: raw.key_items,
+            tm_hm: raw.tm_hm,
+        };
+        bag.validate().map_err(D::Error::custom)?;
+        Ok(bag)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -120,6 +148,19 @@ impl Bag {
             MAX_ITEM_STACK,
             Some(PC_ITEM_CAPACITY),
         )
+    }
+
+    pub fn remove_pc_item(&mut self, definition: &Item, quantity: u16) -> Result<bool, String> {
+        if quantity == 0 {
+            return Err("quantity must be positive".to_string());
+        }
+        if definition.pocket != ITEM_POCKET_ITEM {
+            return Err(format!(
+                "PC item '{}' is not in the ITEM pocket",
+                definition.script_name
+            ));
+        }
+        remove_from_inventory(&mut self.pc_items, &definition.script_name, quantity)
     }
 
     pub fn quantity(&self, definition: &Item) -> u16 {

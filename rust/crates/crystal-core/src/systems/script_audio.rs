@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::models::PokemonSpecies;
 use crate::state::{GameState, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, ScriptMusicFade};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptAudioCommand {
     #[serde(deserialize_with = "required_audio_command_token")]
@@ -16,6 +16,39 @@ pub struct ScriptAudioCommand {
     #[serde(deserialize_with = "required_audio_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptAudioCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptAudioCommand {
+            #[serde(default, deserialize_with = "required_audio_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_audio_token")]
+            audio_id: Option<String>,
+            fade_frames: Option<u16>,
+            #[serde(deserialize_with = "required_audio_source_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptAudioCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            audio_id: raw.audio_id,
+            fade_frames: raw.fade_frames,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_audio_command_shape(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +85,7 @@ pub enum ScriptAudioCue {
 #[serde(deny_unknown_fields)]
 pub enum ScriptAudioError {
     InvalidCommand { command: String },
+    InvalidSourceScript { source_script: String },
     UnknownCommand { command: String },
     MissingAudioId { command: String },
     UnexpectedAudioId { command: String },
@@ -102,6 +136,46 @@ pub fn is_known_script_audio_command(command: &str) -> bool {
         || SCRIPT_AUDIO_CRY_COMMANDS.contains(&command)
         || SCRIPT_AUDIO_MUSIC_FADE_COMMANDS.contains(&command)
         || SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS.contains(&command)
+}
+
+fn validate_script_audio_command_shape(command: &ScriptAudioCommand) -> Result<(), String> {
+    if !is_known_script_audio_command(&command.command) {
+        return Err(format!("unknown script audio command {}", command.command));
+    }
+    match command.command.as_str() {
+        "playmusic" | "playsound" | "cry" => {
+            if command.audio_id.is_none() {
+                return Err(format!(
+                    "script audio command {} requires audio_id",
+                    command.command
+                ));
+            }
+            if command.fade_frames.is_some() {
+                return Err(format!(
+                    "script audio command {} must not declare fade_frames",
+                    command.command
+                ));
+            }
+        }
+        "musicfadeout" => {
+            if command.audio_id.is_none() {
+                return Err("script audio command musicfadeout requires audio_id".to_string());
+            }
+            if command.fade_frames.is_none() {
+                return Err("script audio command musicfadeout requires fade_frames".to_string());
+            }
+        }
+        "waitsfx" => {
+            if command.audio_id.is_some() {
+                return Err("script audio command waitsfx must not declare audio_id".to_string());
+            }
+            if command.fade_frames.is_some() {
+                return Err("script audio command waitsfx must not declare fade_frames".to_string());
+            }
+        }
+        _ => unreachable!("known script audio command was not handled"),
+    }
+    Ok(())
 }
 
 pub fn script_audio_command_issues(
@@ -190,6 +264,7 @@ pub fn resolve_script_audio_command(
     species: &BTreeMap<String, PokemonSpecies>,
     cry_by_species: &BTreeMap<String, String>,
 ) -> Result<ScriptAudioCue, ScriptAudioError> {
+    reject_invalid_source_script(&command)?;
     if !is_exact_audio_command_token(&command.command) {
         return Err(ScriptAudioError::InvalidCommand {
             command: command.command,
@@ -369,6 +444,16 @@ pub fn apply_audio_cue_to_state(state: &mut GameState, cue: &ScriptAudioCue) {
     }
 }
 
+fn reject_invalid_source_script(command: &ScriptAudioCommand) -> Result<(), ScriptAudioError> {
+    if is_exact_audio_token(&command.source_script) {
+        Ok(())
+    } else {
+        Err(ScriptAudioError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+        })
+    }
+}
+
 fn check_audio_id(
     audio_id: Option<&str>,
     known_ids: &BTreeSet<String>,
@@ -401,6 +486,15 @@ fn is_exact_audio_token(value: &str) -> bool {
         && !has_reserved_pack_prefix(value)
 }
 
+fn is_exact_audio_source_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
+        && !has_reserved_pack_prefix(value)
+}
+
 fn required_audio_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -425,6 +519,20 @@ where
     } else {
         Err(serde::de::Error::custom(format!(
             "script audio token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_audio_source_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_audio_source_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script audio source token must be exact ASM label syntax, found {value:?}"
         )))
     }
 }
@@ -819,6 +927,7 @@ mod tests {
     #[test]
     fn cry_requires_exact_species_and_exact_cry_asset() {
         let species = BTreeMap::from([("LUGIA".to_string(), species("LUGIA"))]);
+        let sfx = BTreeSet::from(["SFX_GET_BADGE".to_string()]);
         let cries = BTreeSet::from(["CRY_LUGIA".to_string()]);
         let cry_by_species = BTreeMap::from([("LUGIA".to_string(), "CRY_LUGIA".to_string())]);
         let cue = resolve_script_audio_command(
@@ -1026,6 +1135,38 @@ mod tests {
         );
         assert!(state.script_runtime.audio_events.is_empty());
         assert_eq!(state.script_runtime.current_music, None);
+    }
+
+    #[test]
+    fn invalid_audio_source_script_does_not_mutate_runtime_state() {
+        let mut state = GameState::default();
+        state.script_runtime.current_music = Some("MUSIC_NEW_BARK_TOWN".to_string());
+        let mut bad_source = command("playmusic", Some("MUSIC_ROUTE_29"), None);
+        bad_source.source_script = "legacy_audio_script".to_string();
+
+        let error = apply_script_audio_command(
+            &mut state,
+            bad_source,
+            &BTreeSet::from(["MUSIC_ROUTE_29".to_string()]),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .expect_err("malformed source script is invalid");
+
+        assert_eq!(
+            error,
+            ScriptAudioError::InvalidSourceScript {
+                source_script: "legacy_audio_script".to_string()
+            }
+        );
+        assert!(state.script_runtime.audio_events.is_empty());
+        assert_eq!(
+            state.script_runtime.current_music.as_deref(),
+            Some("MUSIC_NEW_BARK_TOWN")
+        );
+        assert_eq!(state.script_runtime.pending_music_fade, None);
     }
 
     #[test]

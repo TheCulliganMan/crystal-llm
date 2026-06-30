@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::random::Random;
@@ -110,20 +110,68 @@ pub enum EncounterError {
     ActiveRepelMissingLeadLevel { item_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WildEncounter {
     pub level: u8,
-    #[serde(deserialize_with = "required_encounter_token")]
     pub species: String,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for WildEncounter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawWildEncounter {
+            level: u8,
+            #[serde(deserialize_with = "required_encounter_token")]
+            species: String,
+        }
+
+        let raw = RawWildEncounter::deserialize(deserializer)?;
+        if raw.level == 0 {
+            return Err(D::Error::custom(format!(
+                "wild encounter species {} has level 0",
+                raw.species
+            )));
+        }
+        Ok(Self {
+            level: raw.level,
+            species: raw.species,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WildEncounterTable {
     pub morning: Vec<WildEncounter>,
     pub day: Vec<WildEncounter>,
     pub night: Vec<WildEncounter>,
+}
+
+impl<'de> Deserialize<'de> for WildEncounterTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawWildEncounterTable {
+            morning: Vec<WildEncounter>,
+            day: Vec<WildEncounter>,
+            night: Vec<WildEncounter>,
+        }
+
+        let raw = RawWildEncounterTable::deserialize(deserializer)?;
+        Ok(Self {
+            morning: raw.morning,
+            day: raw.day,
+            night: raw.night,
+        })
+    }
 }
 
 impl WildEncounterTable {
@@ -198,6 +246,20 @@ where
     }
 }
 
+fn required_nullable_encounter_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(value) if is_exact_nonempty_encounter_token(&value) => Ok(Some(value)),
+        Some(value) => Err(serde::de::Error::custom(format!(
+            "encounter token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn required_nullable_grass_rates<'de, D>(
     deserializer: D,
 ) -> Result<Option<BTreeMap<String, u8>>, D::Error>
@@ -226,11 +288,37 @@ pub struct ResolvedWildEncounter {
     pub level: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EncounterSlotChance {
     pub threshold: u8,
     pub slot: usize,
+}
+
+impl<'de> Deserialize<'de> for EncounterSlotChance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEncounterSlotChance {
+            threshold: u8,
+            slot: usize,
+        }
+
+        let raw = RawEncounterSlotChance::deserialize(deserializer)?;
+        if raw.threshold == 0 || raw.threshold > 100 {
+            return Err(D::Error::custom(format!(
+                "encounter slot threshold {} is outside 1..100",
+                raw.threshold
+            )));
+        }
+        Ok(Self {
+            threshold: raw.threshold,
+            slot: raw.slot,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -258,7 +346,14 @@ impl<'de> Deserialize<'de> for EncounterSlotTables {
                 )));
             }
         }
-        Ok(Self { tables: raw.tables })
+        let tables = Self { tables: raw.tables };
+        let issues = encounter_slot_table_issues(&tables, true);
+        if let Some(issue) = issues.first() {
+            return Err(serde::de::Error::custom(format!(
+                "invalid encounter slot tables: {issue:?}"
+            )));
+        }
+        Ok(tables)
     }
 }
 
@@ -469,11 +564,36 @@ fn push_custom_encounter_slot_table_issues(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncounterMusicModifier {
     pub numerator: u8,
     pub denominator: u8,
+}
+
+impl<'de> Deserialize<'de> for EncounterMusicModifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEncounterMusicModifier {
+            numerator: u8,
+            denominator: u8,
+        }
+
+        let raw = RawEncounterMusicModifier::deserialize(deserializer)?;
+        if raw.denominator == 0 {
+            return Err(D::Error::custom(
+                "encounter music modifier denominator must be nonzero",
+            ));
+        }
+        Ok(Self {
+            numerator: raw.numerator,
+            denominator: raw.denominator,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -557,20 +677,77 @@ pub fn encounter_music_modifier_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldEncounterEntry {
     pub weight: u8,
-    #[serde(deserialize_with = "required_encounter_token")]
     pub species: String,
     pub level: u8,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FieldEncounterEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFieldEncounterEntry {
+            weight: u8,
+            #[serde(deserialize_with = "required_encounter_token")]
+            species: String,
+            level: u8,
+        }
+
+        let raw = RawFieldEncounterEntry::deserialize(deserializer)?;
+        if raw.weight == 0 {
+            return Err(D::Error::custom(format!(
+                "field encounter species {} has weight 0",
+                raw.species
+            )));
+        }
+        if raw.level == 0 {
+            return Err(D::Error::custom(format!(
+                "field encounter species {} has level 0",
+                raw.species
+            )));
+        }
+        Ok(Self {
+            weight: raw.weight,
+            species: raw.species,
+            level: raw.level,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldEncounterTable {
     pub common: Vec<FieldEncounterEntry>,
     pub rare: Vec<FieldEncounterEntry>,
+}
+
+impl<'de> Deserialize<'de> for FieldEncounterTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFieldEncounterTable {
+            common: Vec<FieldEncounterEntry>,
+            rare: Vec<FieldEncounterEntry>,
+        }
+
+        let raw = RawFieldEncounterTable::deserialize(deserializer)?;
+        if raw.common.is_empty() {
+            return Err(D::Error::custom("field encounter common table is empty"));
+        }
+        Ok(Self {
+            common: raw.common,
+            rare: raw.rare,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -586,15 +763,26 @@ impl<'de> Deserialize<'de> for FieldEncounterData {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct RawFieldEncounterData {
-            #[serde(deserialize_with = "required_encounter_token")]
-            map_name: String,
+            #[serde(default, deserialize_with = "required_nullable_encounter_token")]
+            map_name: Option<String>,
+            #[serde(default)]
             tables: BTreeMap<String, FieldEncounterTable>,
+            #[serde(default)]
+            headbutt: Option<FieldEncounterTable>,
+            #[serde(default)]
+            rock_smash: Option<FieldEncounterTable>,
         }
 
         let raw = RawFieldEncounterData::deserialize(deserializer)?;
-        for kind in raw.tables.keys() {
+        let mut tables = raw.tables;
+        if let Some(headbutt) = raw.headbutt {
+            tables.insert(FieldEncounterKind::Headbutt.as_key().to_string(), headbutt);
+        }
+        if let Some(rock_smash) = raw.rock_smash {
+            tables.insert(FieldEncounterKind::RockSmash.as_key().to_string(), rock_smash);
+        }
+        for kind in tables.keys() {
             if !is_exact_nonempty_encounter_token(kind) {
                 return Err(serde::de::Error::custom(format!(
                     "encounter token must be exact ASCII alphanumeric/underscore, found {kind:?}"
@@ -602,8 +790,8 @@ impl<'de> Deserialize<'de> for FieldEncounterData {
             }
         }
         Ok(Self {
-            map_name: raw.map_name,
-            tables: raw.tables,
+            map_name: raw.map_name.unwrap_or_default(),
+            tables,
         })
     }
 }

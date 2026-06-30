@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::GameState;
 use crate::world::encounters::TimeOfDay;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptVariableCommand {
     #[serde(deserialize_with = "required_script_variable_command_token")]
@@ -15,6 +15,40 @@ pub struct ScriptVariableCommand {
     #[serde(deserialize_with = "required_script_variable_target_token")]
     pub source_script: String,
     pub command_index: usize,
+}
+
+impl<'de> Deserialize<'de> for ScriptVariableCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawScriptVariableCommand {
+            #[serde(default, deserialize_with = "required_script_variable_command_token")]
+            command: String,
+            #[serde(deserialize_with = "required_nullable_script_variable_target_token")]
+            target: Option<String>,
+            #[serde(deserialize_with = "required_script_variable_value_token_vec")]
+            value_tokens: Vec<String>,
+            #[serde(deserialize_with = "required_script_variable_source_token")]
+            source_script: String,
+            command_index: usize,
+        }
+
+        let raw = RawScriptVariableCommand::deserialize(deserializer)?;
+        let command = Self {
+            command: raw.command,
+            target: raw.target,
+            value_tokens: raw.value_tokens,
+            source_script: raw.source_script,
+            command_index: raw.command_index,
+        };
+        if !command.command.is_empty() {
+            validate_script_variable_command(&command).map_err(D::Error::custom)?;
+        }
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +100,8 @@ pub enum ScriptVariableCommandError {
     EmptyValueToken { command: String },
     #[error("script variable command '{command}' has invalid value token '{token}'")]
     InvalidValueToken { command: String, token: String },
+    #[error("script variable command source script '{source_script}' is invalid")]
+    InvalidSourceScript { source_script: String },
     #[error("script variable '{variable}' is unset")]
     UnsetVariable { variable: String },
     #[error("script memory '{memory}' is unset")]
@@ -105,6 +141,7 @@ pub fn apply_script_variable_command(
     command: ScriptVariableCommand,
     time_of_day: Option<TimeOfDay>,
 ) -> Result<ScriptVariableOutcome, ScriptVariableCommandError> {
+    reject_invalid_source_script(&command)?;
     match command.command.as_str() {
         "setval" => {
             reject_target(&command)?;
@@ -141,6 +178,9 @@ pub fn apply_script_variable_command(
                 .script_runtime
                 .variables
                 .insert(variable.clone(), value.clone());
+            if variable == "VAR_BATTLETYPE" {
+                state.pending_special_battle_type = Some(value.clone());
+            }
             Ok(ScriptVariableOutcome::LoadVariable {
                 variable,
                 value,
@@ -202,8 +242,9 @@ pub fn apply_script_variable_command(
         "checktime" => {
             reject_target(&command)?;
             let token = require_single_value(&command)?;
-            let expected = parse_time_token(token)?;
-            let active = time_of_day.is_some_and(|time_of_day| time_of_day == expected);
+            let expected = parse_time_mask(token)?;
+            let active = time_of_day
+                .is_some_and(|time_of_day| expected & time_of_day_mask(time_of_day) != 0);
             let value = if active { "TRUE" } else { "FALSE" }.to_string();
             state.script_runtime.script_value = Some(value.clone());
             Ok(ScriptVariableOutcome::SetAccumulator {
@@ -221,6 +262,7 @@ pub fn apply_script_variable_command(
 pub fn validate_script_variable_command(
     command: &ScriptVariableCommand,
 ) -> Result<(), ScriptVariableCommandError> {
+    reject_invalid_source_script(command)?;
     if !is_exact_script_variable_command_token(&command.command) {
         return Err(ScriptVariableCommandError::UnknownCommand {
             command: command.command.clone(),
@@ -242,7 +284,7 @@ pub fn validate_script_variable_command(
         "checktime" => {
             reject_target(command)?;
             let token = require_single_value(command)?;
-            parse_time_token(token)?;
+            parse_time_mask(token)?;
         }
         other => {
             return Err(ScriptVariableCommandError::UnknownCommand {
@@ -251,6 +293,18 @@ pub fn validate_script_variable_command(
         }
     }
     Ok(())
+}
+
+fn reject_invalid_source_script(
+    command: &ScriptVariableCommand,
+) -> Result<(), ScriptVariableCommandError> {
+    if is_exact_script_variable_source_token(&command.source_script) {
+        Ok(())
+    } else {
+        Err(ScriptVariableCommandError::InvalidSourceScript {
+            source_script: command.source_script.clone(),
+        })
+    }
 }
 
 fn require_target(command: &ScriptVariableCommand) -> Result<&str, ScriptVariableCommandError> {
@@ -333,14 +387,38 @@ fn reject_value(command: &ScriptVariableCommand) -> Result<(), ScriptVariableCom
     }
 }
 
-fn parse_time_token(token: &str) -> Result<TimeOfDay, ScriptVariableCommandError> {
-    match token {
-        "MORN" => Ok(TimeOfDay::Morning),
-        "DAY" => Ok(TimeOfDay::Day),
-        "NITE" => Ok(TimeOfDay::Night),
-        other => Err(ScriptVariableCommandError::UnknownTimeToken {
-            time_token: other.to_string(),
-        }),
+fn parse_time_mask(token: &str) -> Result<u8, ScriptVariableCommandError> {
+    if token == "ANYTIME" {
+        return Ok(time_of_day_mask(TimeOfDay::Morning)
+            | time_of_day_mask(TimeOfDay::Day)
+            | time_of_day_mask(TimeOfDay::Night));
+    }
+    let mut mask = 0;
+    for part in token.split('|') {
+        if part.is_empty() {
+            return Err(ScriptVariableCommandError::UnknownTimeToken {
+                time_token: token.to_string(),
+            });
+        }
+        mask |= match part {
+            "MORN" => time_of_day_mask(TimeOfDay::Morning),
+            "DAY" => time_of_day_mask(TimeOfDay::Day),
+            "NITE" => time_of_day_mask(TimeOfDay::Night),
+            other => {
+                return Err(ScriptVariableCommandError::UnknownTimeToken {
+                    time_token: other.to_string(),
+                });
+            }
+        };
+    }
+    Ok(mask)
+}
+
+fn time_of_day_mask(time_of_day: TimeOfDay) -> u8 {
+    match time_of_day {
+        TimeOfDay::Morning => 0b001,
+        TimeOfDay::Day => 0b010,
+        TimeOfDay::Night => 0b100,
     }
 }
 
@@ -350,6 +428,15 @@ fn is_exact_script_variable_target_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_script_variable_source_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
         && !has_reserved_pack_prefix(value)
 }
 
@@ -391,6 +478,20 @@ where
     } else {
         Err(serde::de::Error::custom(format!(
             "script variable target must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )))
+    }
+}
+
+fn required_script_variable_source_token<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if is_exact_script_variable_source_token(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "script variable source must be exact ASM label syntax, found {value:?}"
         )))
     }
 }
@@ -493,6 +594,50 @@ mod tests {
     }
 
     #[test]
+    fn loadvar_battletype_sets_pending_battle_type_without_aliasing() {
+        let mut state = GameState::default();
+        let outcome = apply_script_variable_command(
+            &mut state,
+            command(
+                "loadvar",
+                Some("VAR_BATTLETYPE"),
+                &["BATTLETYPE_FORCESHINY"],
+            ),
+            None,
+        )
+        .expect("load battle type");
+
+        assert_eq!(
+            outcome,
+            ScriptVariableOutcome::LoadVariable {
+                variable: "VAR_BATTLETYPE".to_string(),
+                value: "BATTLETYPE_FORCESHINY".to_string(),
+                source_script: "VarScript".to_string(),
+                command_index: 5,
+            }
+        );
+        assert_eq!(
+            state.script_runtime.variables.get("VAR_BATTLETYPE"),
+            Some(&"BATTLETYPE_FORCESHINY".to_string())
+        );
+        assert_eq!(
+            state.pending_special_battle_type.as_deref(),
+            Some("BATTLETYPE_FORCESHINY")
+        );
+
+        apply_script_variable_command(
+            &mut state,
+            command("loadvar", Some("var_battletype"), &["BATTLETYPE_NORMAL"]),
+            None,
+        )
+        .expect("lowercase variable is just a distinct exact variable");
+        assert_eq!(
+            state.pending_special_battle_type.as_deref(),
+            Some("BATTLETYPE_FORCESHINY")
+        );
+    }
+
+    #[test]
     fn memory_commands_write_exact_labels_without_aliasing() {
         let mut state = GameState::default();
         apply_script_variable_command(
@@ -550,6 +695,53 @@ mod tests {
             })
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("FALSE"));
+    }
+
+    #[test]
+    fn checktime_uses_exact_time_masks() {
+        let mut state = GameState::default();
+        apply_script_variable_command(
+            &mut state,
+            command("checktime", None, &["MORN|NITE"]),
+            Some(TimeOfDay::Night),
+        )
+        .expect("night matches combined mask");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("TRUE"));
+
+        apply_script_variable_command(
+            &mut state,
+            command("checktime", None, &["MORN|NITE"]),
+            Some(TimeOfDay::Day),
+        )
+        .expect("day misses combined mask");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("FALSE"));
+
+        apply_script_variable_command(
+            &mut state,
+            command("checktime", None, &["ANYTIME"]),
+            Some(TimeOfDay::Day),
+        )
+        .expect("anytime matches exact symbolic mask");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("TRUE"));
+
+        assert_eq!(
+            validate_script_variable_command(&command("checktime", None, &["MORN||DAY"])),
+            Err(ScriptVariableCommandError::UnknownTimeToken {
+                time_token: "MORN||DAY".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_script_variable_command(&command("checktime", None, &["MORN|late"])),
+            Err(ScriptVariableCommandError::UnknownTimeToken {
+                time_token: "late".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_script_variable_command(&command("checktime", None, &["morn|nite"])),
+            Err(ScriptVariableCommandError::UnknownTimeToken {
+                time_token: "morn".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -634,6 +826,39 @@ mod tests {
                 "{field} produced unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_invalid_source_script_before_variable_state_mutation() {
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("UNCHANGED".to_string());
+        let mut bad_source = command(
+            "loadvar",
+            Some("VAR_BATTLETYPE"),
+            &["BATTLETYPE_FORCESHINY"],
+        );
+        bad_source.source_script = "fallback_script".to_string();
+
+        assert_eq!(
+            validate_script_variable_command(&bad_source),
+            Err(ScriptVariableCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+        assert_eq!(
+            apply_script_variable_command(&mut state, bad_source, None),
+            Err(ScriptVariableCommandError::InvalidSourceScript {
+                source_script: "fallback_script".to_string(),
+            })
+        );
+
+        assert_eq!(
+            state.script_runtime.script_value.as_deref(),
+            Some("UNCHANGED")
+        );
+        assert!(state.script_runtime.variables.is_empty());
+        assert!(state.script_runtime.memory.is_empty());
+        assert!(state.pending_special_battle_type.is_none());
     }
 
     #[test]

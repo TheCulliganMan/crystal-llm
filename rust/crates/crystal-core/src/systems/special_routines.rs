@@ -787,7 +787,7 @@ pub struct SpecialRoutineContext<'a> {
     pub oak_ratings: &'a [OakRatingEntry],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BugContestConfig {
     pub park_balls: u8,
@@ -795,6 +795,70 @@ pub struct BugContestConfig {
     pub timer_seconds: u8,
     pub selected_contestant_count: usize,
     pub contestant_flags: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for BugContestConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawConfig {
+            park_balls: u8,
+            timer_minutes: u8,
+            timer_seconds: u8,
+            selected_contestant_count: usize,
+            contestant_flags: Vec<String>,
+        }
+
+        let raw = RawConfig::deserialize(deserializer)?;
+        if raw.park_balls == 0 {
+            return Err(serde::de::Error::custom(
+                "bug contest parkBalls must be nonzero",
+            ));
+        }
+        if raw.timer_minutes == 0 && raw.timer_seconds == 0 {
+            return Err(serde::de::Error::custom(
+                "bug contest timer must be nonzero",
+            ));
+        }
+        if raw.timer_seconds > 59 {
+            return Err(serde::de::Error::custom(format!(
+                "bug contest timerSeconds must be 0..59, found {}",
+                raw.timer_seconds
+            )));
+        }
+        if raw.selected_contestant_count == 0 {
+            return Err(serde::de::Error::custom(
+                "bug contest selectedContestantCount must be nonzero",
+            ));
+        }
+        if raw.contestant_flags.len() < raw.selected_contestant_count {
+            return Err(serde::de::Error::custom(format!(
+                "bug contest selectedContestantCount {} exceeds contestant flag count {}",
+                raw.selected_contestant_count,
+                raw.contestant_flags.len()
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for (index, flag) in raw.contestant_flags.iter().enumerate() {
+            require_special_token(&format!("bug contest contestantFlags[{index}]"), flag)
+                .map_err(serde::de::Error::custom)?;
+            if !seen.insert(flag.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "bug contest contestantFlags[{index}] duplicates {flag:?}"
+                )));
+            }
+        }
+        Ok(Self {
+            park_balls: raw.park_balls,
+            timer_minutes: raw.timer_minutes,
+            timer_seconds: raw.timer_seconds,
+            selected_contestant_count: raw.selected_contestant_count,
+            contestant_flags: raw.contestant_flags,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,7 +934,7 @@ pub fn bug_contest_config_issues(
     issues
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BattleTowerRules {
     pub banned_species: BTreeMap<String, BattleTowerBannedSpeciesRule>,
@@ -883,6 +947,84 @@ pub struct BattleTowerRules {
     pub duplicate_species_failure_text: String,
     pub duplicate_held_item_failure_text: String,
     pub egg_failure_text: String,
+}
+
+impl<'de> Deserialize<'de> for BattleTowerRules {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawRules {
+            banned_species: BTreeMap<String, BattleTowerBannedSpeciesRule>,
+            required_party_count: usize,
+            challenge_streak_length: u8,
+            minimum_level_group: u8,
+            maximum_level_group: u8,
+            level_group_size: u8,
+            party_count_failure_text: String,
+            duplicate_species_failure_text: String,
+            duplicate_held_item_failure_text: String,
+            egg_failure_text: String,
+        }
+
+        let raw = RawRules::deserialize(deserializer)?;
+        if raw.required_party_count == 0 {
+            return Err(serde::de::Error::custom(
+                "battle tower requiredPartyCount must be nonzero",
+            ));
+        }
+        if raw.challenge_streak_length == 0 {
+            return Err(serde::de::Error::custom(
+                "battle tower challengeStreakLength must be nonzero",
+            ));
+        }
+        if raw.level_group_size == 0 {
+            return Err(serde::de::Error::custom(
+                "battle tower levelGroupSize must be nonzero",
+            ));
+        }
+        if raw.minimum_level_group == 0 || raw.maximum_level_group < raw.minimum_level_group {
+            return Err(serde::de::Error::custom(
+                "battle tower level group range must be nonzero and ordered",
+            ));
+        }
+        for (field, value) in [
+            (
+                "battle tower partyCountFailureText",
+                raw.party_count_failure_text.as_str(),
+            ),
+            (
+                "battle tower duplicateSpeciesFailureText",
+                raw.duplicate_species_failure_text.as_str(),
+            ),
+            (
+                "battle tower duplicateHeldItemFailureText",
+                raw.duplicate_held_item_failure_text.as_str(),
+            ),
+            ("battle tower eggFailureText", raw.egg_failure_text.as_str()),
+        ] {
+            require_special_token(field, value).map_err(serde::de::Error::custom)?;
+        }
+        for species_id in raw.banned_species.keys() {
+            require_special_token("battle tower bannedSpecies key", species_id)
+                .map_err(serde::de::Error::custom)?;
+        }
+
+        Ok(Self {
+            banned_species: raw.banned_species,
+            required_party_count: raw.required_party_count,
+            challenge_streak_length: raw.challenge_streak_length,
+            minimum_level_group: raw.minimum_level_group,
+            maximum_level_group: raw.maximum_level_group,
+            level_group_size: raw.level_group_size,
+            party_count_failure_text: raw.party_count_failure_text,
+            duplicate_species_failure_text: raw.duplicate_species_failure_text,
+            duplicate_held_item_failure_text: raw.duplicate_held_item_failure_text,
+            egg_failure_text: raw.egg_failure_text,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1090,12 +1232,67 @@ fn validate_saved_battle_tower_record_len(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OakRatingEntry {
     pub caught_count_limit: usize,
     pub fanfare: String,
     pub text_label: String,
+}
+
+impl<'de> Deserialize<'de> for OakRatingEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEntry {
+            caught_count_limit: usize,
+            fanfare: String,
+            text_label: String,
+        }
+
+        let raw = RawEntry::deserialize(deserializer)?;
+        require_special_token("oak rating fanfare", &raw.fanfare)
+            .map_err(serde::de::Error::custom)?;
+        require_special_token("oak rating textLabel", &raw.text_label)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            caught_count_limit: raw.caught_count_limit,
+            fanfare: raw.fanfare,
+            text_label: raw.text_label,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct OakRatingTable(pub Vec<OakRatingEntry>);
+
+impl<'de> Deserialize<'de> for OakRatingTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = Vec::<OakRatingEntry>::deserialize(deserializer)?;
+        if entries.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Oak rating table must not be empty",
+            ));
+        }
+        let mut previous_limit = None;
+        for (index, entry) in entries.iter().enumerate() {
+            if let Some(previous) = previous_limit
+                && entry.caught_count_limit <= previous
+            {
+                return Err(serde::de::Error::custom(format!(
+                    "Oak rating entry {index} caughtCountLimit must increase"
+                )));
+            }
+            previous_limit = Some(entry.caught_count_limit);
+        }
+        Ok(Self(entries))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1162,7 +1359,7 @@ pub fn oak_rating_table_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OddEggDefinition {
     pub species: String,
@@ -1175,6 +1372,114 @@ pub struct OddEggDefinition {
     pub hatch_cycles: u8,
     pub nickname: String,
     pub original_trainer_name: String,
+}
+
+impl<'de> Deserialize<'de> for OddEggDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawDefinition {
+            species: String,
+            moves: Vec<String>,
+            original_trainer_id: u16,
+            dvs: [u8; 4],
+            probability: u16,
+            level: u8,
+            experience: i32,
+            hatch_cycles: u8,
+            nickname: String,
+            original_trainer_name: String,
+        }
+
+        let raw = RawDefinition::deserialize(deserializer)?;
+        require_special_token("odd egg species", &raw.species).map_err(serde::de::Error::custom)?;
+        if raw.moves.is_empty() || raw.moves.len() > 4 {
+            return Err(serde::de::Error::custom(format!(
+                "odd egg move list must contain 1..4 moves, found {}",
+                raw.moves.len()
+            )));
+        }
+        for (index, move_id) in raw.moves.iter().enumerate() {
+            require_special_token(&format!("odd egg moves[{index}]"), move_id)
+                .map_err(serde::de::Error::custom)?;
+        }
+        for (index, dv) in raw.dvs.iter().enumerate() {
+            if *dv > 15 {
+                return Err(serde::de::Error::custom(format!(
+                    "odd egg dvs[{index}] must be 0..15, found {dv}"
+                )));
+            }
+        }
+        if raw.probability == 0 {
+            return Err(serde::de::Error::custom(
+                "odd egg probability must be nonzero",
+            ));
+        }
+        if raw.level == 0 || raw.level > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "odd egg level must be 1..100, found {}",
+                raw.level
+            )));
+        }
+        if raw.experience < 0 {
+            return Err(serde::de::Error::custom(format!(
+                "odd egg experience must be nonnegative, found {}",
+                raw.experience
+            )));
+        }
+        if raw.hatch_cycles == 0 {
+            return Err(serde::de::Error::custom(
+                "odd egg hatchCycles must be nonzero",
+            ));
+        }
+        require_special_text("odd egg nickname", &raw.nickname)
+            .map_err(serde::de::Error::custom)?;
+        require_special_text("odd egg originalTrainerName", &raw.original_trainer_name)
+            .map_err(serde::de::Error::custom)?;
+
+        Ok(Self {
+            species: raw.species,
+            moves: raw.moves,
+            original_trainer_id: raw.original_trainer_id,
+            dvs: raw.dvs,
+            probability: raw.probability,
+            level: raw.level,
+            experience: raw.experience,
+            hatch_cycles: raw.hatch_cycles,
+            nickname: raw.nickname,
+            original_trainer_name: raw.original_trainer_name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct OddEggDefinitionTable(pub Vec<OddEggDefinition>);
+
+impl<'de> Deserialize<'de> for OddEggDefinitionTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let definitions = Vec::<OddEggDefinition>::deserialize(deserializer)?;
+        if definitions.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Odd Egg definitions must not be empty",
+            ));
+        }
+        let total_probability = definitions
+            .iter()
+            .map(|definition| u32::from(definition.probability))
+            .sum::<u32>();
+        if total_probability != 100 {
+            return Err(serde::de::Error::custom(format!(
+                "Odd Egg definition probabilities must total 100, got {total_probability}"
+            )));
+        }
+        Ok(Self(definitions))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1301,11 +1606,65 @@ pub fn odd_egg_definition_issues(
     issues
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MagikarpLengthEntry {
     pub threshold: u16,
     pub divisor: u16,
+}
+
+impl<'de> Deserialize<'de> for MagikarpLengthEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEntry {
+            threshold: u16,
+            divisor: u16,
+        }
+
+        let raw = RawEntry::deserialize(deserializer)?;
+        if raw.divisor == 0 {
+            return Err(serde::de::Error::custom(
+                "magikarp length divisor must be nonzero",
+            ));
+        }
+        Ok(Self {
+            threshold: raw.threshold,
+            divisor: raw.divisor,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct MagikarpLengthTable(pub Vec<MagikarpLengthEntry>);
+
+impl<'de> Deserialize<'de> for MagikarpLengthTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = Vec::<MagikarpLengthEntry>::deserialize(deserializer)?;
+        if entries.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Magikarp length table must not be empty",
+            ));
+        }
+        let mut previous_threshold = None;
+        for (index, entry) in entries.iter().enumerate() {
+            if let Some(previous) = previous_threshold
+                && entry.threshold <= previous
+            {
+                return Err(serde::de::Error::custom(format!(
+                    "Magikarp length entry {index} threshold must increase"
+                )));
+            }
+            previous_threshold = Some(entry.threshold);
+        }
+        Ok(Self(entries))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1348,20 +1707,102 @@ pub fn magikarp_length_table_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HappinessData {
     pub changes: BTreeMap<u8, HappinessChangeEntry>,
     pub services: BTreeMap<String, Vec<HappinessServiceOutcome>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for HappinessData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawData {
+            changes: BTreeMap<u8, HappinessChangeEntry>,
+            services: BTreeMap<String, Vec<HappinessServiceOutcome>>,
+        }
+
+        let raw = RawData::deserialize(deserializer)?;
+        if raw.changes.is_empty() {
+            return Err(serde::de::Error::custom(
+                "happiness changes must not be empty",
+            ));
+        }
+        if raw.services.is_empty() {
+            return Err(serde::de::Error::custom(
+                "happiness services must not be empty",
+            ));
+        }
+        for (routine, outcomes) in &raw.services {
+            require_special_token("happiness service routine", routine)
+                .map_err(serde::de::Error::custom)?;
+            if outcomes.is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "happiness service {routine} must declare outcomes"
+                )));
+            }
+            for outcome in outcomes {
+                if !raw.changes.contains_key(&outcome.change_code) {
+                    return Err(serde::de::Error::custom(format!(
+                        "happiness service {routine} references unknown change code {}",
+                        outcome.change_code
+                    )));
+                }
+            }
+        }
+        let mut code_names = BTreeSet::new();
+        for (change_code, entry) in &raw.changes {
+            if !code_names.insert(entry.code.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "happiness change code {} duplicates code name {}",
+                    change_code, entry.code
+                )));
+            }
+        }
+        Ok(Self {
+            changes: raw.changes,
+            services: raw.services,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HappinessChangeEntry {
     pub code: String,
     pub low: i16,
     pub mid: i16,
     pub high: i16,
+}
+
+impl<'de> Deserialize<'de> for HappinessChangeEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEntry {
+            code: String,
+            low: i16,
+            mid: i16,
+            high: i16,
+        }
+
+        let raw = RawEntry::deserialize(deserializer)?;
+        require_special_token("happiness change code", &raw.code)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            code: raw.code,
+            low: raw.low,
+            mid: raw.mid,
+            high: raw.high,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1445,6 +1886,43 @@ pub fn happiness_data_issues(data: &HappinessData) -> Vec<HappinessDataIssue> {
 
 pub type DratiniMoveSets = BTreeMap<u8, Vec<String>>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct DratiniMoveSetTable(pub DratiniMoveSets);
+
+impl<'de> Deserialize<'de> for DratiniMoveSetTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let move_sets = DratiniMoveSets::deserialize(deserializer)?;
+        if move_sets.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Dratini move sets must not be empty",
+            ));
+        }
+        for (mode, moves) in &move_sets {
+            if moves.is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "Dratini move set {mode} must not be empty"
+                )));
+            }
+            if moves.len() > 4 {
+                return Err(serde::de::Error::custom(format!(
+                    "Dratini move set {mode} must contain at most 4 moves"
+                )));
+            }
+            for (move_index, move_id) in moves.iter().enumerate() {
+                require_special_token(
+                    &format!("Dratini move set {mode} move {move_index}"),
+                    move_id,
+                )
+                .map_err(serde::de::Error::custom)?;
+            }
+        }
+        Ok(Self(move_sets))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum DratiniMoveSetIssue {
@@ -1500,7 +1978,27 @@ fn is_exact_nonempty_special_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+fn require_special_token(field: &str, value: &str) -> Result<(), String> {
+    if is_exact_nonempty_special_token(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must be a nonempty exact pack token, found {value:?}"
+        ))
+    }
+}
+
+fn require_special_text(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        Err(format!(
+            "{field} must be nonempty exact text, found {value:?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShuckieGiftDefinition {
     pub species: String,
@@ -1510,6 +2008,51 @@ pub struct ShuckieGiftDefinition {
     pub original_trainer_name: String,
     pub original_trainer_id: u16,
     pub got_today_engine_flag: String,
+}
+
+impl<'de> Deserialize<'de> for ShuckieGiftDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawGift {
+            species: String,
+            level: u8,
+            held_item: String,
+            nickname: String,
+            original_trainer_name: String,
+            original_trainer_id: u16,
+            got_today_engine_flag: String,
+        }
+
+        let raw = RawGift::deserialize(deserializer)?;
+        require_special_token("shuckie species", &raw.species).map_err(serde::de::Error::custom)?;
+        if raw.level == 0 || raw.level > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "shuckie level must be 1..100, found {}",
+                raw.level
+            )));
+        }
+        require_special_token("shuckie heldItem", &raw.held_item)
+            .map_err(serde::de::Error::custom)?;
+        require_special_text("shuckie nickname", &raw.nickname)
+            .map_err(serde::de::Error::custom)?;
+        require_special_text("shuckie originalTrainerName", &raw.original_trainer_name)
+            .map_err(serde::de::Error::custom)?;
+        require_special_token("shuckie gotTodayEngineFlag", &raw.got_today_engine_flag)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            species: raw.species,
+            level: raw.level,
+            held_item: raw.held_item,
+            nickname: raw.nickname,
+            original_trainer_name: raw.original_trainer_name,
+            original_trainer_id: raw.original_trainer_id,
+            got_today_engine_flag: raw.got_today_engine_flag,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1576,7 +2119,7 @@ pub fn shuckie_gift_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuenaPasswordCategoryDefinition {
     pub category_type: String,
@@ -1584,11 +2127,109 @@ pub struct BuenaPasswordCategoryDefinition {
     pub options: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+impl<'de> Deserialize<'de> for BuenaPasswordCategoryDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawCategory {
+            category_type: String,
+            points: u8,
+            options: Vec<String>,
+        }
+
+        let raw = RawCategory::deserialize(deserializer)?;
+        require_special_token("buena password categoryType", &raw.category_type)
+            .map_err(serde::de::Error::custom)?;
+        if !is_known_buena_password_category_type(&raw.category_type) {
+            return Err(serde::de::Error::custom(format!(
+                "unknown buena password categoryType {:?}",
+                raw.category_type
+            )));
+        }
+        if raw.points == 0 {
+            return Err(serde::de::Error::custom(
+                "buena password category points must be nonzero",
+            ));
+        }
+        if raw.options.is_empty() {
+            return Err(serde::de::Error::custom(
+                "buena password category options must not be empty",
+            ));
+        }
+        for (index, option) in raw.options.iter().enumerate() {
+            require_special_token(&format!("buena password options[{index}]"), option)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            category_type: raw.category_type,
+            points: raw.points,
+            options: raw.options,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BuenaPasswordCategories {
     pub order: Vec<String>,
     pub categories: BTreeMap<String, BuenaPasswordCategoryDefinition>,
+}
+
+impl<'de> Deserialize<'de> for BuenaPasswordCategories {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCategories {
+            order: Vec<String>,
+            categories: BTreeMap<String, BuenaPasswordCategoryDefinition>,
+        }
+
+        let raw = RawCategories::deserialize(deserializer)?;
+        if raw.order.is_empty() {
+            return Err(serde::de::Error::custom(
+                "buena password order must not be empty",
+            ));
+        }
+        if raw.categories.is_empty() {
+            return Err(serde::de::Error::custom(
+                "buena password categories must not be empty",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for id in &raw.order {
+            require_special_token("buena password order id", id)
+                .map_err(serde::de::Error::custom)?;
+            if !seen.insert(id.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate buena password order id {id:?}"
+                )));
+            }
+            if !raw.categories.contains_key(id) {
+                return Err(serde::de::Error::custom(format!(
+                    "buena password order id {id:?} has no category"
+                )));
+            }
+        }
+        for id in raw.categories.keys() {
+            require_special_token("buena password category id", id)
+                .map_err(serde::de::Error::custom)?;
+            if !seen.contains(id.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "buena password category id {id:?} missing from order"
+                )));
+            }
+        }
+        Ok(Self {
+            order: raw.order,
+            categories: raw.categories,
+        })
+    }
 }
 
 pub const BUENA_PASSWORD_CATEGORY_MON: &str = "BUENA_MON";
@@ -1752,6 +2393,30 @@ pub fn buena_password_category_issues(
 
 pub type KurtApricornRecipes = BTreeMap<String, String>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct KurtApricornRecipeTable(pub KurtApricornRecipes);
+
+impl<'de> Deserialize<'de> for KurtApricornRecipeTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let recipes = KurtApricornRecipes::deserialize(deserializer)?;
+        if recipes.is_empty() {
+            return Err(serde::de::Error::custom(
+                "kurt apricorn recipes must not be empty",
+            ));
+        }
+        for (apricorn, ball) in &recipes {
+            require_special_token("Kurt apricorn recipe apricorn id", apricorn)
+                .map_err(serde::de::Error::custom)?;
+            require_special_token("Kurt apricorn recipe ball id", ball)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self(recipes))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KurtApricornRecipeIssue {
     EmptyApricorn { apricorn: String },
@@ -1802,6 +2467,33 @@ pub fn kurt_apricorn_recipe_issues(
 
 pub type BuenaPrizeDefinitions = BTreeMap<String, u8>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct BuenaPrizeDefinitionTable(pub BuenaPrizeDefinitions);
+
+impl<'de> Deserialize<'de> for BuenaPrizeDefinitionTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let prizes = BuenaPrizeDefinitions::deserialize(deserializer)?;
+        if prizes.is_empty() {
+            return Err(serde::de::Error::custom(
+                "buena prize definitions must not be empty",
+            ));
+        }
+        for (item_id, cost) in &prizes {
+            require_special_token("Buena prize item id", item_id)
+                .map_err(serde::de::Error::custom)?;
+            if *cost == 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "Buena prize item '{item_id}' cost must be nonzero"
+                )));
+            }
+        }
+        Ok(Self(prizes))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuenaPrizeDefinitionIssue {
     EmptyItem { item_id: String },
@@ -1838,7 +2530,7 @@ pub fn buena_prize_definition_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoamingPokemonDefinition {
     pub level: u8,
@@ -1846,6 +2538,38 @@ pub struct RoamingPokemonDefinition {
     pub map_number: u16,
 }
 
+impl<'de> Deserialize<'de> for RoamingPokemonDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawDefinition {
+            level: u8,
+            map_group: u16,
+            map_number: u16,
+        }
+
+        let raw = RawDefinition::deserialize(deserializer)?;
+        if raw.level == 0 || raw.level > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "roaming Pokemon level must be 1..100, found {}",
+                raw.level
+            )));
+        }
+        if raw.map_group == 0 || raw.map_number == 0 {
+            return Err(serde::de::Error::custom(
+                "roaming Pokemon map group and number must be nonzero",
+            ));
+        }
+        Ok(Self {
+            level: raw.level,
+            map_group: raw.map_group,
+            map_number: raw.map_number,
+        })
+    }
+}
 pub type RoamingPokemonDefinitions = BTreeMap<String, RoamingPokemonDefinition>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6818,7 +7542,7 @@ fn battle_tower_leaderboard(
             .script_runtime
             .script_value
             .clone()
-            .unwrap_or_default(),
+            .expect("battle tower leaderboard sets script value before mirroring it"),
     );
     state.script_runtime.variables.insert(
         "battle_tower_leaderboard_count".to_string(),
@@ -9313,8 +10037,8 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         trainer_catalog: &'a TrainerCatalog,
-        phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
-        wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
+        phone_contacts: &'a PhoneContactCatalog,
+        wild_encounters: &'a BTreeMap<String, WildEncounterData>,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,

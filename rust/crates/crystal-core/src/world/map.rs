@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::map::{MapAttributes, MapConnection};
 
@@ -45,7 +45,7 @@ impl TilePosition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldMapData {
     pub name: String,
@@ -56,22 +56,88 @@ pub struct OverworldMapData {
     pub metatile_ids: Vec<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for OverworldMapData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOverworldMapData {
+            name: String,
+            width: u16,
+            height: u16,
+            border_block: u16,
+            connections: Vec<MapConnection>,
+            metatile_ids: Vec<u16>,
+        }
+
+        let raw = RawOverworldMapData::deserialize(deserializer)?;
+        let map = Self {
+            name: raw.name,
+            width: raw.width,
+            height: raw.height,
+            border_block: raw.border_block,
+            connections: raw.connections,
+            metatile_ids: raw.metatile_ids,
+        };
+        map.validate().map_err(D::Error::custom)?;
+        Ok(map)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeMapMetadata {
-    #[serde(deserialize_with = "required_metadata_token")]
     pub constant: String,
-    #[serde(deserialize_with = "required_metadata_token")]
     pub name: String,
-    #[serde(deserialize_with = "required_metadata_token")]
     pub group_name: String,
     pub group_id: u16,
     pub map_id: u16,
     pub width: u16,
     pub height: u16,
-    #[serde(deserialize_with = "required_metadata_token")]
     pub environment: String,
     pub phone_service: u8,
+}
+
+impl<'de> Deserialize<'de> for RuntimeMapMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawRuntimeMapMetadata {
+            #[serde(deserialize_with = "required_metadata_token")]
+            constant: String,
+            #[serde(deserialize_with = "required_metadata_token")]
+            name: String,
+            #[serde(deserialize_with = "required_metadata_token")]
+            group_name: String,
+            group_id: u16,
+            map_id: u16,
+            width: u16,
+            height: u16,
+            #[serde(deserialize_with = "required_metadata_token")]
+            environment: String,
+            phone_service: u8,
+        }
+
+        let raw = RawRuntimeMapMetadata::deserialize(deserializer)?;
+        let metadata = Self {
+            constant: raw.constant,
+            name: raw.name,
+            group_name: raw.group_name,
+            group_id: raw.group_id,
+            map_id: raw.map_id,
+            width: raw.width,
+            height: raw.height,
+            environment: raw.environment,
+            phone_service: raw.phone_service,
+        };
+        metadata.validate().map_err(D::Error::custom)?;
+        Ok(metadata)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,17 +231,42 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
 }
 
 impl OverworldMapData {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_exact_nonempty_metadata_token(&self.name) {
+            return Err(format!("overworld map name {:?} is not exact", self.name));
+        }
+        if self.width == 0 {
+            return Err(format!("overworld map {} has width 0", self.name));
+        }
+        if self.height == 0 {
+            return Err(format!("overworld map {} has height 0", self.name));
+        }
+        if self.border_block > u8::MAX as u16 {
+            return Err(format!(
+                "overworld map {} border_block {} exceeds u8 block id range",
+                self.name, self.border_block
+            ));
+        }
+        let expected = self.width as usize * self.height as usize;
+        if self.metatile_ids.len() != expected {
+            return Err(format!(
+                "overworld map {} has {} metatiles, expected {expected}",
+                self.name,
+                self.metatile_ids.len()
+            ));
+        }
+        Ok(())
+    }
+
     pub fn from_attributes(
         name: impl Into<String>,
         attributes: &MapAttributes,
         metatile_ids: Vec<u16>,
     ) -> Self {
-        let width = attributes.width.max(1);
-        let height = attributes.height.max(1);
         Self {
             name: name.into(),
-            width,
-            height,
+            width: attributes.width,
+            height: attributes.height,
             border_block: attributes.border_block as u16,
             connections: attributes.connections.clone(),
             metatile_ids,
@@ -205,6 +296,24 @@ impl OverworldMapData {
             self.width * METATILE_WIDTH as u16,
             self.height * METATILE_WIDTH as u16,
         )
+    }
+}
+
+impl RuntimeMapMetadata {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.width == 0 {
+            return Err(format!(
+                "runtime map metadata {} has width 0",
+                self.constant
+            ));
+        }
+        if self.height == 0 {
+            return Err(format!(
+                "runtime map metadata {} has height 0",
+                self.constant
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -1,16 +1,42 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::battle::stats::{BattleStatMultiplierTables, apply_stage};
 use crate::models::{Pokemon, Stat};
 use crate::random::Random;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleEscapeRules {
     pub player_speed_multiplier: u16,
     pub enemy_speed_divisor: u16,
     pub failed_attempt_bonus: u16,
     pub rng_roll_values: u16,
+}
+
+impl<'de> Deserialize<'de> for BattleEscapeRules {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawBattleEscapeRules {
+            player_speed_multiplier: u16,
+            enemy_speed_divisor: u16,
+            failed_attempt_bonus: u16,
+            rng_roll_values: u16,
+        }
+
+        let raw = RawBattleEscapeRules::deserialize(deserializer)?;
+        let rules = Self {
+            player_speed_multiplier: raw.player_speed_multiplier,
+            enemy_speed_divisor: raw.enemy_speed_divisor,
+            failed_attempt_bonus: raw.failed_attempt_bonus,
+            rng_roll_values: raw.rng_roll_values,
+        };
+        rules.validate_shape().map_err(D::Error::custom)?;
+        Ok(rules)
+    }
 }
 
 impl Default for BattleEscapeRules {
@@ -21,6 +47,18 @@ impl Default for BattleEscapeRules {
             failed_attempt_bonus: 0,
             rng_roll_values: 0,
         }
+    }
+}
+
+impl BattleEscapeRules {
+    fn validate_shape(&self) -> Result<(), String> {
+        if self == &Self::default() {
+            return Ok(());
+        }
+        if let Some(issue) = battle_escape_rules_issues(self, true).into_iter().next() {
+            return Err(format!("invalid battle escape rules: {issue:?}"));
+        }
+        Ok(())
     }
 }
 

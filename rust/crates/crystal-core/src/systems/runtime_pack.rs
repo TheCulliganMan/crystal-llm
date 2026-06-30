@@ -21,6 +21,8 @@ pub enum RuntimePackPresenceIssue {
     MissingFruitTrees,
     MissingFieldMoves,
     MissingItems,
+    MissingBallItems,
+    MissingTmHmItems,
     MissingTrainers,
     MissingAudio,
     MissingMusicAudio,
@@ -91,6 +93,8 @@ pub struct RuntimePackSections {
     pub has_fruit_trees: bool,
     pub has_field_moves: bool,
     pub has_items: bool,
+    pub has_ball_items: bool,
+    pub has_tmhm_items: bool,
     pub has_trainers: bool,
     pub has_audio: bool,
     pub has_music_audio: bool,
@@ -205,6 +209,12 @@ pub fn runtime_pack_presence_issues(
     }
     if !sections.has_items {
         issues.push(RuntimePackPresenceIssue::MissingItems);
+    }
+    if !sections.has_ball_items {
+        issues.push(RuntimePackPresenceIssue::MissingBallItems);
+    }
+    if !sections.has_tmhm_items {
+        issues.push(RuntimePackPresenceIssue::MissingTmHmItems);
     }
     if !sections.has_trainers {
         issues.push(RuntimePackPresenceIssue::MissingTrainers);
@@ -375,6 +385,8 @@ mod tests {
                 RuntimePackPresenceIssue::MissingFruitTrees,
                 RuntimePackPresenceIssue::MissingFieldMoves,
                 RuntimePackPresenceIssue::MissingItems,
+                RuntimePackPresenceIssue::MissingBallItems,
+                RuntimePackPresenceIssue::MissingTmHmItems,
                 RuntimePackPresenceIssue::MissingTrainers,
                 RuntimePackPresenceIssue::MissingAudio,
                 RuntimePackPresenceIssue::MissingMusicAudio,
@@ -445,6 +457,8 @@ mod tests {
                 has_fruit_trees: true,
                 has_field_moves: true,
                 has_items: true,
+                has_ball_items: true,
+                has_tmhm_items: true,
                 has_trainers: true,
                 has_audio: true,
                 has_music_audio: true,
@@ -519,6 +533,8 @@ mod tests {
             has_fruit_trees: true,
             has_field_moves: true,
             has_items: true,
+            has_ball_items: true,
+            has_tmhm_items: true,
             has_trainers: true,
             has_audio: true,
             has_music_audio: true,

@@ -33,8 +33,11 @@ impl<'de> Deserialize<'de> for FishingCatalog {
         #[serde(deny_unknown_fields)]
         struct RawFishingCatalog {
             groups: BTreeMap<String, FishingGroup>,
+            #[serde(default, deserialize_with = "required_fishing_time_groups")]
             time_groups: BTreeMap<String, TimeFishEntry>,
+            #[serde(default)]
             swarm_rules: BTreeMap<String, FishingSwarmRule>,
+            #[serde(default)]
             rod_items: BTreeMap<String, String>,
         }
 
@@ -124,6 +127,28 @@ where
         }
     }
     Ok(())
+}
+
+fn required_fishing_time_groups<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, TimeFishEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Map(BTreeMap<String, TimeFishEntry>),
+        List(Vec<TimeFishEntry>),
+    }
+
+    match Raw::deserialize(deserializer)? {
+        Raw::Map(map) => Ok(map),
+        Raw::List(entries) if entries.is_empty() => Ok(BTreeMap::new()),
+        Raw::List(_) => Err(serde::de::Error::custom(
+            "legacy fishing time_groups sequence must be empty",
+        )),
+    }
 }
 
 fn required_fishing_token<'de, D>(deserializer: D) -> Result<String, D::Error>
