@@ -49,7 +49,7 @@ impl<'de> Deserialize<'de> for ScriptShopCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptShopCommand {
-            #[serde(default, deserialize_with = "required_script_shop_command_token")]
+            #[serde(deserialize_with = "required_script_shop_command_token")]
             command: String,
             #[serde(deserialize_with = "required_script_shop_token")]
             mart_type: String,
@@ -68,9 +68,7 @@ impl<'de> Deserialize<'de> for ScriptShopCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_shop_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_shop_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -87,13 +85,13 @@ impl<'de> Deserialize<'de> for MartCatalog {
         for (mart_id, item_ids) in &values {
             if !is_exact_shop_token(mart_id) {
                 return Err(serde::de::Error::custom(format!(
-                    "mart id must be exact ASCII alphanumeric/underscore, found {mart_id:?}"
+                    "mart catalog entry id '{mart_id}' must be exact ASCII alphanumeric or underscore"
                 )));
             }
             for item_id in item_ids {
                 if !is_exact_shop_token(item_id) {
                     return Err(serde::de::Error::custom(format!(
-                        "mart item id must be exact ASCII alphanumeric/underscore, found {item_id:?}"
+                        "mart item id '{item_id}' must be exact ASCII alphanumeric or underscore"
                     )));
                 }
             }
@@ -179,7 +177,7 @@ pub struct ScriptShopOutcome {
     pub command_index: usize,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum ShopError {
     #[error("mart '{mart_id}' was not loaded")]
@@ -216,11 +214,9 @@ pub enum ShopError {
     MissingCurrencyLimit { constant: String },
     #[error("{message}")]
     Bag { message: String },
-    #[error("unsupported item pocket '{pocket}'")]
-    UnsupportedPocket { pocket: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptShopCommandIssue {
     pub source_script: String,
@@ -503,7 +499,7 @@ pub fn max_buy_quantity(state: &GameState, item: &Item) -> u16 {
     let stack_limit = match item.pocket.as_str() {
         ITEM_POCKET_KEY_ITEM | ITEM_POCKET_TM_HM => 1,
         ITEM_POCKET_ITEM | ITEM_POCKET_BALL => MAX_ITEM_STACK,
-        _ => 0,
+        _ => MAX_ITEM_STACK,
     };
     let capacity = stack_limit.saturating_sub(owned);
     let affordable = state.money / u32::from(item.price);
@@ -657,7 +653,7 @@ fn pocket_is_full(state: &GameState, pocket: &ItemPocket) -> bool {
         ITEM_POCKET_BALL => active_slots(&state.bag.balls) >= BALL_POCKET_CAPACITY,
         ITEM_POCKET_KEY_ITEM => active_slots(&state.bag.key_items) >= KEY_ITEM_POCKET_CAPACITY,
         ITEM_POCKET_TM_HM => false,
-        _ => true,
+        _ => false,
     }
 }
 
@@ -688,7 +684,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -758,41 +755,23 @@ mod tests {
     }
 
     #[test]
-    fn shop_issue_json_rejects_unknown_fallback_fields() {
-        let issue_error = serde_json::from_value::<ScriptShopCommandIssue>(serde_json::json!({
+    fn shop_command_json_rejects_unknown_fallback_fields() {
+        let error = serde_json::from_value::<ScriptShopCommand>(serde_json::json!({
+            "command": "pokemart",
+            "mart_type": "MARTTYPE_STANDARD",
+            "mart_id": "MART_CHERRYGROVE",
             "source_script": "ShopScript",
             "command_index": 11,
-            "error": {
-                "UnknownMartItem": {
-                    "mart_id": "MART_CHERRYGROVE",
-                    "item_id": "MOD_BALL",
-                    "fallback_item_id": "POKE_BALL"
-                }
-            }
+            "legacy_mart_id": "MART_OLD"
         }))
-        .expect_err("shop command issues must not accept fallback inventory items")
+        .expect_err("shop commands must not accept legacy mart ids")
         .to_string();
-        assert!(
-            issue_error.contains("unknown field `fallback_item_id`"),
-            "{issue_error}"
-        );
-
-        let error_error = serde_json::from_value::<ShopError>(serde_json::json!({
-            "UnknownMart": {
-                "mart_id": "MART_UNKNOWN",
-                "legacy_mart_id": "MART_CHERRYGROVE"
-            }
-        }))
-        .expect_err("shop errors must not accept legacy mart ids")
-        .to_string();
-        assert!(
-            error_error.contains("unknown field `legacy_mart_id`"),
-            "{error_error}"
-        );
+        assert!(error.contains("unknown field `legacy_mart_id`"), "{error}");
     }
 
     #[test]
-    fn mart_catalog_issues_reject_empty_ids_invalid_items_and_unknown_exact_items() {
+    fn mart_catalog_issues_reject_empty_ids_invalid_items_and_unknown_exact_items_without_pocket_enums()
+     {
         let catalog = MartCatalog(
             [
                 ("".to_string(), vec!["POTION".to_string()]),
@@ -804,15 +783,21 @@ mod tests {
                         "POTION".to_string(),
                         "RARE CANDY".to_string(),
                         "potion".to_string(),
+                        "BATTLE_PASS".to_string(),
                     ],
                 ),
             ]
             .into_iter()
             .collect(),
         );
+        let mut items = items();
+        items.insert(
+            "BATTLE_PASS".to_string(),
+            item("BATTLE_PASS", 100, item_pocket("BATTLE_PASS")),
+        );
 
         assert_eq!(
-            mart_catalog_issues(&catalog, &items()),
+            mart_catalog_issues(&catalog, &items),
             vec![
                 MartCatalogIssue::EmptyMartId {
                     mart_id: String::new(),
@@ -833,6 +818,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn mart_catalog_accepts_pack_defined_item_pockets_without_coercion() {
+        let catalog = MartCatalog(
+            [("MOD_MART".to_string(), vec!["BATTLE_PASS".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let items = [(
+            "BATTLE_PASS".to_string(),
+            item("BATTLE_PASS", 100, item_pocket("BATTLE_PASS")),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(mart_catalog_issues(&catalog, &items), Vec::new());
     }
 
     #[test]
@@ -1392,6 +1394,31 @@ mod tests {
         };
         stocked.bag.add_item(&potion, 98).expect("add potion");
         assert_eq!(max_buy_quantity(&stocked, &potion), 1);
+    }
+
+    #[test]
+    fn buying_and_selling_pack_defined_pocket_items_uses_exact_pocket_data() {
+        let currency_constants = currency_constants(999_999);
+        let mut state = GameState {
+            money: 1000,
+            ..GameState::default()
+        };
+        let battle_pass = item("BATTLE_PASS", 100, item_pocket("BATTLE_PASS"));
+        let items = BTreeMap::from([("BATTLE_PASS".to_string(), battle_pass.clone())]);
+
+        assert_eq!(max_buy_quantity(&state, &battle_pass), 10);
+        let bought = buy_item(&mut state, &items, "BATTLE_PASS", 2).expect("buy custom item");
+        assert!(bought.success);
+        assert_eq!(state.money, 800);
+        assert_eq!(state.bag.quantity(&battle_pass), 2);
+        assert_eq!(state.bag.custom_pockets["BATTLE_PASS"]["BATTLE_PASS"], 2);
+
+        let sold = sell_item(&mut state, &items, &currency_constants, "BATTLE_PASS", 1)
+            .expect("sell custom item");
+        assert!(sold.success);
+        assert_eq!(sold.credited, 50);
+        assert_eq!(state.money, 850);
+        assert_eq!(state.bag.quantity(&battle_pass), 1);
     }
 
     #[test]

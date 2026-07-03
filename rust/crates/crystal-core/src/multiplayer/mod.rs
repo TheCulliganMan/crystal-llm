@@ -659,6 +659,59 @@ impl OverworldPresence {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionOverworldPresence {
+    session: LinkSessionIdentity,
+    presence: OverworldPresence,
+}
+
+impl<'de> Deserialize<'de> for SessionOverworldPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionOverworldPresence {
+            session: LinkSessionIdentity,
+            presence: OverworldPresence,
+        }
+
+        let raw = RawSessionOverworldPresence::deserialize(deserializer)?;
+        SessionOverworldPresence::new(raw.session, raw.presence).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionOverworldPresence {
+    pub fn new(session: LinkSessionIdentity, presence: OverworldPresence) -> Result<Self, String> {
+        let frame = Self { session, presence };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.presence.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        presence: OverworldPresence,
+    ) -> Self {
+        Self { session, presence }
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn presence(&self) -> &OverworldPresence {
+        &self.presence
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MultiplayerInteractionKind {
@@ -788,6 +841,63 @@ impl MultiplayerInteractionRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionMultiplayerInteractionRequest {
+    session: LinkSessionIdentity,
+    request: MultiplayerInteractionRequest,
+}
+
+impl<'de> Deserialize<'de> for SessionMultiplayerInteractionRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionMultiplayerInteractionRequest {
+            session: LinkSessionIdentity,
+            request: MultiplayerInteractionRequest,
+        }
+
+        let raw = RawSessionMultiplayerInteractionRequest::deserialize(deserializer)?;
+        SessionMultiplayerInteractionRequest::new(raw.session, raw.request)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionMultiplayerInteractionRequest {
+    pub fn new(
+        session: LinkSessionIdentity,
+        request: MultiplayerInteractionRequest,
+    ) -> Result<Self, String> {
+        let frame = Self { session, request };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.request.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        request: MultiplayerInteractionRequest,
+    ) -> Self {
+        Self { session, request }
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn request(&self) -> &MultiplayerInteractionRequest {
+        &self.request
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MultiplayerInteractionResponse {
     request_id: String,
     from_user_id: String,
@@ -902,6 +1012,136 @@ impl MultiplayerInteractionResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMultiplayerInteractionResponse {
+    session: LinkSessionIdentity,
+    response: MultiplayerInteractionResponse,
+}
+
+impl<'de> Deserialize<'de> for SessionMultiplayerInteractionResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionMultiplayerInteractionResponse {
+            session: LinkSessionIdentity,
+            response: MultiplayerInteractionResponse,
+        }
+
+        let raw = RawSessionMultiplayerInteractionResponse::deserialize(deserializer)?;
+        SessionMultiplayerInteractionResponse::new(raw.session, raw.response)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionMultiplayerInteractionResponse {
+    pub fn new(
+        session: LinkSessionIdentity,
+        response: MultiplayerInteractionResponse,
+    ) -> Result<Self, String> {
+        let frame = Self { session, response };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.response.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        response: MultiplayerInteractionResponse,
+    ) -> Self {
+        Self { session, response }
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn response(&self) -> &MultiplayerInteractionResponse {
+        &self.response
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionDisconnectFrame {
+    session: LinkSessionIdentity,
+    player_id: PlayerId,
+    reason: String,
+}
+
+impl<'de> Deserialize<'de> for SessionDisconnectFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionDisconnectFrame {
+            session: LinkSessionIdentity,
+            player_id: PlayerId,
+            reason: String,
+        }
+
+        let raw = RawSessionDisconnectFrame::deserialize(deserializer)?;
+        SessionDisconnectFrame::new(raw.session, raw.player_id, raw.reason)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionDisconnectFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        player_id: PlayerId,
+        reason: impl Into<String>,
+    ) -> Result<Self, String> {
+        let frame = Self {
+            session,
+            player_id,
+            reason: reason.into(),
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        validate_disconnect_payload(self.player_id, &self.reason).map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        player_id: PlayerId,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            session,
+            player_id,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MultiplayerMessageError {
     #[error("{field} must be non-empty")]
@@ -916,6 +1156,13 @@ pub enum MultiplayerMessageError {
     SameInteractionUser { field: &'static str },
     #[error("{field} frame must be positive but got {frame}")]
     InvalidFrame { field: &'static str, frame: u64 },
+    #[error("{message_type} link message is not bound to an exact session identity")]
+    MissingSessionIdentity { message_type: &'static str },
+    #[error("{message_type} link message session does not match expected session: {message}")]
+    SessionIdentityMismatch {
+        message_type: &'static str,
+        message: String,
+    },
     #[error("{message}")]
     InvalidLinkHandshake { message: String },
     #[error("{message}")]
@@ -1011,6 +1258,16 @@ fn validate_presence_tile(tile: TilePosition) -> Result<(), MultiplayerMessageEr
         });
     }
     Ok(())
+}
+
+fn validate_disconnect_payload(
+    player_id: PlayerId,
+    reason: &str,
+) -> Result<(), MultiplayerMessageError> {
+    if player_id == 0 {
+        return Err(MultiplayerMessageError::InvalidPlayerIdentity { player_id });
+    }
+    validate_multiplayer_text("disconnect reason", reason)
 }
 
 fn validate_command_checksum_events(events: &[GameEvent]) -> Result<(), MultiplayerMessageError> {
@@ -1175,6 +1432,59 @@ pub enum BattleRngError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionBattleRngInitFrame {
+    session: LinkSessionIdentity,
+    state: BattleRngState,
+}
+
+impl<'de> Deserialize<'de> for SessionBattleRngInitFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionBattleRngInitFrame {
+            session: LinkSessionIdentity,
+            state: BattleRngState,
+        }
+
+        let raw = RawSessionBattleRngInitFrame::deserialize(deserializer)?;
+        SessionBattleRngInitFrame::new(raw.session, raw.state).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionBattleRngInitFrame {
+    pub fn new(session: LinkSessionIdentity, state: BattleRngState) -> Result<Self, String> {
+        let frame = Self { session, state };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.state.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        state: BattleRngState,
+    ) -> Self {
+        Self { session, state }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn state(&self) -> BattleRngState {
+        self.state
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlayerInputFrame {
     player_id: PlayerId,
     frame: u64,
@@ -1252,6 +1562,59 @@ impl PlayerInputFrame {
 
     pub const fn into_parts(self) -> (PlayerId, u64, u8) {
         (self.player_id, self.frame, self.joypad_mask)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPlayerInputFrame {
+    session: LinkSessionIdentity,
+    input: PlayerInputFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionPlayerInputFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionPlayerInputFrame {
+            session: LinkSessionIdentity,
+            input: PlayerInputFrame,
+        }
+
+        let raw = RawSessionPlayerInputFrame::deserialize(deserializer)?;
+        SessionPlayerInputFrame::new(raw.session, raw.input).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionPlayerInputFrame {
+    pub fn new(session: LinkSessionIdentity, input: PlayerInputFrame) -> Result<Self, String> {
+        let frame = Self { session, input };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.input.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        input: PlayerInputFrame,
+    ) -> Self {
+        Self { session, input }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn input(&self) -> &PlayerInputFrame {
+        &self.input
     }
 }
 
@@ -1465,6 +1828,112 @@ impl MenuChoiceResultFrame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMenuChoiceFrame {
+    session: LinkSessionIdentity,
+    choice: MenuChoiceFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionMenuChoiceFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionMenuChoiceFrame {
+            session: LinkSessionIdentity,
+            choice: MenuChoiceFrame,
+        }
+
+        let raw = RawSessionMenuChoiceFrame::deserialize(deserializer)?;
+        SessionMenuChoiceFrame::new(raw.session, raw.choice).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionMenuChoiceFrame {
+    pub fn new(session: LinkSessionIdentity, choice: MenuChoiceFrame) -> Result<Self, String> {
+        let frame = Self { session, choice };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.choice.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(session: LinkSessionIdentity, choice: MenuChoiceFrame) -> Self {
+        Self { session, choice }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn choice(&self) -> &MenuChoiceFrame {
+        &self.choice
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMenuChoiceResultFrame {
+    session: LinkSessionIdentity,
+    result: MenuChoiceResultFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionMenuChoiceResultFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionMenuChoiceResultFrame {
+            session: LinkSessionIdentity,
+            result: MenuChoiceResultFrame,
+        }
+
+        let raw = RawSessionMenuChoiceResultFrame::deserialize(deserializer)?;
+        SessionMenuChoiceResultFrame::new(raw.session, raw.result).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionMenuChoiceResultFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        result: MenuChoiceResultFrame,
+    ) -> Result<Self, String> {
+        let frame = Self { session, result };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.result.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        result: MenuChoiceResultFrame,
+    ) -> Self {
+        Self { session, result }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn result(&self) -> &MenuChoiceResultFrame {
+        &self.result
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MenuChoiceResultFrameError {
     #[error("menu choice result choice is invalid: {message}")]
@@ -1589,6 +2058,59 @@ impl StateChecksumFrame {
 
     pub const fn hash(&self) -> u32 {
         self.hash
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionStateChecksumFrame {
+    session: LinkSessionIdentity,
+    checksum: StateChecksumFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionStateChecksumFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionStateChecksumFrame {
+            session: LinkSessionIdentity,
+            checksum: StateChecksumFrame,
+        }
+
+        let raw = RawSessionStateChecksumFrame::deserialize(deserializer)?;
+        SessionStateChecksumFrame::new(raw.session, raw.checksum).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionStateChecksumFrame {
+    pub fn new(session: LinkSessionIdentity, checksum: StateChecksumFrame) -> Result<Self, String> {
+        let frame = Self { session, checksum };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.checksum.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        checksum: StateChecksumFrame,
+    ) -> Self {
+        Self { session, checksum }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn checksum(&self) -> &StateChecksumFrame {
+        &self.checksum
     }
 }
 
@@ -1764,6 +2286,11 @@ impl RuntimeCommandFrame {
         if self.player_id == 0 {
             return Err(RuntimeCommandFrameError::InvalidPlayerIdentity {
                 player_id: self.player_id,
+            });
+        }
+        if self.sequence == 0 {
+            return Err(RuntimeCommandFrameError::InvalidSequence {
+                sequence: self.sequence,
             });
         }
         self.payload.validate()?;
@@ -2041,6 +2568,8 @@ impl SessionRuntimeCommandResultFrame {
 pub enum RuntimeCommandFrameError {
     #[error("runtime command player id {player_id} is not a valid link identity")]
     InvalidPlayerIdentity { player_id: PlayerId },
+    #[error("runtime command sequence {sequence} must be positive")]
+    InvalidSequence { sequence: u64 },
     #[error("runtime command session is invalid: {message}")]
     InvalidSession { message: String },
     #[error("{field} must be exact and non-empty")]
@@ -2227,6 +2756,12 @@ impl SaveCheckpointFrame {
                 checksum_frame: self.checksum.frame(),
             });
         }
+        if self.summary.state_hash() != self.checksum.hash() {
+            return Err(SaveCheckpointFrameError::HashMismatch {
+                summary_hash: self.summary.state_hash(),
+                checksum_hash: self.checksum.hash(),
+            });
+        }
         Ok(())
     }
 
@@ -2346,6 +2881,13 @@ pub enum SaveCheckpointFrameError {
     FrameMismatch {
         summary_frame: u64,
         checksum_frame: u64,
+    },
+    #[error(
+        "save checkpoint summary hash {summary_hash:#010x} does not match checksum hash {checksum_hash:#010x}"
+    )]
+    HashMismatch {
+        summary_hash: u32,
+        checksum_hash: u32,
     },
     #[error("save checkpoint player {player_id} is not in the declared link roster")]
     UnknownPlayer { player_id: PlayerId },
@@ -2512,11 +3054,74 @@ impl BattleActionFrame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBattleActionFrame {
+    session: LinkSessionIdentity,
+    action: BattleActionFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionBattleActionFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionBattleActionFrame {
+            session: LinkSessionIdentity,
+            action: BattleActionFrame,
+        }
+
+        let raw = RawSessionBattleActionFrame::deserialize(deserializer)?;
+        SessionBattleActionFrame::new(raw.session, raw.action).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionBattleActionFrame {
+    pub fn new(session: LinkSessionIdentity, action: BattleActionFrame) -> Result<Self, String> {
+        let frame = Self { session, action };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.action.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        action: BattleActionFrame,
+    ) -> Self {
+        Self { session, action }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn action(&self) -> &BattleActionFrame {
+        &self.action
+    }
+}
+
 fn validate_battle_action(action: &BattleAction) -> Result<(), BattleSyncError> {
     match action {
         BattleAction::Move { slot } => {
             if *slot >= BATTLE_MOVE_SLOTS {
                 return Err(BattleSyncError::InvalidMoveSlot { slot: *slot });
+            }
+        }
+        BattleAction::MoveSwitch { slot, party_index } => {
+            if *slot >= BATTLE_MOVE_SLOTS {
+                return Err(BattleSyncError::InvalidMoveSlot { slot: *slot });
+            }
+            if *party_index >= PARTY_SIZE {
+                return Err(BattleSyncError::InvalidSwitchPartyIndex {
+                    party_index: *party_index,
+                });
             }
         }
         BattleAction::Switch { party_index } => {
@@ -2568,7 +3173,9 @@ pub enum BattleSyncError {
     EmptyRoster,
     #[error("battle sync state hash must be non-empty")]
     EmptyStateHash,
-    #[error("battle sync state hash {state_hash} must be exact and untrimmed")]
+    #[error(
+        "battle sync state hash {state_hash} must be an exact 8-character lowercase FNV hex hash"
+    )]
     InvalidStateHash { state_hash: String },
     #[error("battle sync missing state hash for player {player_id}")]
     MissingStateHash { player_id: PlayerId },
@@ -2675,7 +3282,7 @@ pub enum InputJournalError {
         terminal: u64,
     },
     #[error(
-        "deterministic replay command result {sequence} checksum frame {frame} is outside journal frames {start}..={terminal}"
+        "deterministic replay command result {sequence} frame {frame} is outside journal frames {start}..={terminal}"
     )]
     RuntimeCommandResultFrameOutsideJournal {
         sequence: u64,
@@ -2990,6 +3597,105 @@ impl TradeConfirmation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionTradeOffer {
+    session: LinkSessionIdentity,
+    offer: TradeOffer,
+}
+
+impl<'de> Deserialize<'de> for SessionTradeOffer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionTradeOffer {
+            session: LinkSessionIdentity,
+            offer: TradeOffer,
+        }
+
+        let raw = RawSessionTradeOffer::deserialize(deserializer)?;
+        SessionTradeOffer::new(raw.session, raw.offer).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionTradeOffer {
+    pub fn new(session: LinkSessionIdentity, offer: TradeOffer) -> Result<Self, String> {
+        let frame = Self { session, offer };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.offer.validate().map_err(|error| error.to_string())
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn offer(&self) -> &TradeOffer {
+        &self.offer
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTradeConfirmation {
+    session: LinkSessionIdentity,
+    confirmation: TradeConfirmation,
+}
+
+impl<'de> Deserialize<'de> for SessionTradeConfirmation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionTradeConfirmation {
+            session: LinkSessionIdentity,
+            confirmation: TradeConfirmation,
+        }
+
+        let raw = RawSessionTradeConfirmation::deserialize(deserializer)?;
+        SessionTradeConfirmation::new(raw.session, raw.confirmation)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionTradeConfirmation {
+    pub fn new(
+        session: LinkSessionIdentity,
+        confirmation: TradeConfirmation,
+    ) -> Result<Self, String> {
+        let frame = Self {
+            session,
+            confirmation,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.confirmation
+            .validate()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub fn confirmation(&self) -> &TradeConfirmation {
+        &self.confirmation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeReplacement {
     party_slot: usize,
     received: Pokemon,
@@ -3296,6 +4002,59 @@ impl LinkByteFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionLinkByteFrame {
+    session: LinkSessionIdentity,
+    frame: LinkByteFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionLinkByteFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionLinkByteFrame {
+            session: LinkSessionIdentity,
+            frame: LinkByteFrame,
+        }
+
+        let raw = RawSessionLinkByteFrame::deserialize(deserializer)?;
+        SessionLinkByteFrame::new(raw.session, raw.frame).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionLinkByteFrame {
+    pub fn new(session: LinkSessionIdentity, frame: LinkByteFrame) -> Result<Self, String> {
+        let bound = Self { session, frame };
+        bound.validate()?;
+        Ok(bound)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.frame.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        frame: LinkByteFrame,
+    ) -> Self {
+        Self { session, frame }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn frame(&self) -> &LinkByteFrame {
+        &self.frame
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkClockSyncFrame {
     player_id: PlayerId,
     t0: u64,
@@ -3378,6 +4137,59 @@ impl LinkClockSyncFrame {
 
     pub const fn t2(&self) -> u64 {
         self.t2
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLinkClockSyncFrame {
+    session: LinkSessionIdentity,
+    frame: LinkClockSyncFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionLinkClockSyncFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionLinkClockSyncFrame {
+            session: LinkSessionIdentity,
+            frame: LinkClockSyncFrame,
+        }
+
+        let raw = RawSessionLinkClockSyncFrame::deserialize(deserializer)?;
+        SessionLinkClockSyncFrame::new(raw.session, raw.frame).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionLinkClockSyncFrame {
+    pub fn new(session: LinkSessionIdentity, frame: LinkClockSyncFrame) -> Result<Self, String> {
+        let bound = Self { session, frame };
+        bound.validate()?;
+        Ok(bound)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.session.validate().map_err(|error| error.to_string())?;
+        self.frame.validate().map_err(|error| error.to_string())
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub const fn new_unchecked_for_tests(
+        session: LinkSessionIdentity,
+        frame: LinkClockSyncFrame,
+    ) -> Self {
+        Self { session, frame }
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn frame(&self) -> &LinkClockSyncFrame {
+        &self.frame
     }
 }
 
@@ -4192,6 +5004,15 @@ impl DeterministicReplayBundle {
                     sequence: result.result().request().sequence(),
                 });
             }
+            let request_frame = result.result().request().expected_state().frame();
+            if request_frame < start || request_frame > terminal {
+                return Err(InputJournalError::RuntimeCommandResultFrameOutsideJournal {
+                    sequence: result.result().request().sequence(),
+                    frame: request_frame,
+                    start,
+                    terminal,
+                });
+            }
             let frame = result.result().checksum().frame();
             if frame < start || frame > terminal {
                 return Err(InputJournalError::RuntimeCommandResultFrameOutsideJournal {
@@ -4954,27 +5775,45 @@ impl AppliedLockstepFrame {
 pub enum LinkMessage {
     Hello(LinkHello),
     RngInit { state: BattleRngState },
+    SessionRngInit(SessionBattleRngInitFrame),
     BattleAction(BattleActionFrame),
+    SessionBattleAction(SessionBattleActionFrame),
     TradeOffer(TradeOffer),
+    SessionTradeOffer(SessionTradeOffer),
     TradeConfirmation(TradeConfirmation),
+    SessionTradeConfirmation(SessionTradeConfirmation),
     LinkByte(LinkByteFrame),
+    SessionLinkByte(SessionLinkByteFrame),
     LinkClockSync(LinkClockSyncFrame),
+    SessionLinkClockSync(SessionLinkClockSyncFrame),
     Input(PlayerInputFrame),
+    SessionInput(SessionPlayerInputFrame),
     MenuChoice(MenuChoiceFrame),
+    SessionMenuChoice(SessionMenuChoiceFrame),
     MenuChoiceResult(MenuChoiceResultFrame),
+    SessionMenuChoiceResult(SessionMenuChoiceResultFrame),
     InputJournal(DeterministicInputJournalFrame),
     DeterministicReplay(DeterministicReplayBundle),
     SaveResumeReplay(SaveResumeReplayBundle),
     SaveSummary(SaveGameSummary),
+    SessionSaveSummary(SessionSaveSummaryFrame),
     SaveCheckpoint(SaveCheckpointFrame),
+    SessionSaveCheckpoint(SessionSaveCheckpointFrame),
     StateHash(StateChecksumFrame),
+    SessionStateHash(SessionStateChecksumFrame),
     CommandChecksum(CommandChecksumResult),
     RuntimeCommand(RuntimeCommandFrame),
+    SessionRuntimeCommand(SessionRuntimeCommandFrame),
     RuntimeCommandResult(RuntimeCommandResultFrame),
+    SessionRuntimeCommandResult(SessionRuntimeCommandResultFrame),
     Presence(OverworldPresence),
+    SessionPresence(SessionOverworldPresence),
     InteractionRequest(MultiplayerInteractionRequest),
+    SessionInteractionRequest(SessionMultiplayerInteractionRequest),
     InteractionResponse(MultiplayerInteractionResponse),
+    SessionInteractionResponse(SessionMultiplayerInteractionResponse),
     Disconnect { player_id: PlayerId, reason: String },
+    SessionDisconnect(SessionDisconnectFrame),
 }
 
 impl<'de> Deserialize<'de> for LinkMessage {
@@ -4987,58 +5826,106 @@ impl<'de> Deserialize<'de> for LinkMessage {
         enum RawLinkMessage {
             Hello(LinkHello),
             RngInit { state: BattleRngState },
+            SessionRngInit(SessionBattleRngInitFrame),
             BattleAction(BattleActionFrame),
+            SessionBattleAction(SessionBattleActionFrame),
             TradeOffer(TradeOffer),
+            SessionTradeOffer(SessionTradeOffer),
             TradeConfirmation(TradeConfirmation),
+            SessionTradeConfirmation(SessionTradeConfirmation),
             LinkByte(LinkByteFrame),
+            SessionLinkByte(SessionLinkByteFrame),
             LinkClockSync(LinkClockSyncFrame),
+            SessionLinkClockSync(SessionLinkClockSyncFrame),
             Input(PlayerInputFrame),
+            SessionInput(SessionPlayerInputFrame),
             MenuChoice(MenuChoiceFrame),
+            SessionMenuChoice(SessionMenuChoiceFrame),
             MenuChoiceResult(MenuChoiceResultFrame),
+            SessionMenuChoiceResult(SessionMenuChoiceResultFrame),
             InputJournal(DeterministicInputJournalFrame),
             DeterministicReplay(DeterministicReplayBundle),
             SaveResumeReplay(SaveResumeReplayBundle),
             SaveSummary(SaveGameSummary),
+            SessionSaveSummary(SessionSaveSummaryFrame),
             SaveCheckpoint(SaveCheckpointFrame),
+            SessionSaveCheckpoint(SessionSaveCheckpointFrame),
             StateHash(StateChecksumFrame),
+            SessionStateHash(SessionStateChecksumFrame),
             CommandChecksum(CommandChecksumResult),
             RuntimeCommand(RuntimeCommandFrame),
+            SessionRuntimeCommand(SessionRuntimeCommandFrame),
             RuntimeCommandResult(RuntimeCommandResultFrame),
+            SessionRuntimeCommandResult(SessionRuntimeCommandResultFrame),
             Presence(OverworldPresence),
+            SessionPresence(SessionOverworldPresence),
             InteractionRequest(MultiplayerInteractionRequest),
+            SessionInteractionRequest(SessionMultiplayerInteractionRequest),
             InteractionResponse(MultiplayerInteractionResponse),
+            SessionInteractionResponse(SessionMultiplayerInteractionResponse),
             Disconnect { player_id: PlayerId, reason: String },
+            SessionDisconnect(SessionDisconnectFrame),
         }
 
         let raw = RawLinkMessage::deserialize(deserializer)?;
         let message = match raw {
             RawLinkMessage::Hello(hello) => Self::Hello(hello),
             RawLinkMessage::RngInit { state } => Self::RngInit { state },
+            RawLinkMessage::SessionRngInit(frame) => Self::SessionRngInit(frame),
             RawLinkMessage::BattleAction(action) => Self::BattleAction(action),
+            RawLinkMessage::SessionBattleAction(action) => Self::SessionBattleAction(action),
             RawLinkMessage::TradeOffer(offer) => Self::TradeOffer(offer),
+            RawLinkMessage::SessionTradeOffer(offer) => Self::SessionTradeOffer(offer),
             RawLinkMessage::TradeConfirmation(confirmation) => {
                 Self::TradeConfirmation(confirmation)
             }
+            RawLinkMessage::SessionTradeConfirmation(confirmation) => {
+                Self::SessionTradeConfirmation(confirmation)
+            }
             RawLinkMessage::LinkByte(frame) => Self::LinkByte(frame),
+            RawLinkMessage::SessionLinkByte(frame) => Self::SessionLinkByte(frame),
             RawLinkMessage::LinkClockSync(frame) => Self::LinkClockSync(frame),
+            RawLinkMessage::SessionLinkClockSync(frame) => Self::SessionLinkClockSync(frame),
             RawLinkMessage::Input(input) => Self::Input(input),
+            RawLinkMessage::SessionInput(input) => Self::SessionInput(input),
             RawLinkMessage::MenuChoice(choice) => Self::MenuChoice(choice),
+            RawLinkMessage::SessionMenuChoice(choice) => Self::SessionMenuChoice(choice),
             RawLinkMessage::MenuChoiceResult(result) => Self::MenuChoiceResult(result),
+            RawLinkMessage::SessionMenuChoiceResult(result) => {
+                Self::SessionMenuChoiceResult(result)
+            }
             RawLinkMessage::InputJournal(journal) => Self::InputJournal(journal),
             RawLinkMessage::DeterministicReplay(bundle) => Self::DeterministicReplay(bundle),
             RawLinkMessage::SaveResumeReplay(bundle) => Self::SaveResumeReplay(bundle),
             RawLinkMessage::SaveSummary(summary) => Self::SaveSummary(summary),
+            RawLinkMessage::SessionSaveSummary(summary) => Self::SessionSaveSummary(summary),
             RawLinkMessage::SaveCheckpoint(checkpoint) => Self::SaveCheckpoint(checkpoint),
+            RawLinkMessage::SessionSaveCheckpoint(checkpoint) => {
+                Self::SessionSaveCheckpoint(checkpoint)
+            }
             RawLinkMessage::StateHash(frame) => Self::StateHash(frame),
+            RawLinkMessage::SessionStateHash(frame) => Self::SessionStateHash(frame),
             RawLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result),
             RawLinkMessage::RuntimeCommand(command) => Self::RuntimeCommand(command),
+            RawLinkMessage::SessionRuntimeCommand(command) => Self::SessionRuntimeCommand(command),
             RawLinkMessage::RuntimeCommandResult(result) => Self::RuntimeCommandResult(result),
+            RawLinkMessage::SessionRuntimeCommandResult(result) => {
+                Self::SessionRuntimeCommandResult(result)
+            }
             RawLinkMessage::Presence(presence) => Self::Presence(presence),
+            RawLinkMessage::SessionPresence(presence) => Self::SessionPresence(presence),
             RawLinkMessage::InteractionRequest(request) => Self::InteractionRequest(request),
+            RawLinkMessage::SessionInteractionRequest(request) => {
+                Self::SessionInteractionRequest(request)
+            }
             RawLinkMessage::InteractionResponse(response) => Self::InteractionResponse(response),
+            RawLinkMessage::SessionInteractionResponse(response) => {
+                Self::SessionInteractionResponse(response)
+            }
             RawLinkMessage::Disconnect { player_id, reason } => {
                 Self::Disconnect { player_id, reason }
             }
+            RawLinkMessage::SessionDisconnect(frame) => Self::SessionDisconnect(frame),
         };
         message.validate().map_err(serde::de::Error::custom)?;
         Ok(message)
@@ -5046,6 +5933,123 @@ impl<'de> Deserialize<'de> for LinkMessage {
 }
 
 impl LinkMessage {
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::Hello(_) => "hello",
+            Self::RngInit { .. } => "rng_init",
+            Self::SessionRngInit(_) => "session_rng_init",
+            Self::BattleAction(_) => "battle_action",
+            Self::SessionBattleAction(_) => "session_battle_action",
+            Self::TradeOffer(_) => "trade_offer",
+            Self::SessionTradeOffer(_) => "session_trade_offer",
+            Self::TradeConfirmation(_) => "trade_confirmation",
+            Self::SessionTradeConfirmation(_) => "session_trade_confirmation",
+            Self::LinkByte(_) => "link_byte",
+            Self::SessionLinkByte(_) => "session_link_byte",
+            Self::LinkClockSync(_) => "link_clock_sync",
+            Self::SessionLinkClockSync(_) => "session_link_clock_sync",
+            Self::Input(_) => "input",
+            Self::SessionInput(_) => "session_input",
+            Self::MenuChoice(_) => "menu_choice",
+            Self::SessionMenuChoice(_) => "session_menu_choice",
+            Self::MenuChoiceResult(_) => "menu_choice_result",
+            Self::SessionMenuChoiceResult(_) => "session_menu_choice_result",
+            Self::InputJournal(_) => "input_journal",
+            Self::DeterministicReplay(_) => "deterministic_replay",
+            Self::SaveResumeReplay(_) => "save_resume_replay",
+            Self::SaveSummary(_) => "save_summary",
+            Self::SessionSaveSummary(_) => "session_save_summary",
+            Self::SaveCheckpoint(_) => "save_checkpoint",
+            Self::SessionSaveCheckpoint(_) => "session_save_checkpoint",
+            Self::StateHash(_) => "state_hash",
+            Self::SessionStateHash(_) => "session_state_hash",
+            Self::CommandChecksum(_) => "command_checksum",
+            Self::RuntimeCommand(_) => "runtime_command",
+            Self::SessionRuntimeCommand(_) => "session_runtime_command",
+            Self::RuntimeCommandResult(_) => "runtime_command_result",
+            Self::SessionRuntimeCommandResult(_) => "session_runtime_command_result",
+            Self::Presence(_) => "presence",
+            Self::SessionPresence(_) => "session_presence",
+            Self::InteractionRequest(_) => "interaction_request",
+            Self::SessionInteractionRequest(_) => "session_interaction_request",
+            Self::InteractionResponse(_) => "interaction_response",
+            Self::SessionInteractionResponse(_) => "session_interaction_response",
+            Self::Disconnect { .. } => "disconnect",
+            Self::SessionDisconnect(_) => "session_disconnect",
+        }
+    }
+
+    pub fn session(&self) -> Option<&LinkSessionIdentity> {
+        match self {
+            Self::Hello(hello) => Some(hello.session()),
+            Self::SessionRngInit(frame) => Some(frame.session()),
+            Self::SessionBattleAction(frame) => Some(frame.session()),
+            Self::SessionTradeOffer(frame) => Some(frame.session()),
+            Self::SessionTradeConfirmation(frame) => Some(frame.session()),
+            Self::SessionLinkByte(frame) => Some(frame.session()),
+            Self::SessionLinkClockSync(frame) => Some(frame.session()),
+            Self::SessionInput(frame) => Some(frame.session()),
+            Self::SessionMenuChoice(frame) => Some(frame.session()),
+            Self::SessionMenuChoiceResult(frame) => Some(frame.session()),
+            Self::InputJournal(frame) => Some(frame.journal().session()),
+            Self::DeterministicReplay(bundle) => Some(bundle.input_journal().journal().session()),
+            Self::SaveResumeReplay(bundle) => Some(bundle.checkpoint().session()),
+            Self::SessionSaveSummary(frame) => Some(frame.session()),
+            Self::SessionSaveCheckpoint(frame) => Some(frame.session()),
+            Self::SessionStateHash(frame) => Some(frame.session()),
+            Self::SessionRuntimeCommand(frame) => Some(frame.session()),
+            Self::SessionRuntimeCommandResult(frame) => Some(frame.session()),
+            Self::SessionPresence(frame) => Some(frame.session()),
+            Self::SessionInteractionRequest(frame) => Some(frame.session()),
+            Self::SessionInteractionResponse(frame) => Some(frame.session()),
+            Self::SessionDisconnect(frame) => Some(frame.session()),
+            Self::RngInit { .. }
+            | Self::BattleAction(_)
+            | Self::TradeOffer(_)
+            | Self::TradeConfirmation(_)
+            | Self::LinkByte(_)
+            | Self::LinkClockSync(_)
+            | Self::Input(_)
+            | Self::MenuChoice(_)
+            | Self::MenuChoiceResult(_)
+            | Self::SaveSummary(_)
+            | Self::SaveCheckpoint(_)
+            | Self::StateHash(_)
+            | Self::CommandChecksum(_)
+            | Self::RuntimeCommand(_)
+            | Self::RuntimeCommandResult(_)
+            | Self::Presence(_)
+            | Self::InteractionRequest(_)
+            | Self::InteractionResponse(_)
+            | Self::Disconnect { .. } => None,
+        }
+    }
+
+    pub fn is_session_bound(&self) -> bool {
+        self.session().is_some()
+    }
+
+    pub fn require_session(&self) -> Result<&LinkSessionIdentity, MultiplayerMessageError> {
+        self.session()
+            .ok_or(MultiplayerMessageError::MissingSessionIdentity {
+                message_type: self.message_type(),
+            })
+    }
+
+    pub fn validate_session_identity(
+        &self,
+        expected: &LinkSessionIdentity,
+    ) -> Result<&LinkSessionIdentity, MultiplayerMessageError> {
+        let actual = self.require_session()?;
+        validate_link_session_identity(expected, actual).map_err(|error| {
+            MultiplayerMessageError::SessionIdentityMismatch {
+                message_type: self.message_type(),
+                message: error.to_string(),
+            }
+        })?;
+        Ok(actual)
+    }
+
     pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
         match self {
             Self::Hello(hello) => {
@@ -5055,6 +6059,9 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionRngInit(frame) => frame
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidBattleRng { message }),
             Self::BattleAction(action) => {
                 action
                     .validate()
@@ -5062,6 +6069,9 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionBattleAction(action) => action
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidBattleAction { message }),
             Self::TradeOffer(offer) => {
                 offer
                     .validate()
@@ -5069,11 +6079,17 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionTradeOffer(offer) => offer
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidTradeFrame { message }),
             Self::TradeConfirmation(confirmation) => confirmation.validate().map_err(|error| {
                 MultiplayerMessageError::InvalidTradeFrame {
                     message: error.to_string(),
                 }
             }),
+            Self::SessionTradeConfirmation(confirmation) => confirmation
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidTradeFrame { message }),
             Self::LinkByte(frame) => {
                 frame
                     .validate()
@@ -5081,12 +6097,18 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionLinkByte(frame) => frame
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkCableFrame { message }),
             Self::LinkClockSync(sync) => {
                 sync.validate()
                     .map_err(|error| MultiplayerMessageError::InvalidLinkCableFrame {
                         message: error.to_string(),
                     })
             }
+            Self::SessionLinkClockSync(sync) => sync
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkCableFrame { message }),
             Self::Input(input) => {
                 input
                     .validate()
@@ -5094,7 +6116,13 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionInput(input) => input
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLockstepFrame { message }),
             Self::MenuChoice(choice) => choice.validate(),
+            Self::SessionMenuChoice(choice) => choice
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLockstepFrame { message }),
             Self::MenuChoiceResult(result) => {
                 result
                     .validate()
@@ -5102,6 +6130,9 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionMenuChoiceResult(result) => result
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidRuntimeCommand { message }),
             Self::InputJournal(journal_frame) => journal_frame.validate().map_err(|error| {
                 MultiplayerMessageError::InvalidLockstepFrame {
                     message: error.to_string(),
@@ -5128,22 +6159,41 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionSaveSummary(summary) => {
+                summary
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
+                        message: error.to_string(),
+                    })
+            }
             Self::SaveCheckpoint(checkpoint) => checkpoint.validate().map_err(|error| {
                 MultiplayerMessageError::InvalidLockstepFrame {
                     message: error.to_string(),
                 }
             }),
-            Self::Presence(presence) => presence.validate(),
-            Self::InteractionRequest(request) => request.validate(),
-            Self::InteractionResponse(response) => response.validate(),
-            Self::Disconnect { player_id, reason } => {
-                if *player_id == 0 {
-                    return Err(MultiplayerMessageError::InvalidPlayerIdentity {
-                        player_id: *player_id,
-                    });
+            Self::SessionSaveCheckpoint(checkpoint) => checkpoint.validate().map_err(|error| {
+                MultiplayerMessageError::InvalidLockstepFrame {
+                    message: error.to_string(),
                 }
-                validate_multiplayer_text("disconnect reason", reason)
+            }),
+            Self::Presence(presence) => presence.validate(),
+            Self::SessionPresence(presence) => presence
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkHandshake { message }),
+            Self::InteractionRequest(request) => request.validate(),
+            Self::SessionInteractionRequest(request) => request
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkHandshake { message }),
+            Self::InteractionResponse(response) => response.validate(),
+            Self::SessionInteractionResponse(response) => response
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkHandshake { message }),
+            Self::Disconnect { player_id, reason } => {
+                validate_disconnect_payload(*player_id, reason)
             }
+            Self::SessionDisconnect(frame) => frame
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLinkHandshake { message }),
             Self::RngInit { state } => {
                 state
                     .validate()
@@ -5158,6 +6208,9 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionStateHash(frame) => frame
+                .validate()
+                .map_err(|message| MultiplayerMessageError::InvalidLockstepFrame { message }),
             Self::CommandChecksum(result) => {
                 validate_command_checksum_events(&result.events)?;
                 result.checksum.validate().map_err(|error| {
@@ -5173,7 +6226,21 @@ impl LinkMessage {
                         message: error.to_string(),
                     })
             }
+            Self::SessionRuntimeCommand(command) => {
+                command
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
+                        message: error.to_string(),
+                    })
+            }
             Self::RuntimeCommandResult(result) => {
+                result
+                    .validate()
+                    .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
+                        message: error.to_string(),
+                    })
+            }
+            Self::SessionRuntimeCommandResult(result) => {
                 result
                     .validate()
                     .map_err(|error| MultiplayerMessageError::InvalidRuntimeCommand {
@@ -5262,6 +6329,15 @@ pub fn decode_link_message_bytes(bytes: &[u8]) -> Result<LinkMessage, Multiplaye
     Ok(message)
 }
 
+pub fn decode_link_message_bytes_for_session(
+    bytes: &[u8],
+    expected_session: &LinkSessionIdentity,
+) -> Result<LinkMessage, MultiplayerMessageError> {
+    let message = decode_link_message_bytes(bytes)?;
+    message.validate_session_identity(expected_session)?;
+    Ok(message)
+}
+
 fn link_message_binary_config() -> impl bincode::config::Config {
     bincode::config::standard()
         .with_little_endian()
@@ -5315,7 +6391,7 @@ mod tests {
     use super::*;
     use crate::models::{BaseStats, Dv, PokemonSpecies};
 
-    fn modpack(id: &str, hash: &str) -> SaveModpackIdentity {
+    fn test_modpack(id: &str, hash: &str) -> SaveModpackIdentity {
         SaveModpackIdentity::new(id, hash).expect("modpack identity")
     }
 
@@ -5323,14 +6399,14 @@ mod tests {
         "01020304"
     }
 
-    fn session(
+    fn test_session(
         id: &str,
         modpack: SaveModpackIdentity,
     ) -> Result<LinkSessionIdentity, LinkHandshakeError> {
         LinkSessionIdentity::new(id, modpack, pack_content_hash())
     }
 
-    fn hello(
+    fn test_hello(
         id: &str,
         modpack: SaveModpackIdentity,
         player: PlayerIdentity,
@@ -5338,7 +6414,7 @@ mod tests {
         LinkHello::new(id, modpack, pack_content_hash(), player)
     }
 
-    fn player(id: PlayerId) -> PlayerIdentity {
+    fn test_player(id: PlayerId) -> PlayerIdentity {
         PlayerIdentity::new(id, format!("P{id}")).expect("player")
     }
 
@@ -5346,6 +6422,15 @@ mod tests {
         modpack: SaveModpackIdentity,
         pack_content_hash: &str,
         frame: u64,
+    ) -> SaveGameSummary {
+        save_summary_with_hash(modpack, pack_content_hash, frame, 0xaabb_ccdd)
+    }
+
+    fn save_summary_with_hash(
+        modpack: SaveModpackIdentity,
+        pack_content_hash: &str,
+        frame: u64,
+        state_hash: u32,
     ) -> SaveGameSummary {
         serde_json::from_value(serde_json::json!({
             "format_version": crate::save::SAVE_FORMAT_VERSION,
@@ -5356,7 +6441,8 @@ mod tests {
             "pack_content_hash": pack_content_hash,
             "created_frame": frame,
             "saved_frame": frame,
-            "state_frame": frame
+            "state_frame": frame,
+            "state_hash": state_hash
         }))
         .expect("save summary")
     }
@@ -5399,6 +6485,194 @@ mod tests {
     }
 
     #[test]
+    fn link_message_reports_exact_session_identity_for_bound_transport_messages() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let hello = LinkMessage::Hello(
+            LinkHello::from_session(session.clone(), test_player(1)).expect("hello"),
+        );
+        let input = LinkMessage::SessionInput(
+            SessionPlayerInputFrame::new(
+                session.clone(),
+                PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            )
+            .expect("bound input"),
+        );
+        let state_hash = LinkMessage::SessionStateHash(
+            SessionStateChecksumFrame::new(
+                session.clone(),
+                StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd),
+            )
+            .expect("bound state hash"),
+        );
+        let disconnect = LinkMessage::SessionDisconnect(
+            SessionDisconnectFrame::new(session.clone(), 2, "closed").expect("disconnect"),
+        );
+
+        for message in [hello, input, state_hash, disconnect] {
+            assert!(message.is_session_bound(), "{message:?}");
+            assert_eq!(message.session(), Some(&session), "{message:?}");
+            assert_eq!(message.require_session(), Ok(&session), "{message:?}");
+            assert_eq!(
+                message.validate_session_identity(&session),
+                Ok(&session),
+                "{message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_message_reports_raw_transport_messages_as_unbound() {
+        let messages = [
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input")),
+            LinkMessage::StateHash(StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd)),
+            LinkMessage::Disconnect {
+                player_id: 2,
+                reason: "closed".to_string(),
+            },
+        ];
+
+        for message in messages {
+            assert!(!message.is_session_bound(), "{message:?}");
+            assert_eq!(message.session(), None, "{message:?}");
+            assert_eq!(
+                message.require_session(),
+                Err(MultiplayerMessageError::MissingSessionIdentity {
+                    message_type: message.message_type(),
+                }),
+                "{message:?}"
+            );
+            assert_eq!(
+                message.validate_session_identity(
+                    &test_session("session-1", test_modpack("core-modular", "1234abcd"))
+                        .expect("session")
+                ),
+                Err(MultiplayerMessageError::MissingSessionIdentity {
+                    message_type: message.message_type(),
+                }),
+                "{message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_message_rejects_session_identity_mismatches_without_pack_fallback() {
+        let expected = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("expected session");
+        let other_pack = test_session("session-1", test_modpack("core-modular", "ffffffff"))
+            .expect("other pack session");
+        let message = LinkMessage::SessionInput(
+            SessionPlayerInputFrame::new(
+                other_pack,
+                PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            )
+            .expect("bound input"),
+        );
+
+        assert!(matches!(
+            message.validate_session_identity(&expected),
+            Err(MultiplayerMessageError::SessionIdentityMismatch {
+                message_type: "session_input",
+                message,
+            }) if message.contains("modpack hash")
+        ));
+    }
+
+    #[test]
+    fn link_message_reports_stable_transport_message_type_labels() {
+        assert_eq!(
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"))
+                .message_type(),
+            "input"
+        );
+        assert_eq!(
+            LinkMessage::SessionDisconnect(
+                SessionDisconnectFrame::new(
+                    test_session("session-1", test_modpack("core-modular", "1234abcd"))
+                        .expect("session"),
+                    2,
+                    "closed",
+                )
+                .expect("disconnect")
+            )
+            .message_type(),
+            "session_disconnect"
+        );
+    }
+
+    #[test]
+    fn link_messages_can_bind_inputs_to_exact_pack_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let input = PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input");
+        let bound =
+            SessionPlayerInputFrame::new(session.clone(), input.clone()).expect("bound input");
+        let message = LinkMessage::SessionInput(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound input");
+
+        assert!(json.contains(r#""type":"session_input""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""player_id":2"#), "{json}");
+        assert!(json.contains(r#""frame":144"#), "{json}");
+        assert!(json.contains(r#""joypad_mask":144"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound input"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.input(), &input);
+    }
+
+    #[test]
+    fn session_input_link_message_rejects_invalid_session_identity() {
+        let input = PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input");
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionPlayerInputFrame::new_unchecked_for_tests(invalid_session, input);
+
+        assert!(matches!(
+            LinkMessage::SessionInput(invalid_bound).validate(),
+            Err(MultiplayerMessageError::InvalidLockstepFrame { .. })
+        ));
+
+        let invalid_json = serde_json::json!({
+            "type": "session_input",
+            "session": {
+                "protocol_version": LINK_PROTOCOL_VERSION,
+                "session_id": " session-1",
+                "modpack": {
+                    "id": "core-modular",
+                    "hash": "1234abcd"
+                },
+                "pack_content_hash": pack_content_hash()
+            },
+            "input": {
+                "player_id": 2,
+                "frame": 144,
+                "joypad_mask": 144
+            }
+        });
+
+        assert!(
+            serde_json::from_value::<LinkMessage>(invalid_json)
+                .expect_err("invalid session input rejected")
+                .to_string()
+                .contains("session-1")
+        );
+    }
+
+    #[test]
     fn link_messages_serialize_exact_menu_choices_as_transport_neutral_payloads() {
         let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
         let message = LinkMessage::MenuChoice(choice.clone());
@@ -5435,6 +6709,46 @@ mod tests {
                 field: "menu_choice.menu_id"
             })
         );
+    }
+
+    #[test]
+    fn link_messages_can_bind_menu_choices_to_exact_pack_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
+        let bound =
+            SessionMenuChoiceFrame::new(session.clone(), choice.clone()).expect("bound choice");
+        let message = LinkMessage::SessionMenuChoice(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound menu choice");
+
+        assert!(json.contains(r#""type":"session_menu_choice""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""menu_id":"RuntimeMenu""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound menu choice"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.choice(), &choice);
+
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionMenuChoiceFrame::new_unchecked_for_tests(invalid_session, choice);
+        assert!(matches!(
+            LinkMessage::SessionMenuChoice(invalid_bound).validate(),
+            Err(MultiplayerMessageError::InvalidLockstepFrame { .. })
+        ));
     }
 
     #[test]
@@ -5484,8 +6798,56 @@ mod tests {
     }
 
     #[test]
+    fn link_messages_can_bind_menu_choice_results_to_exact_pack_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
+        let result = MenuChoiceResultFrame::new(
+            choice,
+            StateChecksumFrame::new(2, Frame(145), 0xaabb_ccdd),
+            "2",
+        )
+        .expect("menu choice result");
+        let bound = SessionMenuChoiceResultFrame::new(session.clone(), result.clone())
+            .expect("bound menu result");
+        let message = LinkMessage::SessionMenuChoiceResult(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound menu result");
+
+        assert!(
+            json.contains(r#""type":"session_menu_choice_result""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""script_value":"2""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound menu result"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.result(), &result);
+
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionMenuChoiceResultFrame::new_unchecked_for_tests(invalid_session, result);
+        assert!(matches!(
+            LinkMessage::SessionMenuChoiceResult(invalid_bound).validate(),
+            Err(MultiplayerMessageError::InvalidRuntimeCommand { .. })
+        ));
+    }
+
+    #[test]
     fn link_messages_serialize_input_journals_as_transport_neutral_payloads() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
         let journal = DeterministicInputJournal::new(
             session,
             [1, 2],
@@ -5528,6 +6890,63 @@ mod tests {
             decode_link_message_bytes(&json),
             Err(MultiplayerMessageError::InvalidBinaryMagic)
         );
+    }
+
+    #[test]
+    fn binary_link_messages_can_decode_with_exact_session_gate() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let message = LinkMessage::SessionInput(
+            SessionPlayerInputFrame::new(
+                session.clone(),
+                PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            )
+            .expect("bound input"),
+        );
+        let bytes = encode_link_message_bytes(&message).expect("encode binary link message");
+
+        assert_eq!(
+            decode_link_message_bytes_for_session(&bytes, &session)
+                .expect("decode exact-session binary link message"),
+            message
+        );
+    }
+
+    #[test]
+    fn binary_link_messages_reject_raw_or_wrong_session_at_exact_session_gate() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let raw_message =
+            LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
+        let raw_bytes =
+            encode_link_message_bytes(&raw_message).expect("encode raw binary link message");
+
+        assert_eq!(
+            decode_link_message_bytes_for_session(&raw_bytes, &session),
+            Err(MultiplayerMessageError::MissingSessionIdentity {
+                message_type: "input",
+            })
+        );
+
+        let wrong_session = test_session("session-1", test_modpack("core-modular", "ffffffff"))
+            .expect("wrong session identity");
+        let wrong_message = LinkMessage::SessionInput(
+            SessionPlayerInputFrame::new(
+                wrong_session,
+                PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"),
+            )
+            .expect("bound input"),
+        );
+        let wrong_bytes =
+            encode_link_message_bytes(&wrong_message).expect("encode wrong binary link message");
+
+        assert!(matches!(
+            decode_link_message_bytes_for_session(&wrong_bytes, &session),
+            Err(MultiplayerMessageError::SessionIdentityMismatch {
+                message_type: "session_input",
+                message,
+            }) if message.contains("modpack hash")
+        ));
     }
 
     #[test]
@@ -5595,6 +7014,34 @@ mod tests {
                         .to_string(),
             })
         );
+
+        let invalid_hello = LinkMessage::Hello(LinkHello::new_unchecked_for_tests(
+            LinkSessionIdentity::new_unchecked_for_tests(
+                LINK_PROTOCOL_VERSION,
+                "session-1",
+                test_modpack("core-modular", "1234ABCD"),
+                pack_content_hash(),
+            ),
+            test_player(2),
+        ));
+        let encoded_hello =
+            bincode::serde::encode_to_vec(&invalid_hello, link_message_binary_config())
+                .expect("encode invalid hello for decode test");
+        let mut hello_bytes = Vec::with_capacity(LINK_MESSAGE_HEADER_LEN + encoded_hello.len());
+        hello_bytes.extend_from_slice(LINK_MESSAGE_MAGIC);
+        hello_bytes.extend_from_slice(&LINK_PROTOCOL_VERSION.to_be_bytes());
+        hello_bytes.extend_from_slice(&(encoded_hello.len() as u32).to_be_bytes());
+        hello_bytes.extend_from_slice(&fnv1a32_bytes(&encoded_hello).to_be_bytes());
+        hello_bytes.extend_from_slice(&encoded_hello);
+
+        assert!(matches!(
+            decode_link_message_bytes(&hello_bytes),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
+        assert!(matches!(
+            encode_link_message_bytes(&invalid_hello),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
     }
 
     #[test]
@@ -5619,6 +7066,47 @@ mod tests {
             missing_player.contains("missing field `player_id`"),
             "{missing_player}"
         );
+    }
+
+    #[test]
+    fn session_state_hash_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let checksum = StateChecksumFrame::new(2, Frame(144), 0xaabbccdd);
+        let frame = SessionStateChecksumFrame::new(session.clone(), checksum.clone())
+            .expect("session checksum");
+        let message = LinkMessage::SessionStateHash(frame.clone());
+
+        let json = serde_json::to_string(&message).expect("serialize session state hash");
+        assert!(json.contains(r#""type":"session_state_hash""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""player_id":2"#), "{json}");
+        assert!(json.contains(r#""frame":144"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize session state hash"),
+            message
+        );
+        assert_eq!(frame.session(), &session);
+        assert_eq!(frame.checksum(), &checksum);
+
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_frame =
+            SessionStateChecksumFrame::new_unchecked_for_tests(invalid_session, checksum);
+        assert!(matches!(
+            LinkMessage::SessionStateHash(invalid_frame).validate(),
+            Err(MultiplayerMessageError::InvalidLockstepFrame { .. })
+        ));
     }
 
     #[test]
@@ -5704,10 +7192,14 @@ mod tests {
 
     #[test]
     fn runtime_command_frames_can_be_bound_to_exact_link_session_identity() {
-        let session =
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
         let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
             .expect("runtime payload");
+        assert_eq!(
+            RuntimeCommandFrame::new(2, 0, payload.clone(), StateChecksum::new(144, 0xaabb_ccdd)),
+            Err(RuntimeCommandFrameError::InvalidSequence { sequence: 0 })
+        );
         let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(144, 0xaabb_ccdd))
             .expect("runtime command");
         let bound_command = SessionRuntimeCommandFrame::new(session.clone(), command.clone())
@@ -5727,7 +7219,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -5740,8 +7232,8 @@ mod tests {
 
     #[test]
     fn runtime_command_result_frames_can_be_bound_to_exact_link_session_identity() {
-        let session =
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
         let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
             .expect("runtime payload");
         let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(144, 0xaabb_ccdd))
@@ -5781,8 +7273,8 @@ mod tests {
 
     #[test]
     fn save_summaries_can_be_bound_to_exact_link_session_identity() {
-        let modpack = modpack("core-modular", "1234abcd");
-        let session = session("session-1", modpack.clone()).expect("session identity");
+        let modpack = test_modpack("core-modular", "1234abcd");
+        let session = test_session("session-1", modpack.clone()).expect("session identity");
         let summary = save_summary(modpack, pack_content_hash(), 144);
         let bound =
             SessionSaveSummaryFrame::new(session.clone(), summary.clone()).expect("bound summary");
@@ -5813,14 +7305,20 @@ mod tests {
 
     #[test]
     fn save_checkpoints_bind_summary_to_state_checksum_and_session() {
-        let modpack = modpack("core-modular", "1234abcd");
-        let session = session("session-1", modpack.clone()).expect("session identity");
+        let modpack = test_modpack("core-modular", "1234abcd");
+        let session = test_session("session-1", modpack.clone()).expect("session identity");
         let summary = save_summary(modpack, pack_content_hash(), 144);
         let checksum = StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd);
         let checkpoint =
             SaveCheckpointFrame::new(summary.clone(), checksum.clone()).expect("checkpoint");
         let bound = SessionSaveCheckpointFrame::new(session.clone(), checkpoint.clone())
             .expect("bound checkpoint");
+        let wrong_pack_session =
+            test_session("session-1", test_modpack("other-pack", "1234abcd")).expect("session");
+        assert!(matches!(
+            SessionSaveCheckpointFrame::new(wrong_pack_session, checkpoint.clone()),
+            Err(SaveCheckpointFrameError::InvalidSessionSummary { .. })
+        ));
 
         assert_eq!(checkpoint.summary(), &summary);
         assert_eq!(checkpoint.checksum(), &checksum);
@@ -5831,9 +7329,9 @@ mod tests {
             Ok(())
         );
         assert_eq!(checkpoint.validate_for_players([1, 2]), Ok(()));
-        let mut lobby = LinkLobby::new(session.clone(), player(1)).expect("lobby");
+        let mut lobby = LinkLobby::new(session.clone(), test_player(1)).expect("lobby");
         lobby
-            .accept_hello(LinkHello::from_session(session.clone(), player(2)).expect("hello"))
+            .accept_hello(LinkHello::from_session(session.clone(), test_player(2)).expect("hello"))
             .expect("accept checkpoint player");
         assert_eq!(lobby.validate_save_checkpoint(&checkpoint), Ok(()));
         assert_eq!(
@@ -5842,7 +7340,7 @@ mod tests {
         );
 
         let wrong_frame = SaveCheckpointFrame::new_unchecked_for_tests(
-            summary,
+            summary.clone(),
             StateChecksumFrame::new(2, Frame(145), 0xaabb_ccdd),
         );
         assert_eq!(
@@ -5852,12 +7350,88 @@ mod tests {
                 checksum_frame: 145,
             })
         );
+        let wrong_hash = SaveCheckpointFrame::new_unchecked_for_tests(
+            summary.clone(),
+            StateChecksumFrame::new(2, Frame(144), 0xdddd_ccbb),
+        );
+        assert_eq!(
+            wrong_hash.validate(),
+            Err(SaveCheckpointFrameError::HashMismatch {
+                summary_hash: 0xaabb_ccdd,
+                checksum_hash: 0xdddd_ccbb,
+            })
+        );
+    }
+
+    #[test]
+    fn link_messages_can_carry_session_bound_save_and_runtime_frames() {
+        let modpack = test_modpack("core-modular", "1234abcd");
+        let session = test_session("session-1", modpack.clone()).expect("session identity");
+        let summary = save_summary(modpack.clone(), pack_content_hash(), 144);
+        let checkpoint = SaveCheckpointFrame::new(
+            summary.clone(),
+            StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd),
+        )
+        .expect("checkpoint");
+        let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
+            .expect("runtime payload");
+        let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(144, 0xaabb_ccdd))
+            .expect("runtime command");
+        let result = RuntimeCommandResultFrame::new(
+            command.clone(),
+            StateChecksumFrame::new(2, Frame(145), 0xbbcc_ddee),
+            "ok",
+        )
+        .expect("runtime result");
+
+        for message in [
+            LinkMessage::SessionSaveSummary(
+                SessionSaveSummaryFrame::new(session.clone(), summary.clone())
+                    .expect("bound summary"),
+            ),
+            LinkMessage::SessionSaveCheckpoint(
+                SessionSaveCheckpointFrame::new(session.clone(), checkpoint)
+                    .expect("bound checkpoint"),
+            ),
+            LinkMessage::SessionRuntimeCommand(
+                SessionRuntimeCommandFrame::new(session.clone(), command.clone())
+                    .expect("bound command"),
+            ),
+            LinkMessage::SessionRuntimeCommandResult(
+                SessionRuntimeCommandResultFrame::new(session.clone(), result)
+                    .expect("bound result"),
+            ),
+        ] {
+            assert_eq!(message.validate(), Ok(()));
+            let json = serde_json::to_string(&message).expect("serialize session-bound message");
+            assert!(json.contains(r#""session_id":"session-1""#));
+            assert!(json.contains(r#""pack_content_hash":"01020304""#));
+            assert_eq!(
+                serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound message"),
+                message
+            );
+            encode_link_message_bytes(&message).expect("encode bound message");
+        }
+
+        let mismatched_summary = save_summary(
+            SaveModpackIdentity::new("core-modular", "ffffffff").expect("other identity"),
+            pack_content_hash(),
+            144,
+        );
+        assert!(matches!(
+            LinkMessage::SessionSaveSummary(SessionSaveSummaryFrame::new_unchecked_for_tests(
+                session,
+                mismatched_summary,
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
     }
 
     #[test]
     fn deterministic_replay_bundle_binds_journal_commands_results_and_terminal_checksum() {
-        let session =
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
         let journal = DeterministicInputJournal::new(
             session.clone(),
             [1, 2],
@@ -5918,8 +7492,8 @@ mod tests {
 
     #[test]
     fn save_resume_replay_binds_checkpoint_to_journal_start_state() {
-        let modpack = modpack("core-modular", "1234abcd");
-        let session = session("session-1", modpack.clone()).expect("session identity");
+        let modpack = test_modpack("core-modular", "1234abcd");
+        let session = test_session("session-1", modpack.clone()).expect("session identity");
         let checkpoint = SessionSaveCheckpointFrame::new(
             session.clone(),
             SaveCheckpointFrame::new(
@@ -5959,11 +7533,11 @@ mod tests {
 
     #[test]
     fn save_resume_replay_rejects_session_and_start_checksum_mismatches() {
-        let modpack = modpack("core-modular", "1234abcd");
-        let session = session("session-1", modpack.clone()).expect("session identity");
-        let other_session = session("session-2", modpack.clone()).expect("other session");
+        let modpack = test_modpack("core-modular", "1234abcd");
+        let resume_session = test_session("session-1", modpack.clone()).expect("session identity");
+        let other_session = test_session("session-2", modpack.clone()).expect("other session");
         let checkpoint = SessionSaveCheckpointFrame::new(
-            session.clone(),
+            resume_session.clone(),
             SaveCheckpointFrame::new(
                 save_summary(modpack.clone(), pack_content_hash(), 4),
                 StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
@@ -5972,7 +7546,7 @@ mod tests {
         )
         .expect("session checkpoint");
         let journal = DeterministicInputJournal::new(
-            session.clone(),
+            resume_session.clone(),
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(5), 0xbbcc_ddee),
@@ -5998,9 +7572,9 @@ mod tests {
         );
 
         let wrong_hash_checkpoint = SessionSaveCheckpointFrame::new(
-            session.clone(),
+            resume_session.clone(),
             SaveCheckpointFrame::new(
-                save_summary(modpack.clone(), pack_content_hash(), 4),
+                save_summary_with_hash(modpack.clone(), pack_content_hash(), 4, 0xdddd_ccbb),
                 StateChecksumFrame::new(1, Frame(4), 0xdddd_ccbb),
             )
             .expect("wrong hash checkpoint"),
@@ -6015,7 +7589,7 @@ mod tests {
         );
 
         let wrong_player_checkpoint = SessionSaveCheckpointFrame::new(
-            session,
+            resume_session,
             SaveCheckpointFrame::new(
                 save_summary(modpack, pack_content_hash(), 4),
                 StateChecksumFrame::new(2, Frame(4), 0xaabb_ccdd),
@@ -6034,12 +7608,12 @@ mod tests {
 
     #[test]
     fn deterministic_replay_bundle_rejects_wrong_session_and_out_of_range_commands() {
-        let session =
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
-        let other_session =
-            session("session-2", modpack("core-modular", "1234abcd")).expect("other session");
+        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let other_session = test_session("session-2", test_modpack("core-modular", "1234abcd"))
+            .expect("other session");
         let journal = DeterministicInputJournal::new(
-            session.clone(),
+            replay_session.clone(),
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
@@ -6072,7 +7646,8 @@ mod tests {
         );
 
         let out_of_range_command =
-            SessionRuntimeCommandFrame::new(session, command_before).expect("bound command");
+            SessionRuntimeCommandFrame::new(replay_session.clone(), command_before.clone())
+                .expect("bound command");
         let out_of_range_bundle = DeterministicReplayBundle::new(
             journal_frame.clone(),
             vec![out_of_range_command],
@@ -6084,6 +7659,33 @@ mod tests {
         assert_eq!(
             out_of_range_bundle,
             Err(InputJournalError::RuntimeCommandFrameOutsideJournal {
+                sequence: 7,
+                frame: 3,
+                start: 4,
+                terminal: 6,
+            })
+        );
+
+        let out_of_range_result = RuntimeCommandResultFrame::new(
+            command_before,
+            StateChecksumFrame::new(2, Frame(4), 0xaabb_ccdd),
+            "ok",
+        )
+        .expect("runtime result with in-range checksum");
+        let out_of_range_bound_result =
+            SessionRuntimeCommandResultFrame::new(replay_session, out_of_range_result)
+                .expect("bound result");
+        let out_of_range_result_bundle = DeterministicReplayBundle::new(
+            journal_frame.clone(),
+            Vec::new(),
+            vec![out_of_range_bound_result],
+            Vec::new(),
+            journal_frame.journal().terminal_checksum().clone(),
+        );
+
+        assert_eq!(
+            out_of_range_result_bundle,
+            Err(InputJournalError::RuntimeCommandResultFrameOutsideJournal {
                 sequence: 7,
                 frame: 3,
                 start: 4,
@@ -6119,10 +7721,10 @@ mod tests {
 
     #[test]
     fn deterministic_replay_bundle_rejects_terminal_checksum_hash_mismatch() {
-        let session =
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity");
+        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
         let journal = DeterministicInputJournal::new(
-            session,
+            replay_session,
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
@@ -6150,7 +7752,8 @@ mod tests {
         );
 
         let journal = DeterministicInputJournal::new(
-            session("session-1", modpack("core-modular", "1234abcd")).expect("session identity"),
+            test_session("session-1", test_modpack("core-modular", "1234abcd"))
+                .expect("session identity"),
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
             StateChecksumFrame::new(1, Frame(6), 0xbbcc_ddee),
@@ -6184,7 +7787,7 @@ mod tests {
         state.frame_counter = 144;
         state.overworld = crate::state::OverworldMemory::Active {
             map_name: "PlayersHouse2F".to_string(),
-            tile: TilePosition::new(3, 3),
+            tile: TilePosition::new(4, 4),
             facing: Direction::Down,
             mode: crate::world::movement::MovementMode::Normal,
         };
@@ -6202,7 +7805,7 @@ mod tests {
         let mut moved = state;
         moved.overworld = crate::state::OverworldMemory::Active {
             map_name: "PlayersHouse2F".to_string(),
-            tile: TilePosition::new(5, 3),
+            tile: TilePosition::new(6, 4),
             facing: Direction::Right,
             mode: crate::world::movement::MovementMode::Normal,
         };
@@ -6281,8 +7884,12 @@ mod tests {
 
     #[test]
     fn hello_message_carries_protocol_and_exact_modpack_identity() {
-        let hello =
-            hello("session-1", modpack("core-modular", "1234abcd"), player(1)).expect("hello");
+        let hello = test_hello(
+            "session-1",
+            test_modpack("core-modular", "1234abcd"),
+            test_player(1),
+        )
+        .expect("hello");
         let message = LinkMessage::Hello(hello.clone());
         let json = serde_json::to_string(&message).expect("serialize hello");
 
@@ -6432,14 +8039,23 @@ mod tests {
 
     #[test]
     fn link_handshake_requires_exact_session_protocol_and_modpack_identity() {
-        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
-        let matching =
-            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("matching");
+        let local =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+        let matching = test_hello(
+            "session-1",
+            test_modpack("core-modular", "1234abcd"),
+            test_player(2),
+        )
+        .expect("matching");
 
         validate_link_hello(&local, &matching).expect("matching hello");
 
-        let wrong_session = hello("session-2", modpack("core-modular", "1234abcd"), player(2))
-            .expect("wrong session");
+        let wrong_session = test_hello(
+            "session-2",
+            test_modpack("core-modular", "1234abcd"),
+            test_player(2),
+        )
+        .expect("wrong session");
         assert_eq!(
             validate_link_hello(&local, &wrong_session),
             Err(LinkHandshakeError::SessionMismatch {
@@ -6448,8 +8064,12 @@ mod tests {
             })
         );
 
-        let wrong_hash =
-            hello("session-1", modpack("core-modular", "ffffffff"), player(2)).expect("wrong hash");
+        let wrong_hash = test_hello(
+            "session-1",
+            test_modpack("core-modular", "ffffffff"),
+            test_player(2),
+        )
+        .expect("wrong hash");
         assert_eq!(
             validate_link_hello(&local, &wrong_hash),
             Err(LinkHandshakeError::ModpackHashMismatch {
@@ -6459,9 +8079,13 @@ mod tests {
         );
 
         let wrong_content_hash = LinkHello::from_session(
-            LinkSessionIdentity::new("session-1", modpack("core-modular", "1234abcd"), "ffffffff")
-                .expect("wrong content hash session"),
-            player(2),
+            LinkSessionIdentity::new(
+                "session-1",
+                test_modpack("core-modular", "1234abcd"),
+                "ffffffff",
+            )
+            .expect("wrong content hash session"),
+            test_player(2),
         )
         .expect("wrong content hash");
         assert_eq!(
@@ -6472,8 +8096,12 @@ mod tests {
             })
         );
 
-        let case_changed = hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
-            .expect("case changed");
+        let case_changed = test_hello(
+            "session-1",
+            test_modpack("CORE-MODULAR", "1234abcd"),
+            test_player(2),
+        )
+        .expect("case changed");
         assert_eq!(
             validate_link_hello(&local, &case_changed),
             Err(LinkHandshakeError::ModpackIdMismatch {
@@ -6494,14 +8122,16 @@ mod tests {
 
     #[test]
     fn link_session_identity_validation_owns_protocol_and_modpack_comparison() {
-        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
-        let matching = session("session-1", modpack("core-modular", "1234abcd")).expect("matching");
+        let local =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+        let matching =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("matching");
         validate_link_session_identity(&local, &matching).expect("matching session");
 
         let protocol_drift = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION + 1,
             "session-1",
-            modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd"),
             pack_content_hash(),
         );
         assert_eq!(
@@ -6513,7 +8143,7 @@ mod tests {
         );
 
         let other_pack =
-            session("session-1", modpack("other-pack", "1234abcd")).expect("other pack");
+            test_session("session-1", test_modpack("other-pack", "1234abcd")).expect("other pack");
         assert_eq!(
             validate_link_session_identity(&local, &other_pack),
             Err(LinkHandshakeError::ModpackIdMismatch {
@@ -6527,9 +8157,9 @@ mod tests {
     fn link_handshake_rejects_empty_player_display_names_without_placeholders() {
         let zero_id_player = PlayerIdentity::new_unchecked_for_tests(0, "P0");
         assert_eq!(
-            hello(
+            test_hello(
                 "session-1",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 zero_id_player,
             ),
             Err(LinkHandshakeError::InvalidPlayerIdentity { player_id: 0 })
@@ -6537,9 +8167,9 @@ mod tests {
 
         let empty_player = PlayerIdentity::new_unchecked_for_tests(2, "");
         assert_eq!(
-            hello(
+            test_hello(
                 "session-1",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 empty_player
             ),
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 2 })
@@ -6547,9 +8177,9 @@ mod tests {
 
         let padded_player = PlayerIdentity::new_unchecked_for_tests(2, " P2");
         assert_eq!(
-            hello(
+            test_hello(
                 "session-1",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 padded_player
             ),
             Err(LinkHandshakeError::InvalidPlayerDisplayName {
@@ -6560,9 +8190,9 @@ mod tests {
 
         let control_player = PlayerIdentity::new_unchecked_for_tests(2, "P\n2");
         assert_eq!(
-            hello(
+            test_hello(
                 "session-1",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 control_player
             ),
             Err(LinkHandshakeError::InvalidPlayerDisplayName {
@@ -6571,7 +8201,8 @@ mod tests {
             })
         );
 
-        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
+        let local =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
         let bypassed = LinkHello::new_unchecked_for_tests(
             local.clone(),
             PlayerIdentity::new_unchecked_for_tests(3, ""),
@@ -6613,39 +8244,41 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_malformed_session_ids_without_trimming() {
-        let modpack = modpack("core-modular", "1234abcd");
+        let pack_identity = test_modpack("core-modular", "1234abcd");
         assert_eq!(
-            session("", modpack.clone()).and_then(|session| session.validate()),
+            test_session("", pack_identity.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::MissingSessionId)
         );
         assert_eq!(
-            session(" session-1", modpack.clone()).and_then(|session| session.validate()),
+            test_session(" session-1", pack_identity.clone())
+                .and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: " session-1".to_string(),
             })
         );
         assert_eq!(
-            session("session 1", modpack.clone()).and_then(|session| session.validate()),
+            test_session("session 1", pack_identity.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::InvalidSessionId {
                 session_id: "session 1".to_string(),
             })
         );
         assert_eq!(
-            session("fallback-session", modpack.clone()).and_then(|session| session.validate()),
+            test_session("fallback-session", pack_identity.clone())
+                .and_then(|session| session.validate()),
             Err(LinkHandshakeError::ReservedSessionId {
                 session_id: "fallback-session".to_string(),
             })
         );
 
-        let local = session("session-1", modpack.clone()).expect("local");
+        let local = test_session("session-1", pack_identity.clone()).expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
                 "session-1 ",
-                modpack,
+                pack_identity,
                 pack_content_hash(),
             ),
-            player(2),
+            test_player(2),
         );
         assert_eq!(
             validate_link_hello(&local, &remote),
@@ -6658,10 +8291,10 @@ mod tests {
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
                 "legacy-session",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 pack_content_hash(),
             ),
-            player(2),
+            test_player(2),
         );
         assert_eq!(
             validate_link_hello(&local, &reserved_remote),
@@ -6673,15 +8306,16 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_protocol_drift() {
-        let local = session("session-1", modpack("core-modular", "1234abcd")).expect("local");
+        let local =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION + 1,
                 "session-1",
-                modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd"),
                 pack_content_hash(),
             ),
-            player(2),
+            test_player(2),
         );
 
         assert_eq!(
@@ -6695,35 +8329,52 @@ mod tests {
 
     #[test]
     fn link_lobby_accepts_matching_hellos_in_player_id_order() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session.clone(), player(3)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session.clone(), test_player(3)).expect("lobby");
 
         assert_eq!(
             lobby.accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(1))
-                    .expect("player 1 hello")
+                test_hello(
+                    "session-1",
+                    test_modpack("core-modular", "1234abcd"),
+                    test_player(1)
+                )
+                .expect("player 1 hello")
             ),
             Ok(AcceptPlayerResult::Added)
         );
         assert_eq!(
             lobby.accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2))
-                    .expect("player 2 hello")
+                test_hello(
+                    "session-1",
+                    test_modpack("core-modular", "1234abcd"),
+                    test_player(2)
+                )
+                .expect("player 2 hello")
             ),
             Ok(AcceptPlayerResult::Added)
         );
 
         assert_eq!(lobby.session(), &session);
         assert_eq!(lobby.player_ids(), vec![1, 2, 3]);
-        assert_eq!(lobby.players(), vec![player(1), player(2), player(3)]);
+        assert_eq!(
+            lobby.players(),
+            vec![test_player(1), test_player(2), test_player(3)]
+        );
     }
 
     #[test]
     fn link_lobby_duplicate_same_player_is_idempotent() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let hello =
-            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
+        let hello = test_hello(
+            "session-1",
+            test_modpack("core-modular", "1234abcd"),
+            test_player(2),
+        )
+        .expect("hello");
 
         assert_eq!(
             lobby.accept_hello(hello.clone()),
@@ -6735,13 +8386,18 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_conflicting_player_identity() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let original =
-            hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("original");
-        let conflict = hello(
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
+        let original = test_hello(
             "session-1",
-            modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd"),
+            test_player(2),
+        )
+        .expect("original");
+        let conflict = test_hello(
+            "session-1",
+            test_modpack("core-modular", "1234abcd"),
             PlayerIdentity::new(2, "P02").expect("player"),
         )
         .expect("conflict");
@@ -6759,10 +8415,15 @@ mod tests {
 
     #[test]
     fn link_lobby_rejects_case_changed_modpack_id_before_roster_insert() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
-        let case_changed = hello("session-1", modpack("CORE-MODULAR", "1234abcd"), player(2))
-            .expect("case changed");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
+        let case_changed = test_hello(
+            "session-1",
+            test_modpack("CORE-MODULAR", "1234abcd"),
+            test_player(2),
+        )
+        .expect("case changed");
 
         assert_eq!(
             lobby.accept_hello(case_changed),
@@ -6776,11 +8437,17 @@ mod tests {
 
     #[test]
     fn link_lobby_creates_lockstep_buffer_for_accepted_roster() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(4)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
+                test_hello(
+                    "session-1",
+                    test_modpack("core-modular", "1234abcd"),
+                    test_player(2),
+                )
+                .expect("hello"),
             )
             .expect("accept");
 
@@ -6806,12 +8473,13 @@ mod tests {
 
     #[test]
     fn link_lobby_exports_local_hello_for_registered_player_only() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let lobby = LinkLobby::new(session.clone(), player(1)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let lobby = LinkLobby::new(session.clone(), test_player(1)).expect("lobby");
 
         assert_eq!(
             lobby.local_hello(1).expect("hello"),
-            LinkHello::from_session(session, player(1)).expect("hello")
+            LinkHello::from_session(session, test_player(1)).expect("hello")
         );
         assert_eq!(
             lobby.local_hello(2),
@@ -6821,11 +8489,17 @@ mod tests {
 
     #[test]
     fn battle_action_sync_waits_for_roster_and_orders_exact_actions() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(4)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(4)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
+                test_hello(
+                    "session-1",
+                    test_modpack("core-modular", "1234abcd"),
+                    test_player(2),
+                )
+                .expect("hello"),
             )
             .expect("accept");
         let mut sync = lobby.battle_action_buffer().expect("battle action buffer");
@@ -6939,6 +8613,50 @@ mod tests {
             ),
             Err(BattleSyncError::InvalidMoveSlot {
                 slot: BATTLE_MOVE_SLOTS,
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::MoveSwitch {
+                    slot: 0,
+                    party_index: 1,
+                },
+                "11111111",
+            )
+            .map(|frame| frame.action().clone()),
+            Ok(BattleAction::MoveSwitch {
+                slot: 0,
+                party_index: 1,
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::MoveSwitch {
+                    slot: BATTLE_MOVE_SLOTS,
+                    party_index: 1,
+                },
+                "11111111",
+            ),
+            Err(BattleSyncError::InvalidMoveSlot {
+                slot: BATTLE_MOVE_SLOTS,
+            })
+        );
+        assert_eq!(
+            BattleActionFrame::new(
+                1,
+                1,
+                BattleAction::MoveSwitch {
+                    slot: 0,
+                    party_index: PARTY_SIZE,
+                },
+                "11111111",
+            ),
+            Err(BattleSyncError::InvalidSwitchPartyIndex {
+                party_index: PARTY_SIZE,
             })
         );
         assert_eq!(
@@ -7080,6 +8798,26 @@ mod tests {
                 BTreeMap::from([(1, "11111111".to_string()), (2, "11111111".to_string())]),
             ),
             Err(BattleSyncError::UnexpectedStateHash { player_id: 2 })
+        );
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(1, BattleAction::Move { slot: 0 })]),
+                BTreeMap::from([(1, "1111".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: "1111".to_string(),
+            })
+        );
+        assert_eq!(
+            BattleActionTurn::new(
+                3,
+                BTreeMap::from([(1, BattleAction::Move { slot: 0 })]),
+                BTreeMap::from([(1, "AAAABBBB".to_string())]),
+            ),
+            Err(BattleSyncError::InvalidStateHash {
+                state_hash: "AAAABBBB".to_string(),
+            })
         );
     }
 
@@ -7231,12 +8969,70 @@ mod tests {
     }
 
     #[test]
+    fn session_battle_action_link_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let action = BattleActionFrame::new(
+            2,
+            9,
+            BattleAction::Item {
+                item_id: "johto_plus:EMBER_ORB".to_string(),
+            },
+            "11111111",
+        )
+        .expect("action");
+        let bound =
+            SessionBattleActionFrame::new(session.clone(), action.clone()).expect("bound action");
+        let message = LinkMessage::SessionBattleAction(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound action message");
+
+        assert!(json.contains(r#""type":"session_battle_action""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""item_id":"johto_plus:EMBER_ORB""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""state_hash":"11111111""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound action message"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.action(), &action);
+
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionBattleActionFrame::new_unchecked_for_tests(invalid_session, action);
+        assert!(matches!(
+            LinkMessage::SessionBattleAction(invalid_bound).validate(),
+            Err(MultiplayerMessageError::InvalidBattleAction { .. })
+        ));
+    }
+
+    #[test]
     fn trade_sync_swaps_confirmed_party_slots_without_item_id_coercion() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let mut lobby = LinkLobby::new(session, player(1)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
         lobby
             .accept_hello(
-                hello("session-1", modpack("core-modular", "1234abcd"), player(2)).expect("hello"),
+                test_hello(
+                    "session-1",
+                    test_modpack("core-modular", "1234abcd"),
+                    test_player(2),
+                )
+                .expect("hello"),
             )
             .expect("accept");
 
@@ -7370,8 +9166,9 @@ mod tests {
 
     #[test]
     fn trade_sync_rejects_unknown_players_wrong_trade_ids_and_empty_slots() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let lobby = LinkLobby::new(session, player(1)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
 
         assert_eq!(
             lobby.trade_buffer("trade-1", 1, 2),
@@ -7518,6 +9315,149 @@ mod tests {
     }
 
     #[test]
+    fn session_trade_offer_link_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session(
+            "session-trade-1",
+            test_modpack("core-crystal", "pack-hash-1"),
+        )
+        .expect("session");
+        let offer = TradeOffer::new(
+            "trade-1",
+            1,
+            0,
+            pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
+        )
+        .expect("offer");
+        let message = LinkMessage::SessionTradeOffer(
+            SessionTradeOffer::new(session.clone(), offer.clone()).expect("session offer"),
+        );
+        let json = serde_json::to_string(&message).expect("serialize session trade offer");
+
+        assert!(json.contains(r#""type":"session_trade_offer""#));
+        assert!(json.contains(r#""session_id":"session-trade-1""#));
+        assert!(json.contains(r#""id":"core-crystal""#));
+        assert!(json.contains(r#""hash":"pack-hash-1""#));
+        assert!(json.contains(r#""pack_content_hash":"01020304""#));
+        assert!(json.contains(r#""trade_id":"trade-1""#));
+        assert!(json.contains(r#""item":"johto_plus:EMBER_ORB""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize session trade offer"),
+            message
+        );
+
+        let decoded =
+            serde_json::from_str::<LinkMessage>(&json).expect("decode session trade offer");
+        match decoded {
+            LinkMessage::SessionTradeOffer(frame) => {
+                assert_eq!(frame.session(), &session);
+                assert_eq!(frame.offer(), &offer);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_trade_confirmation_link_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session(
+            "session-trade-2",
+            test_modpack("core-crystal", "pack-hash-2"),
+        )
+        .expect("session");
+        let confirmation = confirmation("trade-1", 2, true);
+        let message = LinkMessage::SessionTradeConfirmation(
+            SessionTradeConfirmation::new(session.clone(), confirmation.clone())
+                .expect("session confirmation"),
+        );
+        let json = serde_json::to_string(&message).expect("serialize session trade confirmation");
+
+        assert!(json.contains(r#""type":"session_trade_confirmation""#));
+        assert!(json.contains(r#""session_id":"session-trade-2""#));
+        assert!(json.contains(r#""id":"core-crystal""#));
+        assert!(json.contains(r#""hash":"pack-hash-2""#));
+        assert!(json.contains(r#""pack_content_hash":"01020304""#));
+        assert!(json.contains(r#""trade_id":"trade-1""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json)
+                .expect("deserialize session trade confirmation"),
+            message
+        );
+
+        let decoded =
+            serde_json::from_str::<LinkMessage>(&json).expect("decode session trade confirmation");
+        match decoded {
+            LinkMessage::SessionTradeConfirmation(frame) => {
+                assert_eq!(frame.session(), &session);
+                assert_eq!(frame.confirmation(), &confirmation);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_trade_messages_reject_invalid_session_identity() {
+        let session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " bad-session",
+            test_modpack("core-crystal", "pack-hash-1"),
+            pack_content_hash(),
+        );
+        let offer = TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", None)).expect("offer");
+        let confirmation = confirmation("trade-1", 1, true);
+
+        assert!(SessionTradeOffer::new(session.clone(), offer).is_err());
+        assert!(SessionTradeConfirmation::new(session, confirmation).is_err());
+
+        let invalid_offer_json = serde_json::json!({
+            "type": "session_trade_offer",
+            "session": {
+                "protocol_version": LINK_PROTOCOL_VERSION,
+                "session_id": " bad-session",
+                "modpack": {
+                    "id": "core-crystal",
+                    "hash": "pack-hash-1"
+                },
+                "pack_content_hash": pack_content_hash()
+            },
+            "offer": {
+                "trade_id": "trade-1",
+                "player_id": 1,
+                "party_slot": 0,
+                "pokemon": pokemon("PIKACHU", None)
+            }
+        });
+        assert!(
+            serde_json::from_value::<LinkMessage>(invalid_offer_json)
+                .expect_err("invalid offer session rejected")
+                .to_string()
+                .contains("bad-session")
+        );
+
+        let invalid_confirmation_json = serde_json::json!({
+            "type": "session_trade_confirmation",
+            "session": {
+                "protocol_version": LINK_PROTOCOL_VERSION,
+                "session_id": " bad-session",
+                "modpack": {
+                    "id": "core-crystal",
+                    "hash": "pack-hash-1"
+                },
+                "pack_content_hash": pack_content_hash()
+            },
+            "confirmation": {
+                "trade_id": "trade-1",
+                "player_id": 1,
+                "confirm": true
+            }
+        });
+        assert!(
+            serde_json::from_value::<LinkMessage>(invalid_confirmation_json)
+                .expect_err("invalid confirmation session rejected")
+                .to_string()
+                .contains("bad-session")
+        );
+    }
+
+    #[test]
     fn link_cable_preamble_establishes_exact_two_player_stream() {
         let mut host = LinkCableState::new(1, 2).expect("host");
         let mut client = LinkCableState::new(2, 1).expect("client");
@@ -7559,6 +9499,34 @@ mod tests {
     }
 
     #[test]
+    fn session_link_byte_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let frame = LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("frame");
+        let bound = SessionLinkByteFrame::new(session.clone(), frame.clone()).expect("bound byte");
+        let message = LinkMessage::SessionLinkByte(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound byte");
+
+        assert!(json.contains(r#""type":"session_link_byte""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""player_id":2"#), "{json}");
+        assert!(json.contains(r#""byte":97"#), "{json}");
+        assert!(json.contains(r#""clock":7"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound byte"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.frame(), &frame);
+    }
+
+    #[test]
     fn link_cable_rejects_wrong_peer_and_clock_regression() {
         let mut cable = LinkCableState::new(1, 2).expect("cable");
 
@@ -7595,8 +9563,9 @@ mod tests {
 
     #[test]
     fn link_cable_from_lobby_requires_accepted_players() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
-        let lobby = LinkLobby::new(session, player(1)).expect("lobby");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+        let lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
 
         assert_eq!(
             LinkCableState::from_lobby(&lobby, 1, 2),
@@ -7635,6 +9604,68 @@ mod tests {
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize sync"),
             message
         );
+    }
+
+    #[test]
+    fn session_link_clock_sync_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let frame = LinkClockSyncFrame::new(2, 10, 11, 12).expect("sync");
+        let bound =
+            SessionLinkClockSyncFrame::new(session.clone(), frame.clone()).expect("bound sync");
+        let message = LinkMessage::SessionLinkClockSync(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound sync");
+
+        assert!(
+            json.contains(r#""type":"session_link_clock_sync""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""player_id":2"#), "{json}");
+        assert!(json.contains(r#""t0":10"#), "{json}");
+        assert!(json.contains(r#""t1":11"#), "{json}");
+        assert!(json.contains(r#""t2":12"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound sync"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.frame(), &frame);
+    }
+
+    #[test]
+    fn session_link_cable_messages_reject_invalid_session_identity() {
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let byte = LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("byte");
+        let sync = LinkClockSyncFrame::new(2, 10, 11, 12).expect("sync");
+
+        assert!(matches!(
+            LinkMessage::SessionLinkByte(SessionLinkByteFrame::new_unchecked_for_tests(
+                invalid_session.clone(),
+                byte
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkCableFrame { .. })
+        ));
+        assert!(matches!(
+            LinkMessage::SessionLinkClockSync(SessionLinkClockSyncFrame::new_unchecked_for_tests(
+                invalid_session,
+                sync
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkCableFrame { .. })
+        ));
     }
 
     #[test]
@@ -7718,7 +9749,78 @@ mod tests {
     }
 
     #[test]
-    fn fnv_hash_matches_battle_synchronizer_helper() {
+    fn session_rng_init_link_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let state = BattleRngState::new(0xf3dd, 0x56, 0x78).expect("rng state");
+        let bound = SessionBattleRngInitFrame::new(session.clone(), state).expect("bound rng init");
+        let message = LinkMessage::SessionRngInit(bound.clone());
+        let json = serde_json::to_string(&message).expect("serialize bound rng init");
+
+        assert!(json.contains(r#""type":"session_rng_init""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""hardware_divider":62429"#), "{json}");
+        assert!(json.contains(r#""h_random_add":86"#), "{json}");
+        assert!(json.contains(r#""h_random_sub":120"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound rng init"),
+            message
+        );
+        assert_eq!(bound.session(), &session);
+        assert_eq!(bound.state(), state);
+    }
+
+    #[test]
+    fn session_rng_init_link_message_rejects_invalid_session_identity() {
+        let state = BattleRngState::new(0xf3dd, 0x56, 0x78).expect("rng state");
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let invalid_bound =
+            SessionBattleRngInitFrame::new_unchecked_for_tests(invalid_session, state);
+
+        assert!(matches!(
+            LinkMessage::SessionRngInit(invalid_bound).validate(),
+            Err(MultiplayerMessageError::InvalidBattleRng { .. })
+        ));
+
+        let invalid_json = serde_json::json!({
+            "type": "session_rng_init",
+            "session": {
+                "protocol_version": LINK_PROTOCOL_VERSION,
+                "session_id": " session-1",
+                "modpack": {
+                    "id": "core-modular",
+                    "hash": "1234abcd"
+                },
+                "pack_content_hash": pack_content_hash()
+            },
+            "state": {
+                "hardware_divider": 62429,
+                "h_random_add": 86,
+                "h_random_sub": 120
+            }
+        });
+
+        assert!(
+            serde_json::from_value::<LinkMessage>(invalid_json)
+                .expect_err("invalid session rng init rejected")
+                .to_string()
+                .contains("session-1")
+        );
+    }
+
+    #[test]
+    fn fnv_hash_matches_battle_synchronizer_reference_values() {
         assert_eq!(fnv1a32_hex(""), "811c9dc5");
         assert_eq!(fnv1a32_hex("battle-state"), "aa0a8273");
         assert_eq!(fnv1a32_hex_bytes(b"battle-state"), "aa0a8273");
@@ -7806,7 +9908,8 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_records_pack_bound_contiguous_lockstep_frames() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
         let frames = vec![
             LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
@@ -7853,7 +9956,8 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_rejects_missing_players_and_frame_gaps() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
 
         assert_eq!(
@@ -7887,7 +9991,8 @@ mod tests {
 
     #[test]
     fn deterministic_input_journal_requires_explicit_terminal_checksum_frame() {
-        let session = session("session-1", modpack("core-modular", "1234abcd")).expect("session");
+        let session =
+            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
 
         assert_eq!(
             DeterministicInputJournal::new(
@@ -8222,6 +10327,183 @@ mod tests {
     }
 
     #[test]
+    fn session_presence_and_interactions_carry_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let presence = OverworldPresence::new(
+            "u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        )
+        .expect("presence");
+        let presence_message = LinkMessage::SessionPresence(
+            SessionOverworldPresence::new(session.clone(), presence.clone())
+                .expect("bound presence"),
+        );
+        let presence_json =
+            serde_json::to_string(&presence_message).expect("serialize bound presence");
+
+        assert!(
+            presence_json.contains(r#""type":"session_presence""#),
+            "{presence_json}"
+        );
+        assert!(
+            presence_json.contains(r#""session_id":"session-1""#),
+            "{presence_json}"
+        );
+        assert!(
+            presence_json.contains(r#""id":"core-modular""#),
+            "{presence_json}"
+        );
+        assert!(
+            presence_json.contains(r#""hash":"1234abcd""#),
+            "{presence_json}"
+        );
+        assert!(
+            presence_json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{presence_json}"
+        );
+        assert!(presence_json.contains(r#""map_name":"ROUTE_29""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&presence_json)
+                .expect("deserialize bound presence"),
+            presence_message
+        );
+
+        let request = MultiplayerInteractionRequest::new(
+            "request-1",
+            "u1",
+            "CHRIS",
+            "u2",
+            MultiplayerInteractionKind::Battle,
+            1235,
+        )
+        .expect("request");
+        let request_message = LinkMessage::SessionInteractionRequest(
+            SessionMultiplayerInteractionRequest::new(session.clone(), request.clone())
+                .expect("bound request"),
+        );
+        let request_json =
+            serde_json::to_string(&request_message).expect("serialize bound request");
+
+        assert!(
+            request_json.contains(r#""type":"session_interaction_request""#),
+            "{request_json}"
+        );
+        assert!(
+            request_json.contains(r#""session_id":"session-1""#),
+            "{request_json}"
+        );
+        assert!(request_json.contains(r#""request_id":"request-1""#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&request_json).expect("deserialize bound request"),
+            request_message
+        );
+
+        let response = MultiplayerInteractionResponse::new(
+            "request-1",
+            "u2",
+            "u1",
+            MultiplayerInteractionKind::Battle,
+            true,
+            1236,
+        )
+        .expect("response");
+        let response_message = LinkMessage::SessionInteractionResponse(
+            SessionMultiplayerInteractionResponse::new(session.clone(), response.clone())
+                .expect("bound response"),
+        );
+        let response_json =
+            serde_json::to_string(&response_message).expect("serialize bound response");
+
+        assert!(
+            response_json.contains(r#""type":"session_interaction_response""#),
+            "{response_json}"
+        );
+        assert!(
+            response_json.contains(r#""session_id":"session-1""#),
+            "{response_json}"
+        );
+        assert!(response_json.contains(r#""accepted":true"#));
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&response_json)
+                .expect("deserialize bound response"),
+            response_message
+        );
+    }
+
+    #[test]
+    fn session_presence_and_interactions_reject_invalid_session_identity() {
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        let presence = OverworldPresence::new(
+            "u1",
+            "CHRIS",
+            PresenceEntityType::Player,
+            "ROUTE_29",
+            TilePosition::new(10, 12),
+            Direction::Up,
+            1234,
+        )
+        .expect("presence");
+        let request = MultiplayerInteractionRequest::new(
+            "request-1",
+            "u1",
+            "CHRIS",
+            "u2",
+            MultiplayerInteractionKind::Trade,
+            1235,
+        )
+        .expect("request");
+        let response = MultiplayerInteractionResponse::new(
+            "request-1",
+            "u2",
+            "u1",
+            MultiplayerInteractionKind::Trade,
+            false,
+            1236,
+        )
+        .expect("response");
+
+        assert!(matches!(
+            LinkMessage::SessionPresence(SessionOverworldPresence::new_unchecked_for_tests(
+                invalid_session.clone(),
+                presence
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
+        assert!(matches!(
+            LinkMessage::SessionInteractionRequest(
+                SessionMultiplayerInteractionRequest::new_unchecked_for_tests(
+                    invalid_session.clone(),
+                    request,
+                )
+            )
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
+        assert!(matches!(
+            LinkMessage::SessionInteractionResponse(
+                SessionMultiplayerInteractionResponse::new_unchecked_for_tests(
+                    invalid_session,
+                    response,
+                )
+            )
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
+    }
+
+    #[test]
     fn presence_and_interaction_validate_exact_identity_fields() {
         let presence = OverworldPresence::new_unchecked_for_tests(
             " u1",
@@ -8511,6 +10793,64 @@ mod tests {
             Err(MultiplayerMessageError::InvalidLockstepFrame {
                 message: "lockstep player id 0 is not a valid link identity".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn session_disconnect_message_carries_exact_pack_bound_session_identity() {
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        let frame =
+            SessionDisconnectFrame::new(session.clone(), 2, "closed").expect("disconnect frame");
+        let message = LinkMessage::SessionDisconnect(frame.clone());
+        let json = serde_json::to_string(&message).expect("serialize session disconnect");
+
+        assert!(json.contains(r#""type":"session_disconnect""#), "{json}");
+        assert!(json.contains(r#""session_id":"session-1""#), "{json}");
+        assert!(json.contains(r#""id":"core-modular""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
+            "{json}"
+        );
+        assert!(json.contains(r#""player_id":2"#), "{json}");
+        assert!(json.contains(r#""reason":"closed""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<LinkMessage>(&json).expect("deserialize session disconnect"),
+            message
+        );
+        assert_eq!(frame.session(), &session);
+        assert_eq!(frame.player_id(), 2);
+        assert_eq!(frame.reason(), "closed");
+    }
+
+    #[test]
+    fn session_disconnect_rejects_invalid_session_and_payload() {
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_PROTOCOL_VERSION,
+            " session-1",
+            test_modpack("core-modular", "1234abcd"),
+            pack_content_hash(),
+        );
+        assert!(matches!(
+            LinkMessage::SessionDisconnect(SessionDisconnectFrame::new_unchecked_for_tests(
+                invalid_session,
+                2,
+                "closed",
+            ))
+            .validate(),
+            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
+        ));
+
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            .expect("session identity");
+        assert_eq!(
+            SessionDisconnectFrame::new(session.clone(), 0, "closed"),
+            Err("multiplayer player id 0 is not a valid link identity".to_string())
+        );
+        assert_eq!(
+            SessionDisconnectFrame::new(session, 2, " closed"),
+            Err("disconnect reason must be exact and untrimmed".to_string())
         );
     }
 }

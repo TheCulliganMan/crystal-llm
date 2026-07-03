@@ -24,15 +24,17 @@ The playable target is the Bevy shell. It reads one definitive compiled pack and
 starts either a new game from a spawn id or an existing Rust save:
 
 ```sh
-cargo run -p crystal-bevy --features bevy-shell -- \
-  --pack <assets/data relative .crystalpack> \
+cargo run -p crystal-bevy -- \
+  --repo /path/to/crystal-llm \
+  --pack apps/web/assets/data/content-packs/core-modular.crystalpack \
   --spawn <spawn-id> \
   --save-path /tmp/pokecrystal.crystalsave
 ```
 
 ```sh
-cargo run -p crystal-bevy --features bevy-shell -- \
-  --pack <assets/data relative .crystalpack> \
+cargo run -p crystal-bevy -- \
+  --repo /path/to/crystal-llm \
+  --pack apps/web/assets/data/content-packs/core-modular.crystalpack \
   --load-save /tmp/pokecrystal.crystalsave \
   --save-path /tmp/pokecrystal.crystalsave
 ```
@@ -42,8 +44,36 @@ launcher has no stdin command shell and no web, MCP, agent, or Electron surface.
 
 ## Verification
 
-Run focused checks from this directory:
+Run the Rust compile gate from this directory:
 
 ```sh
-cargo test -p crystal-core
+cargo test --workspace --no-run
+```
+
+From the repository root, rebuild the definitive core pack:
+
+```sh
+npm run export:core
+```
+
+Then smoke the compiled pack through Bevy without opening a long-running shell:
+
+```sh
+cargo run -p crystal-bevy --manifest-path rust/Cargo.toml -- \
+  --repo /path/to/crystal-llm \
+  --pack apps/web/assets/data/content-packs/core-modular.crystalpack \
+  --list-spawns
+
+cargo run -p crystal-bevy --manifest-path rust/Cargo.toml -- \
+  --repo /path/to/crystal-llm \
+  --pack apps/web/assets/data/content-packs/core-modular.crystalpack \
+  --spawn 0 \
+  --smoke-save /tmp/core-modular-smoke.crystalsave \
+  --smoke-script 'right;down;left;up'
+
+cargo run -p crystal-bevy --manifest-path rust/Cargo.toml -- \
+  --repo /path/to/crystal-llm \
+  --pack apps/web/assets/data/content-packs/core-modular.crystalpack \
+  --smoke-load-save /tmp/core-modular-smoke.crystalsave \
+  --save-path /tmp/core-modular-smoke-roundtrip.crystalsave
 ```

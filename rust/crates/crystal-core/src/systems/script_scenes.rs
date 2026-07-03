@@ -292,6 +292,11 @@ fn resolve_scene_token(
     {
         return Ok(scene_token.to_string());
     }
+    if let Ok(index) = scene_token.parse::<usize>() {
+        if table.scenes.is_empty() || table.scenes.get(index).is_some() {
+            return Ok(scene_token.to_string());
+        }
+    }
     Err(ScriptSceneError::UnknownSceneToken {
         map_name: map_name.to_string(),
         scene_id: scene_token.to_string(),

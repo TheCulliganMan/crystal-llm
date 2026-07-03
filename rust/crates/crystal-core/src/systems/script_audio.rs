@@ -26,7 +26,7 @@ impl<'de> Deserialize<'de> for ScriptAudioCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptAudioCommand {
-            #[serde(default, deserialize_with = "required_audio_command_token")]
+            #[serde(deserialize_with = "required_audio_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_audio_token")]
             audio_id: Option<String>,
@@ -44,9 +44,7 @@ impl<'de> Deserialize<'de> for ScriptAudioCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_audio_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_audio_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }

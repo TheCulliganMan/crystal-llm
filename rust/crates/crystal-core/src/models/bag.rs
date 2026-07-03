@@ -20,6 +20,7 @@ pub struct Bag {
     pub balls: BTreeMap<String, u16>,
     pub key_items: BTreeMap<String, u16>,
     pub tm_hm: Vec<bool>,
+    pub custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
 }
 
 impl<'de> Deserialize<'de> for Bag {
@@ -35,6 +36,7 @@ impl<'de> Deserialize<'de> for Bag {
             balls: BTreeMap<String, u16>,
             key_items: BTreeMap<String, u16>,
             tm_hm: Vec<bool>,
+            custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
         }
 
         let raw = RawBag::deserialize(deserializer)?;
@@ -44,6 +46,7 @@ impl<'de> Deserialize<'de> for Bag {
             balls: raw.balls,
             key_items: raw.key_items,
             tm_hm: raw.tm_hm,
+            custom_pockets: raw.custom_pockets,
         };
         bag.validate().map_err(D::Error::custom)?;
         Ok(bag)
@@ -100,7 +103,12 @@ impl Bag {
                 Some(KEY_ITEM_POCKET_CAPACITY),
             ),
             ITEM_POCKET_TM_HM => self.add_tmhm(definition),
-            other => Err(format!("unsupported item pocket '{other}'")),
+            other => add_to_custom_pocket(
+                &mut self.custom_pockets,
+                other,
+                &definition.script_name,
+                quantity,
+            ),
         }
     }
 
@@ -119,7 +127,12 @@ impl Bag {
                 remove_from_inventory(&mut self.key_items, &definition.script_name, quantity)
             }
             ITEM_POCKET_TM_HM => self.remove_tmhm(definition),
-            other => Err(format!("unsupported item pocket '{other}'")),
+            other => remove_from_custom_pocket(
+                &mut self.custom_pockets,
+                other,
+                &definition.script_name,
+                quantity,
+            ),
         }
     }
 
@@ -185,7 +198,11 @@ impl Bag {
                 .and_then(|index| self.tm_hm.get(index).copied())
                 .map(u16::from)
                 .unwrap_or(0),
-            _ => 0,
+            other => self
+                .custom_pockets
+                .get(other)
+                .and_then(|inventory| inventory.get(&definition.script_name).copied())
+                .unwrap_or(0),
         }
     }
 
@@ -200,12 +217,6 @@ impl Bag {
     }
 
     pub fn consume_ball(&mut self, definition: &Item) -> Result<bool, String> {
-        if definition.pocket != ITEM_POCKET_BALL {
-            return Err(format!(
-                "item '{}' is not in the BALL pocket",
-                definition.script_name
-            ));
-        }
         self.remove_item(definition, 1)
     }
 
@@ -248,8 +259,33 @@ impl Bag {
         validate_inventory(&self.pc_items, MAX_ITEM_STACK, PC_ITEM_CAPACITY, "pc_items")?;
         validate_inventory(&self.balls, MAX_ITEM_STACK, BALL_POCKET_CAPACITY, "balls")?;
         validate_inventory(&self.key_items, 1, KEY_ITEM_POCKET_CAPACITY, "key_items")?;
+        validate_custom_pockets(&self.custom_pockets)?;
         Ok(())
     }
+}
+
+fn add_to_custom_pocket(
+    custom_pockets: &mut BTreeMap<String, BTreeMap<String, u16>>,
+    pocket_id: &str,
+    item_id: &str,
+    quantity: u16,
+) -> Result<bool, String> {
+    validate_pocket_id(pocket_id)?;
+    let inventory = custom_pockets.entry(pocket_id.to_string()).or_default();
+    add_to_inventory(inventory, item_id, quantity, MAX_ITEM_STACK, None)
+}
+
+fn remove_from_custom_pocket(
+    custom_pockets: &mut BTreeMap<String, BTreeMap<String, u16>>,
+    pocket_id: &str,
+    item_id: &str,
+    quantity: u16,
+) -> Result<bool, String> {
+    validate_pocket_id(pocket_id)?;
+    let Some(inventory) = custom_pockets.get_mut(pocket_id) else {
+        return Ok(false);
+    };
+    remove_from_inventory(inventory, item_id, quantity)
 }
 
 pub fn validate_saved_bag_pocket_references(
@@ -368,6 +404,29 @@ fn validate_inventory(
     Ok(())
 }
 
+fn validate_custom_pockets(
+    custom_pockets: &BTreeMap<String, BTreeMap<String, u16>>,
+) -> Result<(), String> {
+    for (pocket_id, inventory) in custom_pockets {
+        validate_pocket_id(pocket_id)?;
+        match pocket_id.as_str() {
+            ITEM_POCKET_ITEM | ITEM_POCKET_BALL | ITEM_POCKET_KEY_ITEM | ITEM_POCKET_TM_HM => {
+                return Err(format!(
+                    "custom_pockets must not redefine built-in pocket {pocket_id}"
+                ));
+            }
+            _ => {}
+        }
+        validate_inventory(
+            inventory,
+            MAX_ITEM_STACK,
+            usize::MAX,
+            &format!("custom_pockets.{pocket_id}"),
+        )?;
+    }
+    Ok(())
+}
+
 fn is_exact_item_id(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
@@ -397,6 +456,23 @@ fn validate_item_id(item_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_pocket_id(pocket_id: &str) -> Result<(), String> {
+    if pocket_id.is_empty() {
+        return Err("item pocket id is required".to_string());
+    }
+    if pocket_id.trim() != pocket_id {
+        return Err(format!(
+            "item pocket id '{pocket_id}' must be exact and untrimmed"
+        ));
+    }
+    if !is_exact_item_id(pocket_id) {
+        return Err(format!(
+            "item pocket id '{pocket_id}' must contain only ASCII letters, numbers, or underscores"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,7 +496,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -454,6 +531,24 @@ mod tests {
         assert!(bag.consume_ball(&poke_ball).expect("consume ball"));
         assert_eq!(bag.quantity(&poke_ball), 0);
         assert!(!bag.consume_ball(&poke_ball).expect("no balls left"));
+    }
+
+    #[test]
+    fn bag_consumes_capture_items_from_exact_custom_pockets() {
+        let prism_ball = item("PRISM_BALL", item_pocket("PRISM_BALL"));
+        let mut bag = Bag::default();
+
+        assert!(bag.add_item(&prism_ball, 2).expect("add custom ball"));
+        assert_eq!(bag.quantity(&prism_ball), 2);
+        assert!(bag.consume_ball(&prism_ball).expect("consume custom ball"));
+        assert_eq!(bag.quantity(&prism_ball), 1);
+        assert_eq!(
+            bag.custom_pockets
+                .get("PRISM_BALL")
+                .and_then(|pocket| pocket.get("PRISM_BALL"))
+                .copied(),
+            Some(1)
+        );
     }
 
     #[test]
@@ -563,6 +658,45 @@ mod tests {
     }
 
     #[test]
+    fn custom_pack_pockets_store_exact_items_without_core_enum_support() {
+        let pass = item("BATTLE_PASS", item_pocket("BATTLE_PASS"));
+        let mut bag = Bag::default();
+
+        assert!(bag.add_item(&pass, 2).expect("add custom pocket item"));
+        assert_eq!(bag.quantity(&pass), 2);
+        assert_eq!(bag.custom_pockets["BATTLE_PASS"]["BATTLE_PASS"], 2);
+        assert!(
+            bag.remove_item(&pass, 1)
+                .expect("remove custom pocket item")
+        );
+        assert_eq!(bag.quantity(&pass), 1);
+        bag.validate().expect("valid custom pocket");
+    }
+
+    #[test]
+    fn custom_pack_pockets_reject_malformed_or_builtin_pocket_ids() {
+        let pass = item("BATTLE_PASS", item_pocket("BATTLE PASS"));
+        let mut bag = Bag::default();
+
+        assert_eq!(
+            bag.add_item(&pass, 1),
+            Err(
+                "item pocket id 'BATTLE PASS' must contain only ASCII letters, numbers, or underscores"
+                    .to_string()
+            )
+        );
+
+        bag.custom_pockets.insert(
+            ITEM_POCKET_ITEM.to_string(),
+            BTreeMap::from([("POTION".to_string(), 1)]),
+        );
+        assert_eq!(
+            bag.validate(),
+            Err("custom_pockets must not redefine built-in pocket ITEM".to_string())
+        );
+    }
+
+    #[test]
     fn pc_items_use_exact_item_pocket_storage() {
         let potion = item("POTION", item_pocket("ITEM"));
         let ball = item("POKE_BALL", item_pocket("BALL"));
@@ -586,6 +720,7 @@ mod tests {
             "balls": {},
             "key_items": {},
             "tm_hm": [],
+            "custom_pockets": {},
             "legacy_pc_items": {}
         }))
         .expect_err("bag saves must not accept legacy inventory fields")
@@ -601,12 +736,20 @@ mod tests {
             "pc_items": {},
             "balls": {},
             "key_items": {},
-            "tm_hm": []
+            "tm_hm": [],
+            "custom_pockets": {}
         });
         serde_json::from_value::<Bag>(complete.clone())
             .expect("explicit empty bag pockets are valid");
 
-        for field in ["items", "pc_items", "balls", "key_items", "tm_hm"] {
+        for field in [
+            "items",
+            "pc_items",
+            "balls",
+            "key_items",
+            "tm_hm",
+            "custom_pockets",
+        ] {
             let mut missing = complete.clone();
             missing.as_object_mut().expect("bag object").remove(field);
             let error = serde_json::from_value::<Bag>(missing)

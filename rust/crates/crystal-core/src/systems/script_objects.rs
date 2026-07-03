@@ -2,13 +2,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::state::{EventFlagError, GameState};
+use crate::state::{EventFlagError, GameState, ScriptRuntimeEmote};
 use crate::systems::script_runtime::script_label_parent;
-use crate::world::session::{OverworldFollowState, OverworldSession};
+use crate::world::session::{
+    OverworldFollowState, OverworldSession, raw_event_tile_to_runtime_tile_checked,
+};
 use crate::world::{
     map::{Direction, TilePosition},
-    movement::move_by_stride,
+    movement::{DEFAULT_RUNTIME_TILE_STRIDE, checked_move_by_stride},
 };
+
+// Script movement opcodes are authored in the same exact runtime tile
+// coordinate space as objects, warps, and player movement.
+pub const SCRIPT_MOVEMENT_EVENT_TILE_STRIDE: i16 = DEFAULT_RUNTIME_TILE_STRIDE;
+pub const SCRIPT_MOVEMENT_JUMP_TILE_STRIDE: i16 = SCRIPT_MOVEMENT_EVENT_TILE_STRIDE * 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +48,7 @@ impl<'de> Deserialize<'de> for ScriptObjectCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptObjectCommand {
-            #[serde(default, deserialize_with = "required_script_object_command_token")]
+            #[serde(deserialize_with = "required_script_object_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_script_object_token")]
             object_id: Option<String>,
@@ -75,9 +82,7 @@ impl<'de> Deserialize<'de> for ScriptObjectCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_object_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_object_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -111,7 +116,7 @@ impl<'de> Deserialize<'de> for ScriptMovementStep {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptMovementStep {
-            #[serde(default, deserialize_with = "required_script_object_command_token")]
+            #[serde(deserialize_with = "required_script_object_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_script_object_token")]
             direction: Option<String>,
@@ -126,9 +131,7 @@ impl<'de> Deserialize<'de> for ScriptMovementStep {
             duration: raw.duration,
             index: raw.index,
         };
-        if !step.command.is_empty()
-            && let Some(issue) = script_movement_step_issues(&step).into_iter().next()
-        {
+        if let Some(issue) = script_movement_step_issues(&step).into_iter().next() {
             return Err(D::Error::custom(format!(
                 "invalid movement step: {issue:?}"
             )));
@@ -166,6 +169,7 @@ pub struct ScriptMovementOutcome {
     pub previous_tile: TilePosition,
     pub tile: TilePosition,
     pub facing: Direction,
+    pub executed_steps: Vec<ScriptMovementStep>,
     pub effects: Vec<ScriptMovementEffect>,
     pub fixed_facing: bool,
     pub sliding: bool,
@@ -185,6 +189,8 @@ pub enum ScriptObjectCommandError {
     UnknownObject { object_id: String },
     #[error("script object id '{object_id}' is not an exact pack token")]
     InvalidObjectId { object_id: String },
+    #[error("script object '{object_id}' has out-of-range raw event coordinate ({x}, {y})")]
+    ObjectCoordinatesOutOfRange { object_id: String, x: u16, y: u16 },
     #[error("script object source script '{source_script}' is invalid")]
     InvalidSourceScript { source_script: String },
     #[error("object '{object_id}' has no initialized facing")]
@@ -196,8 +202,23 @@ pub enum ScriptObjectCommandError {
     },
     #[error("moveobject for '{object_id}' is missing x/y coordinates")]
     MissingMoveCoordinates { object_id: String },
+    #[error("moveobject for '{object_id}' has out-of-range raw event coordinate ({x}, {y})")]
+    MoveCoordinatesOutOfRange { object_id: String, x: u16, y: u16 },
+    #[error(
+        "moveobject for '{object_id}' raw event coordinate resolves outside map {map_name} runtime tile bounds {width}x{height}: raw ({x}, {y})"
+    )]
+    MoveCoordinatesOutOfMap {
+        object_id: String,
+        map_name: String,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    },
     #[error("script object command '{command}' is missing a direction")]
     MissingDirection { command: String },
+    #[error("script object command '{command}' is missing emote payload")]
+    MissingEmote { command: String },
     #[error("unknown script direction '{direction}'")]
     UnknownDirection { direction: String },
     #[error("applymovement for '{object_id}' is missing a movement label")]
@@ -215,6 +236,14 @@ pub enum ScriptObjectCommandError {
         index: usize,
     },
     #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} has no runtime stride"
+    )]
+    MovementMissingRuntimeStride {
+        movement: String,
+        command: String,
+        index: usize,
+    },
+    #[error(
         "movement command '{command}' in movement '{movement}' at index {index} is missing a direction"
     )]
     MovementMissingDirection {
@@ -222,8 +251,62 @@ pub enum ScriptObjectCommandError {
         command: String,
         index: usize,
     },
+    #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} has unexpected direction payload"
+    )]
+    MovementUnexpectedDirection {
+        movement: String,
+        command: String,
+        index: usize,
+    },
+    #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} has unknown direction '{direction}'"
+    )]
+    MovementUnknownDirection {
+        movement: String,
+        command: String,
+        index: usize,
+        direction: String,
+    },
+    #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} is missing a duration"
+    )]
+    MovementMissingDuration {
+        movement: String,
+        command: String,
+        index: usize,
+    },
+    #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} overflows supported runtime coordinates from ({x}, {y})"
+    )]
+    MovementRuntimeTileOverflow {
+        movement: String,
+        command: String,
+        index: usize,
+        x: i16,
+        y: i16,
+    },
     #[error("movement for '{object_id}' moved outside unsigned object coordinates: ({x}, {y})")]
     ObjectPositionOutOfRange { object_id: String, x: i16, y: i16 },
+    #[error("movement for '{object_id}' ended on unsaveable object tile ({x}, {y})")]
+    ObjectPositionUnsavable { object_id: String, x: i16, y: i16 },
+    #[error("follow object '{object_id}' is missing from the overworld session")]
+    FollowObjectMissing { object_id: String },
+    #[error("follow object '{object_id}' cannot be moved to unsaveable runtime tile ({x}, {y})")]
+    FollowPositionUnsavable { object_id: String, x: i16, y: i16 },
+    #[error("map {map_name} runtime tile bounds overflow supported coordinates")]
+    MapBoundsOverflow { map_name: String },
+    #[error(
+        "movement for '{object_id}' ended outside map {map_name} runtime bounds: ({x}, {y}) not within {width}x{height}"
+    )]
+    ObjectPositionOutOfMap {
+        object_id: String,
+        map_name: String,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    },
     #[error("event flag error: {error}")]
     EventFlag { error: EventFlagError },
 }
@@ -233,6 +316,7 @@ pub enum ScriptObjectCommandError {
 pub enum ScriptMovementStepIssue {
     UnexpectedDirection,
     MissingDirection,
+    MissingDuration,
     UnknownDirection { direction: String },
     UnsupportedCommand,
 }
@@ -275,6 +359,12 @@ pub enum ScriptObjectCommandIssue {
     MissingCoordinates {
         source_script: String,
         command_index: usize,
+    },
+    MoveCoordinatesOutOfRange {
+        source_script: String,
+        command_index: usize,
+        x: u16,
+        y: u16,
     },
     MissingDirection {
         source_script: String,
@@ -355,18 +445,53 @@ pub const SCRIPT_MOVEMENT_DIRECTION_COMMANDS: &[&str] = &[
     "step_bump",
     "turn_head",
     "turn_away",
+    "turn_in",
+    "turn_waterfall",
 ];
 pub const SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS: &[&str] = &["step_sleep"];
+pub const SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS: &[&str] = &[
+    "step_sleep_1",
+    "step_sleep_2",
+    "step_sleep_3",
+    "step_sleep_4",
+    "step_sleep_5",
+    "step_sleep_6",
+    "step_sleep_7",
+    "step_sleep_8",
+    "step_sleep_9",
+    "step_sleep_10",
+    "step_sleep_11",
+    "step_sleep_12",
+    "step_sleep_13",
+    "step_sleep_14",
+    "step_sleep_15",
+    "step_sleep_16",
+];
+pub const SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS: &[&str] = &[
+    "step_wait_end",
+    "step_dig",
+    "step_shake",
+    "rock_smash",
+    "return_dig",
+];
 pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
     "step_end",
+    "step_loop",
+    "step_stop",
     "fix_facing",
     "remove_fixed_facing",
     "set_sliding",
     "remove_sliding",
     "teleport_from",
     "teleport_to",
+    "skyfall",
     "skyfall_top",
+    "fish_got_bite",
+    "fish_cast_rod",
+    "hide_emote",
+    "show_emote",
     "tree_shake",
+    "remove_object",
     "hide_object",
     "show_object",
 ];
@@ -385,16 +510,47 @@ pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "step_bump",
     "turn_head",
     "turn_away",
+    "turn_in",
+    "turn_waterfall",
     "step_sleep",
+    "step_sleep_1",
+    "step_sleep_2",
+    "step_sleep_3",
+    "step_sleep_4",
+    "step_sleep_5",
+    "step_sleep_6",
+    "step_sleep_7",
+    "step_sleep_8",
+    "step_sleep_9",
+    "step_sleep_10",
+    "step_sleep_11",
+    "step_sleep_12",
+    "step_sleep_13",
+    "step_sleep_14",
+    "step_sleep_15",
+    "step_sleep_16",
+    "step_wait_end",
     "step_end",
+    "step_loop",
+    "step_stop",
     "fix_facing",
     "remove_fixed_facing",
     "set_sliding",
     "remove_sliding",
     "teleport_from",
     "teleport_to",
+    "skyfall",
     "skyfall_top",
+    "step_dig",
+    "fish_got_bite",
+    "fish_cast_rod",
+    "hide_emote",
+    "show_emote",
+    "step_shake",
     "tree_shake",
+    "rock_smash",
+    "return_dig",
+    "remove_object",
     "hide_object",
     "show_object",
 ];
@@ -434,6 +590,11 @@ fn validate_script_object_command_shape(command: &ScriptObjectCommand) -> Result
             if command.x.is_none() || command.y.is_none() {
                 return Err(format!(
                     "script object command {command_name} requires x and y"
+                ));
+            }
+            if !moveobject_raw_coordinates_fit_runtime_tile(command) {
+                return Err(format!(
+                    "script object command {command_name} raw event coordinates overflow runtime tile space"
                 ));
             }
             reject_target_object_id(command, command_name)?;
@@ -647,6 +808,15 @@ pub fn script_object_command_issues(
                 source_script: command.source_script.clone(),
                 command_index: command.command_index,
             });
+        } else if !moveobject_raw_coordinates_fit_runtime_tile(command)
+            && let (Some(x), Some(y)) = (command.x, command.y)
+        {
+            issues.push(ScriptObjectCommandIssue::MoveCoordinatesOutOfRange {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                x,
+                y,
+            });
         }
     } else if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str())
         || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str())
@@ -680,9 +850,7 @@ pub fn script_object_command_issues(
             return issues;
         }
         let movement_source = script_label_parent(&command.source_script);
-        if !movements.contains(&(movement.to_string(), None))
-            && !movements.contains(&(movement.to_string(), Some(movement_source.to_string())))
-        {
+        if !movements.contains(&(movement.to_string(), Some(movement_source.to_string()))) {
             issues.push(ScriptObjectCommandIssue::UnknownMovement {
                 source_script: command.source_script.clone(),
                 command_index: command.command_index,
@@ -929,10 +1097,19 @@ fn validate_script_object_command_source(
 pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
     let command = step.command.as_str();
     if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
+        || SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS.contains(&command)
         || SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS.contains(&command)
     {
         if step.direction.is_some() {
             vec![ScriptMovementStepIssue::UnexpectedDirection]
+        } else {
+            Vec::new()
+        }
+    } else if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&command) {
+        if step.direction.is_some() {
+            vec![ScriptMovementStepIssue::UnexpectedDirection]
+        } else if step.duration.is_none() {
+            vec![ScriptMovementStepIssue::MissingDuration]
         } else {
             Vec::new()
         }
@@ -961,8 +1138,10 @@ pub fn apply_script_object_mutation(
         "moveobject" => apply_moveobject_command(session, command),
         "turnobject" => apply_turnobject_command(session, command),
         "faceobject" => apply_faceobject_command(session, command),
+        "faceplayer" => apply_faceplayer_command(session, command),
         "follow" => apply_follow_command(session, command),
         "stopfollow" => apply_stopfollow_command(session, command),
+        "showemote" => apply_showemote_command(state, session, command),
         command => Err(ScriptObjectCommandError::NotObjectMutation {
             command: command.to_string(),
         }),
@@ -1011,6 +1190,7 @@ pub fn apply_script_movement(
             expected,
         });
     }
+    validate_script_movement_steps_for_runtime(movement)?;
 
     let mut tile = object_tile(session, &object_id)?;
     let previous_tile = tile;
@@ -1018,12 +1198,13 @@ pub fn apply_script_movement(
     let mut steps_applied = 0;
     let mut fixed_facing = false;
     let mut sliding = false;
+    let mut executed_steps = Vec::new();
     let mut effects = Vec::new();
 
     for step in &movement.steps {
         match step.command.as_str() {
-            "step_end" => break,
             "fix_facing" => {
+                executed_steps.push(step.clone());
                 fixed_facing = true;
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
@@ -1031,6 +1212,7 @@ pub fn apply_script_movement(
                 });
             }
             "remove_fixed_facing" => {
+                executed_steps.push(step.clone());
                 fixed_facing = false;
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
@@ -1038,6 +1220,7 @@ pub fn apply_script_movement(
                 });
             }
             "set_sliding" => {
+                executed_steps.push(step.clone());
                 sliding = true;
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
@@ -1045,28 +1228,44 @@ pub fn apply_script_movement(
                 });
             }
             "remove_sliding" => {
+                executed_steps.push(step.clone());
                 sliding = false;
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
                 });
             }
-            "step_sleep" => {
+            command if movement_step_sleeps(command) => {
+                executed_steps.push(step.clone());
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
                 });
-                steps_applied += 1;
+                steps_applied += movement_step_tick_count(movement, step)?;
+            }
+            command if movement_step_ends_sequence(command) => {
+                break;
             }
             command if movement_step_moves_object(command) => {
+                executed_steps.push(step.clone());
                 let direction = movement_step_direction(movement, step)?;
                 if !fixed_facing {
                     facing = direction;
                 }
-                tile = move_by_stride(tile, direction, 1);
+                let stride = movement_step_stride(movement, step)?;
+                tile = checked_move_by_stride(tile, direction, stride).ok_or_else(|| {
+                    ScriptObjectCommandError::MovementRuntimeTileOverflow {
+                        movement: movement.label.clone(),
+                        command: step.command.clone(),
+                        index: step.index,
+                        x: tile.x,
+                        y: tile.y,
+                    }
+                })?;
                 steps_applied += 1;
             }
             command if movement_step_turns_without_moving(command) => {
+                executed_steps.push(step.clone());
                 let direction = movement_step_direction(movement, step)?;
                 facing = match command {
                     "turn_away" => opposite_direction(direction),
@@ -1074,13 +1273,13 @@ pub fn apply_script_movement(
                 };
                 steps_applied += 1;
             }
-            "teleport_from" | "teleport_to" | "skyfall_top" | "tree_shake" | "hide_object"
-            | "show_object" => {
+            command if movement_step_records_effect(command) => {
+                executed_steps.push(step.clone());
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
                 });
-                steps_applied += 1;
+                steps_applied += movement_step_tick_count(movement, step)?;
             }
             command => {
                 return Err(ScriptObjectCommandError::UnsupportedMovementCommand {
@@ -1092,8 +1291,18 @@ pub fn apply_script_movement(
         }
     }
 
+    if tile != previous_tile {
+        validate_follow_after_script_movement(session, &object_id, previous_tile)?;
+    }
+
     set_object_tile(session, &object_id, tile)?;
     set_object_facing(session, &object_id, facing)?;
+    if tile != previous_tile {
+        session.update_follow_after_entity_move(&object_id, previous_tile, tile);
+    }
+    for effect in &effects {
+        apply_movement_step_effect(session, &object_id, effect.command.as_str());
+    }
 
     Ok(ScriptMovementOutcome {
         object_id,
@@ -1101,11 +1310,90 @@ pub fn apply_script_movement(
         previous_tile,
         tile,
         facing,
+        executed_steps,
         effects,
         fixed_facing,
         sliding,
         steps_applied,
     })
+}
+
+fn validate_script_movement_steps_for_runtime(
+    movement: &ScriptMovement,
+) -> Result<(), ScriptObjectCommandError> {
+    for step in &movement.steps {
+        if let Some(issue) = script_movement_step_issues(step).into_iter().next() {
+            return Err(script_movement_step_issue_error(movement, step, issue));
+        }
+    }
+    Ok(())
+}
+
+fn script_movement_step_issue_error(
+    movement: &ScriptMovement,
+    step: &ScriptMovementStep,
+    issue: ScriptMovementStepIssue,
+) -> ScriptObjectCommandError {
+    match issue {
+        ScriptMovementStepIssue::UnexpectedDirection => {
+            ScriptObjectCommandError::MovementUnexpectedDirection {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        }
+        ScriptMovementStepIssue::MissingDirection => {
+            ScriptObjectCommandError::MovementMissingDirection {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        }
+        ScriptMovementStepIssue::MissingDuration => {
+            ScriptObjectCommandError::MovementMissingDuration {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        }
+        ScriptMovementStepIssue::UnknownDirection { direction } => {
+            ScriptObjectCommandError::MovementUnknownDirection {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+                direction,
+            }
+        }
+        ScriptMovementStepIssue::UnsupportedCommand => {
+            ScriptObjectCommandError::UnsupportedMovementCommand {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        }
+    }
+}
+
+fn apply_movement_step_effect(session: &mut OverworldSession, object_id: &str, command: &str) {
+    match command {
+        "remove_object" | "hide_object" | "step_dig" => {
+            set_movement_object_hidden(session, object_id, true)
+        }
+        "show_object" | "return_dig" => set_movement_object_hidden(session, object_id, false),
+        _ => {}
+    }
+}
+
+fn set_movement_object_hidden(session: &mut OverworldSession, object_id: &str, hidden: bool) {
+    if object_id == "PLAYER" {
+        session.player_hidden = hidden;
+    } else if hidden {
+        session
+            .hidden_object_identifiers
+            .insert(object_id.to_string());
+    } else {
+        session.hidden_object_identifiers.remove(object_id);
+    }
 }
 
 fn apply_visibility_command(
@@ -1220,6 +1508,35 @@ fn apply_faceobject_command(
     })
 }
 
+fn apply_faceplayer_command(
+    session: &mut OverworldSession,
+    command: &ScriptObjectCommand,
+) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    let object_id = session
+        .last_talked_object_identifier
+        .clone()
+        .ok_or(ScriptObjectCommandError::MissingLastTalkedObject)?;
+    let from = object_tile(session, &object_id)?;
+    let target = object_tile(session, "PLAYER")?;
+    let direction = match direction_toward(from, target) {
+        Some(direction) => direction,
+        None => object_facing(session, &object_id)?,
+    };
+    set_object_facing(session, &object_id, direction)?;
+
+    Ok(ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id,
+        event_flag: None,
+        previous_x: None,
+        previous_y: None,
+        x: None,
+        y: None,
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    })
+}
+
 fn apply_follow_command(
     session: &mut OverworldSession,
     command: &ScriptObjectCommand,
@@ -1264,6 +1581,48 @@ fn apply_stopfollow_command(
     })
 }
 
+fn apply_showemote_command(
+    state: &mut GameState,
+    session: &OverworldSession,
+    command: &ScriptObjectCommand,
+) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    let object_id = required_object_id(session, command)?;
+    validate_object_reference(session, &object_id)?;
+    let emote = command
+        .emote
+        .clone()
+        .ok_or_else(|| ScriptObjectCommandError::MissingEmote {
+            command: command.command.clone(),
+        })?;
+    let duration = command
+        .duration
+        .ok_or_else(|| ScriptObjectCommandError::MissingEmote {
+            command: command.command.clone(),
+        })?;
+    state
+        .script_runtime
+        .pending_emotes
+        .push(ScriptRuntimeEmote {
+            emote,
+            object: object_id.clone(),
+            duration,
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+
+    Ok(ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id,
+        event_flag: None,
+        previous_x: None,
+        previous_y: None,
+        x: None,
+        y: None,
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    })
+}
+
 fn apply_moveobject_command(
     session: &mut OverworldSession,
     command: &ScriptObjectCommand,
@@ -1279,17 +1638,25 @@ fn apply_moveobject_command(
         .ok_or_else(|| ScriptObjectCommandError::MissingMoveCoordinates {
             object_id: object_id.clone(),
         })?;
+    if !session
+        .objects
+        .iter()
+        .find(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+        .is_some()
+    {
+        return Err(ScriptObjectCommandError::UnknownObject {
+            object_id: object_id.clone(),
+        });
+    }
+    let tile = require_moveobject_runtime_tile(session, &object_id, x, y)?;
     let object = session
         .objects
-        .iter_mut()
+        .iter()
         .find(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
-        .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
-            object_id: object_id.clone(),
-        })?;
+        .expect("object existence checked before coordinate validation");
     let previous_x = object.x;
     let previous_y = object.y;
-    object.x = x;
-    object.y = y;
+    set_object_tile(session, &object_id, tile)?;
 
     Ok(ScriptObjectMutationOutcome {
         command: command.command.clone(),
@@ -1304,6 +1671,44 @@ fn apply_moveobject_command(
     })
 }
 
+fn moveobject_raw_coordinates_fit_runtime_tile(command: &ScriptObjectCommand) -> bool {
+    let (Some(x), Some(y)) = (command.x, command.y) else {
+        return false;
+    };
+    raw_event_tile_to_runtime_tile_checked(x, y).is_some()
+}
+
+fn require_moveobject_runtime_tile(
+    session: &OverworldSession,
+    object_id: &str,
+    x: u16,
+    y: u16,
+) -> Result<TilePosition, ScriptObjectCommandError> {
+    let tile = raw_event_tile_to_runtime_tile_checked(x, y).ok_or_else(|| {
+        ScriptObjectCommandError::MoveCoordinatesOutOfRange {
+            object_id: object_id.to_string(),
+            x,
+            y,
+        }
+    })?;
+    let (width, height) = session.map.checked_tile_bounds().ok_or_else(|| {
+        ScriptObjectCommandError::MapBoundsOverflow {
+            map_name: session.map.name.clone(),
+        }
+    })?;
+    if !runtime_tile_within_bounds(tile, width, height) {
+        return Err(ScriptObjectCommandError::MoveCoordinatesOutOfMap {
+            object_id: object_id.to_string(),
+            map_name: session.map.name.clone(),
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    Ok(tile)
+}
+
 fn movement_object_id(
     session: &OverworldSession,
     command: &ScriptObjectCommand,
@@ -1315,6 +1720,32 @@ fn movement_object_id(
             .ok_or(ScriptObjectCommandError::MissingLastTalkedObject);
     }
     required_object_id(session, command)
+}
+
+fn validate_follow_after_script_movement(
+    session: &OverworldSession,
+    moved_object_id: &str,
+    previous_tile: TilePosition,
+) -> Result<(), ScriptObjectCommandError> {
+    let Some(following) = session.following.as_ref() else {
+        return Ok(());
+    };
+    if following.leader_object_id != moved_object_id {
+        return Ok(());
+    }
+    if following.follower_object_id == "PLAYER" {
+        return Ok(());
+    }
+    session
+        .objects
+        .iter()
+        .any(|object| {
+            object.object_identifier.as_deref() == Some(following.follower_object_id.as_str())
+        })
+        .then_some(())
+        .ok_or_else(|| ScriptObjectCommandError::FollowObjectMissing {
+            object_id: following.follower_object_id.clone(),
+        })
 }
 
 fn movement_step_direction(
@@ -1348,8 +1779,130 @@ fn movement_step_moves_object(command: &str) -> bool {
     )
 }
 
+fn movement_step_stride(
+    movement: &ScriptMovement,
+    step: &ScriptMovementStep,
+) -> Result<i16, ScriptObjectCommandError> {
+    script_movement_step_runtime_stride(&step.command).ok_or_else(|| {
+        ScriptObjectCommandError::MovementMissingRuntimeStride {
+            movement: movement.label.clone(),
+            command: step.command.clone(),
+            index: step.index,
+        }
+    })
+}
+
+pub fn script_movement_step_runtime_stride(command: &str) -> Option<i16> {
+    if !movement_step_moves_object(command) {
+        return None;
+    }
+    match command {
+        "jump_step" | "fast_jump_step" | "slow_jump_step" => Some(SCRIPT_MOVEMENT_JUMP_TILE_STRIDE),
+        _ => Some(SCRIPT_MOVEMENT_EVENT_TILE_STRIDE),
+    }
+}
+
+fn movement_step_tick_count(
+    movement: &ScriptMovement,
+    step: &ScriptMovementStep,
+) -> Result<usize, ScriptObjectCommandError> {
+    if let Some(duration) = exact_sleep_command_duration(step.command.as_str()) {
+        Ok(duration)
+    } else if let Some(duration) = exact_stationary_effect_duration(step.command.as_str()) {
+        Ok(duration)
+    } else if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&step.command.as_str()) {
+        step.duration.map(usize::from).ok_or_else(|| {
+            ScriptObjectCommandError::MovementMissingDuration {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        })
+    } else {
+        Ok(step.duration.map(usize::from).unwrap_or(1))
+    }
+}
+
+fn movement_step_sleeps(command: &str) -> bool {
+    command == "step_sleep" || SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS.contains(&command)
+}
+
+fn exact_sleep_command_duration(command: &str) -> Option<usize> {
+    match command {
+        "step_sleep_1" => Some(1),
+        "step_sleep_2" => Some(2),
+        "step_sleep_3" => Some(3),
+        "step_sleep_4" => Some(4),
+        "step_sleep_5" => Some(5),
+        "step_sleep_6" => Some(6),
+        "step_sleep_7" => Some(7),
+        "step_sleep_8" => Some(8),
+        "step_sleep_9" => Some(9),
+        "step_sleep_10" => Some(10),
+        "step_sleep_11" => Some(11),
+        "step_sleep_12" => Some(12),
+        "step_sleep_13" => Some(13),
+        "step_sleep_14" => Some(14),
+        "step_sleep_15" => Some(15),
+        "step_sleep_16" => Some(16),
+        _ => None,
+    }
+}
+
+fn exact_stationary_effect_duration(command: &str) -> Option<usize> {
+    match command {
+        "teleport_from" => Some(24),
+        "teleport_to" => Some(64),
+        "skyfall_top" => Some(16),
+        "tree_shake" => Some(24),
+        _ => None,
+    }
+}
+
 fn movement_step_turns_without_moving(command: &str) -> bool {
-    matches!(command, "turn_head" | "turn_away" | "step_bump")
+    matches!(
+        command,
+        "turn_head" | "turn_away" | "turn_in" | "turn_waterfall" | "step_bump"
+    )
+}
+
+fn movement_step_ends_sequence(command: &str) -> bool {
+    matches!(command, "step_end" | "step_stop" | "step_loop")
+}
+
+fn movement_step_records_effect(command: &str) -> bool {
+    matches!(
+        command,
+        "step_wait_end"
+            | "teleport_from"
+            | "teleport_to"
+            | "skyfall"
+            | "skyfall_top"
+            | "step_dig"
+            | "fish_got_bite"
+            | "fish_cast_rod"
+            | "hide_emote"
+            | "show_emote"
+            | "step_shake"
+            | "tree_shake"
+            | "rock_smash"
+            | "return_dig"
+            | "remove_object"
+            | "hide_object"
+            | "show_object"
+    )
+}
+
+fn movement_step_is_executable(command: &str) -> bool {
+    movement_step_sleeps(command)
+        || movement_step_ends_sequence(command)
+        || movement_step_moves_object(command)
+        || movement_step_turns_without_moving(command)
+        || movement_step_records_effect(command)
+        || matches!(
+            command,
+            "fix_facing" | "remove_fixed_facing" | "set_sliding" | "remove_sliding"
+        )
 }
 
 fn opposite_direction(direction: Direction) -> Direction {
@@ -1368,13 +1921,23 @@ fn object_tile(
     if object_id == "PLAYER" {
         return Ok(session.player.tile);
     }
-    session
+    if let Some(tile) = session.object_runtime_tiles.get(object_id) {
+        return Ok(*tile);
+    }
+    let (index, object) = session
         .objects
         .iter()
-        .find(|object| object.object_identifier.as_deref() == Some(object_id))
-        .map(|object| TilePosition::new(object.x as i16, object.y as i16))
+        .enumerate()
+        .find(|(_, object)| object.object_identifier.as_deref() == Some(object_id))
         .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
             object_id: object_id.to_string(),
+        })?;
+    session
+        .object_runtime_tile_checked(index, object)
+        .map_err(|_| ScriptObjectCommandError::ObjectCoordinatesOutOfRange {
+            object_id: object_id.to_string(),
+            x: object.x,
+            y: object.y,
         })
 }
 
@@ -1400,33 +1963,38 @@ fn set_object_tile(
     object_id: &str,
     tile: TilePosition,
 ) -> Result<(), ScriptObjectCommandError> {
+    if object_id != "PLAYER"
+        && !session
+            .objects
+            .iter()
+            .any(|object| object.object_identifier.as_deref() == Some(object_id))
+    {
+        return Err(ScriptObjectCommandError::UnknownObject {
+            object_id: object_id.to_string(),
+        });
+    }
     if object_id == "PLAYER" {
+        let (width, height) = session.map.checked_tile_bounds().ok_or_else(|| {
+            ScriptObjectCommandError::MapBoundsOverflow {
+                map_name: session.map.name.clone(),
+            }
+        })?;
+        if !runtime_tile_within_bounds(tile, width, height) {
+            return Err(ScriptObjectCommandError::ObjectPositionOutOfMap {
+                object_id: object_id.to_string(),
+                map_name: session.map.name.clone(),
+                x: tile.x,
+                y: tile.y,
+                width,
+                height,
+            });
+        }
         session.player.tile = tile;
         return Ok(());
     }
-    let object = session
-        .objects
-        .iter_mut()
-        .find(|object| object.object_identifier.as_deref() == Some(object_id))
-        .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
-            object_id: object_id.to_string(),
-        })?;
-    object.x =
-        tile.x
-            .try_into()
-            .map_err(|_| ScriptObjectCommandError::ObjectPositionOutOfRange {
-                object_id: object_id.to_string(),
-                x: tile.x,
-                y: tile.y,
-            })?;
-    object.y =
-        tile.y
-            .try_into()
-            .map_err(|_| ScriptObjectCommandError::ObjectPositionOutOfRange {
-                object_id: object_id.to_string(),
-                x: tile.x,
-                y: tile.y,
-            })?;
+    session
+        .object_runtime_tiles
+        .insert(object_id.to_string(), tile);
     Ok(())
 }
 
@@ -1518,10 +2086,16 @@ fn resolve_script_object_id(
         });
     }
     if object_id == "LAST_TALKED" {
-        return session
+        let resolved = session
             .last_talked_object_identifier
             .clone()
-            .ok_or(ScriptObjectCommandError::MissingLastTalkedObject);
+            .ok_or(ScriptObjectCommandError::MissingLastTalkedObject)?;
+        if is_exact_script_object_token(&resolved) {
+            return Ok(resolved);
+        }
+        return Err(ScriptObjectCommandError::InvalidObjectId {
+            object_id: resolved,
+        });
     }
     Ok(object_id.to_string())
 }
@@ -1572,6 +2146,13 @@ fn validate_toggle_flag(object_id: &str, event_flag: &str) -> Result<(), ScriptO
     Ok(())
 }
 
+fn runtime_tile_within_bounds(tile: TilePosition, width: u16, height: u16) -> bool {
+    tile.x >= 0
+        && tile.y >= 0
+        && i32::from(tile.x) < i32::from(width)
+        && i32::from(tile.y) < i32::from(height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,8 +2188,8 @@ mod tests {
                 &MapAttributes {
                     tileset_name: "test".to_string(),
                     border_block: 0,
-                    width: 4,
-                    height: 4,
+                    width: 8,
+                    height: 8,
                     connections: Vec::new(),
                     time_of_day: None,
                     phone_service: 0,
@@ -1625,7 +2206,7 @@ mod tests {
                     map_events_label: None,
                     connection_flags: None,
                 },
-                vec![0; 16],
+                vec![0; 64],
             ),
             MapEvents::default(),
             objects,
@@ -1736,29 +2317,102 @@ mod tests {
                 "slow_slide_step",
                 "step_bump",
                 "turn_head",
-                "turn_away"
+                "turn_away",
+                "turn_in",
+                "turn_waterfall"
             ]
         );
         assert_eq!(SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, &["step_sleep"]);
         assert_eq!(
+            SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS,
+            &[
+                "step_sleep_1",
+                "step_sleep_2",
+                "step_sleep_3",
+                "step_sleep_4",
+                "step_sleep_5",
+                "step_sleep_6",
+                "step_sleep_7",
+                "step_sleep_8",
+                "step_sleep_9",
+                "step_sleep_10",
+                "step_sleep_11",
+                "step_sleep_12",
+                "step_sleep_13",
+                "step_sleep_14",
+                "step_sleep_15",
+                "step_sleep_16"
+            ]
+        );
+        assert_eq!(
+            SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS,
+            &[
+                "step_wait_end",
+                "step_dig",
+                "step_shake",
+                "rock_smash",
+                "return_dig"
+            ]
+        );
+        assert_eq!(
             SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
             &[
                 "step_end",
+                "step_loop",
+                "step_stop",
                 "fix_facing",
                 "remove_fixed_facing",
                 "set_sliding",
                 "remove_sliding",
                 "teleport_from",
+                "teleport_to",
+                "skyfall",
                 "skyfall_top",
+                "fish_got_bite",
+                "fish_cast_rod",
+                "hide_emote",
+                "show_emote",
                 "tree_shake",
+                "remove_object",
                 "hide_object",
                 "show_object"
             ]
         );
         assert!(is_known_script_movement_command("turn_head"));
+        assert!(is_known_script_movement_command("turn_waterfall"));
         assert!(is_known_script_movement_command("fast_slide_step"));
+        assert!(is_known_script_movement_command("step_dig"));
+        assert!(is_known_script_movement_command("rock_smash"));
+        assert!(is_known_script_movement_command("step_sleep_8"));
         assert!(is_known_script_movement_command("hide_object"));
+        assert!(!is_known_script_movement_command("step_sleep_17"));
         assert!(!is_known_script_movement_command("spin_forever"));
+    }
+
+    #[test]
+    fn script_movement_stride_matches_runtime_player_stride() {
+        assert_eq!(SCRIPT_MOVEMENT_EVENT_TILE_STRIDE, 2);
+        assert_eq!(
+            crate::world::movement::StepOptions::default().stride_tiles,
+            SCRIPT_MOVEMENT_EVENT_TILE_STRIDE
+        );
+        assert_eq!(script_movement_step_runtime_stride("step"), Some(2));
+        assert_eq!(script_movement_step_runtime_stride("jump_step"), Some(4));
+        assert_eq!(script_movement_step_runtime_stride("turn_head"), None);
+    }
+
+    #[test]
+    fn every_verified_script_movement_command_has_runtime_execution_bucket() {
+        let missing = SCRIPT_MOVEMENT_COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| !movement_step_is_executable(command))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "verified movement commands without Rust runtime execution buckets: {missing:?}"
+        );
     }
 
     #[test]
@@ -1835,10 +2489,28 @@ mod tests {
         );
         assert_eq!(
             script_movement_step_issues(&ScriptMovementStep {
+                command: "step_dig".to_string(),
+                direction: None,
+                duration: None,
+                index: 5,
+            }),
+            vec![ScriptMovementStepIssue::MissingDuration]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "rock_smash".to_string(),
+                direction: None,
+                duration: Some(10),
+                index: 6,
+            }),
+            Vec::<ScriptMovementStepIssue>::new()
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
                 command: "turn_head".to_string(),
                 direction: Some("LEFT".to_string()),
                 duration: None,
-                index: 4,
+                index: 7,
             }),
             Vec::<ScriptMovementStepIssue>::new()
         );
@@ -1849,7 +2521,7 @@ mod tests {
         let object_event_flags =
             BTreeMap::from([("NPC".to_string(), "EVENT_HIDE_NPC".to_string())]);
         let hideable_event_flags = BTreeSet::from(["EVENT_HIDE_NPC".to_string()]);
-        let movements = BTreeSet::from([("Walk".to_string(), None)]);
+        let movements = BTreeSet::from([("Walk".to_string(), Some("Script".to_string()))]);
 
         assert_eq!(
             script_object_command_issues(
@@ -2176,7 +2848,7 @@ mod tests {
     }
 
     #[test]
-    fn moveobject_updates_exact_object_coordinates() {
+    fn moveobject_updates_exact_raw_event_coordinates() {
         let mut state = GameState::default();
         let mut session = session(vec![object(
             "INDIGOPLATEAUPOKECENTER1F_RIVAL",
@@ -2185,15 +2857,333 @@ mod tests {
             1,
         )]);
         let mut moveobject = command("moveobject", "INDIGOPLATEAUPOKECENTER1F_RIVAL");
-        moveobject.x = Some(17);
-        moveobject.y = Some(9);
+        moveobject.x = Some(7);
+        moveobject.y = Some(5);
 
         let outcome = apply_script_object_mutation(&mut state, &mut session, &moveobject)
             .expect("moveobject applies");
 
         assert_eq!((outcome.previous_x, outcome.previous_y), (Some(1), Some(1)));
-        assert_eq!((outcome.x, outcome.y), (Some(17), Some(9)));
-        assert_eq!((session.objects[0].x, session.objects[0].y), (17, 9));
+        assert_eq!((outcome.x, outcome.y), (Some(7), Some(5)));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (7, 5));
+    }
+
+    #[test]
+    fn moveobject_rejects_coordinates_that_overflow_runtime_tile_space() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "INDIGOPLATEAUPOKECENTER1F_RIVAL",
+            "EVENT_RIVAL",
+            1,
+            1,
+        )]);
+        let mut moveobject = command("moveobject", "INDIGOPLATEAUPOKECENTER1F_RIVAL");
+        moveobject.x = Some(40_000);
+        moveobject.y = Some(0);
+
+        assert_eq!(
+            apply_script_object_mutation(&mut state, &mut session, &moveobject),
+            Err(ScriptObjectCommandError::MoveCoordinatesOutOfRange {
+                object_id: "INDIGOPLATEAUPOKECENTER1F_RIVAL".to_string(),
+                x: 40_000,
+                y: 0,
+            })
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (1, 1));
+
+        let object_flags = BTreeMap::from([(
+            "INDIGOPLATEAUPOKECENTER1F_RIVAL".to_string(),
+            "EVENT_RIVAL".to_string(),
+        )]);
+        assert_eq!(
+            script_object_command_issues(
+                &moveobject,
+                &object_flags,
+                &BTreeSet::new(),
+                &BTreeSet::new()
+            ),
+            vec![ScriptObjectCommandIssue::MoveCoordinatesOutOfRange {
+                source_script: "Script".to_string(),
+                command_index: 0,
+                x: 40_000,
+                y: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn moveobject_json_rejects_coordinates_that_overflow_runtime_tile_space() {
+        let payload = serde_json::json!({
+            "command": "moveobject",
+            "object_id": "INDIGOPLATEAUPOKECENTER1F_RIVAL",
+            "target_object_id": null,
+            "x": 40000,
+            "y": 0,
+            "direction": null,
+            "movement": null,
+            "emote": null,
+            "duration": null,
+            "source_script": "Script",
+            "command_index": 0
+        });
+
+        let error = serde_json::from_value::<ScriptObjectCommand>(payload)
+            .expect_err("overflowing moveobject coordinates must fail during JSON load")
+            .to_string();
+
+        assert!(
+            error.contains(
+                "script object command moveobject raw event coordinates overflow runtime tile space"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn moveobject_rejects_coordinates_outside_current_map() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "INDIGOPLATEAUPOKECENTER1F_RIVAL",
+            "EVENT_RIVAL",
+            1,
+            1,
+        )]);
+        let mut moveobject = command("moveobject", "INDIGOPLATEAUPOKECENTER1F_RIVAL");
+        moveobject.x = Some(8);
+        moveobject.y = Some(4);
+
+        assert_eq!(
+            apply_script_object_mutation(&mut state, &mut session, &moveobject),
+            Err(ScriptObjectCommandError::MoveCoordinatesOutOfMap {
+                object_id: "INDIGOPLATEAUPOKECENTER1F_RIVAL".to_string(),
+                map_name: "TestMap".to_string(),
+                x: 8,
+                y: 4,
+                width: 16,
+                height: 16,
+            })
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (1, 1));
+    }
+
+    #[test]
+    fn faceobject_rejects_existing_object_coordinates_that_overflow_runtime_tile_space() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("SOURCE_NPC", "-1", 40_000, 1),
+            object("TARGET_NPC", "-1", 1, 1),
+        ]);
+        let mut faceobject = command("faceobject", "SOURCE_NPC");
+        faceobject.target_object_id = Some("TARGET_NPC".to_string());
+
+        assert_eq!(
+            apply_script_object_mutation(&mut state, &mut session, &faceobject),
+            Err(ScriptObjectCommandError::ObjectCoordinatesOutOfRange {
+                object_id: "SOURCE_NPC".to_string(),
+                x: 40_000,
+                y: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn object_runtime_tile_updates_accept_negative_transient_positions() {
+        let mut session = session(vec![object(
+            "ECRUTEAKPOKECENTER1F_BILL",
+            "EVENT_BILL_IN_ECRUTEAK",
+            4,
+            4,
+        )]);
+
+        set_object_tile(
+            &mut session,
+            "ECRUTEAKPOKECENTER1F_BILL",
+            TilePosition::new(-1, 9),
+        )
+        .expect("scripted object positions may move offscreen");
+
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("ECRUTEAKPOKECENTER1F_BILL")
+                .copied(),
+            Some(TilePosition::new(-1, 9))
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (4, 4));
+    }
+
+    #[test]
+    fn object_runtime_tile_updates_accept_positions_outside_current_map() {
+        let mut session = session(vec![object(
+            "ECRUTEAKPOKECENTER1F_BILL",
+            "EVENT_BILL_IN_ECRUTEAK",
+            4,
+            4,
+        )]);
+
+        set_object_tile(
+            &mut session,
+            "ECRUTEAKPOKECENTER1F_BILL",
+            TilePosition::new(8, 4),
+        )
+        .expect("scripted object positions may move outside the visible map");
+
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("ECRUTEAKPOKECENTER1F_BILL")
+                .copied(),
+            Some(TilePosition::new(8, 4))
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (4, 4));
+    }
+
+    #[test]
+    fn applymovement_accepts_out_of_map_endpoint_as_transient_object_state() {
+        let mut session = session(vec![object(
+            "ECRUTEAKPOKECENTER1F_BILL",
+            "EVENT_BILL_IN_ECRUTEAK",
+            7,
+            4,
+        )]);
+        let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
+        movement_command.movement = Some("MovesOutOfMap".to_string());
+        let movement = ScriptMovement {
+            label: "MovesOutOfMap".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let outcome = apply_script_movement(&mut session, &movement_command, &movement)
+            .expect("object movement may leave the visible map");
+
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("ECRUTEAKPOKECENTER1F_BILL")
+                .copied(),
+            Some(TilePosition::new(8, 4))
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (7, 4));
+        assert_eq!(outcome.steps_applied, 1);
+        assert!(
+            session
+                .hidden_object_identifiers
+                .contains("ECRUTEAKPOKECENTER1F_BILL")
+        );
+    }
+
+    #[test]
+    fn applymovement_rejects_runtime_tile_overflow_without_partial_visibility_mutation() {
+        let mut session = session(vec![object(
+            "ECRUTEAKPOKECENTER1F_BILL",
+            "EVENT_BILL_IN_ECRUTEAK",
+            16383,
+            0,
+        )]);
+        let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
+        movement_command.movement = Some("MovesPastRuntimeLimit".to_string());
+        let movement = ScriptMovement {
+            label: "MovesPastRuntimeLimit".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let error = apply_script_movement(&mut session, &movement_command, &movement)
+            .expect_err("overflowing endpoint rejects");
+
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::MovementRuntimeTileOverflow {
+                movement: "MovesPastRuntimeLimit".to_string(),
+                command: "step".to_string(),
+                index: 1,
+                x: i16::MAX - 1,
+                y: 0,
+            }
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (16383, 0));
+        assert!(
+            !session
+                .hidden_object_identifiers
+                .contains("ECRUTEAKPOKECENTER1F_BILL")
+        );
+    }
+
+    #[test]
+    fn applymovement_rejects_missing_follower_without_moving_leader_or_effects() {
+        let mut session = session(vec![object(
+            "ECRUTEAKPOKECENTER1F_BILL",
+            "EVENT_BILL_IN_ECRUTEAK",
+            4,
+            4,
+        )]);
+        session.following = Some(OverworldFollowState {
+            leader_object_id: "ECRUTEAKPOKECENTER1F_BILL".to_string(),
+            follower_object_id: "MISSING_FOLLOWER".to_string(),
+        });
+        let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
+        movement_command.movement = Some("MoveWithFollower".to_string());
+        let movement = ScriptMovement {
+            label: "MoveWithFollower".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let error = apply_script_movement(&mut session, &movement_command, &movement)
+            .expect_err("missing follower must reject script movement");
+
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::FollowObjectMissing {
+                object_id: "MISSING_FOLLOWER".to_string(),
+            }
+        );
+        assert_eq!((session.objects[0].x, session.objects[0].y), (4, 4));
+        assert!(
+            !session
+                .hidden_object_identifiers
+                .contains("ECRUTEAKPOKECENTER1F_BILL")
+        );
     }
 
     #[test]
@@ -2226,6 +3216,91 @@ mod tests {
     }
 
     #[test]
+    fn showemote_queues_exact_object_emote() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "ROUTE43GATE_ROCKET1",
+            "EVENT_ROUTE43GATE_ROCKETS",
+            4,
+            4,
+        )]);
+        let mut command = command("showemote", "ROUTE43GATE_ROCKET1");
+        command.emote = Some("EMOTE_SHOCK".to_string());
+        command.duration = Some(15);
+        command.command_index = 8;
+
+        let outcome =
+            apply_script_object_mutation(&mut state, &mut session, &command).expect("showemote");
+
+        assert_eq!(outcome.command, "showemote");
+        assert_eq!(outcome.object_id, "ROUTE43GATE_ROCKET1");
+        assert_eq!(state.script_runtime.pending_emotes.len(), 1);
+        assert_eq!(state.script_runtime.pending_emotes[0].emote, "EMOTE_SHOCK");
+        assert_eq!(
+            state.script_runtime.pending_emotes[0].object,
+            "ROUTE43GATE_ROCKET1"
+        );
+        assert_eq!(state.script_runtime.pending_emotes[0].duration, 15);
+        assert_eq!(
+            state.script_runtime.pending_emotes[0].source_script,
+            "Script"
+        );
+        assert_eq!(state.script_runtime.pending_emotes[0].command_index, 8);
+    }
+
+    #[test]
+    fn showemote_resolves_last_talked_without_object_id_fallback() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "POKECENTER_NURSE",
+            "EVENT_POKECENTER_NURSE",
+            2,
+            2,
+        )]);
+        session.last_talked_object_identifier = Some("POKECENTER_NURSE".to_string());
+        let command = ScriptObjectCommand {
+            command: "showemote".to_string(),
+            object_id: Some("LAST_TALKED".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: None,
+            emote: Some("EMOTE_HAPPY".to_string()),
+            duration: Some(16),
+            source_script: "Script".to_string(),
+            command_index: 9,
+        };
+
+        apply_script_object_mutation(&mut state, &mut session, &command).expect("showemote");
+
+        assert_eq!(
+            state.script_runtime.pending_emotes[0].object,
+            "POKECENTER_NURSE"
+        );
+
+        session.last_talked_object_identifier = Some("missing_nurse".to_string());
+        let error = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect_err("last talked must resolve to an exact object");
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::InvalidObjectId {
+                object_id: "missing_nurse".to_string()
+            }
+        );
+
+        session.last_talked_object_identifier = Some("MISSING_NURSE".to_string());
+        let error = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect_err("last talked must name an existing object");
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::UnknownObject {
+                object_id: "MISSING_NURSE".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn follow_stopfollow_and_faceobject_mutate_exact_session_state() {
         let mut state = GameState::default();
         let mut session = session(vec![
@@ -2250,6 +3325,29 @@ mod tests {
         apply_script_object_mutation(&mut state, &mut session, &face).expect("faceobject applies");
         assert_eq!(session.player.facing, Direction::Up);
 
+        session.last_talked_object_identifier = Some("BATTLETOWER1F_RECEPTIONIST".to_string());
+        let face_player = ScriptObjectCommand {
+            command: "faceplayer".to_string(),
+            object_id: None,
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: None,
+            emote: None,
+            duration: None,
+            source_script: "Script".to_string(),
+            command_index: 8,
+        };
+        let face_player_outcome =
+            apply_script_object_mutation(&mut state, &mut session, &face_player)
+                .expect("faceplayer applies");
+        assert_eq!(face_player_outcome.object_id, "BATTLETOWER1F_RECEPTIONIST");
+        assert_eq!(
+            session.object_facings.get("BATTLETOWER1F_RECEPTIONIST"),
+            Some(&Direction::Down)
+        );
+
         let stop = ScriptObjectCommand {
             command: "stopfollow".to_string(),
             object_id: None,
@@ -2268,14 +3366,14 @@ mod tests {
     }
 
     #[test]
-    fn applymovement_moves_player_and_objects_from_exact_steps() {
+    fn applymovement_moves_player_and_objects_by_exact_runtime_steps() {
         let mut session = session(vec![object(
             "ECRUTEAKPOKECENTER1F_BILL",
             "EVENT_BILL_IN_ECRUTEAK",
             4,
             4,
         )]);
-        session.player.tile = TilePosition::new(1, 1);
+        session.player.tile = TilePosition::new(2, 6);
         let mut player_command = command("applymovement", "PLAYER");
         player_command.movement = Some("PlayerWalks".to_string());
         let player_movement = ScriptMovement {
@@ -2305,9 +3403,9 @@ mod tests {
 
         let player_outcome = apply_script_movement(&mut session, &player_command, &player_movement)
             .expect("player movement applies");
-        assert_eq!(player_outcome.previous_tile, TilePosition::new(1, 1));
-        assert_eq!(player_outcome.tile, TilePosition::new(1, 0));
-        assert_eq!(session.player.tile, TilePosition::new(1, 0));
+        assert_eq!(player_outcome.previous_tile, TilePosition::new(2, 6));
+        assert_eq!(player_outcome.tile, TilePosition::new(2, 5));
+        assert_eq!(session.player.tile, TilePosition::new(2, 5));
         assert_eq!(session.player.facing, Direction::Right);
 
         let mut bill_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
@@ -2341,7 +3439,14 @@ mod tests {
             .expect("object moves");
         assert_eq!(bill_outcome.previous_tile, TilePosition::new(4, 4));
         assert_eq!(bill_outcome.tile, TilePosition::new(5, 5));
-        assert_eq!((session.objects[0].x, session.objects[0].y), (5, 5));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (4, 4));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("ECRUTEAKPOKECENTER1F_BILL")
+                .copied(),
+            Some(TilePosition::new(5, 5))
+        );
         assert_eq!(
             session.object_facings.get("ECRUTEAKPOKECENTER1F_BILL"),
             Some(&Direction::Down)
@@ -2351,7 +3456,7 @@ mod tests {
     #[test]
     fn applymovement_rejects_malformed_matching_label_before_mutating_session() {
         let mut session = session(Vec::new());
-        session.player.tile = TilePosition::new(1, 1);
+        session.player.tile = TilePosition::new(2, 2);
         let mut command = command("applymovement", "PLAYER");
         command.movement = Some("Player Walks".to_string());
         let movement = ScriptMovement {
@@ -2371,13 +3476,13 @@ mod tests {
                 movement: "Player Walks".to_string(),
             })
         );
-        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+        assert_eq!(session.player.tile, TilePosition::new(2, 2));
     }
 
     #[test]
     fn applymovement_rejects_invalid_source_before_mutating_session() {
         let mut session = session(Vec::new());
-        session.player.tile = TilePosition::new(1, 1);
+        session.player.tile = TilePosition::new(2, 2);
         let mut command = command("applymovement", "PLAYER");
         command.movement = Some("PlayerWalks".to_string());
         let movement = ScriptMovement {
@@ -2397,7 +3502,7 @@ mod tests {
                 source_script: "legacy_script".to_string(),
             })
         );
-        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+        assert_eq!(session.player.tile, TilePosition::new(2, 2));
 
         command.source_script = "fallback_script".to_string();
         let movement = ScriptMovement {
@@ -2410,7 +3515,7 @@ mod tests {
                 source_script: "fallback_script".to_string(),
             })
         );
-        assert_eq!(session.player.tile, TilePosition::new(1, 1));
+        assert_eq!(session.player.tile, TilePosition::new(2, 2));
     }
 
     #[test]
@@ -2459,7 +3564,14 @@ mod tests {
         assert_eq!(outcome.object_id, "POKECENTER2F_RECEPTIONIST");
         assert_eq!(outcome.previous_tile, TilePosition::new(5, 5));
         assert_eq!(outcome.tile, TilePosition::new(5, 4));
-        assert_eq!((session.objects[0].x, session.objects[0].y), (5, 4));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (5, 5));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("POKECENTER2F_RECEPTIONIST")
+                .copied(),
+            Some(TilePosition::new(5, 4))
+        );
     }
 
     #[test]
@@ -2485,28 +3597,34 @@ mod tests {
                     index: 1,
                 },
                 ScriptMovementStep {
-                    command: "slow_jump_step".to_string(),
+                    command: "big_step".to_string(),
                     direction: Some("RIGHT".to_string()),
                     duration: None,
                     index: 2,
                 },
                 ScriptMovementStep {
-                    command: "remove_sliding".to_string(),
-                    direction: None,
+                    command: "jump_step".to_string(),
+                    direction: Some("RIGHT".to_string()),
                     duration: None,
                     index: 3,
                 },
                 ScriptMovementStep {
-                    command: "remove_fixed_facing".to_string(),
+                    command: "remove_sliding".to_string(),
                     direction: None,
                     duration: None,
                     index: 4,
                 },
                 ScriptMovementStep {
-                    command: "step_end".to_string(),
+                    command: "remove_fixed_facing".to_string(),
                     direction: None,
                     duration: None,
                     index: 5,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 6,
                 },
             ],
         };
@@ -2515,8 +3633,23 @@ mod tests {
             apply_script_movement(&mut session, &command, &movement).expect("slide applies");
 
         assert_eq!(outcome.previous_tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.tile, TilePosition::new(1, 0));
+        assert_eq!(outcome.tile, TilePosition::new(6, 0));
         assert_eq!(outcome.facing, Direction::Left);
+        assert_eq!(
+            outcome
+                .executed_steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "fix_facing",
+                "set_sliding",
+                "big_step",
+                "jump_step",
+                "remove_sliding",
+                "remove_fixed_facing"
+            ]
+        );
         assert_eq!(session.player.facing, Direction::Left);
         assert!(!outcome.fixed_facing);
         assert!(!outcome.sliding);
@@ -2533,14 +3666,190 @@ mod tests {
                 },
                 ScriptMovementEffect {
                     command: "remove_sliding".to_string(),
-                    index: 3,
+                    index: 4,
                 },
                 ScriptMovementEffect {
                     command: "remove_fixed_facing".to_string(),
-                    index: 4,
+                    index: 5,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn applymovement_uses_exact_steps_and_double_step_jump_commands() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(4, 4);
+        session.player.facing = Direction::Down;
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("ExactStride".to_string());
+        let movement = ScriptMovement {
+            label: "ExactStride".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "slow_step".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "jump_step".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 3,
+                },
+            ],
+        };
+
+        let outcome =
+            apply_script_movement(&mut session, &command, &movement).expect("movement applies");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(4, 4));
+        assert_eq!(outcome.tile, TilePosition::new(2, 6));
+        assert_eq!(session.player.tile, TilePosition::new(2, 6));
+        assert_eq!(outcome.facing, Direction::Left);
+        assert_eq!(outcome.steps_applied, 3);
+        assert_eq!(
+            outcome
+                .executed_steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step", "slow_step", "jump_step"]
+        );
+    }
+
+    #[test]
+    fn applymovement_moves_objects_by_runtime_stride_and_saves_raw_event_coordinates() {
+        let mut session = session(vec![object("ROUTE29_YOUNGSTER", "-1", 1, 1)]);
+        let mut command = command("applymovement", "ROUTE29_YOUNGSTER");
+        command.movement = Some("NpcRuntimeStride".to_string());
+        let movement = ScriptMovement {
+            label: "NpcRuntimeStride".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "jump_step".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 2,
+                },
+            ],
+        };
+
+        let outcome =
+            apply_script_movement(&mut session, &command, &movement).expect("object moves");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(1, 1));
+        assert_eq!(outcome.tile, TilePosition::new(2, 3));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (1, 1));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("ROUTE29_YOUNGSTER")
+                .copied(),
+            Some(TilePosition::new(2, 3))
+        );
+        assert_eq!(outcome.facing, Direction::Down);
+    }
+
+    #[test]
+    fn applymovement_rejects_malformed_later_step_without_partial_movement() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(2, 2);
+        session.player.facing = Direction::Down;
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("MalformedLaterStep".to_string());
+        let movement = ScriptMovement {
+            label: "MalformedLaterStep".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let error = apply_script_movement(&mut session, &command, &movement)
+            .expect_err("malformed movement rejects before mutation");
+
+        assert_eq!(
+            error,
+            ScriptObjectCommandError::MovementUnexpectedDirection {
+                movement: "MalformedLaterStep".to_string(),
+                command: "step_end".to_string(),
+                index: 1,
+            }
+        );
+        assert_eq!(session.player.tile, TilePosition::new(2, 2));
+        assert_eq!(session.player.facing, Direction::Down);
+    }
+
+    #[test]
+    fn applymovement_accepts_odd_starting_runtime_tile_even_without_moving() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(1, 0);
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("TurnOnly".to_string());
+        let movement = ScriptMovement {
+            label: "TurnOnly".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "turn_head".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let outcome = apply_script_movement(&mut session, &command, &movement)
+            .expect("odd player runtime tile is valid");
+
+        assert_eq!(outcome.steps_applied, 1);
+        assert_eq!(session.player.tile, TilePosition::new(1, 0));
+        assert_eq!(session.player.facing, Direction::Up);
     }
 
     #[test]
@@ -2571,16 +3880,94 @@ mod tests {
                     index: 2,
                 },
                 ScriptMovementStep {
-                    command: "tree_shake".to_string(),
+                    command: "skyfall".to_string(),
                     direction: None,
                     duration: None,
                     index: 3,
                 },
                 ScriptMovementStep {
+                    command: "step_dig".to_string(),
+                    direction: None,
+                    duration: Some(32),
+                    index: 4,
+                },
+                ScriptMovementStep {
+                    command: "fish_cast_rod".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 5,
+                },
+                ScriptMovementStep {
+                    command: "fish_got_bite".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 6,
+                },
+                ScriptMovementStep {
+                    command: "hide_emote".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 7,
+                },
+                ScriptMovementStep {
+                    command: "show_emote".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 8,
+                },
+                ScriptMovementStep {
+                    command: "step_shake".to_string(),
+                    direction: None,
+                    duration: Some(16),
+                    index: 9,
+                },
+                ScriptMovementStep {
+                    command: "tree_shake".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 10,
+                },
+                ScriptMovementStep {
+                    command: "rock_smash".to_string(),
+                    direction: None,
+                    duration: Some(10),
+                    index: 11,
+                },
+                ScriptMovementStep {
+                    command: "return_dig".to_string(),
+                    direction: None,
+                    duration: Some(32),
+                    index: 12,
+                },
+                ScriptMovementStep {
+                    command: "remove_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 13,
+                },
+                ScriptMovementStep {
+                    command: "step_wait_end".to_string(),
+                    direction: None,
+                    duration: Some(4),
+                    index: 14,
+                },
+                ScriptMovementStep {
+                    command: "step_sleep_8".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 15,
+                },
+                ScriptMovementStep {
+                    command: "step_stop".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 16,
+                },
+                ScriptMovementStep {
                     command: "step_end".to_string(),
                     direction: None,
                     duration: None,
-                    index: 4,
+                    index: 17,
                 },
             ],
         };
@@ -2588,6 +3975,32 @@ mod tests {
         let outcome =
             apply_script_movement(&mut session, &command, &movement).expect("visuals apply");
         assert_eq!(outcome.tile, TilePosition::new(0, 0));
+        assert_eq!(outcome.steps_applied, 236);
+        assert_eq!(
+            outcome
+                .executed_steps
+                .iter()
+                .map(|step| (step.command.as_str(), step.duration))
+                .collect::<Vec<_>>(),
+            vec![
+                ("teleport_from", None),
+                ("teleport_to", None),
+                ("skyfall_top", None),
+                ("skyfall", None),
+                ("step_dig", Some(32)),
+                ("fish_cast_rod", None),
+                ("fish_got_bite", None),
+                ("hide_emote", None),
+                ("show_emote", None),
+                ("step_shake", Some(16)),
+                ("tree_shake", None),
+                ("rock_smash", Some(10)),
+                ("return_dig", Some(32)),
+                ("remove_object", None),
+                ("step_wait_end", Some(4)),
+                ("step_sleep_8", None)
+            ]
+        );
         assert_eq!(
             outcome.effects,
             vec![
@@ -2604,11 +4017,130 @@ mod tests {
                     index: 2,
                 },
                 ScriptMovementEffect {
-                    command: "tree_shake".to_string(),
+                    command: "skyfall".to_string(),
                     index: 3,
+                },
+                ScriptMovementEffect {
+                    command: "step_dig".to_string(),
+                    index: 4,
+                },
+                ScriptMovementEffect {
+                    command: "fish_cast_rod".to_string(),
+                    index: 5,
+                },
+                ScriptMovementEffect {
+                    command: "fish_got_bite".to_string(),
+                    index: 6,
+                },
+                ScriptMovementEffect {
+                    command: "hide_emote".to_string(),
+                    index: 7,
+                },
+                ScriptMovementEffect {
+                    command: "show_emote".to_string(),
+                    index: 8,
+                },
+                ScriptMovementEffect {
+                    command: "step_shake".to_string(),
+                    index: 9,
+                },
+                ScriptMovementEffect {
+                    command: "tree_shake".to_string(),
+                    index: 10,
+                },
+                ScriptMovementEffect {
+                    command: "rock_smash".to_string(),
+                    index: 11,
+                },
+                ScriptMovementEffect {
+                    command: "return_dig".to_string(),
+                    index: 12,
+                },
+                ScriptMovementEffect {
+                    command: "remove_object".to_string(),
+                    index: 13,
+                },
+                ScriptMovementEffect {
+                    command: "step_wait_end".to_string(),
+                    index: 14,
+                },
+                ScriptMovementEffect {
+                    command: "step_sleep_8".to_string(),
+                    index: 15,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn applymovement_step_dig_and_return_dig_toggle_actor_visibility() {
+        let mut session = session(Vec::new());
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("DigReturn".to_string());
+        let movement = ScriptMovement {
+            label: "DigReturn".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step_dig".to_string(),
+                    direction: None,
+                    duration: Some(32),
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "return_dig".to_string(),
+                    direction: None,
+                    duration: Some(32),
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 2,
+                },
+            ],
+        };
+
+        let outcome =
+            apply_script_movement(&mut session, &command, &movement).expect("dig movement applies");
+
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|effect| effect.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step_dig", "return_dig"]
+        );
+        assert!(!session.player_hidden);
+    }
+
+    #[test]
+    fn applymovement_rejects_duration_required_steps_without_runtime_default() {
+        let mut session = session(Vec::new());
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("DigOut".to_string());
+        let movement = ScriptMovement {
+            label: "DigOut".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "step_dig".to_string(),
+                direction: None,
+                duration: None,
+                index: 4,
+            }],
+        };
+
+        assert_eq!(
+            apply_script_movement(&mut session, &command, &movement),
+            Err(ScriptObjectCommandError::MovementMissingDuration {
+                movement: "DigOut".to_string(),
+                command: "step_dig".to_string(),
+                index: 4,
+            })
+        );
+        assert_eq!(session.player.tile, TilePosition::new(0, 0));
     }
 
     #[test]
@@ -2659,22 +4191,34 @@ mod tests {
                     index: 5,
                 },
                 ScriptMovementStep {
+                    command: "turn_in".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 6,
+                },
+                ScriptMovementStep {
+                    command: "turn_waterfall".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index: 7,
+                },
+                ScriptMovementStep {
                     command: "hide_object".to_string(),
                     direction: None,
                     duration: None,
-                    index: 6,
+                    index: 8,
                 },
                 ScriptMovementStep {
                     command: "show_object".to_string(),
                     direction: None,
                     duration: None,
-                    index: 7,
+                    index: 9,
                 },
                 ScriptMovementStep {
                     command: "step_end".to_string(),
                     direction: None,
                     duration: None,
-                    index: 8,
+                    index: 10,
                 },
             ],
         };
@@ -2684,18 +4228,18 @@ mod tests {
 
         assert_eq!(outcome.previous_tile, TilePosition::new(2, 2));
         assert_eq!(outcome.tile, TilePosition::new(2, 2));
-        assert_eq!(outcome.facing, Direction::Down);
-        assert_eq!(outcome.steps_applied, 8);
+        assert_eq!(outcome.facing, Direction::Up);
+        assert_eq!(outcome.steps_applied, 10);
         assert_eq!(
             outcome.effects,
             vec![
                 ScriptMovementEffect {
                     command: "hide_object".to_string(),
-                    index: 6,
+                    index: 8,
                 },
                 ScriptMovementEffect {
                     command: "show_object".to_string(),
-                    index: 7,
+                    index: 9,
                 },
             ]
         );
@@ -2738,7 +4282,7 @@ mod tests {
         ]);
         let hideable_event_flags = BTreeSet::from(["EVENT_HIDE_NPC".to_string()]);
         let movements = BTreeSet::from([
-            ("GlobalWalk".to_string(), None),
+            ("GlobalWalk".to_string(), Some("Script".to_string())),
             ("LocalWalk".to_string(), Some("SceneScript".to_string())),
         ]);
 

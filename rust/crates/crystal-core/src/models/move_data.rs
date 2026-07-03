@@ -145,7 +145,7 @@ pub fn move_name_catalog_issues(
         });
     }
     for (index, move_name) in move_names.iter().enumerate() {
-        if !is_valid_move_payload_token(move_name) {
+        if !is_valid_move_display_name(move_name) {
             issues.push(MoveNameCatalogIssue::InvalidName { index });
         }
     }
@@ -166,9 +166,9 @@ impl<'de> Deserialize<'de> for MoveNameTable {
             return Err(D::Error::custom("move names table must not be empty"));
         }
         for (index, name) in names.iter().enumerate() {
-            if !is_valid_move_payload_token(name) {
+            if !is_valid_move_display_name(name) {
                 return Err(D::Error::custom(format!(
-                    "move names table entry {index} must be an exact move token, found {name:?}"
+                    "move names table entry {index} must be an exact move display name, found {name:?}"
                 )));
             }
         }
@@ -186,6 +186,13 @@ fn is_exact_nonempty_move_token(value: &str) -> bool {
 
 fn is_valid_move_payload_token(value: &str) -> bool {
     is_exact_nonempty_move_token(value) && validate_no_reserved_move_token(value).is_ok()
+}
+
+fn is_valid_move_display_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.chars().all(|character| !character.is_control())
+        && validate_no_reserved_move_token(value).is_ok()
 }
 
 fn validate_no_reserved_move_token(value: &str) -> Result<(), String> {

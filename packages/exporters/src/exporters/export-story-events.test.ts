@@ -107,6 +107,26 @@ AzaleaTownRivalBattleScript:
     });
   });
 
+  it("exports warpfacing in canonical pack order", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
+    const asmSource = path.join(tmpDir, "Route29.asm");
+    fs.writeFileSync(
+      asmSource,
+      `Route29WarpScript:
+\twarpfacing RIGHT, ROUTE_29, 6, 27
+\tend
+`,
+      "utf8"
+    );
+
+    const scripts = parseAsmFile(asmSource);
+
+    expect(scripts.Route29WarpScript[0]).toEqual({
+      command: "warpfacing",
+      args: ["ROUTE_29", "6", "27", "RIGHT"],
+    });
+  });
+
   it("preserves consecutive local labels as aliases for the same commands", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
     const asmSource = path.join(tmpDir, "IlexForest.asm");
@@ -137,6 +157,35 @@ AzaleaTownRivalBattleScript:
     expect(scripts[".Position8_Left@IlexForestFarfetchdScript"]).toBe(
       scripts[".Position8_Up@IlexForestFarfetchdScript"]
     );
+  });
+
+  it("materializes movement data fallthrough through the next movement terminator", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
+    const asmSource = path.join(tmpDir, "BattleTower1F.asm");
+    fs.writeFileSync(
+      asmSource,
+      `MovementData_BattleTower1FWalkToElevator:
+\tstep UP
+\tstep UP
+MovementData_BattleTowerHallwayPlayerEntersBattleRoom:
+\tstep UP
+\tstep_end
+`,
+      "utf8"
+    );
+
+    const scripts = parseAsmFile(asmSource);
+
+    expect(scripts.MovementData_BattleTower1FWalkToElevator).toEqual([
+      { command: "step", args: ["UP"] },
+      { command: "step", args: ["UP"] },
+      { command: "step", args: ["UP"] },
+      { command: "step_end", args: [] },
+    ]);
+    expect(scripts.MovementData_BattleTowerHallwayPlayerEntersBattleRoom).toEqual([
+      { command: "step", args: ["UP"] },
+      { command: "step_end", args: [] },
+    ]);
   });
 
   it("expands Goldenrod underground switch door macros into local scripts", () => {

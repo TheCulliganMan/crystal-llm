@@ -51,6 +51,8 @@ const TEST_CONTENT_PACK_CATEGORIES = [
   "step_event_rules",
   "fishing",
   "field_moves",
+  "field_box_items",
+  "runtime_title_screen",
   "fruit_trees",
   "npcs",
   "pokegear_landmarks",
@@ -97,6 +99,32 @@ const strictFiles = (
     ),
     ...overrides,
   }) as Record<(typeof TEST_CONTENT_PACK_CATEGORIES)[number], string[]>;
+
+const titleMusicAudioAsset = {
+  MUSIC_TITLE: {
+    id: "MUSIC_TITLE",
+    path: "content-packs/core-modular/music/MUSIC_TITLE.mid",
+    kind: "music" as const,
+    source: "midi" as const,
+  },
+};
+
+const titleRuntimeSpawnPoints = {
+  "0": {
+    identifier: 0,
+    mapConstant: "PLAYERS_HOUSE_2F",
+    mapName: "PlayersHouse2F",
+    groupId: 24,
+    mapId: 7,
+    tileX: 3,
+    tileY: 3,
+    groupName: "NEW_BARK",
+    metatileX: 1,
+    metatileY: 1,
+    subtileX: 1,
+    subtileY: 1,
+  },
+};
 
 const mockStrictIndexAndEmptyMapBlocks = (
   index = { version: 1, packs: [] as unknown[] },
@@ -647,7 +675,9 @@ describe("export-core-content-pack", () => {
         require_all_maps_reachable: false,
         require_walkable_maps: true,
       },
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
       audioAssets: {
+        ...titleMusicAudioAsset,
         MUSIC_ROUTE_29: {
           id: "MUSIC_ROUTE_29",
           path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
@@ -993,7 +1023,21 @@ describe("export-core-content-pack", () => {
           pokemon_frontpic_anim: [
             { TOTODILE: { commands: [{ kind: "endanim" }] } },
           ],
-          audio: [
+          runtime_title_screen: [
+            {
+              new_game_spawn_identifier: 0,
+              title_music: "MUSIC_TITLE",
+            },
+          ],
+          audio: expect.arrayContaining([
+            {
+              MUSIC_TITLE: {
+                id: "MUSIC_TITLE",
+                path: "content-packs/core-modular/music/MUSIC_TITLE.mid",
+                kind: "music",
+                source: "midi",
+              },
+            },
             {
               MUSIC_ROUTE_29: {
                 id: "MUSIC_ROUTE_29",
@@ -1002,7 +1046,7 @@ describe("export-core-content-pack", () => {
                 source: "midi",
               },
             },
-          ],
+          ]),
         }),
       }),
     );
@@ -1112,6 +1156,9 @@ describe("export-core-content-pack", () => {
             fruit_trees: [
               "content-packs/core-modular/fruit_trees/fruit_trees.json",
             ],
+            runtime_title_screen: [
+              "content-packs/core-modular/runtime_title_screen/title.json",
+            ],
             currency_constants: [
               "content-packs/core-modular/currency_constants/constants.json",
             ],
@@ -1121,7 +1168,17 @@ describe("export-core-content-pack", () => {
             ],
             items: ["content-packs/core-modular/items/POTION.json"],
             playability: ["content-packs/core-modular/playability/core.json"],
-            audio: ["content-packs/core-modular/music/MUSIC_ROUTE_29.json"],
+            audio: [
+              "content-packs/core-modular/music/MUSIC_TITLE.json",
+              "content-packs/core-modular/music/MUSIC_ROUTE_29.json",
+            ],
+          }),
+        }),
+        expect.objectContaining({
+          id: "module-audio-MUSIC_TITLE",
+          enabled: false,
+          files: expect.objectContaining({
+            audio: ["content-packs/core-modular/music/MUSIC_TITLE.json"],
           }),
         }),
         expect.objectContaining({
@@ -1287,7 +1344,9 @@ describe("export-core-content-pack", () => {
 
   it("does not coerce route module map names when linking map files", () => {
     jest.spyOn(fs, "existsSync").mockImplementation((pathLike) => {
-      return String(pathLike).endsWith("/maps");
+      return (
+        String(pathLike).endsWith("/maps") || String(pathLike).endsWith(".mid")
+      );
     });
     jest.spyOn(fs, "readdirSync").mockImplementation((pathLike) => {
       if (String(pathLike).endsWith("/maps")) {
@@ -1373,6 +1432,8 @@ describe("export-core-content-pack", () => {
         NewBarkTown: [],
       },
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
+      audioAssets: titleMusicAudioAsset,
     });
 
     const indexCall = mockWriteJsonToTargets.mock.calls.at(-1);
@@ -1478,6 +1539,8 @@ describe("export-core-content-pack", () => {
       pokedex: [],
       npcData: {},
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
+      audioAssets: titleMusicAudioAsset,
     });
 
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
@@ -1549,6 +1612,8 @@ describe("export-core-content-pack", () => {
       pokedex: [],
       npcData: {},
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
+      audioAssets: titleMusicAudioAsset,
     };
 
     exportCoreContentPack(payload);
@@ -1703,7 +1768,8 @@ describe("export-core-content-pack", () => {
     jest.spyOn(fs, "existsSync").mockImplementation((pathLike) => {
       return (
         String(pathLike).endsWith("/maps") ||
-        String(pathLike).endsWith("/tilesets")
+        String(pathLike).endsWith("/tilesets") ||
+        String(pathLike).endsWith(".mid")
       );
     });
     jest.spyOn(fs, "readdirSync").mockImplementation((pathLike) => {
@@ -1754,6 +1820,8 @@ describe("export-core-content-pack", () => {
       pokedex: [],
       npcData: { NewRoute: [] },
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
+      audioAssets: titleMusicAudioAsset,
     });
 
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith(

@@ -10,8 +10,12 @@ use crate::world::collision::{
     sample_collision,
 };
 use crate::world::map::{Direction, OverworldMapData, TilePosition};
-use crate::world::movement::{MovementMode, PlayerMovementState, StepOptions, move_by_stride};
-use crate::world::session::{OverworldSession, WarpTransition};
+use crate::world::movement::{
+    MovementMode, PlayerMovementState, StepOptions, checked_move_by_stride,
+};
+use crate::world::session::{
+    OverworldObjectCoordinateError, OverworldSession, WarpTransition, warp_tile_position_checked,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +40,7 @@ pub struct FieldMoveCatalog {
     pub coin_case: FieldItemRule,
     pub blue_card: FieldItemRule,
     pub town_map: FieldItemRule,
+    pub pokegear: FieldItemRule,
 }
 
 impl<'de> Deserialize<'de> for FieldMoveCatalog {
@@ -66,6 +71,7 @@ impl<'de> Deserialize<'de> for FieldMoveCatalog {
             coin_case: FieldItemRule,
             blue_card: FieldItemRule,
             town_map: FieldItemRule,
+            pokegear: FieldItemRule,
         }
 
         let raw = RawFieldMoveCatalog::deserialize(deserializer)?;
@@ -90,6 +96,7 @@ impl<'de> Deserialize<'de> for FieldMoveCatalog {
             coin_case: raw.coin_case,
             blue_card: raw.blue_card,
             town_map: raw.town_map,
+            pokegear: raw.pokegear,
         };
         validate_field_move_catalog_pack_tokens(&catalog).map_err(serde::de::Error::custom)?;
         Ok(catalog)
@@ -154,6 +161,7 @@ impl<'de> Deserialize<'de> for FieldMoveRule {
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveMoveRule {
     pub move_id: String,
+    pub target_collisions: Vec<u8>,
 }
 
 impl<'de> Deserialize<'de> for FieldMoveMoveRule {
@@ -165,11 +173,13 @@ impl<'de> Deserialize<'de> for FieldMoveMoveRule {
         #[serde(deny_unknown_fields)]
         struct RawRule {
             move_id: String,
+            target_collisions: Vec<u8>,
         }
 
         let raw = RawRule::deserialize(deserializer)?;
         Ok(Self {
             move_id: raw.move_id,
+            target_collisions: raw.target_collisions,
         })
     }
 }
@@ -253,30 +263,6 @@ impl<'de> Deserialize<'de> for FieldMoveBlockRule {
         }
 
         let raw = RawRule::deserialize(deserializer)?;
-        if raw.target_collisions.is_empty() {
-            return Err(serde::de::Error::custom(
-                "field_move.block.target_collisions must not be empty",
-            ));
-        }
-        if raw.replacements.is_empty() {
-            return Err(serde::de::Error::custom(
-                "field_move.block.replacements must not be empty",
-            ));
-        }
-        for (tileset, replacements) in &raw.replacements {
-            if replacements.is_empty() {
-                return Err(serde::de::Error::custom(format!(
-                    "field_move.block.replacements[{tileset}] must not be empty"
-                )));
-            }
-            for (block_id, replacement) in replacements {
-                if replacement.replacement_block_id == *block_id {
-                    return Err(serde::de::Error::custom(format!(
-                        "field_move.block.replacements[{tileset}][{block_id}].replacement_block_id must change the block"
-                    )));
-                }
-            }
-        }
         Ok(Self {
             move_id: raw.move_id,
             badge: raw.badge,
@@ -367,11 +353,6 @@ impl<'de> Deserialize<'de> for FieldMoveTravelRule {
         }
 
         let raw = RawRule::deserialize(deserializer)?;
-        if raw.target_collisions.is_empty() {
-            return Err(serde::de::Error::custom(
-                "field_move.travel.target_collisions must not be empty",
-            ));
-        }
         Ok(Self {
             move_id: raw.move_id,
             badge: raw.badge,
@@ -480,29 +461,33 @@ pub fn field_move_catalog_issues(
         &mut issues,
     );
     collect_move_rule_issues("field_moves:fly", &catalog.fly, moves, &mut issues);
-    collect_move_only_rule_issues("field_moves:dig", &catalog.dig, moves, &mut issues);
+    collect_move_only_rule_issues("field_moves:dig", &catalog.dig, moves, false, &mut issues);
     collect_move_only_rule_issues(
         "field_moves:teleport",
         &catalog.teleport,
         moves,
+        false,
         &mut issues,
     );
     collect_move_only_rule_issues(
         "field_moves:headbutt",
         &catalog.headbutt,
         moves,
+        true,
         &mut issues,
     );
     collect_move_only_rule_issues(
         "field_moves:rock_smash",
         &catalog.rock_smash,
         moves,
+        false,
         &mut issues,
     );
     collect_move_only_rule_issues(
         "field_moves:sweet_scent",
         &catalog.sweet_scent,
         moves,
+        false,
         &mut issues,
     );
     collect_escape_item_rule_issues(&catalog.escape_rope, items, &mut issues);
@@ -538,6 +523,12 @@ pub fn field_move_catalog_issues(
         items,
         &mut issues,
     );
+    collect_field_item_rule_issues(
+        "field_moves:pokegear",
+        &catalog.pokegear,
+        items,
+        &mut issues,
+    );
     issues
 }
 
@@ -568,6 +559,7 @@ fn validate_field_move_catalog_pack_tokens(catalog: &FieldMoveCatalog) -> Result
     validate_item_rule_pack_tokens("field_moves.coin_case", &catalog.coin_case)?;
     validate_item_rule_pack_tokens("field_moves.blue_card", &catalog.blue_card)?;
     validate_item_rule_pack_tokens("field_moves.town_map", &catalog.town_map)?;
+    validate_item_rule_pack_tokens("field_moves.pokegear", &catalog.pokegear)?;
     Ok(())
 }
 
@@ -622,9 +614,9 @@ fn validate_badge_pack_tokens(
     badge: &FieldMoveBadgeRequirement,
 ) -> Result<(), String> {
     validate_exact_field_move_token(&format!("{subject}.{move_id}.badge.region"), &badge.region)?;
-    if badge.region != "johto" {
+    if !is_supported_badge_region(&badge.region) {
         return Err(format!(
-            "{subject}.{move_id}.badge.region must be johto, found {:?}",
+            "{subject}.{move_id}.badge.region must be johto or kanto, found {:?}",
             badge.region
         ));
     }
@@ -661,9 +653,16 @@ fn collect_move_only_rule_issues(
     subject: &str,
     rule: &FieldMoveMoveRule,
     moves: &BTreeSet<String>,
+    require_target_collisions: bool,
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
     collect_move_id_issues(subject, &rule.move_id, moves, issues);
+    if require_target_collisions && rule.target_collisions.is_empty() {
+        issues.push(FieldMoveCatalogIssue::MissingTargetCollisions {
+            subject: subject.to_string(),
+            move_id: rule.move_id.clone(),
+        });
+    }
 }
 
 fn collect_block_rule_issues(
@@ -854,13 +853,17 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
     value.starts_with("fallback") || value.starts_with("legacy")
 }
 
+fn is_supported_badge_region(region: &str) -> bool {
+    matches!(region, "johto" | "kanto")
+}
+
 fn collect_badge_issues(
     subject: &str,
     move_id: &str,
     badge: &FieldMoveBadgeRequirement,
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
-    if badge.region != "johto" {
+    if !is_supported_badge_region(&badge.region) {
         issues.push(FieldMoveCatalogIssue::InvalidBadgeRegion {
             subject: subject.to_string(),
             move_id: move_id.to_string(),
@@ -966,8 +969,8 @@ pub enum FieldMoveError {
     MissingRuleField { move_id: String, field: String },
     #[error("field move rule field {field} has invalid value {value}")]
     InvalidRuleField { field: String, value: String },
-    #[error("field move {move_id} uses unsupported badge region {region}")]
-    UnsupportedBadgeRegion { move_id: String, region: String },
+    #[error("field move {move_id} uses invalid badge region {region}")]
+    InvalidBadgeRegion { move_id: String, region: String },
     #[error("field move {move_id} uses invalid badge index {badge_index}")]
     InvalidBadgeIndex { move_id: String, badge_index: usize },
     #[error("field move party index {party_index} is outside the party")]
@@ -976,8 +979,12 @@ pub enum FieldMoveError {
     EmptyPartySlot { party_index: usize },
     #[error("party Pokemon at index {party_index} does not know {move_id}")]
     PokemonDoesNotKnowMove { party_index: usize, move_id: String },
-    #[error("field move {move_id} requires Johto badge index {badge_index}")]
-    MissingBadge { move_id: String, badge_index: usize },
+    #[error("field move {move_id} requires {region} badge index {badge_index}")]
+    MissingBadge {
+        move_id: String,
+        region: String,
+        badge_index: usize,
+    },
     #[error("field escape item {item_id} expected configured item id {expected_item_id}")]
     InvalidEscapeItemId {
         item_id: String,
@@ -1032,6 +1039,16 @@ pub enum FieldMoveError {
         warp_index: u16,
     },
     #[error(
+        "{context} saved dig warp index {warp_index} on {map_name} has coordinate ({x}, {y}) outside supported runtime tile range"
+    )]
+    SavedDigWarpCoordinateOverflow {
+        context: String,
+        map_name: String,
+        warp_index: u16,
+        x: u16,
+        y: u16,
+    },
+    #[error(
         "field squirtbottle target {object_identifier:?} references missing exact script {script}"
     )]
     MissingSquirtBottleTargetScript {
@@ -1048,6 +1065,19 @@ pub enum FieldMoveError {
     },
     #[error("field move {move_id} target tile is outside map {map_name}")]
     TargetTileOutOfBounds { move_id: String, map_name: String },
+    #[error(
+        "field move {move_id} runtime tile ({x}, {y}) is not aligned to metatile width {metatile_width}"
+    )]
+    UnalignedRuntimeTile {
+        move_id: String,
+        x: i16,
+        y: i16,
+        metatile_width: i16,
+    },
+    #[error(
+        "field move {move_id} target tile from ({x}, {y}) overflows supported runtime coordinates"
+    )]
+    RuntimeTileOverflow { move_id: String, x: i16, y: i16 },
     #[error("field move {move_id} target tile is blocked")]
     BlockedTarget { move_id: String },
     #[error("field move {move_id} target tile is not water")]
@@ -1066,6 +1096,10 @@ pub enum FieldMoveError {
         "field move {move_id} target block {block_id:#04x} does not contain a supported collision"
     )]
     UnsupportedCollision { move_id: String, block_id: u16 },
+    #[error("field move {move_id} target tile ({x}, {y}) has no smashable rock object")]
+    MissingRockSmashTarget { move_id: String, x: i16, y: i16 },
+    #[error("field move {move_id} target object movement '{movement}' is not a smashable rock")]
+    TargetNotSmashableRock { move_id: String, movement: String },
     #[error(
         "field move {move_id} has no exact replacement for tileset '{tileset_name}' block {block_id:#04x}"
     )]
@@ -1076,6 +1110,8 @@ pub enum FieldMoveError {
     },
     #[error("field move flag error: {0}")]
     Flag(#[from] EventFlagError),
+    #[error(transparent)]
+    ObjectCoordinate(#[from] OverworldObjectCoordinateError),
 }
 
 pub fn resolve_squirtbottle_target<F>(
@@ -1085,12 +1121,20 @@ pub fn resolve_squirtbottle_target<F>(
 where
     F: FnOnce(&str) -> bool,
 {
-    let target_tile = move_by_stride(
+    const SQUIRTBOTTLE_TARGET_CONTEXT: &str = "SQUIRTBOTTLE";
+    require_runtime_field_move_tile_alignment(SQUIRTBOTTLE_TARGET_CONTEXT, overworld.player.tile)?;
+    let target_tile = checked_move_by_stride(
         overworld.player.tile,
         overworld.player.facing,
         StepOptions::default().stride_tiles,
-    );
-    let Some((_, object)) = overworld.visible_object_at(target_tile) else {
+    )
+    .ok_or_else(|| FieldMoveError::RuntimeTileOverflow {
+        move_id: SQUIRTBOTTLE_TARGET_CONTEXT.to_string(),
+        x: overworld.player.tile.x,
+        y: overworld.player.tile.y,
+    })?;
+    require_runtime_field_move_tile_alignment(SQUIRTBOTTLE_TARGET_CONTEXT, target_tile)?;
+    let Some((_, object)) = overworld.visible_object_at_checked(target_tile)? else {
         return Ok(SquirtBottleTarget {
             target_tile,
             target_object_identifier: None,
@@ -1288,7 +1332,18 @@ pub fn apply_surf_field_move(
             mode: player.mode,
         });
     }
-    let target = move_by_stride(player.tile, player.facing, 2);
+    require_runtime_field_move_tile_alignment(&rule.move_id, player.tile)?;
+    let target = checked_move_by_stride(
+        player.tile,
+        player.facing,
+        StepOptions::default().stride_tiles,
+    )
+    .ok_or_else(|| FieldMoveError::RuntimeTileOverflow {
+        move_id: rule.move_id.clone(),
+        x: player.tile.x,
+        y: player.tile.y,
+    })?;
+    require_runtime_field_move_tile_alignment(&rule.move_id, target)?;
     let sample = sample_collision(map, tileset, target).ok_or_else(|| {
         FieldMoveError::TargetTileOutOfBounds {
             move_id: rule.move_id.clone(),
@@ -1348,7 +1403,18 @@ pub fn apply_waterfall_field_move(
             actual: player.facing,
         });
     }
-    let first_target = move_by_stride(player.tile, player.facing, 2);
+    require_runtime_field_move_tile_alignment(&rule.move_id, player.tile)?;
+    let first_target = checked_move_by_stride(
+        player.tile,
+        player.facing,
+        StepOptions::default().stride_tiles,
+    )
+    .ok_or_else(|| FieldMoveError::RuntimeTileOverflow {
+        move_id: rule.move_id.clone(),
+        x: player.tile.x,
+        y: player.tile.y,
+    })?;
+    require_runtime_field_move_tile_alignment(&rule.move_id, first_target)?;
     let first_sample = sample_collision(map, tileset, first_target).ok_or_else(|| {
         FieldMoveError::TargetTileOutOfBounds {
             move_id: rule.move_id.clone(),
@@ -1364,7 +1430,17 @@ pub fn apply_waterfall_field_move(
     let from_tile = player.tile;
     let mut steps = 0_u16;
     loop {
-        let target = move_by_stride(player.tile, player.facing, 2);
+        let target = checked_move_by_stride(
+            player.tile,
+            player.facing,
+            StepOptions::default().stride_tiles,
+        )
+        .ok_or_else(|| FieldMoveError::RuntimeTileOverflow {
+            move_id: rule.move_id.clone(),
+            x: player.tile.x,
+            y: player.tile.y,
+        })?;
+        require_runtime_field_move_tile_alignment(&rule.move_id, target)?;
         let Some(sample) = sample_collision(map, tileset, target) else {
             break;
         };
@@ -1549,6 +1625,13 @@ pub fn validate_town_map_item(
     validate_field_item_id("town_map", &catalog.town_map, item)
 }
 
+pub fn validate_pokegear_item(
+    catalog: &FieldMoveCatalog,
+    item: &Item,
+) -> Result<(), FieldMoveError> {
+    validate_field_item_id("pokegear", &catalog.pokegear, item)
+}
+
 pub fn blue_card_balance(state: &GameState) -> Result<u8, FieldMoveError> {
     let Some(value) = state.script_runtime.variables.get("VAR_BLUECARDBALANCE") else {
         return Ok(0);
@@ -1661,10 +1744,19 @@ pub fn saved_dig_warp_destination(
             map_name: map_name.clone(),
             warp_index,
         })?;
+    let tile = warp_tile_position_checked(warp).ok_or_else(|| {
+        FieldMoveError::SavedDigWarpCoordinateOverflow {
+            context: context.to_string(),
+            map_name: map_name.clone(),
+            warp_index,
+            x: warp.x,
+            y: warp.y,
+        }
+    })?;
     Ok(SavedDigWarpDestination {
         map_name,
         warp_index,
-        tile: TilePosition::new(warp.x as i16, warp.y as i16),
+        tile,
     })
 }
 
@@ -1768,8 +1860,8 @@ fn require_move_badge_rule_fields(
     badge: &FieldMoveBadgeRequirement,
 ) -> Result<(), FieldMoveError> {
     require_rule_field(move_id, "move_id")?;
-    if badge.region != "johto" {
-        return Err(FieldMoveError::UnsupportedBadgeRegion {
+    if !is_supported_badge_region(&badge.region) {
+        return Err(FieldMoveError::InvalidBadgeRegion {
             move_id: move_id.to_string(),
             region: badge.region.clone(),
         });
@@ -1780,6 +1872,14 @@ fn require_move_badge_rule_fields(
             badge_index: badge.index,
         });
     }
+    Ok(())
+}
+
+fn require_runtime_field_move_tile_alignment(
+    move_id: &str,
+    tile: TilePosition,
+) -> Result<(), FieldMoveError> {
+    let _ = (move_id, tile);
     Ok(())
 }
 
@@ -1838,13 +1938,13 @@ fn require_badge(
     move_id: &str,
     badge: &FieldMoveBadgeRequirement,
 ) -> Result<(), FieldMoveError> {
-    if badge.region != "johto" {
-        return Err(FieldMoveError::UnsupportedBadgeRegion {
+    let Some(region_badges) = badges_for_region(state, &badge.region) else {
+        return Err(FieldMoveError::InvalidBadgeRegion {
             move_id: move_id.to_string(),
             region: badge.region.clone(),
         });
-    }
-    let Some(has_badge) = state.badges.johto.get(badge.index).copied() else {
+    };
+    let Some(has_badge) = region_badges.get(badge.index).copied() else {
         return Err(FieldMoveError::InvalidBadgeIndex {
             move_id: move_id.to_string(),
             badge_index: badge.index,
@@ -1855,8 +1955,17 @@ fn require_badge(
     }
     Err(FieldMoveError::MissingBadge {
         move_id: move_id.to_string(),
+        region: badge.region.clone(),
         badge_index: badge.index,
     })
+}
+
+fn badges_for_region<'a>(state: &'a GameState, region: &str) -> Option<&'a [bool; 8]> {
+    match region {
+        "johto" => Some(&state.badges.johto),
+        "kanto" => Some(&state.badges.kanto),
+        _ => None,
+    }
 }
 
 fn target_metatile<'a>(
@@ -1865,8 +1974,20 @@ fn target_metatile<'a>(
     metatile_x: u16,
     metatile_y: u16,
 ) -> Result<(usize, u16, &'a MetatileCollision), FieldMoveError> {
+    let metatile_x_i16 =
+        i16::try_from(metatile_x).map_err(|_| FieldMoveError::TargetOutOfBounds {
+            map_name: map.name.clone(),
+            metatile_x,
+            metatile_y,
+        })?;
+    let metatile_y_i16 =
+        i16::try_from(metatile_y).map_err(|_| FieldMoveError::TargetOutOfBounds {
+            map_name: map.name.clone(),
+            metatile_x,
+            metatile_y,
+        })?;
     let index = map
-        .metatile_index(metatile_x as i16, metatile_y as i16)
+        .metatile_index(metatile_x_i16, metatile_y_i16)
         .ok_or_else(|| FieldMoveError::TargetOutOfBounds {
             map_name: map.name.clone(),
             metatile_x,
@@ -1934,7 +2055,7 @@ fn block_replacement<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{MapAttributes, WarpEvent};
+    use crate::map::{MapAttributes, MapEvents, WarpEvent};
     use crate::models::{BaseStats, Dv, Item, LearnedMove, Pokemon, PokemonSpecies, item_pocket};
     use crate::world::collision::permissions;
 
@@ -2053,18 +2174,23 @@ mod tests {
             },
             dig: FieldMoveMoveRule {
                 move_id: MOVE_DIG.to_string(),
+                target_collisions: Vec::new(),
             },
             teleport: FieldMoveMoveRule {
                 move_id: MOVE_TELEPORT.to_string(),
+                target_collisions: Vec::new(),
             },
             headbutt: FieldMoveMoveRule {
                 move_id: "HEADBUTT".to_string(),
+                target_collisions: vec![permissions::HEADBUTT_TREE, permissions::HEADBUTT_TREE_1D],
             },
             rock_smash: FieldMoveMoveRule {
                 move_id: "ROCK_SMASH".to_string(),
+                target_collisions: Vec::new(),
             },
             sweet_scent: FieldMoveMoveRule {
                 move_id: "SWEET_SCENT".to_string(),
+                target_collisions: Vec::new(),
             },
             escape_rope: FieldEscapeItemRule {
                 item_id: "ESCAPE_ROPE".to_string(),
@@ -2088,6 +2214,9 @@ mod tests {
             },
             town_map: FieldItemRule {
                 item_id: "TOWN_MAP".to_string(),
+            },
+            pokegear: FieldItemRule {
+                item_id: "POKEGEAR".to_string(),
             },
         }
     }
@@ -2130,6 +2259,27 @@ mod tests {
             &attributes_with_size("johto", width, height),
             blocks,
         )
+    }
+
+    fn object(identifier: &str, x: u16, y: u16, movement: &str) -> ObjectEvent {
+        ObjectEvent {
+            sprite: "SPRITE_SUDOWOODO".to_string(),
+            x,
+            y,
+            spritemovedata: movement.to_string(),
+            move_range_x: 0,
+            move_range_y: 0,
+            hram_x: -1,
+            hram_y: -1,
+            pal: 0,
+            object_type: "OBJECTTYPE_SCRIPT".to_string(),
+            radius: 0,
+            script: "Route36SudowoodoScript".to_string(),
+            label: None,
+            event_flag: "-1".to_string(),
+            object_identifier: Some(identifier.to_string()),
+            sightline_direction_override: None,
+        }
     }
 
     fn tileset() -> TilesetCollision {
@@ -2195,7 +2345,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -2235,7 +2386,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -2351,11 +2503,121 @@ mod tests {
             error,
             FieldMoveError::MissingBadge {
                 move_id: MOVE_CUT.to_string(),
+                region: "johto".to_string(),
                 badge_index: BADGE_HIVE,
             }
         );
         assert_eq!(map.metatile_at(0, 0), Some(0x5b));
         assert!(state.map_block_overrides.is_empty());
+    }
+
+    #[test]
+    fn block_field_move_rejects_oversized_metatile_coordinate_without_wrapping() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_HIVE] = true;
+        let storage = storage_with(MOVE_CUT);
+        let mut map = map(vec![0x5b, 0x00]);
+
+        let error = apply_cut_field_move(
+            &catalog(),
+            &mut state,
+            &storage,
+            &mut map,
+            &tileset(),
+            "johto",
+            0,
+            u16::MAX,
+            0,
+        )
+        .expect_err("oversized coordinate must reject");
+
+        assert_eq!(
+            error,
+            FieldMoveError::TargetOutOfBounds {
+                map_name: "Route29".to_string(),
+                metatile_x: u16::MAX,
+                metatile_y: 0,
+            }
+        );
+        assert_eq!(map.metatile_at(0, 0), Some(0x5b));
+        assert!(state.map_block_overrides.is_empty());
+    }
+
+    #[test]
+    fn squirtbottle_target_accepts_odd_runtime_tile() {
+        let overworld = OverworldSession::with_events_and_objects(
+            map_with_size(1, 2, vec![0, 0]),
+            MapEvents::default(),
+            Vec::new(),
+            tileset(),
+            TilePosition::new(0, 1),
+        );
+
+        let target = resolve_squirtbottle_target(&overworld, |_| true)
+            .expect("odd runtime tile is a valid squirtbottle origin");
+
+        assert_eq!(target.target_tile, TilePosition::new(0, 2));
+        assert_eq!(target.target_object_identifier, None);
+    }
+
+    #[test]
+    fn squirtbottle_target_rejects_invalid_visible_object_coordinates() {
+        let mut overworld = OverworldSession::with_events_and_objects(
+            map_with_size(1, 2, vec![0, 0]),
+            MapEvents::default(),
+            vec![object(
+                "BROKEN_SUDOWOODO",
+                u16::MAX,
+                1,
+                "SPRITEMOVEDATA_SUDOWOODO",
+            )],
+            tileset(),
+            TilePosition::new(0, 0),
+        );
+        overworld.player.facing = Direction::Down;
+
+        let error = resolve_squirtbottle_target(&overworld, |_| true)
+            .expect_err("invalid visible object coordinates must reject squirtbottle target");
+
+        assert!(matches!(
+            error,
+            FieldMoveError::ObjectCoordinate(OverworldObjectCoordinateError::OutOfRange {
+                object_id,
+                x: u16::MAX,
+                y: 1,
+            }) if object_id == "BROKEN_SUDOWOODO"
+        ));
+    }
+
+    #[test]
+    fn squirtbottle_target_uses_exact_runtime_object_coordinates() {
+        let mut overworld = OverworldSession::with_events_and_objects(
+            map_with_size(1, 2, vec![0, 0]),
+            MapEvents::default(),
+            vec![object(
+                "ROUTE36_SUDOWOODO",
+                0,
+                1,
+                "SPRITEMOVEDATA_SUDOWOODO",
+            )],
+            tileset(),
+            TilePosition::new(0, 0),
+        );
+        overworld.player.facing = Direction::Down;
+
+        let target =
+            resolve_squirtbottle_target(&overworld, |script| script == "Route36SudowoodoScript")
+                .expect("squirtbottle target resolves");
+
+        assert_eq!(target.target_tile, TilePosition::new(0, 2));
+        assert_eq!(
+            target.target_object_identifier.as_deref(),
+            Some("ROUTE36_SUDOWOODO")
+        );
+        assert_eq!(
+            target.target_script.as_deref(),
+            Some("Route36SudowoodoScript")
+        );
     }
 
     #[test]
@@ -2421,7 +2683,7 @@ mod tests {
         let mut state = GameState::default();
         state.badges.johto[BADGE_FOG] = true;
         let storage = storage_with(MOVE_SURF);
-        let map = map(vec![0x00, 0x08]);
+        let map = map(vec![0x08, 0x08]);
         let mut player = PlayerMovementState::new(TilePosition::new(0, 0));
         player.facing = Direction::Right;
 
@@ -2452,7 +2714,7 @@ mod tests {
         let mut player = PlayerMovementState::new(TilePosition::new(0, 0));
         player.facing = Direction::Right;
 
-        let error = apply_surf_field_move(
+        let outcome = apply_surf_field_move(
             &catalog(),
             &state,
             &storage,
@@ -2464,7 +2726,7 @@ mod tests {
         .expect_err("not water");
 
         assert_eq!(
-            error,
+            outcome,
             FieldMoveError::TargetNotWater {
                 move_id: MOVE_SURF.to_string()
             }
@@ -2474,12 +2736,69 @@ mod tests {
     }
 
     #[test]
+    fn surf_accepts_odd_runtime_tile() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_FOG] = true;
+        let storage = storage_with(MOVE_SURF);
+        let map = map(vec![0x08, 0x08]);
+        let mut player = PlayerMovementState::new(TilePosition::new(1, 0));
+        player.facing = Direction::Right;
+
+        let outcome = apply_surf_field_move(
+            &catalog(),
+            &state,
+            &storage,
+            &map,
+            &tileset(),
+            &mut player,
+            0,
+        )
+        .expect("odd runtime tile is a valid surf origin");
+
+        assert_eq!(outcome.to_tile, TilePosition::new(2, 0));
+        assert_eq!(player.mode, MovementMode::Surf);
+        assert_eq!(player.tile, TilePosition::new(2, 0));
+    }
+
+    #[test]
+    fn surf_rejects_runtime_target_overflow_without_moving() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_FOG] = true;
+        let storage = storage_with(MOVE_SURF);
+        let map = map(vec![0x08, 0x08]);
+        let mut player = PlayerMovementState::new(TilePosition::new(i16::MAX - 1, 0));
+        player.facing = Direction::Right;
+
+        let error = apply_surf_field_move(
+            &catalog(),
+            &state,
+            &storage,
+            &map,
+            &tileset(),
+            &mut player,
+            0,
+        )
+        .expect_err("surf must reject overflowing runtime targets");
+
+        assert_eq!(
+            error,
+            FieldMoveError::RuntimeTileOverflow {
+                move_id: MOVE_SURF.to_string(),
+                x: i16::MAX - 1,
+                y: 0,
+            }
+        );
+        assert_eq!(player.mode, MovementMode::Normal);
+        assert_eq!(player.tile, TilePosition::new(i16::MAX - 1, 0));
+    }
+
+    #[test]
     fn waterfall_climbs_until_leaving_waterfall_collision() {
         let mut state = GameState::default();
         state.badges.johto[BADGE_RISING] = true;
         let storage = storage_with(MOVE_WATERFALL);
         let map = map_with_size(1, 4, vec![0x08, 0x09, 0x09, 0x08]);
-        let mut player = PlayerMovementState::new(TilePosition::new(1, 7));
+        let mut player = PlayerMovementState::new(TilePosition::new(0, 6));
         player.facing = Direction::Up;
         player.mode = MovementMode::Surf;
 
@@ -2494,11 +2813,38 @@ mod tests {
         )
         .expect("waterfall");
 
-        assert_eq!(outcome.from_tile, TilePosition::new(1, 7));
-        assert_eq!(outcome.to_tile, TilePosition::new(1, 1));
+        assert_eq!(outcome.from_tile, TilePosition::new(0, 6));
+        assert_eq!(outcome.to_tile, TilePosition::new(0, 0));
         assert_eq!(outcome.steps, 3);
         assert_eq!(player.mode, MovementMode::Surf);
-        assert_eq!(player.tile, TilePosition::new(1, 1));
+        assert_eq!(player.tile, TilePosition::new(0, 0));
+    }
+
+    #[test]
+    fn waterfall_accepts_odd_runtime_tile() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_RISING] = true;
+        let storage = storage_with(MOVE_WATERFALL);
+        let map = map_with_size(1, 4, vec![0x08, 0x09, 0x09, 0x08]);
+        let mut player = PlayerMovementState::new(TilePosition::new(0, 5));
+        player.facing = Direction::Up;
+        player.mode = MovementMode::Surf;
+
+        let outcome = apply_waterfall_field_move(
+            &catalog(),
+            &state,
+            &storage,
+            &map,
+            &tileset(),
+            &mut player,
+            0,
+        )
+        .expect("odd runtime tile is a valid waterfall origin");
+
+        assert_eq!(outcome.from_tile, TilePosition::new(0, 5));
+        assert_eq!(outcome.to_tile, TilePosition::new(0, 1));
+        assert_eq!(player.mode, MovementMode::Surf);
+        assert_eq!(player.tile, TilePosition::new(0, 1));
     }
 
     #[test]
@@ -2506,7 +2852,7 @@ mod tests {
         let state = GameState::default();
         let storage = storage_with(MOVE_WATERFALL);
         let map = map_with_size(1, 2, vec![0x09, 0x08]);
-        let mut player = PlayerMovementState::new(TilePosition::new(1, 3));
+        let mut player = PlayerMovementState::new(TilePosition::new(0, 2));
         player.facing = Direction::Up;
         player.mode = MovementMode::Surf;
 
@@ -2525,10 +2871,11 @@ mod tests {
             error,
             FieldMoveError::MissingBadge {
                 move_id: MOVE_WATERFALL.to_string(),
+                region: "johto".to_string(),
                 badge_index: BADGE_RISING,
             }
         );
-        assert_eq!(player.tile, TilePosition::new(1, 3));
+        assert_eq!(player.tile, TilePosition::new(0, 2));
     }
 
     #[test]
@@ -2544,6 +2891,7 @@ mod tests {
             missing,
             FieldMoveError::MissingBadge {
                 move_id: MOVE_FLY.to_string(),
+                region: "johto".to_string(),
                 badge_index: BADGE_ZEPHYR,
             }
         );
@@ -2555,6 +2903,36 @@ mod tests {
         assert_eq!(outcome.move_id, MOVE_FLY);
         assert_eq!(outcome.actor_party_index, 0);
         assert_eq!(outcome.actor_species, "CHIKORITA");
+    }
+
+    #[test]
+    fn field_moves_require_exact_kanto_badges_when_catalog_uses_kanto_region() {
+        let mut catalog = catalog();
+        catalog.fly.badge = FieldMoveBadgeRequirement {
+            region: "kanto".to_string(),
+            index: 2,
+        };
+        let mut state = GameState::default();
+        let storage = storage_with(MOVE_FLY);
+
+        let missing = validate_fly_field_move(&catalog, &state, &storage, 0)
+            .expect_err("kanto catalog badge is required");
+        assert_eq!(
+            missing,
+            FieldMoveError::MissingBadge {
+                move_id: MOVE_FLY.to_string(),
+                region: "kanto".to_string(),
+                badge_index: 2,
+            }
+        );
+
+        state.badges.johto[2] = true;
+        validate_fly_field_move(&catalog, &state, &storage, 0)
+            .expect_err("johto badge does not satisfy kanto rule");
+
+        state.badges.kanto[2] = true;
+        validate_fly_field_move(&catalog, &state, &storage, 0)
+            .expect("kanto badge satisfies exact catalog rule");
     }
 
     #[test]
@@ -2707,12 +3085,12 @@ mod tests {
         WarpTransition {
             trigger: crate::world::session::WarpTrigger {
                 map_name: map_name.to_string(),
-                tile: TilePosition::new(3, 4),
+                tile: TilePosition::new(6, 8),
                 warp: warp.clone(),
             },
             destination: crate::world::session::WarpDestination {
                 map_name: "DESTINATION".to_string(),
-                tile: TilePosition::new(1, 2),
+                tile: TilePosition::new(2, 4),
                 warp,
             },
         }
@@ -2822,7 +3200,35 @@ mod tests {
             Ok(SavedDigWarpDestination {
                 map_name: "ROUTE_29".to_string(),
                 warp_index: 3,
-                tile: TilePosition::new(9, 11),
+                tile: TilePosition::new(18, 22),
+            })
+        );
+    }
+
+    #[test]
+    fn saved_dig_warp_destination_rejects_coordinate_overflow() {
+        let warps = vec![WarpEvent {
+            index: 3,
+            x: 40_000,
+            y: 11,
+            target_map_constant: "DESTINATION".to_string(),
+            target_map: "DESTINATION".to_string(),
+            target_warp_id: 2,
+        }];
+        let state = GameState {
+            dig_warp_map_name: Some("ROUTE_29".to_string()),
+            dig_warp_index: Some(3),
+            ..GameState::default()
+        };
+
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Err(FieldMoveError::SavedDigWarpCoordinateOverflow {
+                context: "DIG field move".to_string(),
+                map_name: "ROUTE_29".to_string(),
+                warp_index: 3,
+                x: 40_000,
+                y: 11,
             })
         );
     }
@@ -3014,7 +3420,7 @@ mod tests {
             fn(&FieldMoveCatalog, &Item) -> Result<(), FieldMoveError>,
             &str,
             &str,
-        ); 5] = [
+        ); 6] = [
             (
                 "itemfinder",
                 |catalog| &mut catalog.itemfinder,
@@ -3050,6 +3456,13 @@ mod tests {
                 "TOWN_MAP",
                 "MOD_TOWN_MAP_ITEM",
             ),
+            (
+                "pokegear",
+                |catalog| &mut catalog.pokegear,
+                validate_pokegear_item,
+                "POKEGEAR",
+                "MOD_POKEGEAR_ITEM",
+            ),
         ];
 
         for (rule_id, rule, validate, default_item_id, mod_item_id) in cases {
@@ -3079,7 +3492,7 @@ mod tests {
         catalog.cut = FieldMoveBlockRule {
             move_id: "CUT".to_string(),
             badge: FieldMoveBadgeRequirement {
-                region: "kanto".to_string(),
+                region: "orange".to_string(),
                 index: 8,
             },
             target_collisions: Vec::new(),
@@ -3120,7 +3533,7 @@ mod tests {
         assert!(issues.contains(&FieldMoveCatalogIssue::InvalidBadgeRegion {
             subject: "field_moves:cut".to_string(),
             move_id: "CUT".to_string(),
-            region: "kanto".to_string(),
+            region: "orange".to_string(),
         }));
         assert!(issues.contains(&FieldMoveCatalogIssue::InvalidBadgeIndex {
             subject: "field_moves:cut".to_string(),
@@ -3246,10 +3659,19 @@ mod tests {
     fn field_move_catalog_issues_reject_repel_payloads_that_are_not_field_usable() {
         let mut catalog = FieldMoveCatalog::default();
         catalog.repel = FieldRepelItemRule {};
+        catalog.bicycle = FieldItemRule {
+            item_id: "BICYCLE".to_string(),
+        };
 
         let mut repel = repel_item("MOD_REPEL", Some(100));
         repel.field_usable = false;
-        let items = BTreeMap::from([("MOD_REPEL".to_string(), repel)]);
+        let items = BTreeMap::from([
+            ("MOD_REPEL".to_string(), repel),
+            (
+                "BICYCLE".to_string(),
+                field_effect_item("BICYCLE", "BICYCLE"),
+            ),
+        ]);
 
         let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
 

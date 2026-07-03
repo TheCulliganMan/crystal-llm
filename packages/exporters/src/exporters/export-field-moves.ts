@@ -15,6 +15,7 @@ export type ExportedFieldMoveRule = {
 
 export type ExportedFieldMoveMoveRule = {
   move_id: string;
+  target_collisions: number[];
 };
 
 export type ExportedFieldEscapeItemRule = {
@@ -63,6 +64,9 @@ export type ExportedFieldMoveCatalog = {
   fly: ExportedFieldMoveRule;
   dig: ExportedFieldMoveMoveRule;
   teleport: ExportedFieldMoveMoveRule;
+  headbutt: ExportedFieldMoveMoveRule;
+  rock_smash: ExportedFieldMoveMoveRule;
+  sweet_scent: ExportedFieldMoveMoveRule;
   escape_rope: ExportedFieldEscapeItemRule;
   repel: ExportedFieldRepelItemRule;
   bicycle: ExportedFieldItemRule;
@@ -71,6 +75,7 @@ export type ExportedFieldMoveCatalog = {
   coin_case: ExportedFieldItemRule;
   blue_card: ExportedFieldItemRule;
   town_map: ExportedFieldItemRule;
+  pokegear: ExportedFieldItemRule;
 };
 
 const stripComment = (line: string): string => line.replace(/;.*/, "").trim();
@@ -359,9 +364,25 @@ export function exportFieldMoves(): ExportedFieldMoveCatalog {
     },
     dig: {
       move_id: requireMoveConstant(moveConstants, "DIG"),
+      target_collisions: [],
     },
     teleport: {
       move_id: requireMoveConstant(moveConstants, "TELEPORT"),
+      target_collisions: [],
+    },
+    headbutt: {
+      move_id: requireMoveConstant(moveConstants, "HEADBUTT"),
+      target_collisions: ["COLL_HEADBUTT_TREE", "COLL_HEADBUTT_TREE_1D"].map((name) =>
+        requireCollision(collisionConstants, name)
+      ),
+    },
+    rock_smash: {
+      move_id: requireMoveConstant(moveConstants, "ROCK_SMASH"),
+      target_collisions: [],
+    },
+    sweet_scent: {
+      move_id: requireMoveConstant(moveConstants, "SWEET_SCENT"),
+      target_collisions: [],
     },
     escape_rope: requireEscapeRopeRule(itemEffects, overworld),
     repel: requireRepelRule(itemEffects),
@@ -371,6 +392,7 @@ export function exportFieldMoves(): ExportedFieldMoveCatalog {
     coin_case: requireTextboxItemEffectRule(itemEffects, "CoinCaseEffect", "COIN_CASE", "CoinCaseCountText"),
     blue_card: requireTextboxItemEffectRule(itemEffects, "BlueCardEffect", "BLUE_CARD", "BlueCardBalanceText"),
     town_map: requireFarcallItemEffectRule(itemEffects, "TownMapEffect", "TOWN_MAP", "PokegearMap"),
+    pokegear: { item_id: "POKEGEAR" },
   };
 
   writeJsonToTargets("field_moves.json", catalog, { indent: 2 });

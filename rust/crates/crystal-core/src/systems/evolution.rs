@@ -467,6 +467,7 @@ pub struct EvolutionContext<'a> {
 pub struct EvolutionReport {
     pub target_species: Option<String>,
     pub events: Vec<EvolutionEvent>,
+    pub pending_move_learns: Vec<LearnedMove>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,7 +713,7 @@ pub fn evolve_pokemon(
             species_id: entry.species.clone(),
         }
     })?;
-    let learned_moves =
+    let move_learns =
         evolution_moves_for(&target_species.id, pokemon.level, &pokemon.moves, context)?;
 
     let mut events = Vec::new();
@@ -739,14 +740,15 @@ pub fn evolve_pokemon(
         }
     }
 
-    pokemon.moves.extend(learned_moves.clone());
-    for learned in learned_moves {
+    pokemon.moves.extend(move_learns.learned.clone());
+    for learned in move_learns.learned {
         events.push(EvolutionEvent::MoveLearned(learned.name));
     }
 
     Ok(EvolutionReport {
         target_species: Some(target_species.id.clone()),
         events,
+        pending_move_learns: move_learns.pending,
     })
 }
 
@@ -786,17 +788,26 @@ fn refresh_evolved_stats(pokemon: &mut Pokemon, old_max_hp: u16, old_hp: u16) {
     pokemon.hp = (i32::from(old_hp) + hp_delta).clamp(0, i32::from(stats.max_hp)) as u16;
 }
 
+struct EvolutionMoveLearnResult {
+    learned: Vec<LearnedMove>,
+    pending: Vec<LearnedMove>,
+}
+
 fn evolution_moves_for(
     species_id: &str,
     level: u8,
     known_moves: &[LearnedMove],
     context: &EvolutionContext<'_>,
-) -> Result<Vec<LearnedMove>, EvolutionError> {
+) -> Result<EvolutionMoveLearnResult, EvolutionError> {
     if level == 0 {
-        return Ok(Vec::new());
+        return Ok(EvolutionMoveLearnResult {
+            learned: Vec::new(),
+            pending: Vec::new(),
+        });
     }
     let mut current = known_moves.to_vec();
     let mut learned = Vec::new();
+    let mut pending = Vec::new();
     for LearnsetEntry(learn_level, move_name) in
         level_up_moves_for_species(context.learnsets, species_id).map_err(|_| {
             EvolutionError::MissingLearnset {
@@ -804,10 +815,7 @@ fn evolution_moves_for(
             }
         })?
     {
-        if *learn_level != level
-            || current.iter().any(|known| known.name == *move_name)
-            || current.len() >= 4
-        {
+        if *learn_level != level || current.iter().any(|known| known.name == *move_name) {
             continue;
         }
         validate_evolution_runtime_token(move_name).map_err(|_| EvolutionError::InvalidMoveId {
@@ -825,10 +833,14 @@ fn evolution_moves_for(
             current_pp: move_data.pp,
             pp_ups: 0,
         };
-        current.push(entry.clone());
-        learned.push(entry);
+        if current.len() >= 4 {
+            pending.push(entry);
+        } else {
+            current.push(entry.clone());
+            learned.push(entry);
+        }
     }
-    Ok(learned)
+    Ok(EvolutionMoveLearnResult { learned, pending })
 }
 
 fn is_holding_everstone(pokemon: &Pokemon) -> bool {

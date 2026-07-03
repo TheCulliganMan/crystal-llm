@@ -18,6 +18,8 @@ pub struct CaptureRules {
     pub status_bonus: BTreeMap<String, u8>,
 }
 
+const BATTLE_ONLY_CAPTURE_BALLS: &[&str] = &["SAFARI_BALL"];
+
 impl<'de> Deserialize<'de> for CaptureRules {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -26,15 +28,10 @@ impl<'de> Deserialize<'de> for CaptureRules {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawCaptureRules {
-            #[serde(default)]
             fast_ball_species: BTreeSet<String>,
-            #[serde(default)]
             heavy_ball_modifiers: BTreeMap<String, i16>,
-            #[serde(default)]
             ball_rules: BTreeMap<String, CaptureBallRule>,
-            #[serde(default)]
             guaranteed_capture_balls: BTreeSet<String>,
-            #[serde(default)]
             status_bonus: BTreeMap<String, u8>,
         }
 
@@ -423,10 +420,23 @@ pub fn throw_ball_from_bag(
     rng: &mut Random,
 ) -> Result<Option<CaptureOutcome>, CaptureUseError> {
     validate_capture_ball_item(rules, ball)?;
+    context.ball_id = ball.script_name.clone();
+    if context.trainer_battle {
+        if bag.quantity(ball) == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(resolve_capture_attempt(
+            player,
+            enemy,
+            &context,
+            rules,
+            wobble_probabilities,
+            rng,
+        )?));
+    }
     if !bag.consume_ball(ball).map_err(CaptureUseError::Bag)? {
         return Ok(None);
     }
-    context.ball_id = ball.script_name.clone();
     Ok(Some(resolve_capture_attempt(
         player,
         enemy,
@@ -509,7 +519,7 @@ pub fn capture_rules_issues(
             issues.push(CaptureRulesIssue::InvalidBallRuleItem {
                 ball_id: ball_id.clone(),
             });
-        } else if !ball_items.is_empty() {
+        } else if !ball_items.is_empty() && !BATTLE_ONLY_CAPTURE_BALLS.contains(&ball_id.as_str()) {
             match ball_items.get(ball_id) {
                 Some(item) if !item.battle_usable => {
                     issues.push(CaptureRulesIssue::UnusableBallRuleItem {
@@ -702,6 +712,18 @@ pub fn complete_active_wild_capture(
     state: &mut GameState,
     outcome: &CaptureOutcome,
 ) -> Result<Option<StoredCapture>, String> {
+    if !outcome.caught {
+        return Err("cannot complete capture from an uncaught capture outcome".to_string());
+    }
+    if outcome.blocked {
+        return Err("cannot complete capture from a blocked capture outcome".to_string());
+    }
+    if outcome.rng_seed_after != state.rng_seed {
+        return Err(format!(
+            "capture outcome rng seed {} does not match saved rng seed {}",
+            outcome.rng_seed_after, state.rng_seed
+        ));
+    }
     let enemy_pokemon = match &state.battle {
         BattleMemory::Wild { enemy_pokemon, .. }
         | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
@@ -1098,7 +1120,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -1712,6 +1735,7 @@ mod tests {
         let mut state = GameState::default();
         state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
             enemy_pokemon: enemy.clone(),
             enemy_party: vec![enemy],
@@ -1788,7 +1812,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -1846,6 +1871,54 @@ mod tests {
     }
 
     #[test]
+    fn throwing_ball_in_trainer_battle_is_blocked_without_consuming_bag_item() {
+        let ball = test_ball("POKE_BALL");
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut bag = Bag::default();
+        bag.add_item(&ball, 1).expect("add ball");
+        let mut rng = Random::new(1);
+        let mut context = CaptureAttemptContext::wild("IGNORED");
+        context.trainer_battle = true;
+
+        let outcome = throw_ball_from_bag(
+            &mut bag,
+            &ball,
+            &player,
+            &enemy,
+            context,
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect("trainer ball throw resolves")
+        .expect("ball was available");
+
+        assert!(outcome.blocked);
+        assert!(!outcome.caught);
+        assert_eq!(outcome.rng_seed_after, rng.seed());
+        assert_eq!(bag.quantity(&ball), 1);
+
+        let mut empty_bag = Bag::default();
+        let mut context = CaptureAttemptContext::wild("IGNORED");
+        context.trainer_battle = true;
+        assert_eq!(
+            throw_ball_from_bag(
+                &mut empty_bag,
+                &ball,
+                &player,
+                &enemy,
+                context,
+                &capture_rules(),
+                &wobble_probabilities(),
+                &mut rng,
+            )
+            .expect("empty trainer ball throw resolves"),
+            None
+        );
+    }
+
+    #[test]
     fn undeclared_capture_ball_rule_rejects_before_consumption() {
         use crate::models::item_pocket;
 
@@ -1866,7 +1939,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -1932,7 +2006,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,

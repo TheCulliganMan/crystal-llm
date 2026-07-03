@@ -52,6 +52,9 @@ describe("exportFieldMoves", () => {
         "\tconst FLY",
         "\tconst DIG",
         "\tconst TELEPORT",
+        "\tconst HEADBUTT",
+        "\tconst ROCK_SMASH",
+        "\tconst SWEET_SCENT",
       ].join("\n")
     );
     writeFile(
@@ -62,6 +65,8 @@ describe("exportFieldMoves", () => {
         "DEF COLL_TALL_GRASS EQU $18",
         "DEF COLL_LONG_GRASS EQU $14",
         "DEF COLL_LONG_GRASS_1C EQU $1c",
+        "DEF COLL_HEADBUTT_TREE EQU $15",
+        "DEF COLL_HEADBUTT_TREE_1D EQU $1d",
         "DEF COLL_WHIRLPOOL EQU $24",
         "DEF COLL_WHIRLPOOL_2C EQU $2c",
         "DEF COLL_WATERFALL_RIGHT EQU $30",
@@ -161,8 +166,11 @@ describe("exportFieldMoves", () => {
     expect(catalog.cut.badge).toEqual({ region: "johto", index: 1 });
     expect(catalog.flash.engine_flag).toBe("STATUSFLAGS_FLASH");
     expect(catalog.fly).toEqual({ move_id: "FLY", badge: { region: "johto", index: 5 } });
-    expect(catalog.dig).toEqual({ move_id: "DIG" });
-    expect(catalog.teleport).toEqual({ move_id: "TELEPORT" });
+    expect(catalog.dig).toEqual({ move_id: "DIG", target_collisions: [] });
+    expect(catalog.teleport).toEqual({ move_id: "TELEPORT", target_collisions: [] });
+    expect(catalog.headbutt).toEqual({ move_id: "HEADBUTT", target_collisions: [0x15, 0x1d] });
+    expect(catalog.rock_smash).toEqual({ move_id: "ROCK_SMASH", target_collisions: [] });
+    expect(catalog.sweet_scent).toEqual({ move_id: "SWEET_SCENT", target_collisions: [] });
     expect(catalog.escape_rope).toEqual({ item_id: "ESCAPE_ROPE", escape_rope_mode: "DIG_WARP" });
     expect(catalog.repel).toEqual({});
     expect(catalog.bicycle).toEqual({ item_id: "BICYCLE" });

@@ -88,8 +88,8 @@ const scriptedWarpMapArg = (command: string, args: string[]): string | null => {
   if (command === "warp" && args[0] && !isMapSentinel(args[0])) {
     return args[0];
   }
-  if (command === "warpfacing" && args[1] && !isMapSentinel(args[1])) {
-    return args[1];
+  if (command === "warpfacing" && args[0] && !isMapSentinel(args[0])) {
+    return args[0];
   }
   return null;
 };
@@ -179,8 +179,8 @@ export function exportPlayability(options: { itemIds?: Iterable<string> } = {}):
     itemIds: options.itemIds,
     start: {
       map: spawn.mapName,
-      x: spawn.metatileX,
-      y: spawn.metatileY,
+      x: spawn.tileX,
+      y: spawn.tileY,
     },
   });
 }

@@ -28,6 +28,15 @@ const STAT_MAPPING: Record<string, Stat> = {
   EVASION: "EVASION",
 };
 
+function canonicalMoveEffectId(effect: string): string {
+  const statChangeMatch = effect.match(/^([A-Z_]+)_(UP|DOWN)_?(\d)?_?(HIT)?$/);
+  if (!statChangeMatch) return effect;
+  const [, statKey, direction, amountStr, isHit] = statChangeMatch;
+  const statName = STAT_MAPPING[statKey];
+  if (!statName) return effect;
+  return `${statName}_${direction}${amountStr ? `_${amountStr}` : ""}${isHit ? "_HIT" : ""}`;
+}
+
 export function parsePokemonConstants(constantsFilePath: string): Record<string, number> {
   const idMap: Record<string, number> = {};
   let idCounter = 0;
@@ -214,7 +223,7 @@ export function parseMoves(movesFilePath: string): Record<string, Move> {
         stat = statName;
         amount = amountStr ? Number.parseInt(amountStr, 10) : 1;
         if (direction === "DOWN" && amount !== null) amount *= -1;
-        effect = `${statName}_${direction}${amountStr ?? ""}${isHit ? "_HIT" : ""}`;
+        effect = canonicalMoveEffectId(effect);
       }
     }
     movesMap[name] = {

@@ -5,6 +5,7 @@ const mockExportData = jest.fn(() => {
   return {
     pokemonData: [{ id: "BULBASAUR", int_id: 1 }],
     movesData: { TACKLE: { name: "TACKLE", effect: "NORMAL_HIT" } },
+    growthRatesData: [],
     learnsetsData: {},
     levelUpMovesData: {},
     eggMovesData: {},
@@ -40,8 +41,11 @@ const mockExportFieldMoves = jest.fn(() => {
     surf: { move_id: "SURF", badge: { region: "johto", index: 3 }, blocked_collisions: [], target_collisions: [] },
     waterfall: { move_id: "WATERFALL", badge: { region: "johto", index: 7 }, blocked_collisions: [], target_collisions: [] },
     fly: { move_id: "FLY", badge: { region: "johto", index: 5 } },
-    dig: { move_id: "DIG" },
-    teleport: { move_id: "TELEPORT" },
+    dig: { move_id: "DIG", target_collisions: [] },
+    teleport: { move_id: "TELEPORT", target_collisions: [] },
+    headbutt: { move_id: "HEADBUTT", target_collisions: [0x15, 0x1d] },
+    rock_smash: { move_id: "ROCK_SMASH", target_collisions: [] },
+    sweet_scent: { move_id: "SWEET_SCENT", target_collisions: [] },
     escape_rope: { effect: "ESCAPE_ROPE", escape_rope_mode: "DIG_WARP" },
     repel: { effects: ["REPEL", "SUPER_REPEL", "MAX_REPEL"] },
     bicycle: { effect: "BICYCLE" },
@@ -51,6 +55,20 @@ const mockExportFieldMoves = jest.fn(() => {
     blue_card: { effect: "BLUE_CARD" },
     town_map: { effect: "TOWN_MAP" },
   };
+});
+const mockExportFieldBoxItems = jest.fn(() => {
+  mockCalls.push("exportFieldBoxItems");
+  return {
+    NORMAL_BOX: {
+      item_id: "NORMAL_BOX",
+      effect: "NORMAL_BOX",
+      decoration_flag: "EVENT_DECO_SILVER_TROPHY",
+    },
+  };
+});
+const mockExportFlyDestinations = jest.fn(() => {
+  mockCalls.push("exportFlyDestinations");
+  return { ENGINE_FLYPOINT_NEW_BARK: { label: "LANDMARK_NEW_BARK_TOWN" } };
 });
 const mockExportBattleRewardRules = jest.fn(() => {
   mockCalls.push("exportBattleRewardRules");
@@ -154,6 +172,7 @@ const mockExportRuntimeAssets = jest.fn(() => {
     specialPhoneCalls: { SPECIALCALL_NONE: {} },
     npcTrades: { NPC_TRADE_MIKE: {} },
     specialRoutines: { FadeOutMusic: {} },
+    encounterMusicModifiers: { trainerClasses: {}, species: {} },
   };
 });
 const mockExportRoamingPokemon = jest.fn(() => {
@@ -382,6 +401,8 @@ jest.mock("./export-wild-encounters", () => ({ exportWildEncounters: mockExportW
 jest.mock("./export-field-encounters", () => ({ exportFieldEncounters: mockExportFieldEncounters }));
 jest.mock("./export-fishing", () => ({ exportFishing: mockExportFishing }));
 jest.mock("./export-field-moves", () => ({ exportFieldMoves: mockExportFieldMoves }));
+jest.mock("./export-field-box-items", () => ({ exportFieldBoxItems: mockExportFieldBoxItems }));
+jest.mock("./export-fly-destinations", () => ({ exportFlyDestinations: mockExportFlyDestinations }));
 jest.mock("./export-battle-reward-rules", () => ({ exportBattleRewardRules: mockExportBattleRewardRules }));
 jest.mock("./export-battle-escape-rules", () => ({ exportBattleEscapeRules: mockExportBattleEscapeRules }));
 jest.mock("./export-step-event-rules", () => ({ exportStepEventRules: mockExportStepEventRules }));
@@ -450,6 +471,8 @@ describe("exportCoreData", () => {
       "exportFieldEncounters",
       "exportFishing",
       "exportFieldMoves",
+      "exportFieldBoxItems",
+      "exportFlyDestinations",
       "exportBattleRewardRules",
       "exportBattleEscapeRules",
       "exportStepEventRules",
@@ -528,6 +551,7 @@ describe("exportCoreData", () => {
     expect(mockExportCoreContentPack).toHaveBeenCalledWith({
       pokemonData: [{ id: "BULBASAUR", int_id: 1 }],
       movesData: { TACKLE: { name: "TACKLE", effect: "NORMAL_HIT" } },
+      growthRatesData: [],
       learnsetsData: {},
       levelUpMovesData: {},
       eggMovesData: {},
@@ -543,8 +567,11 @@ describe("exportCoreData", () => {
         surf: { move_id: "SURF", badge: { region: "johto", index: 3 }, blocked_collisions: [], target_collisions: [] },
         waterfall: { move_id: "WATERFALL", badge: { region: "johto", index: 7 }, blocked_collisions: [], target_collisions: [] },
         fly: { move_id: "FLY", badge: { region: "johto", index: 5 } },
-        dig: { move_id: "DIG" },
-        teleport: { move_id: "TELEPORT" },
+        dig: { move_id: "DIG", target_collisions: [] },
+        teleport: { move_id: "TELEPORT", target_collisions: [] },
+        headbutt: { move_id: "HEADBUTT", target_collisions: [0x15, 0x1d] },
+        rock_smash: { move_id: "ROCK_SMASH", target_collisions: [] },
+        sweet_scent: { move_id: "SWEET_SCENT", target_collisions: [] },
         escape_rope: { effect: "ESCAPE_ROPE", escape_rope_mode: "DIG_WARP" },
         repel: { effects: ["REPEL", "SUPER_REPEL", "MAX_REPEL"] },
         bicycle: { effect: "BICYCLE" },
@@ -554,6 +581,14 @@ describe("exportCoreData", () => {
         blue_card: { effect: "BLUE_CARD" },
         town_map: { effect: "TOWN_MAP" },
       },
+      fieldBoxItems: {
+        NORMAL_BOX: {
+          item_id: "NORMAL_BOX",
+          effect: "NORMAL_BOX",
+          decoration_flag: "EVENT_DECO_SILVER_TROPHY",
+        },
+      },
+      flyDestinations: { ENGINE_FLYPOINT_NEW_BARK: { label: "LANDMARK_NEW_BARK_TOWN" } },
       battleRewardRules: {
         max_level: 100,
         wild_exp_divisor: 7,
@@ -667,6 +702,7 @@ describe("exportCoreData", () => {
         grass: [{ threshold: 100, slot: 0 }],
         water: [{ threshold: 100, slot: 0 }],
       },
+      encounterMusicModifiers: { trainerClasses: {}, species: {} },
       battleStatMultipliers: {
         stat: [{ numerator: 1, denominator: 1 }],
         accuracy: [{ numerator: 1, denominator: 1 }],

@@ -140,7 +140,7 @@ impl<'de> Deserialize<'de> for ScriptPhoneCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptPhoneCommand {
-            #[serde(default, deserialize_with = "required_script_phone_command_token")]
+            #[serde(deserialize_with = "required_script_phone_command_token")]
             command: String,
             #[serde(deserialize_with = "required_phone_contact_id")]
             contact_id: String,
@@ -156,9 +156,7 @@ impl<'de> Deserialize<'de> for ScriptPhoneCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_phone_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_phone_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -197,7 +195,7 @@ pub enum PhoneRegistrationResult {
     Refused,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum ScriptPhoneError {
     #[error("invalid script phone command '{command}'")]
@@ -1421,17 +1419,18 @@ mod tests {
             "{outcome_error}"
         );
 
-        let error_error = serde_json::from_value::<ScriptPhoneError>(serde_json::json!({
-            "UnknownCommand": {
-                "command": "phonecall",
-                "normalized_command": "checkcellnum"
-            }
+        let command_error = serde_json::from_value::<ScriptPhoneCommand>(serde_json::json!({
+            "command": "checkcellnum",
+            "contact_id": "PHONE_MOM",
+            "source_script": "MomScript",
+            "command_index": 2,
+            "normalized_command": "checkcellnum"
         }))
         .expect_err("normalized command must be rejected")
         .to_string();
         assert!(
-            error_error.contains("unknown field `normalized_command`"),
-            "{error_error}"
+            command_error.contains("unknown field `normalized_command`"),
+            "{command_error}"
         );
     }
 }

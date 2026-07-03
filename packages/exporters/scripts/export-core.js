@@ -43,6 +43,8 @@ require.extensions[".ts"] = function registerTs(module, filename) {
 
 require(path.join(packageRoot, "src", "exporters")).exportCoreData();
 
+const compiledPackRelativePath = "content-packs/core-modular.crystalpack";
+const packCompilerTargetDir = path.join(repoRoot, "rust", "target-pack-core");
 const packResult = childProcess.spawnSync(
   "cargo",
   [
@@ -56,9 +58,16 @@ const packResult = childProcess.spawnSync(
     "pack_core",
     "--",
     repoRoot,
-    "content-packs/core-modular.crystalpack",
+    compiledPackRelativePath,
   ],
-  { cwd: repoRoot, stdio: "inherit" }
+  {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: packCompilerTargetDir,
+    },
+    stdio: "inherit",
+  }
 );
 if (packResult.error) {
   throw packResult.error;
@@ -66,3 +75,8 @@ if (packResult.error) {
 if (packResult.status !== 0) {
   process.exit(packResult.status ?? 1);
 }
+
+const compiledAssetPack = path.join(repoRoot, "apps", "web", "assets", "data", compiledPackRelativePath);
+const trackedPack = path.join(repoRoot, compiledPackRelativePath);
+fs.mkdirSync(path.dirname(trackedPack), { recursive: true });
+fs.copyFileSync(compiledAssetPack, trackedPack);

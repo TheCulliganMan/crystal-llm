@@ -15,30 +15,11 @@ impl<'de> Deserialize<'de> for FleeMonTables {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawFleeMonTables {
-            buckets: Option<BTreeMap<String, Vec<String>>>,
-            #[serde(default)]
-            always: Vec<String>,
-            #[serde(default)]
-            often: Vec<String>,
-            #[serde(default)]
-            sometimes: Vec<String>,
+            buckets: BTreeMap<String, Vec<String>>,
         }
 
         let raw = RawFleeMonTables::deserialize(deserializer)?;
-        let mut buckets = raw.buckets.unwrap_or_default();
-        if !raw.always.is_empty() {
-            buckets.insert("always".to_string(), raw.always);
-        }
-        if !raw.often.is_empty() {
-            buckets.insert("often".to_string(), raw.often);
-        }
-        if !raw.sometimes.is_empty() {
-            buckets.insert("sometimes".to_string(), raw.sometimes);
-        }
-        if buckets.is_empty() {
-            return Err(serde::de::Error::missing_field("buckets"));
-        }
-
+        let buckets = raw.buckets;
         for (bucket_id, species) in &buckets {
             if !is_exact_nonempty_flee_mon_bucket(bucket_id) {
                 return Err(serde::de::Error::custom(format!(
@@ -59,9 +40,7 @@ impl<'de> Deserialize<'de> for FleeMonTables {
             }
         }
 
-        Ok(Self {
-            buckets,
-        })
+        Ok(Self { buckets })
     }
 }
 
@@ -234,20 +213,14 @@ mod tests {
 
     #[test]
     fn flee_mon_tables_accept_exact_custom_bucket_ids() {
-        let flee_mons: FleeMonTables = serde_json::from_str(
-            r#"{"buckets":{"always":["RAIKOU"],"deep_cave":["ZUBAT"],"empty":[]}}"#,
-        )
-        .expect("exact custom bucket ids are pack data");
+        let flee_mons: FleeMonTables =
+            serde_json::from_str(r#"{"buckets":{"always":["RAIKOU"],"deep_cave":["ZUBAT"]}}"#)
+                .expect("exact custom bucket ids are pack data");
         let species_ids = ["RAIKOU".to_string(), "ZUBAT".to_string()]
             .into_iter()
             .collect();
 
-        assert_eq!(
-            flee_mon_catalog_issues(&flee_mons, &species_ids),
-            vec![FleeMonCatalogIssue::EmptyBucket {
-                bucket_id: "empty".to_string(),
-            }]
-        );
+        assert!(flee_mon_catalog_issues(&flee_mons, &species_ids).is_empty());
     }
 
     #[test]

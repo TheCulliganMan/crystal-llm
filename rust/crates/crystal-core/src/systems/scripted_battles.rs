@@ -318,6 +318,7 @@ mod tests {
         let pokemon = test_pokemon();
         let start = StaticWildBattleStart {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             species: "SNORLAX".to_string(),
             level: 30,
             source_script: "Route12SnorlaxScript".to_string(),
@@ -365,6 +366,7 @@ mod tests {
         let pokemon = test_pokemon();
         let start = StaticWildBattleStart {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             species: "SNORLAX".to_string(),
             level: 30,
             source_script: "Route12SnorlaxScript".to_string(),

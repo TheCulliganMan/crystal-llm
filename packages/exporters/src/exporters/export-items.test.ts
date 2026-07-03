@@ -439,6 +439,25 @@ describe("exportItems", () => {
     expect(() => exportItems()).toThrow("missing authored item effect for item slot 0");
   });
 
+  it("exports Town Map as field usable from the exact authored item effect", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "attributes.asm"),
+      completeAttributeTableWithFirstRow(
+        "TOWN_MAP",
+        "\titem_attribute 0, HELD_NONE, 0, CANT_SELECT | CANT_TOSS, KEY_ITEM, ITEMMENU_NOUSE, ITEMMENU_NOUSE"
+      )
+    );
+
+    const items = exportItems();
+
+    expect(items[0]).toMatchObject({
+      script_name: "TOWN_MAP",
+      effect: "TOWN_MAP",
+      field_menu: "ITEMMENU_NOUSE",
+      field_usable: true,
+    });
+  });
+
   it("exports vitamin stat metadata as definitive modpack fields", () => {
     writeFile(path.join(mockDisassemblyRoot, "data", "items", "attributes.asm"), completeAttributeTable("PROTEIN"));
 

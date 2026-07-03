@@ -8,6 +8,7 @@ use crate::state::{
 };
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::PlayerMovementState;
+use crate::world::session::raw_event_tile_to_runtime_tile_checked;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +36,7 @@ impl<'de> Deserialize<'de> for ScriptMapCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptMapCommand {
-            #[serde(default, deserialize_with = "required_script_map_command_token")]
+            #[serde(deserialize_with = "required_script_map_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_script_map_token")]
             target_map: Option<String>,
@@ -61,9 +62,7 @@ impl<'de> Deserialize<'de> for ScriptMapCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_map_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_map_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -247,9 +246,7 @@ fn require_warp_destination_shape(command: &ScriptMapCommand) -> Result<(), Stri
         }
         .to_string());
     }
-    if command.x.is_some_and(|x| i16::try_from(x).is_err())
-        || command.y.is_some_and(|y| i16::try_from(y).is_err())
-    {
+    if command_runtime_tile(command).is_err() {
         return Err(ScriptMapCommandError::CoordinatesOutOfRange {
             command: command.command.clone(),
         }
@@ -641,18 +638,20 @@ fn is_no_warp_sentinel(command: &ScriptMapCommand) -> bool {
 }
 
 fn require_tile(command: &ScriptMapCommand) -> Result<TilePosition, ScriptMapCommandError> {
+    command_runtime_tile(command)
+}
+
+fn command_runtime_tile(command: &ScriptMapCommand) -> Result<TilePosition, ScriptMapCommandError> {
     let (Some(x), Some(y)) = (command.x, command.y) else {
         return Err(ScriptMapCommandError::MissingCoordinates {
             command: command.command.clone(),
         });
     };
-    let x = i16::try_from(x).map_err(|_| ScriptMapCommandError::CoordinatesOutOfRange {
-        command: command.command.clone(),
-    })?;
-    let y = i16::try_from(y).map_err(|_| ScriptMapCommandError::CoordinatesOutOfRange {
-        command: command.command.clone(),
-    })?;
-    Ok(TilePosition::new(x, y))
+    raw_event_tile_to_runtime_tile_checked(x, y).ok_or_else(|| {
+        ScriptMapCommandError::CoordinatesOutOfRange {
+            command: command.command.clone(),
+        }
+    })
 }
 
 fn reject_warp_destination(command: &ScriptMapCommand) -> Result<(), ScriptMapCommandError> {
@@ -714,9 +713,7 @@ fn push_warp_destination_issues(
         issues.push(ScriptMapCommandError::MissingCoordinates {
             command: command.command.clone(),
         });
-    } else if command.x.is_some_and(|x| i16::try_from(x).is_err())
-        || command.y.is_some_and(|y| i16::try_from(y).is_err())
-    {
+    } else if command_runtime_tile(command).is_err() {
         issues.push(ScriptMapCommandError::CoordinatesOutOfRange {
             command: command.command.clone(),
         });
@@ -1088,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_exact_warp_and_warpfacing_commands() {
+    fn resolves_scaled_warp_and_warpfacing_commands() {
         let mut warp = command("warp");
         warp.target_map = Some("EcruteakCity".to_string());
         warp.x = Some(6);
@@ -1097,7 +1094,7 @@ mod tests {
             resolve_script_map_command(warp, &maps()).expect("warp"),
             ScriptMapAction::Warp {
                 target_map: "EcruteakCity".to_string(),
-                tile: TilePosition::new(6, 27),
+                tile: TilePosition::new(12, 54),
                 facing: None,
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
@@ -1113,11 +1110,52 @@ mod tests {
             resolve_script_map_command(warpfacing, &maps()).expect("warpfacing"),
             ScriptMapAction::Warp {
                 target_map: "BattleTower1F".to_string(),
-                tile: TilePosition::new(7, 7),
+                tile: TilePosition::new(14, 14),
                 facing: Some(Direction::Up),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
             }
+        );
+    }
+
+    #[test]
+    fn script_warp_coordinates_are_scaled_raw_event_tiles() {
+        let mut warp = command("warpfacing");
+        warp.target_map = Some("EcruteakCity".to_string());
+        warp.x = Some(27);
+        warp.y = Some(1);
+        warp.facing = Some("RIGHT".to_string());
+
+        assert_eq!(
+            resolve_script_map_command(warp, &maps()).expect("raw tile warpfacing"),
+            ScriptMapAction::Warp {
+                target_map: "EcruteakCity".to_string(),
+                tile: TilePosition::new(54, 2),
+                facing: Some(Direction::Right),
+                source_script: "WarpScript".to_string(),
+                command_index: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_script_warp_coordinates_that_overflow_runtime_tile_space() {
+        let mut warp = command("warp");
+        warp.target_map = Some("EcruteakCity".to_string());
+        warp.x = Some(40_000);
+        warp.y = Some(0);
+
+        assert_eq!(
+            resolve_script_map_command(warp.clone(), &maps()),
+            Err(ScriptMapCommandError::CoordinatesOutOfRange {
+                command: "warp".to_string(),
+            })
+        );
+        assert_eq!(
+            script_map_command_issues(&warp, &maps()),
+            vec![ScriptMapCommandError::CoordinatesOutOfRange {
+                command: "warp".to_string(),
+            }]
         );
     }
 
@@ -1289,7 +1327,7 @@ mod tests {
             state.script_runtime.pending_script_warp,
             Some(ScriptWarpRequest {
                 target_map: "BattleTower1F".to_string(),
-                tile: TilePosition::new(7, 7),
+                tile: TilePosition::new(14, 14),
                 facing: Some(Direction::Up),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
@@ -1342,7 +1380,7 @@ mod tests {
         let mut state = GameState::default();
         state.script_runtime.pending_script_warp = Some(ScriptWarpRequest {
             target_map: "EcruteakCity".to_string(),
-            tile: TilePosition::new(6, 27),
+            tile: TilePosition::new(12, 54),
             facing: None,
             source_script: "PreviousScript".to_string(),
             command_index: 1,
@@ -1364,7 +1402,7 @@ mod tests {
     fn completing_pending_script_warp_clears_exact_request_only() {
         let request = ScriptWarpRequest {
             target_map: "EcruteakCity".to_string(),
-            tile: TilePosition::new(6, 27),
+            tile: TilePosition::new(12, 54),
             facing: Some(Direction::Down),
             source_script: "WarpScript".to_string(),
             command_index: 2,
@@ -1383,7 +1421,7 @@ mod tests {
     fn completing_pending_script_warp_rejects_missing_or_changed_request() {
         let request = ScriptWarpRequest {
             target_map: "EcruteakCity".to_string(),
-            tile: TilePosition::new(6, 27),
+            tile: TilePosition::new(12, 54),
             facing: None,
             source_script: "WarpScript".to_string(),
             command_index: 2,
@@ -1409,11 +1447,11 @@ mod tests {
 
     #[test]
     fn script_warp_arrival_facing_applies_only_explicit_direction() {
-        let mut player = PlayerMovementState::new(TilePosition::new(6, 27));
+        let mut player = PlayerMovementState::new(TilePosition::new(12, 54));
         player.facing = Direction::Left;
         let request = ScriptWarpRequest {
             target_map: "EcruteakCity".to_string(),
-            tile: TilePosition::new(6, 27),
+            tile: TilePosition::new(12, 54),
             facing: Some(Direction::Up),
             source_script: "WarpScript".to_string(),
             command_index: 2,

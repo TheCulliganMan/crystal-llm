@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::battle::start::materialize_trainer_party;
+use crate::battle::start::{first_available_battle_party_index, materialize_trainer_party};
 use crate::models::{
     CaptureStorageLocation, Dv, Item, LearnedMove, MAX_BOX_MONS, Move, Party, Pokemon,
     PokemonSpecies, TrainerCatalog, create_pokemon_from_known_dvs, max_move_pp,
@@ -21,7 +21,7 @@ use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
 use crate::systems::phone::PhoneContactCatalog;
 use crate::world::encounters::{TimeOfDay, WildEncounter, WildEncounterData};
-use crate::world::map::{Direction, TilePosition};
+use crate::world::map::{Direction, METATILE_WIDTH, TilePosition};
 use crate::world::movement::MovementMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +622,8 @@ pub enum SpecialRoutineError {
     InvalidBuenaPasswordCategoryIndex { routine: String, index: usize },
     #[error("special routine {routine} has invalid Buena password option index {index}")]
     InvalidBuenaPasswordOptionIndex { routine: String, index: usize },
+    #[error("special routine {routine} has invalid Buena password guess {guess}")]
+    InvalidBuenaPasswordGuess { routine: String, guess: String },
     #[error(
         "saved buenas_password.category_index {index} is outside compiled Buena password categories"
     )]
@@ -1978,6 +1980,13 @@ fn is_exact_nonempty_special_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn is_exact_nonempty_special_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && !value.chars().any(char::is_control)
+}
+
 fn require_special_token(field: &str, value: &str) -> Result<(), String> {
     if is_exact_nonempty_special_token(value) {
         Ok(())
@@ -2160,8 +2169,11 @@ impl<'de> Deserialize<'de> for BuenaPasswordCategoryDefinition {
             ));
         }
         for (index, option) in raw.options.iter().enumerate() {
-            require_special_token(&format!("buena password options[{index}]"), option)
-                .map_err(serde::de::Error::custom)?;
+            if !is_exact_nonempty_special_value(option) {
+                return Err(serde::de::Error::custom(format!(
+                    "buena password options[{index}] must be exact and nonempty"
+                )));
+            }
         }
         Ok(Self {
             category_type: raw.category_type,
@@ -2354,7 +2366,12 @@ pub fn buena_password_category_issues(
                 });
                 continue;
             }
-            if !is_exact_nonempty_special_token(option) {
+            let option_is_valid = if category.category_type == "BUENA_STRING" {
+                is_exact_nonempty_special_value(option)
+            } else {
+                is_exact_nonempty_special_token(option)
+            };
+            if !option_is_valid {
                 issues.push(BuenaPasswordCategoryIssue::InvalidOption {
                     id: id.clone(),
                     option_index,
@@ -2643,6 +2660,26 @@ pub enum RuntimeSpawnPointCatalogIssue {
     InvalidSpawnPoint {
         key: String,
     },
+    CoordinateMismatch {
+        key: String,
+        tile_x: i16,
+        tile_y: i16,
+        expected_tile_x: i16,
+        expected_tile_y: i16,
+    },
+    CoordinateOverflow {
+        key: String,
+        metatile_x: i16,
+        metatile_y: i16,
+        subtile_x: i16,
+        subtile_y: i16,
+    },
+    InvalidSubtile {
+        key: String,
+        subtile_x: i16,
+        subtile_y: i16,
+        metatile_width: i16,
+    },
     DuplicateMapBinding {
         key: String,
         existing_key: String,
@@ -2665,6 +2702,35 @@ pub fn runtime_spawn_point_catalog_issues(
             || !is_exact_nonempty_spawn_token(&spawn.group_name);
         if invalid_spawn_point {
             issues.push(RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint { key: key.clone() });
+        }
+        if !runtime_spawn_subtiles_are_valid(spawn) {
+            issues.push(RuntimeSpawnPointCatalogIssue::InvalidSubtile {
+                key: key.clone(),
+                subtile_x: spawn.subtile_x,
+                subtile_y: spawn.subtile_y,
+                metatile_width: METATILE_WIDTH,
+            });
+        } else {
+            match checked_runtime_spawn_expected_tile(spawn) {
+                Some(expected_tile) => {
+                    if spawn.tile_x != expected_tile.x || spawn.tile_y != expected_tile.y {
+                        issues.push(RuntimeSpawnPointCatalogIssue::CoordinateMismatch {
+                            key: key.clone(),
+                            tile_x: spawn.tile_x,
+                            tile_y: spawn.tile_y,
+                            expected_tile_x: expected_tile.x,
+                            expected_tile_y: expected_tile.y,
+                        });
+                    }
+                }
+                None => issues.push(RuntimeSpawnPointCatalogIssue::CoordinateOverflow {
+                    key: key.clone(),
+                    metatile_x: spawn.metatile_x,
+                    metatile_y: spawn.metatile_y,
+                    subtile_x: spawn.subtile_x,
+                    subtile_y: spawn.subtile_y,
+                }),
+            }
         }
         if key.parse::<u16>().ok() != Some(spawn.identifier) {
             issues.push(RuntimeSpawnPointCatalogIssue::IdentifierMismatch {
@@ -2701,6 +2767,61 @@ pub fn runtime_spawn_point_catalog_issues(
     }
 
     issues
+}
+
+pub fn runtime_spawn_expected_tile(spawn: &RuntimeSpawnPointRef) -> TilePosition {
+    checked_runtime_spawn_expected_tile(spawn)
+        .expect("verified runtime spawn point coordinate must fit runtime tile arithmetic")
+}
+
+pub fn runtime_spawn_point_from_runtime_tile(
+    identifier: u16,
+    map_constant: String,
+    map_name: String,
+    group_id: i16,
+    map_id: i16,
+    group_name: String,
+    tile: TilePosition,
+) -> Option<RuntimeSpawnPointRef> {
+    if tile.x < 0 || tile.y < 0 {
+        return None;
+    }
+    let spawn = RuntimeSpawnPointRef {
+        identifier,
+        map_constant,
+        map_name,
+        group_id,
+        map_id,
+        tile_x: tile.x,
+        tile_y: tile.y,
+        group_name,
+        metatile_x: tile.x.div_euclid(METATILE_WIDTH),
+        metatile_y: tile.y.div_euclid(METATILE_WIDTH),
+        subtile_x: tile.x.rem_euclid(METATILE_WIDTH),
+        subtile_y: tile.y.rem_euclid(METATILE_WIDTH),
+    };
+    (checked_runtime_spawn_expected_tile(&spawn) == Some(tile)).then_some(spawn)
+}
+
+pub fn checked_runtime_spawn_expected_tile(spawn: &RuntimeSpawnPointRef) -> Option<TilePosition> {
+    if !runtime_spawn_subtiles_are_valid(spawn) {
+        return None;
+    }
+    let x = i32::from(spawn.metatile_x)
+        .checked_mul(i32::from(METATILE_WIDTH))?
+        .checked_add(i32::from(spawn.subtile_x))?;
+    let y = i32::from(spawn.metatile_y)
+        .checked_mul(i32::from(METATILE_WIDTH))?
+        .checked_add(i32::from(spawn.subtile_y))?;
+    Some(TilePosition::new(
+        i16::try_from(x).ok()?,
+        i16::try_from(y).ok()?,
+    ))
+}
+
+pub fn runtime_spawn_subtiles_are_valid(spawn: &RuntimeSpawnPointRef) -> bool {
+    (0..METATILE_WIDTH).contains(&spawn.subtile_x)
+        && (0..METATILE_WIDTH).contains(&spawn.subtile_y)
 }
 
 fn is_exact_nonempty_spawn_token(value: &str) -> bool {
@@ -3336,7 +3457,7 @@ fn warp_to_spawn_point(
         });
     }
     let spawn = resolve_spawn_point(state, spawn_points, routine)?;
-    let tile = TilePosition::new(spawn.tile_x, spawn.tile_y);
+    let tile = runtime_spawn_expected_tile(spawn);
     state.last_spawn_identifier = Some(spawn.identifier);
     state.overworld = OverworldMemory::Active {
         map_name: spawn.map_name.clone(),
@@ -3384,11 +3505,11 @@ fn warp_to_spawn_point(
     state
         .script_runtime
         .variables
-        .insert("wXCoord".to_string(), spawn.tile_x.to_string());
+        .insert("wXCoord".to_string(), tile.x.to_string());
     state
         .script_runtime
         .variables
-        .insert("wYCoord".to_string(), spawn.tile_y.to_string());
+        .insert("wYCoord".to_string(), tile.y.to_string());
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -4247,21 +4368,16 @@ fn snorlax_awake(
 }
 
 fn snorlax_tile_is_adjacent(x: i16, y: i16) -> bool {
-    const PROXIMITY_COORDS: &[(i32, i32)] = &[(33, 8), (34, 10), (35, 10), (36, 8), (36, 9)];
+    const PROXIMITY_COORDS: &[(i32, i32)] = &[
+        (33 * METATILE_WIDTH as i32, 8 * METATILE_WIDTH as i32),
+        (34 * METATILE_WIDTH as i32, 10 * METATILE_WIDTH as i32),
+        (35 * METATILE_WIDTH as i32, 10 * METATILE_WIDTH as i32),
+        (36 * METATILE_WIDTH as i32, 8 * METATILE_WIDTH as i32),
+        (36 * METATILE_WIDTH as i32, 9 * METATILE_WIDTH as i32),
+    ];
     let x = i32::from(x);
     let y = i32::from(y);
     PROXIMITY_COORDS.iter().any(|&(px, py)| px == x && py == y)
-        || [1, 3].into_iter().any(|x_offset| {
-            [1, 3].into_iter().any(|y_offset| {
-                let normalized_x = x - x_offset;
-                let normalized_y = y - y_offset;
-                normalized_x % 2 == 0
-                    && normalized_y % 2 == 0
-                    && PROXIMITY_COORDS
-                        .iter()
-                        .any(|&(px, py)| px == normalized_x / 2 && py == normalized_y / 2)
-            })
-        })
 }
 
 fn set_day_of_week(
@@ -4929,12 +5045,13 @@ fn name_rival(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let provided = required_string_script_variable(state, routine, "_rival_name")?;
-    let rival_name = if provided.chars().all(|value| value == ' ') || provided.is_empty() {
-        "SILVER".to_string()
-    } else {
-        provided
-    };
+    let rival_name = required_string_script_variable(state, routine, "_rival_name")?;
+    if rival_name.is_empty() || rival_name.chars().all(|value| value == ' ') {
+        return Err(SpecialRoutineError::MissingScriptValue {
+            routine: routine.to_string(),
+            variable: "_rival_name".to_string(),
+        });
+    }
     state
         .script_runtime
         .variables
@@ -6078,6 +6195,19 @@ fn buenas_password(
         .variables
         .get("BUENA_PASSWORD")
         .cloned();
+    if let Some(guess) = guess.as_deref() {
+        let exact_guess = if category.category_type == BUENA_PASSWORD_CATEGORY_STRING {
+            is_exact_nonempty_special_value(guess)
+        } else {
+            is_exact_nonempty_special_token(guess)
+        };
+        if !exact_guess {
+            return Err(SpecialRoutineError::InvalidBuenaPasswordGuess {
+                routine: routine.to_string(),
+                guess: guess.to_string(),
+            });
+        }
+    }
     let matched = guess.as_deref() == Some(correct.as_str());
     set_script_bool_value(state, matched);
     state
@@ -7015,17 +7145,19 @@ fn battle_tower_action(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let raw_action = required_raw_script_value(state, routine)?;
-    let action = raw_action
-        .split(';')
-        .next()
-        .expect("split always yields the original string")
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
+    if raw_action.trim().is_empty() || raw_action.trim_start().starts_with(';') {
+        return Err(SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
             variable: "_value action token".to_string(),
-        })?
-        .to_string();
+        });
+    }
+    if !is_exact_nonempty_special_token(&raw_action) {
+        return Err(SpecialRoutineError::UnhandledBattleTowerAction {
+            routine: routine.to_string(),
+            action: raw_action.to_string(),
+        });
+    }
+    let action = raw_action.to_string();
     let action_key = action.clone();
     let (value, truthy) = match action_key.as_str() {
         "BATTLETOWERACTION_CHECKSAVEFILEISYOURS" => {
@@ -7461,8 +7593,16 @@ fn load_opponent_trainer_and_pokemon_with_ot_sprite(
         ai_item_switch_flags: trainer.ai_item_switch_flags,
         ai_layers: trainer.ai_layers.clone(),
     };
+    let active_party_index = first_available_battle_party_index(state).ok_or_else(|| {
+        SpecialRoutineError::BattleTowerTrainerBuild {
+            routine: routine.to_string(),
+            trainer_id: trainer_id.clone(),
+            error: "no non-fainted player party Pokemon".to_string(),
+        }
+    })?;
+
     state.battle_result = 0;
-    state.battle_active_party_index = None;
+    state.battle_active_party_index = Some(active_party_index);
     state.battle_active_enemy_party_index = Some(0);
     state.battle_rewarded_enemy_party_indices.clear();
     state.script_runtime.variables.insert(
@@ -8164,12 +8304,19 @@ pub fn validate_saved_buena_password_references(
     Ok(())
 }
 
+const SAVED_SPECIAL_BATTLE_TYPE_BUILTIN_ROUTINES: &[(&str, &str)] = &[
+    ("BATTLETYPE_TRAINER_HOUSE", "TrainerHouse"),
+    ("BATTLETYPE_CELEBI", "CelebiShrineEvent"),
+];
+
+pub fn saved_special_battle_type_builtin_routines() -> &'static [(&'static str, &'static str)] {
+    SAVED_SPECIAL_BATTLE_TYPE_BUILTIN_ROUTINES
+}
+
 pub fn saved_special_battle_type_builtin_routine(battle_type: &str) -> Option<&'static str> {
-    match battle_type {
-        "BATTLETYPE_TRAINER_HOUSE" => Some("TrainerHouse"),
-        "BATTLETYPE_CELEBI" => Some("CelebiShrineEvent"),
-        _ => None,
-    }
+    saved_special_battle_type_builtin_routines()
+        .iter()
+        .find_map(|(candidate, routine)| (*candidate == battle_type).then_some(*routine))
 }
 
 pub fn validate_saved_pending_special_battle_type<F, G>(
@@ -9442,7 +9589,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -9986,20 +10134,16 @@ mod tests {
         tile_x: i16,
         tile_y: i16,
     ) -> RuntimeSpawnPointRef {
-        RuntimeSpawnPointRef {
+        runtime_spawn_point_from_runtime_tile(
             identifier,
-            map_constant: map_name.to_string(),
-            map_name: map_name.to_string(),
+            map_name.to_string(),
+            map_name.to_string(),
             group_id,
             map_id,
-            tile_x,
-            tile_y,
-            group_name: "GROUP".to_string(),
-            metatile_x: tile_x / 2,
-            metatile_y: tile_y / 2,
-            subtile_x: tile_x % 2,
-            subtile_y: tile_y % 2,
-        }
+            "GROUP".to_string(),
+            TilePosition::new(tile_x, tile_y),
+        )
+        .expect("test spawn point must be representable")
     }
 
     fn spawn_context<'a>(
@@ -10037,8 +10181,6 @@ mod tests {
         species_catalog: &'a BTreeMap<String, PokemonSpecies>,
         learnsets: &'a SpeciesLearnsets,
         trainer_catalog: &'a TrainerCatalog,
-        phone_contacts: &'a PhoneContactCatalog,
-        wild_encounters: &'a BTreeMap<String, WildEncounterData>,
     ) -> SpecialRoutineContext<'a> {
         SpecialRoutineContext {
             move_catalog,
@@ -10059,6 +10201,8 @@ mod tests {
             magikarp_lengths: &[],
             happiness_data: None,
             trainer_catalog,
+            phone_contacts: &EMPTY_TEST_PHONE_CONTACTS,
+            wild_encounters: &EMPTY_TEST_WILD_ENCOUNTERS,
             odd_egg_definitions: &[],
             oak_ratings: &[],
         }
@@ -11274,7 +11418,7 @@ mod tests {
         state.script_runtime.current_music = Some("MUSIC_POKE_FLUTE_CHANNEL".to_string());
         state.overworld = crate::state::OverworldMemory::Active {
             map_name: "Route11".to_string(),
-            tile: crate::world::map::TilePosition::new(34, 10),
+            tile: crate::world::map::TilePosition::new(68, 20),
             facing: crate::world::map::Direction::Down,
             mode: crate::world::movement::MovementMode::Normal,
         };
@@ -11286,7 +11430,7 @@ mod tests {
             awake.effect,
             SpecialRoutineEffect::SnorlaxAwake {
                 music: Some("MUSIC_POKE_FLUTE_CHANNEL".to_string()),
-                tile: Some((34, 10)),
+                tile: Some((68, 20)),
                 awake: true
             }
         );
@@ -11300,7 +11444,7 @@ mod tests {
             asleep.effect,
             SpecialRoutineEffect::SnorlaxAwake {
                 music: Some("MUSIC_ROUTE_11".to_string()),
-                tile: Some((34, 10)),
+                tile: Some((68, 20)),
                 awake: false
             }
         );
@@ -11308,7 +11452,7 @@ mod tests {
     }
 
     #[test]
-    fn snorlax_awake_accepts_packed_coordinate_candidates() {
+    fn snorlax_awake_rejects_packed_coordinate_candidates() {
         let mut state = GameState::default();
         state.script_runtime.current_music = Some("MUSIC_POKE_FLUTE_CHANNEL".to_string());
         state.overworld = crate::state::OverworldMemory::Active {
@@ -11319,16 +11463,17 @@ mod tests {
         };
 
         let outcome =
-            apply_special_routine(&mut state, &moves(), "SnorlaxAwake").expect("packed snorlax");
+            apply_special_routine(&mut state, &moves(), "SnorlaxAwake").expect("snorlax check");
 
         assert_eq!(
             outcome.effect,
             SpecialRoutineEffect::SnorlaxAwake {
                 music: Some("MUSIC_POKE_FLUTE_CHANNEL".to_string()),
                 tile: Some((67, 17)),
-                awake: true
+                awake: false
             }
         );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
         assert_eq!(
             state.script_runtime.last_special_routine.as_deref(),
             Some("SnorlaxAwake")
@@ -12164,6 +12309,18 @@ mod tests {
         state
             .script_runtime
             .variables
+            .insert("_rival_name".to_string(), "     ".to_string());
+        let blank_rival = apply_special_routine(&mut state, &moves(), "NameRival")
+            .expect_err("blank rival name is invalid definitive content");
+        assert!(matches!(
+            blank_rival,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "NameRival" && variable == "_rival_name"
+        ));
+
+        state
+            .script_runtime
+            .variables
             .insert("_rival_name".to_string(), "SILVER".to_string());
         let rival = apply_special_routine(&mut state, &moves(), "NameRival").expect("name rival");
 
@@ -12407,8 +12564,8 @@ mod tests {
 
         assert_eq!(
             happiness_data_issues(&HappinessData {
-                changes: Vec::new(),
-                services: Vec::new(),
+                changes: BTreeMap::new(),
+                services: BTreeMap::new(),
             }),
             vec![
                 HappinessDataIssue::EmptyChanges,
@@ -14571,13 +14728,14 @@ mod tests {
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
 
-        let mut aliased_state = GameState::default();
-        aliased_state
+        let mut padded_guess = state.clone();
+        padded_guess
             .script_runtime
             .variables
-            .insert("_selected_password".to_string(), "TOTODILE".to_string());
-        let aliased = apply_special_routine_with_context(
-            &mut aliased_state,
+            .insert("BUENA_PASSWORD".to_string(), " TOTODILE".to_string());
+        let before_padded_guess = padded_guess.clone();
+        let padded_guess_error = apply_special_routine_with_context(
+            &mut padded_guess,
             full_context_with_buena_password_categories(
                 &moves,
                 &species,
@@ -14587,18 +14745,15 @@ mod tests {
             ),
             "BuenasPassword",
         )
-        .expect("selected password alias is ignored");
+        .expect_err("padded Buena password guess rejected");
         assert_eq!(
-            aliased.effect,
-            SpecialRoutineEffect::BuenasPassword {
-                category: "JohtoStarters".to_string(),
-                category_type: "BUENA_MON".to_string(),
-                correct: "TOTODILE".to_string(),
-                guess: None,
-                matched: false,
-                rng_seed_after: 127_215
+            padded_guess_error,
+            SpecialRoutineError::InvalidBuenaPasswordGuess {
+                routine: "BuenasPassword".to_string(),
+                guess: " TOTODILE".to_string(),
             }
         );
+        assert_eq!(padded_guess, before_padded_guess);
 
         state
             .script_runtime
@@ -15757,6 +15912,32 @@ mod tests {
             assert_eq!(state, before);
         }
 
+        for padded_action in [
+            " BATTLETOWERACTION_SET_EXPLANATION_READ",
+            "BATTLETOWERACTION_SET_EXPLANATION_READ ",
+            "BATTLETOWERACTION_SET_EXPLANATION_READ ; comment",
+        ] {
+            let mut state = GameState::default();
+            state.battle_tower.save_file_flags = 0x55;
+            state
+                .script_runtime
+                .variables
+                .insert("_value".to_string(), padded_action.to_string());
+            let before = state.clone();
+
+            let error = apply_special_routine(&mut state, &moves(), "BattleTowerAction")
+                .expect_err("padded battle tower action rejected");
+
+            assert_eq!(
+                error,
+                SpecialRoutineError::UnhandledBattleTowerAction {
+                    routine: "BattleTowerAction".to_string(),
+                    action: padded_action.to_string(),
+                }
+            );
+            assert_eq!(state, before);
+        }
+
         let cases = [
             (
                 "BATTLETOWERACTION_SAVELEVELGROUP",
@@ -16425,7 +16606,7 @@ mod tests {
         let spawns = BTreeMap::from([
             (
                 "0".to_string(),
-                spawn_point(0, "PlayersHouse2F", 24, 7, 3, 3),
+                spawn_point(0, "PlayersHouse2F", 24, 7, 4, 4),
             ),
             (
                 "14".to_string(),
@@ -16543,7 +16724,7 @@ mod tests {
         state.last_spawn_identifier = Some(21);
         let spawns = BTreeMap::from([(
             "21".to_string(),
-            spawn_point(21, "IndigoPlateauPokecenter1F", 11, 4, 9, 7),
+            spawn_point(21, "IndigoPlateauPokecenter1F", 11, 4, 10, 8),
         )]);
 
         let outcome = apply_special_routine_with_context(
@@ -16557,7 +16738,7 @@ mod tests {
             SpecialRoutineEffect::WarpToSpawnPoint {
                 spawn_identifier: 21,
                 map_name: "IndigoPlateauPokecenter1F".to_string(),
-                tile: TilePosition::new(9, 7)
+                tile: TilePosition::new(10, 8)
             }
         );
 
@@ -16773,6 +16954,59 @@ mod tests {
     }
 
     #[test]
+    fn runtime_spawn_point_from_runtime_tile_preserves_exact_coordinate_fields() {
+        let spawn = runtime_spawn_point_from_runtime_tile(
+            7,
+            "ROUTE_29".to_string(),
+            "Route29".to_string(),
+            1,
+            2,
+            "GROUP_ROUTE_29".to_string(),
+            TilePosition::new(4, 6),
+        )
+            .expect("runtime tile can form spawn point");
+
+        assert_eq!(spawn.tile_x, 4);
+        assert_eq!(spawn.tile_y, 6);
+        assert_eq!(spawn.metatile_x, 2);
+        assert_eq!(spawn.metatile_y, 3);
+        assert_eq!(spawn.subtile_x, 0);
+        assert_eq!(spawn.subtile_y, 0);
+        assert_eq!(
+            checked_runtime_spawn_expected_tile(&spawn),
+            Some(TilePosition::new(4, 6))
+        );
+        let odd_spawn = runtime_spawn_point_from_runtime_tile(
+            7,
+            "ROUTE_29".to_string(),
+            "Route29".to_string(),
+            1,
+            2,
+            "GROUP_ROUTE_29".to_string(),
+            TilePosition::new(5, 7),
+        )
+        .expect("odd runtime tile can form spawn point");
+        assert_eq!(odd_spawn.tile_x, 5);
+        assert_eq!(odd_spawn.tile_y, 7);
+        assert_eq!(odd_spawn.metatile_x, 2);
+        assert_eq!(odd_spawn.metatile_y, 3);
+        assert_eq!(odd_spawn.subtile_x, 1);
+        assert_eq!(odd_spawn.subtile_y, 1);
+        assert!(
+            runtime_spawn_point_from_runtime_tile(
+                7,
+                "ROUTE_29".to_string(),
+                "Route29".to_string(),
+                1,
+                2,
+                "GROUP_ROUTE_29".to_string(),
+                TilePosition::new(-1, 7),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn runtime_spawn_point_catalog_issues_validate_exact_pack_records() {
         let spawn_points = [
             (
@@ -16792,7 +17026,7 @@ mod tests {
                     map_constant: "ROUTE_29".to_string(),
                     map_name: "WrongMap".to_string(),
                     group_name: "GROUP_ROUTE_29".to_string(),
-                    ..spawn_point(2, "ROUTE_29", 1, 2, 3, 4)
+                    ..spawn_point(2, "ROUTE_29", 1, 2, 4, 4)
                 },
             ),
             (
@@ -16802,7 +17036,7 @@ mod tests {
                     map_constant: "ROUTE 29".to_string(),
                     map_name: "Route 29".to_string(),
                     group_name: "GROUP ROUTE_29".to_string(),
-                    ..spawn_point(3, "ROUTE_29", 1, 3, 5, 6)
+                    ..spawn_point(3, "ROUTE_29", 1, 3, 6, 6)
                 },
             ),
             (
@@ -16812,7 +17046,7 @@ mod tests {
                     map_constant: "ROUTE_29".to_string(),
                     map_name: "Route29".to_string(),
                     group_name: "GROUP_ROUTE_29".to_string(),
-                    ..spawn_point(4, "ROUTE_29", 1, 2, 7, 8)
+                    ..spawn_point(4, "ROUTE_29", 1, 2, 8, 8)
                 },
             ),
         ]
@@ -16887,6 +17121,114 @@ mod tests {
                     map_constant: "legacy_ROUTE_29".to_string(),
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_point_catalog_issues_reject_inconsistent_tile_fields() {
+        let spawn_points = [(
+            "1".to_string(),
+            RuntimeSpawnPointRef {
+                identifier: 1,
+                map_constant: "ROUTE_29".to_string(),
+                map_name: "Route29".to_string(),
+                group_name: "GROUP_ROUTE_29".to_string(),
+                tile_x: 10,
+                tile_y: 8,
+                metatile_x: 4,
+                metatile_y: 4,
+                subtile_x: 0,
+                subtile_y: 0,
+                ..spawn_point(1, "ROUTE_29", 1, 1, 8, 8)
+            },
+        )]
+        .into_iter()
+        .collect();
+        let runtime_map_names = [("ROUTE_29".to_string(), "Route29".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
+            vec![RuntimeSpawnPointCatalogIssue::CoordinateMismatch {
+                key: "1".to_string(),
+                tile_x: 10,
+                tile_y: 8,
+                expected_tile_x: 8,
+                expected_tile_y: 8,
+            }],
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_point_catalog_issues_reject_out_of_range_subtiles() {
+        let spawn_points = [(
+            "1".to_string(),
+            RuntimeSpawnPointRef {
+                identifier: 1,
+                map_constant: "ROUTE_29".to_string(),
+                map_name: "Route29".to_string(),
+                group_name: "GROUP_ROUTE_29".to_string(),
+                tile_x: 3,
+                tile_y: 0,
+                metatile_x: 0,
+                metatile_y: 0,
+                subtile_x: METATILE_WIDTH,
+                subtile_y: 0,
+                ..spawn_point(1, "ROUTE_29", 1, 1, 0, 0)
+            },
+        )]
+        .into_iter()
+        .collect();
+        let runtime_map_names = [("ROUTE_29".to_string(), "Route29".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
+            vec![RuntimeSpawnPointCatalogIssue::InvalidSubtile {
+                key: "1".to_string(),
+                subtile_x: METATILE_WIDTH,
+                subtile_y: 0,
+                metatile_width: METATILE_WIDTH,
+            }],
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_point_catalog_issues_reject_overflowing_runtime_tile() {
+        let spawn_points = [(
+            "1".to_string(),
+            RuntimeSpawnPointRef {
+                identifier: 1,
+                map_constant: "ROUTE_29".to_string(),
+                map_name: "Route29".to_string(),
+                group_id: 1,
+                map_id: 1,
+                tile_x: 0,
+                tile_y: 0,
+                group_name: "GROUP_ROUTE_29".to_string(),
+                metatile_x: i16::MAX,
+                metatile_y: 0,
+                subtile_x: 0,
+                subtile_y: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let runtime_map_names = [("ROUTE_29".to_string(), "Route29".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
+            vec![RuntimeSpawnPointCatalogIssue::CoordinateOverflow {
+                key: "1".to_string(),
+                metatile_x: i16::MAX,
+                metatile_y: 0,
+                subtile_x: 0,
+                subtile_y: 0,
+            }],
         );
     }
 

@@ -4,7 +4,6 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::random::Random;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EncounterSurface {
@@ -85,6 +84,32 @@ pub enum EncounterError {
     MissingEncounterSlotTable { surface: EncounterSurface },
     #[error("encounter music modifier for '{music_id}' has invalid denominator 0")]
     InvalidEncounterMusicModifier { music_id: String },
+    #[error(
+        "encounter music modifier for '{music_id}' overflows encounter threshold byte: {threshold} * {numerator} / {denominator} = {adjusted}"
+    )]
+    EncounterMusicModifierOverflow {
+        music_id: String,
+        threshold: u8,
+        numerator: u8,
+        denominator: u8,
+        adjusted: u16,
+    },
+    #[error("map {map_name} runtime tile bounds overflow supported encounter coordinates")]
+    RuntimeTileBoundsOverflow { map_name: String },
+    #[error(
+        "encounter runtime tile ({x}, {y}) is outside map {map_name} runtime tile bounds {width}x{height}"
+    )]
+    RuntimeTileOutOfBounds {
+        map_name: String,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    },
+    #[error("encounter runtime tile ({x}, {y}) is not aligned to metatile width {metatile_width}")]
+    UnalignedRuntimeTile { x: i16, y: i16, metatile_width: i16 },
+    #[error("encounter runtime tile ({x}, {y}) has no collision data on map {map_name}")]
+    MissingRuntimeCollision { map_name: String, x: i16, y: i16 },
     #[error("{kind:?} field encounter table for map '{map_name}' is missing from the modpack")]
     MissingFieldEncounterTable {
         map_name: String,
@@ -339,19 +364,22 @@ impl<'de> Deserialize<'de> for EncounterSlotTables {
         }
 
         let raw = RawEncounterSlotTables::deserialize(deserializer)?;
-        for surface_id in raw.tables.keys() {
+        let tables = raw.tables;
+        for surface_id in tables.keys() {
             if !is_exact_nonempty_encounter_token(surface_id) {
                 return Err(serde::de::Error::custom(format!(
                     "encounter token must be exact ASCII alphanumeric/underscore, found {surface_id:?}"
                 )));
             }
         }
-        let tables = Self { tables: raw.tables };
-        let issues = encounter_slot_table_issues(&tables, true);
-        if let Some(issue) = issues.first() {
-            return Err(serde::de::Error::custom(format!(
-                "invalid encounter slot tables: {issue:?}"
-            )));
+        let tables = Self { tables };
+        if tables != Self::default() {
+            let issues = encounter_slot_table_issues(&tables, true);
+            if let Some(issue) = issues.first() {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid encounter slot tables: {issue:?}"
+                )));
+            }
         }
         Ok(tables)
     }
@@ -763,25 +791,15 @@ impl<'de> Deserialize<'de> for FieldEncounterData {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct RawFieldEncounterData {
-            #[serde(default, deserialize_with = "required_nullable_encounter_token")]
-            map_name: Option<String>,
-            #[serde(default)]
+            #[serde(deserialize_with = "required_encounter_token")]
+            map_name: String,
             tables: BTreeMap<String, FieldEncounterTable>,
-            #[serde(default)]
-            headbutt: Option<FieldEncounterTable>,
-            #[serde(default)]
-            rock_smash: Option<FieldEncounterTable>,
         }
 
         let raw = RawFieldEncounterData::deserialize(deserializer)?;
-        let mut tables = raw.tables;
-        if let Some(headbutt) = raw.headbutt {
-            tables.insert(FieldEncounterKind::Headbutt.as_key().to_string(), headbutt);
-        }
-        if let Some(rock_smash) = raw.rock_smash {
-            tables.insert(FieldEncounterKind::RockSmash.as_key().to_string(), rock_smash);
-        }
+        let tables = raw.tables;
         for kind in tables.keys() {
             if !is_exact_nonempty_encounter_token(kind) {
                 return Err(serde::de::Error::custom(format!(
@@ -790,7 +808,7 @@ impl<'de> Deserialize<'de> for FieldEncounterData {
             }
         }
         Ok(Self {
-            map_name: raw.map_name.unwrap_or_default(),
+            map_name: raw.map_name,
             tables,
         })
     }
@@ -1299,10 +1317,15 @@ pub fn apply_encounter_music_effect(
             music_id: music_id.to_string(),
         });
     }
-    Ok(
-        ((u16::from(threshold) * u16::from(modifier.numerator)) / u16::from(modifier.denominator))
-            as u8,
-    )
+    let adjusted =
+        (u16::from(threshold) * u16::from(modifier.numerator)) / u16::from(modifier.denominator);
+    u8::try_from(adjusted).map_err(|_| EncounterError::EncounterMusicModifierOverflow {
+        music_id: music_id.to_string(),
+        threshold,
+        numerator: modifier.numerator,
+        denominator: modifier.denominator,
+        adjusted,
+    })
 }
 
 pub fn apply_cleanse_tag_effect(threshold: u8, has_cleanse_tag: bool) -> u8 {
@@ -2272,6 +2295,30 @@ mod tests {
     }
 
     #[test]
+    fn encounter_music_modifier_overflow_rejects_pack_ratio_without_threshold_truncation() {
+        let modifiers = EncounterMusicModifiers {
+            modifiers: BTreeMap::from([(
+                "MUSIC_POKEMON_MARCH".to_string(),
+                EncounterMusicModifier {
+                    numerator: 2,
+                    denominator: 1,
+                },
+            )]),
+        };
+
+        assert_eq!(
+            apply_encounter_music_effect(200, Some("MUSIC_POKEMON_MARCH"), &modifiers),
+            Err(EncounterError::EncounterMusicModifierOverflow {
+                music_id: "MUSIC_POKEMON_MARCH".to_string(),
+                threshold: 200,
+                numerator: 2,
+                denominator: 1,
+                adjusted: 400,
+            })
+        );
+    }
+
+    #[test]
     fn slot_probabilities_match_grass_and_water_boundaries() {
         let slot_tables = slot_tables();
         assert_eq!(
@@ -2578,6 +2625,33 @@ mod tests {
     }
 
     #[test]
+    fn field_encounters_accept_odd_runtime_targets() {
+        let data = field_data();
+
+        let headbutt =
+            select_headbutt_encounter(&data, 1, 0, 0, 2, 54).expect("odd headbutt target");
+        assert_eq!(headbutt.target_tile_x, 1);
+        assert_eq!(headbutt.target_tile_y, 0);
+
+        let rock_smash =
+            select_rock_smash_encounter(&data, 0, 1, 2, 90).expect("odd rock smash target");
+        assert_eq!(rock_smash.target_tile_x, 0);
+        assert_eq!(rock_smash.target_tile_y, 1);
+
+        let mut rng = Random::new(0x1234_5678);
+        let headbutt_roll =
+            roll_headbutt_encounter(&data, 1, 0, 0, &mut rng).expect("odd headbutt roll");
+        assert_eq!(headbutt_roll.target_tile_x, 1);
+        assert_ne!(rng.seed(), 0x1234_5678);
+
+        let mut rng = Random::new(0x1234_5678);
+        let rock_smash_roll =
+            roll_rock_smash_encounter(&data, 0, 1, &mut rng).expect("odd rock smash roll");
+        assert_eq!(rock_smash_roll.target_tile_y, 1);
+        assert_ne!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
     fn field_encounters_require_modpack_tables_and_selected_buckets() {
         let mut data = field_data();
         data.tables.remove(FieldEncounterKind::Headbutt.as_key());
@@ -2818,10 +2892,42 @@ mod tests {
 
         let field_cases = [
             (
+                "field missing map",
+                serde_json::json!({
+                    "tables": {}
+                }),
+            ),
+            (
                 "field map",
                 serde_json::json!({
                     "map_name": "Route 29",
                     "tables": {}
+                }),
+            ),
+            (
+                "field missing tables",
+                serde_json::json!({
+                    "map_name": "Route29"
+                }),
+            ),
+            (
+                "field legacy headbutt alias",
+                serde_json::json!({
+                    "map_name": "Route29",
+                    "headbutt": {
+                        "common": [{"weight": 100, "species": "AIPOM", "level": 10}],
+                        "rare": []
+                    }
+                }),
+            ),
+            (
+                "field legacy rock smash alias",
+                serde_json::json!({
+                    "map_name": "Route29",
+                    "rock_smash": {
+                        "common": [{"weight": 100, "species": "KRABBY", "level": 10}],
+                        "rare": []
+                    }
                 }),
             ),
             (
@@ -2851,7 +2957,10 @@ mod tests {
                 .expect_err("malformed field encounter tokens must fail during JSON load")
                 .to_string();
             assert!(
-                error.contains("encounter token must be"),
+                error.contains("encounter token must be")
+                    || error.contains("missing field `map_name`")
+                    || error.contains("missing field `tables`")
+                    || error.contains("unknown field"),
                 "{label} produced unexpected error: {error}"
             );
         }

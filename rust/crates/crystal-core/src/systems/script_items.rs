@@ -8,7 +8,7 @@ use crate::state::GameState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemGrant {
-    #[serde(default, deserialize_with = "required_script_item_grant_command")]
+    #[serde(deserialize_with = "required_script_item_grant_command")]
     pub command: String,
     #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
@@ -22,7 +22,7 @@ pub struct ScriptItemGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptItemAccess {
-    #[serde(default, deserialize_with = "required_script_item_access_command")]
+    #[serde(deserialize_with = "required_script_item_access_command")]
     pub command: String,
     #[serde(deserialize_with = "required_script_item_token")]
     pub item_id: String,
@@ -422,7 +422,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,

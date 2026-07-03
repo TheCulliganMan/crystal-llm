@@ -26,7 +26,7 @@ impl<'de> Deserialize<'de> for ScriptTextCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptTextCommand {
-            #[serde(default, deserialize_with = "required_script_text_command_token")]
+            #[serde(deserialize_with = "required_script_text_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_script_label_token")]
             text_label: Option<String>,
@@ -42,9 +42,7 @@ impl<'de> Deserialize<'de> for ScriptTextCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_text_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_text_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -74,22 +72,20 @@ impl<'de> Deserialize<'de> for ScriptTextBodyCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptTextBodyCommand {
-            #[serde(default, deserialize_with = "required_script_text_command_token")]
+            #[serde(deserialize_with = "required_script_text_command_token")]
             command: String,
             args: Vec<String>,
             command_index: usize,
         }
 
         let raw = RawScriptTextBodyCommand::deserialize(deserializer)?;
-        if !raw.command.is_empty() {
-            validate_fixed_arg_command_shape(
-                "script text body",
-                &text_body_command_arg_counts(),
-                &raw.command,
-                raw.args.len(),
-            )
-            .map_err(D::Error::custom)?;
-        }
+        validate_fixed_arg_command_shape(
+            "script text body",
+            &text_body_command_arg_counts(),
+            &raw.command,
+            raw.args.len(),
+        )
+        .map_err(D::Error::custom)?;
         Ok(Self {
             command: raw.command,
             args: raw.args,
@@ -222,7 +218,7 @@ impl<'de> Deserialize<'de> for AsmTextTable {
 pub fn asm_text_catalog_issues(asm_text: &BTreeMap<String, String>) -> Vec<AsmTextCatalogIssue> {
     asm_text
         .iter()
-        .filter(|(label, text)| !is_exact_nonempty_label(label) || !is_exact_nonempty_label(text))
+        .filter(|(label, text)| !is_exact_nonempty_label(label) || !is_exact_nonempty_text(text))
         .map(|(label, _)| AsmTextCatalogIssue::InvalidText {
             label: label.clone(),
         })
@@ -469,6 +465,9 @@ pub fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
 pub fn menu_definition_command_arg_counts() -> BTreeMap<&'static str, BTreeSet<usize>> {
     BTreeMap::from([
         ("db", BTreeSet::from([1, 3])),
+        ("dn", BTreeSet::from([2])),
+        ("dba", BTreeSet::from([1])),
+        ("dbw", BTreeSet::from([2])),
         ("menu_coords", BTreeSet::from([4])),
         ("dw", BTreeSet::from([1])),
     ])
@@ -746,6 +745,14 @@ fn is_exact_nonempty_label(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@'))
         && !has_reserved_pack_prefix(value)
+}
+
+fn is_exact_nonempty_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .chars()
+            .all(|character| character == '\n' || character == '\r' || !character.is_control())
 }
 
 fn is_exact_script_text_command_token(value: &str) -> bool {
@@ -1246,6 +1253,19 @@ mod tests {
 
     #[test]
     fn script_text_json_commands_require_explicit_args() {
+        let error = serde_json::from_str::<ScriptTextCommand>(
+            r#"{"text_label":null,"source_script":"Script","command_index":0}"#,
+        )
+        .expect_err("missing text command must not default to empty")
+        .to_string();
+        assert!(error.contains("missing field `command`"), "{error}");
+
+        let error =
+            serde_json::from_str::<ScriptTextBodyCommand>(r#"{"args":[],"command_index":0}"#)
+                .expect_err("missing body command must not default to empty")
+                .to_string();
+        assert!(error.contains("missing field `command`"), "{error}");
+
         let error = serde_json::from_str::<ScriptTextBodyCommand>(
             r#"{"command":"text","command_index":0}"#,
         )

@@ -31,7 +31,7 @@ impl<'de> Deserialize<'de> for ScriptControlCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptControlCommand {
-            #[serde(default, deserialize_with = "required_control_command_token")]
+            #[serde(deserialize_with = "required_control_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_compare_token")]
             compare_value: Option<String>,
@@ -53,9 +53,7 @@ impl<'de> Deserialize<'de> for ScriptControlCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_control_command(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_control_command(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -121,7 +119,7 @@ pub enum ScriptControlCommandError {
     InvalidSourceScript { source_script: String },
     #[error("script accumulator is unset for '{command}'")]
     UnsetAccumulator { command: String },
-    #[error("script accumulator value '{value}' is not an exact TRUE/FALSE token")]
+    #[error("script accumulator value '{value}' is not an exact TRUE/FALSE/1/0 token")]
     UnknownBoolean { value: String },
     #[error("numeric script token '{token}' is not exact pack syntax")]
     InvalidNumericToken { token: String },
@@ -400,8 +398,8 @@ fn require_boolean(
     command: &ScriptControlCommand,
 ) -> Result<bool, ScriptControlCommandError> {
     match accumulator(state, command)? {
-        "TRUE" => Ok(true),
-        "FALSE" => Ok(false),
+        "TRUE" | "1" => Ok(true),
+        "FALSE" | "0" => Ok(false),
         value => Err(ScriptControlCommandError::UnknownBoolean {
             value: value.to_string(),
         }),
@@ -497,7 +495,17 @@ fn parse_numeric_token(
     token: &str,
     constants: &BTreeMap<String, i32>,
 ) -> Result<i32, ScriptControlCommandError> {
-    let parts: Vec<&str> = token.split_whitespace().collect();
+    if token.is_empty() || token.trim() != token || token.contains('\t') {
+        return Err(ScriptControlCommandError::InvalidNumericToken {
+            token: token.to_string(),
+        });
+    }
+    let parts: Vec<&str> = token.split(' ').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(ScriptControlCommandError::InvalidNumericToken {
+            token: token.to_string(),
+        });
+    }
     match parts.as_slice() {
         [single] => parse_numeric_atom(single, constants),
         [left, op @ ("-" | "+"), right] => {
@@ -658,7 +666,11 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn command(name: &str, compare: Option<&str>, target: Option<&str>) -> ScriptControlCommand {
+    fn script_control_command(
+        name: &str,
+        compare: Option<&str>,
+        target: Option<&str>,
+    ) -> ScriptControlCommand {
         ScriptControlCommand {
             command: name.to_string(),
             compare_value: compare.map(str::to_string),
@@ -726,7 +738,7 @@ mod tests {
         assert_eq!(
             resolve_script_control_command(
                 &state,
-                command("ifequal", Some("SATURDAY"), Some(".Done")),
+                script_control_command("ifequal", Some("SATURDAY"), Some(".Done")),
                 &BTreeMap::new(),
             )
             .expect("branch"),
@@ -742,7 +754,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifnotequal", Some("SATURDAY"), Some(".Done")),
+                script_control_command("ifnotequal", Some("SATURDAY"), Some(".Done")),
                 &BTreeMap::new(),
             ),
             Ok(ScriptControlAction::Continue { .. })
@@ -756,7 +768,25 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("iftrue", None, Some(".Yes")),
+                script_control_command("iftrue", None, Some(".Yes")),
+                &BTreeMap::new(),
+            ),
+            Ok(ScriptControlAction::Jump { .. })
+        ));
+        state.script_runtime.script_value = Some("1".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("iftrue", None, Some(".One")),
+                &BTreeMap::new(),
+            ),
+            Ok(ScriptControlAction::Jump { .. })
+        ));
+        state.script_runtime.script_value = Some("0".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("iffalse", None, Some(".Zero")),
                 &BTreeMap::new(),
             ),
             Ok(ScriptControlAction::Jump { .. })
@@ -767,13 +797,17 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifgreater", Some("NUM_JOHTO_BADGES - 1"), Some(".AllEight")),
+                script_control_command(
+                    "ifgreater",
+                    Some("NUM_JOHTO_BADGES - 1"),
+                    Some(".AllEight")
+                ),
                 &constants,
             ),
             Ok(ScriptControlAction::Jump { .. })
         ));
 
-        let mut jumpstd = command("jumpstd", None, Some("PokecenterSignScript"));
+        let mut jumpstd = script_control_command("jumpstd", None, Some("PokecenterSignScript"));
         jumpstd.resolved_target_script = None;
         assert_eq!(
             resolve_script_control_command(&state, jumpstd, &constants).expect("jumpstd"),
@@ -797,7 +831,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifgreater", Some("NUM_JOHTO_BADGES  -  1"), Some(".AllEight")),
+                script_control_command("ifgreater", Some("NUM_JOHTO_BADGES  -  1"), Some(".AllEight")),
                 &constants,
             ),
             Err(ScriptControlCommandError::InvalidNumericToken { token })
@@ -806,7 +840,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifgreater", Some("$GG"), Some(".AllEight")),
+                script_control_command("ifgreater", Some("$GG"), Some(".AllEight")),
                 &constants,
             ),
             Err(ScriptControlCommandError::InvalidNumericToken { token }) if token == "$GG"
@@ -814,7 +848,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifgreater", Some("MISSING_CONSTANT"), Some(".AllEight")),
+                script_control_command("ifgreater", Some("MISSING_CONSTANT"), Some(".AllEight")),
                 &constants,
             ),
             Err(ScriptControlCommandError::UnknownNumericToken { token })
@@ -825,11 +859,41 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("ifgreater", Some("1"), Some(".AllEight")),
+                script_control_command("ifgreater", Some("1"), Some(".AllEight")),
                 &constants,
             ),
             Err(ScriptControlCommandError::InvalidNumericToken { token })
                 if token == "NUM JOHTO BADGES"
+        ));
+
+        state.script_runtime.script_value = Some(" 8".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("ifgreater", Some("7"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token }) if token == " 8"
+        ));
+
+        state.script_runtime.script_value = Some("8".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("ifgreater", Some("7 "), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token }) if token == "7 "
+        ));
+
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("ifgreater", Some("NUM_JOHTO_BADGES\t-\t1"), Some(".AllEight")),
+                &constants,
+            ),
+            Err(ScriptControlCommandError::InvalidNumericToken { token })
+                if token == "NUM_JOHTO_BADGES\t-\t1"
         ));
     }
 
@@ -838,7 +902,10 @@ mod tests {
         let labels = BTreeSet::from([".Done@Script".to_string()]);
 
         assert_eq!(
-            script_control_command_issues(&command("iftrue", Some("TRUE"), Some(".Done")), &labels),
+            script_control_command_issues(
+                &script_control_command("iftrue", Some("TRUE"), Some(".Done")),
+                &labels
+            ),
             vec![ScriptControlCommandIssue::InvalidCommand {
                 error: ScriptControlCommandError::UnexpectedCompareValue {
                     command: "iftrue".to_string()
@@ -847,7 +914,7 @@ mod tests {
         );
         assert_eq!(
             script_control_command_issues(
-                &command("ifequal", Some("TRUE"), Some(".missing")),
+                &script_control_command("ifequal", Some("TRUE"), Some(".missing")),
                 &labels
             ),
             vec![ScriptControlCommandIssue::UnknownTargetScript {
@@ -856,7 +923,7 @@ mod tests {
         );
         assert_eq!(
             script_control_command_issues(
-                &command("ifequal", Some(" TRUE"), Some(".Done")),
+                &script_control_command("ifequal", Some(" TRUE"), Some(".Done")),
                 &labels
             ),
             vec![ScriptControlCommandIssue::InvalidCommand {
@@ -867,7 +934,7 @@ mod tests {
             }]
         );
 
-        let mut invalid_resolved = command("ifequal", Some("TRUE"), Some(".Done"));
+        let mut invalid_resolved = script_control_command("ifequal", Some("TRUE"), Some(".Done"));
         invalid_resolved.resolved_target_script = Some(" .Done@Script".to_string());
         assert_eq!(
             script_control_command_issues(&invalid_resolved, &labels),
@@ -879,7 +946,7 @@ mod tests {
             }]
         );
 
-        let mut jumpstd = command("jumpstd", None, Some("PokecenterSignScript"));
+        let mut jumpstd = script_control_command("jumpstd", None, Some("PokecenterSignScript"));
         jumpstd.resolved_target_script = None;
         assert_eq!(script_control_command_issues(&jumpstd, &labels), []);
     }
@@ -889,7 +956,10 @@ mod tests {
         let labels = BTreeSet::from([".Done@Script".to_string()]);
 
         assert_eq!(
-            script_control_command_issues(&command("fallbackjump", None, Some(".Done")), &labels,),
+            script_control_command_issues(
+                &script_control_command("fallbackjump", None, Some(".Done")),
+                &labels,
+            ),
             vec![ScriptControlCommandIssue::InvalidCommand {
                 error: ScriptControlCommandError::PaddedCommand {
                     command: "fallbackjump".to_string(),
@@ -898,7 +968,7 @@ mod tests {
         );
         assert_eq!(
             script_control_command_issues(
-                &command("ifequal", Some("legacy_value"), Some(".Done")),
+                &script_control_command("ifequal", Some("legacy_value"), Some(".Done")),
                 &labels,
             ),
             vec![ScriptControlCommandIssue::InvalidCommand {
@@ -910,7 +980,7 @@ mod tests {
         );
         assert_eq!(
             script_control_command_issues(
-                &command("iftrue", None, Some("fallback_target")),
+                &script_control_command("iftrue", None, Some("fallback_target")),
                 &labels,
             ),
             vec![ScriptControlCommandIssue::InvalidCommand {
@@ -921,7 +991,7 @@ mod tests {
             }]
         );
 
-        let mut invalid_resolved = command("iftrue", None, Some(".Done"));
+        let mut invalid_resolved = script_control_command("iftrue", None, Some(".Done"));
         invalid_resolved.resolved_target_script = Some("legacy_target@Script".to_string());
         assert_eq!(
             script_control_command_issues(&invalid_resolved, &labels),
@@ -970,7 +1040,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("iftrue", None, Some(".Done")),
+                script_control_command("iftrue", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::UnsetAccumulator { .. })
@@ -981,7 +1051,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("iftrue", None, Some(".Done")),
+                script_control_command("iftrue", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::UnknownBoolean { .. })
@@ -996,7 +1066,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("", None, Some(".Done")),
+                script_control_command("", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::EmptyCommand)
@@ -1004,7 +1074,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command(" iftrue", None, Some(".Done")),
+                script_control_command(" iftrue", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::PaddedCommand { .. })
@@ -1012,7 +1082,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("if true", None, Some(".Done")),
+                script_control_command("if true", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::PaddedCommand { .. })
@@ -1021,7 +1091,7 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("iftrue", None, Some(" .Done")),
+                script_control_command("iftrue", None, Some(" .Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::InvalidTarget { .. })
@@ -1029,22 +1099,22 @@ mod tests {
         assert!(matches!(
             resolve_script_control_command(
                 &state,
-                command("iftrue", None, Some(".Do ne")),
+                script_control_command("iftrue", None, Some(".Do ne")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::InvalidTarget { .. })
         ));
 
-        let mut command = command("iftrue", None, Some(".Done"));
-        command.resolved_target_script = Some(" .Done@Script".to_string());
+        let mut resolved_command = script_control_command("iftrue", None, Some(".Done"));
+        resolved_command.resolved_target_script = Some(" .Done@Script".to_string());
         assert!(matches!(
-            resolve_script_control_command(&state, command, &BTreeMap::new()),
+            resolve_script_control_command(&state, resolved_command, &BTreeMap::new()),
             Err(ScriptControlCommandError::InvalidResolvedTarget { .. })
         ));
-        let mut command = command("iftrue", None, Some(".Done"));
-        command.resolved_target_script = Some(".Done @Script".to_string());
+        let mut resolved_command = script_control_command("iftrue", None, Some(".Done"));
+        resolved_command.resolved_target_script = Some(".Done @Script".to_string());
         assert!(matches!(
-            resolve_script_control_command(&state, command, &BTreeMap::new()),
+            resolve_script_control_command(&state, resolved_command, &BTreeMap::new()),
             Err(ScriptControlCommandError::InvalidResolvedTarget { .. })
         ));
     }
@@ -1055,7 +1125,7 @@ mod tests {
         state.script_runtime.script_value = Some("TRUE".to_string());
         apply_script_control_command(
             &mut state,
-            command("iftrue", None, Some(".Yes")),
+            script_control_command("iftrue", None, Some(".Yes")),
             &BTreeMap::new(),
         )
         .expect("jump");
@@ -1070,7 +1140,7 @@ mod tests {
 
         apply_script_control_command(
             &mut state,
-            command("scall", None, Some(".Call")),
+            script_control_command("scall", None, Some(".Call")),
             &BTreeMap::new(),
         )
         .expect("call");
@@ -1088,7 +1158,7 @@ mod tests {
 
         apply_script_control_command(
             &mut state,
-            command("sdefer", None, Some(".Deferred")),
+            script_control_command("sdefer", None, Some(".Deferred")),
             &BTreeMap::new(),
         )
         .expect("defer");
@@ -1097,7 +1167,7 @@ mod tests {
             vec![".Deferred@Script"]
         );
 
-        let mut jumpstd = command("jumpstd", None, Some("PokecenterSignScript"));
+        let mut jumpstd = script_control_command("jumpstd", None, Some("PokecenterSignScript"));
         jumpstd.resolved_target_script = None;
         apply_script_control_command(&mut state, jumpstd, &BTreeMap::new()).expect("jumpstd");
         assert_eq!(
@@ -1120,7 +1190,7 @@ mod tests {
         state.script_runtime.script_value = Some("SATURDAY".to_string());
         apply_script_control_command(
             &mut state,
-            command("ifnotequal", Some("SATURDAY"), Some(".Done")),
+            script_control_command("ifnotequal", Some("SATURDAY"), Some(".Done")),
             &BTreeMap::new(),
         )
         .expect("continue");
@@ -1144,7 +1214,7 @@ mod tests {
         state.script_runtime.next_script = Some("PendingScript".to_string());
         apply_script_control_command(
             &mut state,
-            command("endifjustbattled", None, None),
+            script_control_command("endifjustbattled", None, None),
             &BTreeMap::new(),
         )
         .expect("end guarded");
@@ -1168,7 +1238,7 @@ mod tests {
         assert!(matches!(
             apply_script_control_command(
                 &mut state,
-                command("iftrue", None, Some(".Done")),
+                script_control_command("iftrue", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
             Err(ScriptControlCommandError::UnknownBoolean { .. })
@@ -1185,7 +1255,7 @@ mod tests {
         let mut state = GameState::default();
         state.script_runtime.script_value = Some("TRUE".to_string());
         state.script_runtime.next_script = Some("PendingScript".to_string());
-        let mut bad_source = command("scall", None, Some(".Done"));
+        let mut bad_source = script_control_command("scall", None, Some(".Done"));
         bad_source.source_script = "fallback_script".to_string();
 
         assert_eq!(

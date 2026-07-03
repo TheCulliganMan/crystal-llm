@@ -2014,16 +2014,18 @@ describe("exportRuntimeAssets", () => {
     const tables = exportEncounterSlotTables();
 
     expect(tables).toEqual({
-      grass: [
-        { threshold: 30, slot: 0 },
-        { threshold: 60, slot: 1 },
-        { threshold: 100, slot: 2 },
-      ],
-      water: [
-        { threshold: 60, slot: 0 },
-        { threshold: 90, slot: 1 },
-        { threshold: 100, slot: 2 },
-      ],
+      tables: {
+        grass: [
+          { threshold: 30, slot: 0 },
+          { threshold: 60, slot: 1 },
+          { threshold: 100, slot: 2 },
+        ],
+        water: [
+          { threshold: 60, slot: 0 },
+          { threshold: 90, slot: 1 },
+          { threshold: 100, slot: 2 },
+        ],
+      },
     });
     const dataDir = path.join(mockAssetsRoot, "data");
     expect(
@@ -2915,7 +2917,7 @@ describe("exportRuntimeAssets", () => {
       ),
       [
         '\tdb "LEAF@"',
-        "\tdw 1000, 140 ; height, weight",
+        "\tdw 100000, 140 ; height, weight",
         '\tdb "Leafy.@"',
         "",
       ].join("\n"),
@@ -2937,7 +2939,7 @@ describe("exportRuntimeAssets", () => {
       ),
       [
         '\tdb "LEAF@"',
-        "\tdw 209, 10000 ; height, weight",
+        "\tdw 209, 100000 ; height, weight",
         '\tdb "Leafy.@"',
         "",
       ].join("\n"),

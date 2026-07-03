@@ -292,10 +292,16 @@ impl OverworldMapData {
     }
 
     pub fn tile_bounds(&self) -> (u16, u16) {
-        (
-            self.width * METATILE_WIDTH as u16,
-            self.height * METATILE_WIDTH as u16,
-        )
+        self.checked_tile_bounds()
+            .expect("verified runtime map dimensions must fit tile bounds")
+    }
+
+    pub fn checked_tile_bounds(&self) -> Option<(u16, u16)> {
+        let metatile_width = u16::try_from(METATILE_WIDTH).ok()?;
+        Some((
+            self.width.checked_mul(metatile_width)?,
+            self.height.checked_mul(metatile_width)?,
+        ))
     }
 }
 
@@ -371,6 +377,17 @@ mod tests {
             OverworldMapData::from_attributes("test", &attributes(2, 2, 7), vec![1, 2, 3, 4, 5]);
         assert_eq!((truncated.width, truncated.height), (2, 2));
         assert_eq!(truncated.metatile_ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn checked_tile_bounds_rejects_runtime_dimension_overflow() {
+        let exact =
+            OverworldMapData::from_attributes("test", &attributes(3, 2, 7), vec![1, 2, 3, 4]);
+        assert_eq!(exact.checked_tile_bounds(), Some((6, 4)));
+
+        let overflowing =
+            OverworldMapData::from_attributes("huge", &attributes(u16::MAX, 1, 7), Vec::new());
+        assert_eq!(overflowing.checked_tile_bounds(), None);
     }
 
     #[test]

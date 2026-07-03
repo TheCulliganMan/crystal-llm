@@ -1,8 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::world::map::OverworldMapData;
+use crate::world::map::{METATILE_WIDTH, OverworldMapData};
 
-pub const CHANGE_BLOCK_COORD_STRIDE: u16 = 2;
+pub const CHANGE_BLOCK_COORD_STRIDE: u16 = METATILE_WIDTH as u16;
 pub const SCRIPT_BLOCK_CHANGE_COMMANDS: &[&str] = &["changeblock"];
 
 pub fn is_known_script_block_change_command(command: &str) -> bool {
@@ -113,7 +113,7 @@ pub enum ScriptBlockChangeIssue {
 }
 
 fn validate_script_block_change_shape(change: &ScriptBlockChange) -> Result<(), String> {
-    if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+    if script_block_change_metatile(change.x, change.y).is_none() {
         return Err(format!(
             "script block change at ({}, {}) is not aligned to stride {}",
             change.x, change.y, CHANGE_BLOCK_COORD_STRIDE
@@ -137,16 +137,16 @@ pub fn script_block_change_issues(
                 command_index: change.command_index,
             });
         }
-        if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+        let Some((metatile_x, metatile_y)) = script_block_change_metatile(change.x, change.y)
+        else {
             issues.push(ScriptBlockChangeIssue::UnalignedCoordinates {
                 source_script: change.source_script.clone(),
                 command_index: change.command_index,
                 x: change.x,
                 y: change.y,
             });
-        }
-        let metatile_x = change.x / CHANGE_BLOCK_COORD_STRIDE;
-        let metatile_y = change.y / CHANGE_BLOCK_COORD_STRIDE;
+            continue;
+        };
         if metatile_x >= width || metatile_y >= height {
             issues.push(ScriptBlockChangeIssue::OutOfBounds {
                 source_script: change.source_script.clone(),
@@ -178,38 +178,70 @@ pub fn apply_script_block_change(
             source_script: change.source_script,
         });
     }
-    if change.x % CHANGE_BLOCK_COORD_STRIDE != 0 || change.y % CHANGE_BLOCK_COORD_STRIDE != 0 {
-        return Err(ScriptBlockError::UnalignedCoordinates {
-            source_script: change.source_script,
-            command_index: change.command_index,
-            x: change.x,
-            y: change.y,
-        });
-    }
-    let metatile_x = change.x / CHANGE_BLOCK_COORD_STRIDE;
-    let metatile_y = change.y / CHANGE_BLOCK_COORD_STRIDE;
-    let index = map
-        .metatile_index(metatile_x as i16, metatile_y as i16)
-        .ok_or_else(|| ScriptBlockError::OutOfBounds {
+    let (metatile_x, metatile_y) =
+        script_block_change_metatile(change.x, change.y).ok_or_else(|| {
+            ScriptBlockError::UnalignedCoordinates {
+                source_script: change.source_script.clone(),
+                command_index: change.command_index,
+                x: change.x,
+                y: change.y,
+            }
+        })?;
+    let metatile_x = i16::try_from(metatile_x).map_err(|_| ScriptBlockError::OutOfBounds {
+        map_name: map.name.clone(),
+        x: change.x,
+        y: change.y,
+        width: map.width,
+        height: map.height,
+    })?;
+    let metatile_y = i16::try_from(metatile_y).map_err(|_| ScriptBlockError::OutOfBounds {
+        map_name: map.name.clone(),
+        x: change.x,
+        y: change.y,
+        width: map.width,
+        height: map.height,
+    })?;
+    let index = map.metatile_index(metatile_x, metatile_y).ok_or_else(|| {
+        ScriptBlockError::OutOfBounds {
             map_name: map.name.clone(),
             x: change.x,
             y: change.y,
             width: map.width,
             height: map.height,
-        })?;
+        }
+    })?;
     let previous_block_id = map.metatile_ids[index];
     map.metatile_ids[index] = change.block_id;
     Ok(ScriptBlockChangeOutcome {
         map_name: map.name.clone(),
         x: change.x,
         y: change.y,
-        metatile_x,
-        metatile_y,
+        metatile_x: u16::try_from(metatile_x).map_err(|_| ScriptBlockError::OutOfBounds {
+            map_name: map.name.clone(),
+            x: change.x,
+            y: change.y,
+            width: map.width,
+            height: map.height,
+        })?,
+        metatile_y: u16::try_from(metatile_y).map_err(|_| ScriptBlockError::OutOfBounds {
+            map_name: map.name.clone(),
+            x: change.x,
+            y: change.y,
+            width: map.width,
+            height: map.height,
+        })?,
         previous_block_id,
         block_id: change.block_id,
         source_script: change.source_script,
         command_index: change.command_index,
     })
+}
+
+fn script_block_change_metatile(x: u16, y: u16) -> Option<(u16, u16)> {
+    if x % CHANGE_BLOCK_COORD_STRIDE != 0 || y % CHANGE_BLOCK_COORD_STRIDE != 0 {
+        return None;
+    }
+    Some((x / CHANGE_BLOCK_COORD_STRIDE, y / CHANGE_BLOCK_COORD_STRIDE))
 }
 
 fn is_exact_script_block_label_token(value: &str) -> bool {
@@ -316,6 +348,26 @@ mod tests {
             ScriptBlockError::OutOfBounds {
                 map_name: "RuinsOfAlphKabutoChamber".to_string(),
                 x: 6,
+                y: 0,
+                width: 3,
+                height: 2,
+            }
+        );
+        assert_eq!(map.metatile_ids, original);
+    }
+
+    #[test]
+    fn rejects_coordinates_that_overflow_metatile_lookup_without_mutating_map() {
+        let mut map = map();
+        let original = map.metatile_ids.clone();
+        let error = apply_script_block_change(&mut map, change(u16::MAX - 1, 0, 0x2e))
+            .expect_err("overflowing metatile coordinate is an error");
+
+        assert_eq!(
+            error,
+            ScriptBlockError::OutOfBounds {
+                map_name: "RuinsOfAlphKabutoChamber".to_string(),
+                x: u16::MAX - 1,
                 y: 0,
                 width: 3,
                 height: 2,

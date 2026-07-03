@@ -71,6 +71,10 @@ pub enum StepOutcome {
         facing: Direction,
         object_identifier: Option<String>,
     },
+    RuntimeTileOverflow {
+        from: TilePosition,
+        facing: Direction,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +99,10 @@ pub enum LedgeJumpOutcome {
         facing: Direction,
         object_identifier: Option<String>,
     },
+    RuntimeTileOverflow {
+        from: TilePosition,
+        facing: Direction,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,11 +119,13 @@ pub struct StepOptions {
     pub stride_tiles: i16,
 }
 
+pub const DEFAULT_RUNTIME_TILE_STRIDE: i16 = 1;
+
 impl Default for StepOptions {
     fn default() -> Self {
         Self {
             force_step_after_turn: false,
-            stride_tiles: 2,
+            stride_tiles: DEFAULT_RUNTIME_TILE_STRIDE,
         }
     }
 }
@@ -144,7 +154,15 @@ pub fn attempt_step_with_occupied_tiles(
     }
 
     state.facing = direction;
-    let target = move_by_stride(state.tile, direction, options.stride_tiles.max(1));
+    let target = match checked_move_by_stride(state.tile, direction, options.stride_tiles) {
+        Some(target) => target,
+        None => {
+            return StepOutcome::RuntimeTileOverflow {
+                from: state.tile,
+                facing: direction,
+            };
+        }
+    };
     if let Some(occupied) = occupied_tile_at(occupied_tiles, target) {
         return StepOutcome::BlockedByObject {
             at: target,
@@ -194,8 +212,16 @@ pub fn attempt_ledge_jump_with_occupied_tiles(
     occupied_tiles: &[OccupiedTile],
 ) -> LedgeJumpOutcome {
     state.facing = direction;
-    let stride = options.stride_tiles.max(1);
-    let ledge = move_by_stride(state.tile, direction, stride);
+    let stride = options.stride_tiles;
+    let ledge = match checked_move_by_stride(state.tile, direction, stride) {
+        Some(ledge) => ledge,
+        None => {
+            return LedgeJumpOutcome::RuntimeTileOverflow {
+                from: state.tile,
+                facing: direction,
+            };
+        }
+    };
     if !can_jump_ledge(map, tileset, ledge, direction, stride) {
         return LedgeJumpOutcome::NotLedge {
             at: ledge,
@@ -203,7 +229,24 @@ pub fn attempt_ledge_jump_with_occupied_tiles(
         };
     }
 
-    let landing = move_by_stride(state.tile, direction, stride * 2);
+    let landing_stride = match stride.checked_mul(2) {
+        Some(stride) => stride,
+        None => {
+            return LedgeJumpOutcome::RuntimeTileOverflow {
+                from: state.tile,
+                facing: direction,
+            };
+        }
+    };
+    let landing = match checked_move_by_stride(state.tile, direction, landing_stride) {
+        Some(landing) => landing,
+        None => {
+            return LedgeJumpOutcome::RuntimeTileOverflow {
+                from: state.tile,
+                facing: direction,
+            };
+        }
+    };
     if let Some(occupied) = occupied_tile_at(occupied_tiles, landing) {
         return LedgeJumpOutcome::BlockedByObject {
             at: landing,
@@ -245,13 +288,15 @@ pub fn is_declared_connection_step(
     direction: Direction,
 ) -> bool {
     let (width, height) = map.tile_bounds();
-    let width = width as i16;
-    let height = height as i16;
+    let width = i32::from(width);
+    let height = i32::from(height);
+    let target_x = i32::from(target.x);
+    let target_y = i32::from(target.y);
     let required_direction = match direction {
-        Direction::Left if target.x < 0 => "west",
-        Direction::Right if target.x >= width => "east",
-        Direction::Up if target.y < 0 => "north",
-        Direction::Down if target.y >= height => "south",
+        Direction::Left if target_x < 0 => "west",
+        Direction::Right if target_x >= width => "east",
+        Direction::Up if target_y < 0 => "north",
+        Direction::Down if target_y >= height => "south",
         _ => return false,
     };
     map.connections()
@@ -269,6 +314,18 @@ pub const fn move_by_stride(
         x: start.x + dx * stride_tiles,
         y: start.y + dy * stride_tiles,
     }
+}
+
+pub fn checked_move_by_stride(
+    start: TilePosition,
+    direction: Direction,
+    stride_tiles: i16,
+) -> Option<TilePosition> {
+    let (dx, dy) = direction.delta();
+    Some(TilePosition {
+        x: start.x.checked_add(dx.checked_mul(stride_tiles)?)?,
+        y: start.y.checked_add(dy.checked_mul(stride_tiles)?)?,
+    })
 }
 
 #[cfg(test)]
@@ -342,7 +399,7 @@ mod tests {
                         permissions::FLOOR,
                         permissions::HOP_DOWN,
                         permissions::HOP_DOWN,
-                        permissions::WALL,
+                        permissions::HOP_DOWN,
                     ],
                 },
                 MetatileCollision {
@@ -409,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_step_after_turn_moves_by_collision_stride() {
+    fn forced_step_after_turn_moves_by_default_runtime_stride() {
         let mut state = PlayerMovementState::new(TilePosition::new(0, 0));
         let outcome = attempt_step(
             &mut state,
@@ -465,7 +522,7 @@ mod tests {
     #[test]
     fn blocked_step_keeps_position() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 0),
+            tile: TilePosition::new(2, 2),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -479,17 +536,17 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Blocked {
-                at: TilePosition::new(2, 2),
+                at: TilePosition::new(2, 4),
                 facing: Direction::Down,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 0));
+        assert_eq!(state.tile, TilePosition::new(2, 2));
     }
 
     #[test]
     fn declared_connection_step_can_move_beyond_map_edge() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(4, 0),
+            tile: TilePosition::new(5, 0),
             facing: Direction::Right,
             mode: MovementMode::Normal,
         };
@@ -504,18 +561,18 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Moved {
-                from: TilePosition::new(4, 0),
-                to: TilePosition::new(6, 0),
+                from: TilePosition::new(5, 0),
+                to: TilePosition::new(7, 0),
                 speed_multiplier: 1,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(6, 0));
+        assert_eq!(state.tile, TilePosition::new(7, 0));
     }
 
     #[test]
     fn undeclared_connection_step_still_blocks_at_map_edge() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(4, 0),
+            tile: TilePosition::new(5, 0),
             facing: Direction::Right,
             mode: MovementMode::Normal,
         };
@@ -530,18 +587,110 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Blocked {
-                at: TilePosition::new(6, 0),
+                at: TilePosition::new(7, 0),
                 facing: Direction::Right,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(4, 0));
+        assert_eq!(state.tile, TilePosition::new(5, 0));
+    }
+
+    #[test]
+    fn wide_map_connection_checks_do_not_narrow_tile_bounds() {
+        let mut attributes = attributes(20_000, 1);
+        attributes.connections.push(MapConnection {
+            direction: "east".to_string(),
+            target_map: "next".to_string(),
+            offset: 0,
+        });
+        let map = OverworldMapData::from_attributes("wide", &attributes, vec![0; 20_000]);
+
+        assert!(!is_declared_connection_step(
+            &map,
+            TilePosition::new(100, 0),
+            Direction::Right
+        ));
+        assert!(!is_declared_connection_step(
+            &map,
+            TilePosition::new(i16::MAX, 0),
+            Direction::Right
+        ));
+    }
+
+    #[test]
+    fn checked_move_by_stride_rejects_coordinate_overflow() {
+        assert_eq!(
+            checked_move_by_stride(TilePosition::new(0, 0), Direction::Right, 2),
+            Some(TilePosition::new(2, 0))
+        );
+        assert_eq!(
+            checked_move_by_stride(TilePosition::new(i16::MAX, 0), Direction::Right, 2),
+            None
+        );
+        assert_eq!(
+            checked_move_by_stride(TilePosition::new(i16::MIN, 0), Direction::Left, 2),
+            None
+        );
+    }
+
+    #[test]
+    fn step_reports_runtime_tile_overflow_without_moving() {
+        let mut state = PlayerMovementState {
+            tile: TilePosition::new(i16::MAX - 1, 0),
+            facing: Direction::Right,
+            mode: MovementMode::Normal,
+        };
+
+        let outcome = attempt_step(
+            &mut state,
+            Direction::Right,
+            &map(),
+            &tileset(),
+            StepOptions::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            StepOutcome::RuntimeTileOverflow {
+                from: TilePosition::new(i16::MAX - 1, 0),
+                facing: Direction::Right,
+            }
+        );
+        assert_eq!(state.tile, TilePosition::new(i16::MAX - 1, 0));
+        assert_eq!(state.facing, Direction::Right);
+    }
+
+    #[test]
+    fn ledge_jump_reports_runtime_tile_overflow_without_moving() {
+        let mut state = PlayerMovementState {
+            tile: TilePosition::new(0, i16::MAX - 1),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
+
+        let outcome = attempt_ledge_jump(
+            &mut state,
+            Direction::Down,
+            &ledge_map(),
+            &ledge_tileset(permissions::FLOOR),
+            StepOptions::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            LedgeJumpOutcome::RuntimeTileOverflow {
+                from: TilePosition::new(0, i16::MAX - 1),
+                facing: Direction::Down,
+            }
+        );
+        assert_eq!(state.tile, TilePosition::new(0, i16::MAX - 1));
+        assert_eq!(state.facing, Direction::Down);
     }
 
     #[test]
     fn surf_mode_can_enter_water_when_walk_cannot() {
         let water_map = OverworldMapData::from_attributes("water", &attributes(2, 1), vec![0, 2]);
         let mut walker = PlayerMovementState {
-            tile: TilePosition::new(0, 0),
+            tile: TilePosition::new(1, 0),
             facing: Direction::Right,
             mode: MovementMode::Normal,
         };
@@ -599,7 +748,7 @@ mod tests {
     #[test]
     fn ledge_jump_moves_two_strides_over_valid_ledge() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 1),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -614,20 +763,20 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::Jumped {
-                from: TilePosition::new(1, 1),
-                over: TilePosition::new(1, 3),
-                to: TilePosition::new(1, 5),
+                from: TilePosition::new(2, 1),
+                over: TilePosition::new(2, 3),
+                to: TilePosition::new(2, 5),
                 speed_multiplier: 1,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(1, 5));
+        assert_eq!(state.tile, TilePosition::new(2, 5));
         assert_eq!(state.facing, Direction::Down);
     }
 
     #[test]
     fn ledge_jump_rejects_wrong_direction_without_normalization() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(1, 5),
+            tile: TilePosition::new(2, 5),
             facing: Direction::Up,
             mode: MovementMode::Normal,
         };
@@ -642,17 +791,17 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::NotLedge {
-                at: TilePosition::new(1, 3),
+                at: TilePosition::new(2, 3),
                 facing: Direction::Up,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(1, 5));
+        assert_eq!(state.tile, TilePosition::new(2, 5));
     }
 
     #[test]
     fn ledge_jump_rejects_blocked_landing() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 1),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -667,17 +816,17 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::BlockedLanding {
-                at: TilePosition::new(1, 5),
+                at: TilePosition::new(2, 5),
                 facing: Direction::Down,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(1, 1));
+        assert_eq!(state.tile, TilePosition::new(2, 1));
     }
 
     #[test]
     fn occupied_tile_blocks_ledge_landing_without_moving() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 1),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -688,7 +837,7 @@ mod tests {
             &ledge_tileset(permissions::FLOOR),
             StepOptions::default(),
             &[OccupiedTile {
-                tile: TilePosition::new(1, 5),
+                tile: TilePosition::new(2, 5),
                 object_identifier: Some("LANDING_NPC".to_string()),
             }],
         );
@@ -696,11 +845,11 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::BlockedByObject {
-                at: TilePosition::new(1, 5),
+                at: TilePosition::new(2, 5),
                 facing: Direction::Down,
                 object_identifier: Some("LANDING_NPC".to_string()),
             }
         );
-        assert_eq!(state.tile, TilePosition::new(1, 1));
+        assert_eq!(state.tile, TilePosition::new(2, 1));
     }
 }

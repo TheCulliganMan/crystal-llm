@@ -4,8 +4,8 @@ import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import type { ObjectEvent } from "@pokecrystal/core/core/models/map";
 import { parseAsmNumber, splitAsmArgs, stripAsmComment, writeJsonToTargets } from "./asm-utils";
 
-export type ExportedNpcEvent = Omit<ObjectEvent, "sightline_direction_override"> & {
-  sightline_direction_override?: string | null;
+export type ExportedNpcEvent = Omit<ObjectEvent, "label"> & {
+  label: string | null;
 };
 export type NpcData = Record<string, ExportedNpcEvent[]>;
 
@@ -113,11 +113,18 @@ export function parseObjectConstantLabels(content: string): string[] {
 const parseObjectEvent = (
   args: string[],
   objectIdentifier: string | null,
-  constants: Record<string, number>
+  constants: Record<string, number>,
+  trainerEventFlags: Record<string, string> = {}
 ): ExportedNpcEvent => {
   if (args.length !== 13) {
     throw new Error(`object_event requires 13 args, found ${args.length}: ${args.join(", ")}`);
   }
+  const objectType = args[9];
+  const script = args[11];
+  const eventFlag =
+    objectType === "OBJECTTYPE_TRAINER" && trainerEventFlags[script]
+      ? trainerEventFlags[script]
+      : args[12];
   return {
     x: parseNumericExpression(args[0], constants),
     y: parseNumericExpression(args[1], constants),
@@ -128,13 +135,37 @@ const parseObjectEvent = (
     hram_x: parseNumericExpression(args[6], constants),
     hram_y: parseNumericExpression(args[7], constants),
     pal: parseNumericExpression(args[8], constants),
-    object_type: args[9],
+    object_type: objectType,
     radius: parseNumericExpression(args[10], constants),
-    script: args[11],
-    event_flag: args[12],
+    script,
+    label: null,
+    event_flag: eventFlag,
     object_identifier: objectIdentifier,
+    sightline_direction_override: null,
   };
 };
+
+function parseTrainerEventFlags(content: string): Record<string, string> {
+  const flags: Record<string, string> = {};
+  let currentLabel: string | null = null;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripAsmComment(rawLine);
+    const label = line.match(/^([A-Za-z_][A-Za-z0-9_]*):$/);
+    if (label) {
+      currentLabel = label[1];
+      continue;
+    }
+    if (!currentLabel || !line.startsWith("trainer")) {
+      continue;
+    }
+    const args = splitAsmArgs(line.slice("trainer".length));
+    if (args.length < 3) {
+      throw new Error(`trainer command requires at least 3 args for ${currentLabel}: ${args.join(", ")}`);
+    }
+    flags[currentLabel] = args[2];
+  }
+  return flags;
+}
 
 export function parseNpcDataFromMapFile(
   mapName: string,
@@ -143,6 +174,7 @@ export function parseNpcDataFromMapFile(
 ): ExportedNpcEvent[] {
   const content = fs.readFileSync(filePath, "utf8");
   const labels = parseObjectConstantLabels(content);
+  const trainerEventFlags = parseTrainerEventFlags(content);
   const events: ExportedNpcEvent[] = [];
 
   for (const rawLine of content.split(/\r?\n/)) {
@@ -151,7 +183,7 @@ export function parseNpcDataFromMapFile(
       continue;
     }
     const args = splitAsmArgs(line.slice("object_event".length));
-    events.push(parseObjectEvent(args, labels[events.length] ?? null, constants));
+    events.push(parseObjectEvent(args, labels[events.length] ?? null, constants, trainerEventFlags));
   }
 
   if (labels.length > 0 && labels.length !== events.length) {

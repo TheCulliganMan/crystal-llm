@@ -36,6 +36,8 @@ pub enum TmHmLearnError {
     AlreadyKnows { move_id: String },
     #[error("Pokemon has four moves and no replacement slot was selected")]
     MoveListFull,
+    #[error("Pokemon has fewer than four moves and replacement slot {slot} was selected")]
+    UnexpectedReplacementSlot { slot: usize },
     #[error("replacement slot {slot} is outside the Pokemon move list")]
     InvalidReplacementSlot { slot: usize },
     #[error("saved bag.tm_hm has {slots} slots, compiled TM/HM max index is {max_index}")]
@@ -106,6 +108,9 @@ pub fn teach_tmhm_move(
         pp_ups: 0,
     };
     let (replaced_slot, replaced_move) = if pokemon.moves.len() < 4 {
+        if let Some(slot) = replace_slot {
+            return Err(TmHmLearnError::UnexpectedReplacementSlot { slot });
+        }
         pokemon.moves.push(learned);
         (None, None)
     } else {
@@ -251,7 +256,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -336,6 +342,19 @@ mod tests {
         assert!(outcome.consumed);
         assert_eq!(pokemon.moves.last().expect("learned").name, "HEADBUTT");
         assert_eq!(pokemon.moves.last().expect("learned").current_pp, 15);
+    }
+
+    #[test]
+    fn open_move_slot_rejects_unused_replacement_slot_without_mutation() {
+        let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
+        let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
+        let before = pokemon.clone();
+
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), Some(0), true)
+            .expect_err("open move slot must not receive replacement choice");
+
+        assert_eq!(error, TmHmLearnError::UnexpectedReplacementSlot { slot: 0 });
+        assert_eq!(pokemon, before);
     }
 
     #[test]

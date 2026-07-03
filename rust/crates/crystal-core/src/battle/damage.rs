@@ -72,6 +72,7 @@ impl TypeMultiplier {
 pub enum Weather {
     None,
     Rain,
+    Sandstorm,
     Sun,
 }
 
@@ -80,6 +81,7 @@ impl Weather {
         match self {
             Self::None => None,
             Self::Rain => Some("WEATHER_RAIN"),
+            Self::Sandstorm => Some("WEATHER_SANDSTORM"),
             Self::Sun => Some("WEATHER_SUN"),
         }
     }
@@ -629,6 +631,7 @@ fn validate_exact_damage_token(subject: &str, value: &str) -> Result<(), String>
 pub struct DamageContext {
     pub is_critical: bool,
     pub is_confusion_damage: bool,
+    pub defender_identified: bool,
     pub weather: Weather,
     pub random_roll: u8,
 }
@@ -638,6 +641,7 @@ impl Default for DamageContext {
         Self {
             is_critical: false,
             is_confusion_damage: false,
+            defender_identified: false,
             weather: Weather::None,
             random_roll: 255,
         }
@@ -721,23 +725,45 @@ pub fn type_effectiveness(
     move_type: impl AsRef<str>,
     defender_type: impl AsRef<str>,
 ) -> Result<TypeMultiplier, DamageCalculationError> {
-    if table.matchups.is_empty() {
+    type_effectiveness_from_matchups(&table.matchups, move_type, defender_type)
+}
+
+pub fn foresight_type_effectiveness(
+    table: &TypeEffectivenessTable,
+    move_type: impl AsRef<str>,
+    defender_type: impl AsRef<str>,
+) -> Result<TypeMultiplier, DamageCalculationError> {
+    let move_type = move_type.as_ref();
+    let defender_type = defender_type.as_ref();
+    validate_type_effectiveness_tokens(move_type, defender_type)?;
+    if let Some(multiplier) = table
+        .foresight_matchups
+        .get(move_type)
+        .and_then(|defenders| defenders.get(defender_type))
+        .copied()
+    {
+        return Ok(multiplier);
+    }
+    type_effectiveness(table, move_type, defender_type)
+}
+
+fn type_effectiveness_from_matchups(
+    matchups: &BTreeMap<String, BTreeMap<String, TypeMultiplier>>,
+    move_type: impl AsRef<str>,
+    defender_type: impl AsRef<str>,
+) -> Result<TypeMultiplier, DamageCalculationError> {
+    if matchups.is_empty() {
         return Err(DamageCalculationError::MissingTypeEffectivenessTable);
     }
     let move_type = move_type.as_ref();
     let defender_type = defender_type.as_ref();
     if !is_exact_battle_damage_token(move_type) {
-        return Err(DamageCalculationError::InvalidTypeEffectivenessAttacker {
-            attacker: move_type.to_string(),
-        });
+        return Err(invalid_type_effectiveness_attacker(move_type));
     }
     if !is_exact_battle_damage_token(defender_type) {
-        return Err(DamageCalculationError::InvalidTypeEffectivenessDefender {
-            defender: defender_type.to_string(),
-        });
+        return Err(invalid_type_effectiveness_defender(defender_type));
     }
-    table
-        .matchups
+    matchups
         .get(move_type)
         .and_then(|defenders| defenders.get(defender_type))
         .copied()
@@ -747,16 +773,54 @@ pub fn type_effectiveness(
         })
 }
 
+fn validate_type_effectiveness_tokens(
+    move_type: &str,
+    defender_type: &str,
+) -> Result<(), DamageCalculationError> {
+    if !is_exact_battle_damage_token(move_type) {
+        return Err(invalid_type_effectiveness_attacker(move_type));
+    }
+    if !is_exact_battle_damage_token(defender_type) {
+        return Err(invalid_type_effectiveness_defender(defender_type));
+    }
+    Ok(())
+}
+
+fn invalid_type_effectiveness_attacker(move_type: &str) -> DamageCalculationError {
+    DamageCalculationError::InvalidTypeEffectivenessAttacker {
+        attacker: move_type.to_string(),
+    }
+}
+
+fn invalid_type_effectiveness_defender(defender_type: &str) -> DamageCalculationError {
+    DamageCalculationError::InvalidTypeEffectivenessDefender {
+        defender: defender_type.to_string(),
+    }
+}
+
 pub fn calculate_type_effectiveness_multiplier(
     table: &TypeEffectivenessTable,
     move_type: impl AsRef<str>,
     defender_types: &[PokemonType],
 ) -> Result<TypeMultiplier, DamageCalculationError> {
+    calculate_type_effectiveness_multiplier_with_foresight(table, move_type, defender_types, false)
+}
+
+pub fn calculate_type_effectiveness_multiplier_with_foresight(
+    table: &TypeEffectivenessTable,
+    move_type: impl AsRef<str>,
+    defender_types: &[PokemonType],
+    defender_identified: bool,
+) -> Result<TypeMultiplier, DamageCalculationError> {
     let move_type = move_type.as_ref();
     defender_types
         .iter()
         .try_fold(TypeMultiplier::one(), |acc, defender_type| {
-            let next = type_effectiveness(table, move_type, defender_type)?;
+            let next = if defender_identified {
+                foresight_type_effectiveness(table, move_type, defender_type)?
+            } else {
+                type_effectiveness(table, move_type, defender_type)?
+            };
             if next.numerator == 0 {
                 Ok(TypeMultiplier::zero())
             } else {
@@ -829,6 +893,7 @@ pub fn calculate_damage(
             )?,
         )
     };
+    let attack_value = apply_burn_attack_penalty(attacker, physical, attack_value);
     let defense_value = if context.is_critical && defense_stage > attack_stage {
         clamp_stat(base_defense)
     } else {
@@ -869,10 +934,11 @@ pub fn calculate_damage(
     let type_multiplier = if context.is_confusion_damage || move_data.name == "STRUGGLE" {
         TypeMultiplier::one()
     } else {
-        calculate_type_effectiveness_multiplier(
+        calculate_type_effectiveness_multiplier_with_foresight(
             type_effectiveness,
             &move_data.move_type,
             &defender_types,
+            context.defender_identified,
         )?
     };
     if type_multiplier.numerator == 0 {
@@ -930,6 +996,14 @@ fn distinct_defender_types(defender: &Pokemon) -> Vec<PokemonType> {
 
 fn clamp_stat(value: u16) -> u16 {
     value.clamp(1, 999)
+}
+
+fn apply_burn_attack_penalty(attacker: &Pokemon, physical: bool, attack_value: u16) -> u16 {
+    if physical && attacker.status.as_deref() == Some("BURN") {
+        (attack_value / 2).max(1)
+    } else {
+        attack_value
+    }
 }
 
 const fn gcd(mut a: u16, mut b: u16) -> u16 {
@@ -1233,7 +1307,13 @@ mod tests {
     fn type_effectiveness_table() -> TypeEffectivenessTable {
         serde_json::from_value(serde_json::json!({
             "matchups": {
-                "NORMAL": { "NORMAL": { "numerator": 1, "denominator": 1 } },
+                "NORMAL": {
+                    "NORMAL": { "numerator": 1, "denominator": 1 },
+                    "GHOST": { "numerator": 0, "denominator": 1 }
+                },
+                "FIGHTING": {
+                    "GHOST": { "numerator": 0, "denominator": 1 }
+                },
                 "GHOST": { "STEEL": { "numerator": 1, "denominator": 2 } },
                 "DARK": { "STEEL": { "numerator": 1, "denominator": 2 } },
                 "ELECTRIC": { "GROUND": { "numerator": 0, "denominator": 1 } },
@@ -1244,8 +1324,8 @@ mod tests {
                 "FIRE": { "GRASS": { "numerator": 2, "denominator": 1 } }
             },
             "foresight_matchups": {
-                "NORMAL": { "GHOST": { "numerator": 0, "denominator": 1 } },
-                "FIGHTING": { "GHOST": { "numerator": 0, "denominator": 1 } }
+                "NORMAL": { "GHOST": { "numerator": 1, "denominator": 1 } },
+                "FIGHTING": { "GHOST": { "numerator": 1, "denominator": 1 } }
             }
         }))
         .expect("type effectiveness fixture should parse")
@@ -1356,48 +1436,51 @@ mod tests {
             physical: vec!["NORMAL".to_string()],
             special: vec!["FIRE".to_string()],
         };
-        let table: TypeEffectivenessTable = serde_json::from_value(serde_json::json!({
-            "matchups": {
-                "NORMAL": {
-                    "NORMAL": { "numerator": 1, "denominator": 0 }
-                },
-                "WATER": {
-                    "FIRE": { "numerator": 1, "denominator": 1 }
-                },
-                "WA TER": {
-                    "FIRE": { "numerator": 1, "denominator": 1 }
-                },
-                "FIRE": {
-                    "WA TER": { "numerator": 1, "denominator": 1 },
-                    "WATER": { "numerator": 1, "denominator": 1 }
-                }
-            },
-            "foresight_matchups": {
-                "NORMAL": {
-                    "WATER": { "numerator": 1, "denominator": 0 },
-                    "WA TER": { "numerator": 1, "denominator": 1 }
-                },
-                "NO RMAL": {
-                    "NORMAL": { "numerator": 1, "denominator": 1 }
-                }
-            }
-        }))
-        .expect("type effectiveness fixture should parse");
+        let one = TypeMultiplier {
+            numerator: 1,
+            denominator: 1,
+        };
+        let zero_denominator = TypeMultiplier {
+            numerator: 1,
+            denominator: 0,
+        };
+        let table = TypeEffectivenessTable {
+            matchups: BTreeMap::from([
+                (
+                    "NORMAL".to_string(),
+                    BTreeMap::from([("NORMAL".to_string(), zero_denominator)]),
+                ),
+                (
+                    "WATER".to_string(),
+                    BTreeMap::from([("FIRE".to_string(), one)]),
+                ),
+                (
+                    "WA TER".to_string(),
+                    BTreeMap::from([("FIRE".to_string(), one)]),
+                ),
+                (
+                    "FIRE".to_string(),
+                    BTreeMap::from([("WA TER".to_string(), one), ("WATER".to_string(), one)]),
+                ),
+            ]),
+            foresight_matchups: BTreeMap::from([
+                (
+                    "NORMAL".to_string(),
+                    BTreeMap::from([
+                        ("WATER".to_string(), zero_denominator),
+                        ("WA TER".to_string(), one),
+                    ]),
+                ),
+                (
+                    "NO RMAL".to_string(),
+                    BTreeMap::from([("NORMAL".to_string(), one)]),
+                ),
+            ]),
+        };
 
         assert_eq!(
             type_effectiveness_table_issues(&table, &categories, true),
             vec![
-                TypeEffectivenessTableIssue::InvalidMultiplierDenominator {
-                    table: TypeEffectivenessTableKind::Matchups,
-                },
-                TypeEffectivenessTableIssue::UnknownAttacker {
-                    table: TypeEffectivenessTableKind::Matchups,
-                    attacker: pokemon_type("WATER"),
-                },
-                TypeEffectivenessTableIssue::InvalidAttacker {
-                    table: TypeEffectivenessTableKind::Matchups,
-                    attacker: pokemon_type("WA TER"),
-                },
                 TypeEffectivenessTableIssue::InvalidDefender {
                     table: TypeEffectivenessTableKind::Matchups,
                     defender: pokemon_type("WA TER"),
@@ -1405,6 +1488,17 @@ mod tests {
                 TypeEffectivenessTableIssue::UnknownDefender {
                     table: TypeEffectivenessTableKind::Matchups,
                     defender: pokemon_type("WATER"),
+                },
+                TypeEffectivenessTableIssue::InvalidMultiplierDenominator {
+                    table: TypeEffectivenessTableKind::Matchups,
+                },
+                TypeEffectivenessTableIssue::InvalidAttacker {
+                    table: TypeEffectivenessTableKind::Matchups,
+                    attacker: pokemon_type("WA TER"),
+                },
+                TypeEffectivenessTableIssue::UnknownAttacker {
+                    table: TypeEffectivenessTableKind::Matchups,
+                    attacker: pokemon_type("WATER"),
                 },
                 TypeEffectivenessTableIssue::MissingMatchup {
                     attacker: "FIRE".to_string(),
@@ -1418,13 +1512,6 @@ mod tests {
                     attacker: "NORMAL".to_string(),
                     defender: "FIRE".to_string(),
                 },
-                TypeEffectivenessTableIssue::InvalidMultiplierDenominator {
-                    table: TypeEffectivenessTableKind::ForesightMatchups,
-                },
-                TypeEffectivenessTableIssue::UnknownDefender {
-                    table: TypeEffectivenessTableKind::ForesightMatchups,
-                    defender: pokemon_type("WATER"),
-                },
                 TypeEffectivenessTableIssue::InvalidAttacker {
                     table: TypeEffectivenessTableKind::ForesightMatchups,
                     attacker: pokemon_type("NO RMAL"),
@@ -1432,6 +1519,13 @@ mod tests {
                 TypeEffectivenessTableIssue::InvalidDefender {
                     table: TypeEffectivenessTableKind::ForesightMatchups,
                     defender: pokemon_type("WA TER"),
+                },
+                TypeEffectivenessTableIssue::InvalidMultiplierDenominator {
+                    table: TypeEffectivenessTableKind::ForesightMatchups,
+                },
+                TypeEffectivenessTableIssue::UnknownDefender {
+                    table: TypeEffectivenessTableKind::ForesightMatchups,
+                    defender: pokemon_type("WATER"),
                 },
             ],
         );
@@ -1522,6 +1616,25 @@ mod tests {
             )
             .expect("type effectiveness calculates"),
             TypeMultiplier::zero()
+        );
+        assert_eq!(
+            calculate_type_effectiveness_multiplier(
+                &type_effectiveness_table(),
+                pokemon_type("NORMAL"),
+                &[pokemon_type("GHOST")]
+            )
+            .expect("normal ghost immunity calculates"),
+            TypeMultiplier::zero()
+        );
+        assert_eq!(
+            calculate_type_effectiveness_multiplier_with_foresight(
+                &type_effectiveness_table(),
+                pokemon_type("NORMAL"),
+                &[pokemon_type("GHOST")],
+                true
+            )
+            .expect("foresight normal ghost override calculates"),
+            TypeMultiplier::one()
         );
         assert_eq!(
             calculate_type_effectiveness_multiplier(
@@ -1650,6 +1763,110 @@ mod tests {
             }
         );
         assert_eq!(result.damage, 90);
+    }
+
+    #[test]
+    fn burn_halves_physical_attack_damage_for_exact_status_token() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let mut burned = attacker.clone();
+        burned.status = Some("BURN".to_string());
+        let mut lowercase_burn = attacker.clone();
+        lowercase_burn.status = Some("burn".to_string());
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 83, 80, 100, 100),
+            50,
+        );
+        let tackle = tackle(pokemon_type("NORMAL"), 60);
+        let context = DamageContext::default();
+
+        let normal = calculate_damage(
+            &attacker,
+            &defender,
+            &tackle,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            context,
+        )
+        .expect("normal physical damage");
+        let burned = calculate_damage(
+            &burned,
+            &defender,
+            &tackle,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            context,
+        )
+        .expect("burned physical damage");
+        let lowercase = calculate_damage(
+            &lowercase_burn,
+            &defender,
+            &tackle,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            context,
+        )
+        .expect("lowercase burn physical damage");
+
+        assert!(burned.damage < normal.damage);
+        assert_eq!(lowercase.damage, normal.damage);
+    }
+
+    #[test]
+    fn burn_does_not_reduce_special_damage() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("FIRE"),
+            BaseStats::new(80, 100, 78, 100, 100, 85),
+            50,
+        );
+        let mut burned = attacker.clone();
+        burned.status = Some("BURN".to_string());
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("GRASS"),
+            BaseStats::new(80, 82, 83, 80, 100, 100),
+            50,
+        );
+        let ember = tackle(pokemon_type("FIRE"), 40);
+        let context = DamageContext::default();
+
+        let normal = calculate_damage(
+            &attacker,
+            &defender,
+            &ember,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            context,
+        )
+        .expect("normal special damage");
+        let burned = calculate_damage(
+            &burned,
+            &defender,
+            &ember,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            context,
+        )
+        .expect("burned special damage");
+
+        assert_eq!(burned.damage, normal.damage);
     }
 
     #[test]

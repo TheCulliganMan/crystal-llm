@@ -17,6 +17,7 @@ use crate::world::session::WildEncounterRoll;
 #[serde(deny_unknown_fields)]
 pub struct WildBattleStart {
     pub battle_type: String,
+    pub battle_music: String,
     pub encounter: WildEncounterRoll,
     pub enemy_pokemon: Pokemon,
     pub enemy_party: Vec<Pokemon>,
@@ -27,6 +28,7 @@ pub struct WildBattleStart {
 #[serde(deny_unknown_fields)]
 pub struct StaticWildBattleRequest {
     pub battle_type: String,
+    pub battle_music: String,
     pub species: String,
     pub level: u8,
     pub source_script: String,
@@ -36,6 +38,7 @@ impl StaticWildBattleRequest {
     pub fn new(species: impl Into<String>, level: u8) -> Self {
         Self {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: String::new(),
             species: species.into(),
             level,
             source_script: String::new(),
@@ -47,6 +50,7 @@ impl StaticWildBattleRequest {
 #[serde(deny_unknown_fields)]
 pub struct StaticWildBattleStart {
     pub battle_type: String,
+    pub battle_music: String,
     pub species: String,
     pub level: u8,
     pub source_script: String,
@@ -143,6 +147,7 @@ impl From<&WildBattleStart> for BattleMemory {
     fn from(start: &WildBattleStart) -> Self {
         Self::Wild {
             battle_type: start.battle_type.clone(),
+            battle_music: start.battle_music.clone(),
             map_name: start.encounter.map_name.clone(),
             enemy_pokemon: start.enemy_pokemon.clone(),
             enemy_party: start.enemy_party.clone(),
@@ -154,6 +159,7 @@ impl From<&StaticWildBattleStart> for BattleMemory {
     fn from(start: &StaticWildBattleStart) -> Self {
         Self::StaticWild {
             battle_type: start.battle_type.clone(),
+            battle_music: start.battle_music.clone(),
             species: start.species.clone(),
             level: start.level,
             source_script: start.source_script.clone(),
@@ -306,6 +312,10 @@ pub struct BattleStatDropGuardOutcome {
 pub enum StaticWildBattleError {
     #[error("static wild battle request is missing exact species id")]
     MissingSpecies,
+    #[error("static wild battle request is missing exact battle music id")]
+    MissingBattleMusic,
+    #[error("static wild battle request has invalid battle music id '{battle_music}'")]
+    InvalidBattleMusic { battle_music: String },
     #[error("static wild battle request has invalid species id '{species}'")]
     InvalidSpecies { species: String },
     #[error("unknown static wild species '{species}'")]
@@ -321,6 +331,10 @@ pub enum StaticWildBattleError {
 pub enum WildBattleStartError {
     #[error("wild battle cannot start from unresolved encounter roll on map '{map_name}'")]
     UnresolvedEncounter { map_name: String },
+    #[error("wild battle request is missing exact battle music id")]
+    MissingBattleMusic,
+    #[error("wild battle request has invalid battle music id '{battle_music}'")]
+    InvalidBattleMusic { battle_music: String },
     #[error("wild Pokemon build error: {0}")]
     PokemonBuild(#[from] PokemonBuildError),
 }
@@ -336,12 +350,21 @@ pub fn wild_dvs_from_rng(rng: &mut Random) -> Dv {
 
 pub fn wild_battle_start_from_encounter(
     encounter: WildEncounterRoll,
+    battle_music: String,
     species: &PokemonSpecies,
     learnsets: &SpeciesLearnsets,
     moves: &BTreeMap<String, Move>,
     growth_rates: &GrowthRateCatalog,
     rng: &mut Random,
 ) -> Result<WildBattleStart, WildBattleStartError> {
+    if battle_music.is_empty() {
+        return Err(WildBattleStartError::MissingBattleMusic);
+    }
+    validate_battle_start_token(&battle_music).map_err(|_| {
+        WildBattleStartError::InvalidBattleMusic {
+            battle_music: battle_music.clone(),
+        }
+    })?;
     let resolved =
         encounter
             .resolved
@@ -358,6 +381,7 @@ pub fn wild_battle_start_from_encounter(
 
     Ok(WildBattleStart {
         battle_type: "BATTLETYPE_NORMAL".to_string(),
+        battle_music,
         encounter,
         enemy_party: vec![enemy_pokemon.clone()],
         enemy_pokemon,
@@ -373,6 +397,14 @@ pub fn static_wild_battle_start(
     request: StaticWildBattleRequest,
     rng: &mut Random,
 ) -> Result<StaticWildBattleStart, StaticWildBattleError> {
+    if request.battle_music.is_empty() {
+        return Err(StaticWildBattleError::MissingBattleMusic);
+    }
+    validate_battle_start_token(&request.battle_music).map_err(|_| {
+        StaticWildBattleError::InvalidBattleMusic {
+            battle_music: request.battle_music.clone(),
+        }
+    })?;
     if request.species.is_empty() {
         return Err(StaticWildBattleError::MissingSpecies);
     }
@@ -416,6 +448,7 @@ pub fn static_wild_battle_start(
 
     Ok(StaticWildBattleStart {
         battle_type: request.battle_type,
+        battle_music: request.battle_music,
         species: request.species,
         level: request.level,
         source_script: request.source_script,
@@ -838,6 +871,7 @@ fn reset_active_battle_slots(state: &mut GameState) {
     state.battle_rewarded_enemy_party_indices.clear();
     state.battle_escape_attempts = 0;
     state.battle_player_stat_drop_guard_turns = 0;
+    state.battle_pay_day_money = 0;
 }
 
 pub fn deactivate_battle(state: &mut GameState) {
@@ -851,6 +885,7 @@ pub fn clear_active_battle_slots(state: &mut GameState) {
     state.battle_rewarded_enemy_party_indices.clear();
     state.battle_escape_attempts = 0;
     state.battle_player_stat_drop_guard_turns = 0;
+    state.battle_pay_day_money = 0;
 }
 
 fn trainer_battle_money_cap(
@@ -1054,6 +1089,7 @@ mod tests {
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1073,6 +1109,7 @@ mod tests {
             BattleMemory::from(&start),
             BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: start.enemy_pokemon.clone(),
                 enemy_party: start.enemy_party.clone(),
@@ -1100,6 +1137,7 @@ mod tests {
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1110,6 +1148,7 @@ mod tests {
         state.battle_rewarded_enemy_party_indices.insert(9);
         state.battle_escape_attempts = 3;
         state.battle_player_stat_drop_guard_turns = 4;
+        state.battle_pay_day_money = 55;
 
         activate_wild_battle_start(&mut state, &start);
 
@@ -1120,6 +1159,7 @@ mod tests {
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
+        assert_eq!(state.battle_pay_day_money, 0);
     }
 
     #[test]
@@ -1128,6 +1168,7 @@ mod tests {
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1139,6 +1180,7 @@ mod tests {
         state.battle_rewarded_enemy_party_indices.insert(0);
         state.battle_escape_attempts = 2;
         state.battle_player_stat_drop_guard_turns = 3;
+        state.battle_pay_day_money = 40;
 
         deactivate_battle(&mut state);
 
@@ -1148,6 +1190,7 @@ mod tests {
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
+        assert_eq!(state.battle_pay_day_money, 0);
     }
 
     #[test]
@@ -1207,6 +1250,7 @@ mod tests {
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1351,6 +1395,7 @@ mod tests {
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1381,6 +1426,7 @@ mod tests {
 
         let error = wild_battle_start_from_encounter(
             encounter,
+            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             &species(),
             &learnsets(),
             &BTreeMap::new(),
@@ -1393,6 +1439,39 @@ mod tests {
             error,
             WildBattleStartError::UnresolvedEncounter {
                 map_name: "Route29".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wild_battle_start_rejects_missing_or_malformed_battle_music() {
+        let mut rng = Random::new(1);
+        let missing = wild_battle_start_from_encounter(
+            encounter(),
+            String::new(),
+            &species(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &mut rng,
+        )
+        .expect_err("wild battle music must be explicit");
+        assert_eq!(missing, WildBattleStartError::MissingBattleMusic);
+
+        let malformed = wild_battle_start_from_encounter(
+            encounter(),
+            "MUSIC JOHTO WILD BATTLE".to_string(),
+            &species(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &mut rng,
+        )
+        .expect_err("wild battle music must be an exact token");
+        assert_eq!(
+            malformed,
+            WildBattleStartError::InvalidBattleMusic {
+                battle_music: "MUSIC JOHTO WILD BATTLE".to_string(),
             }
         );
     }
@@ -1457,6 +1536,7 @@ mod tests {
         let mut rng = Random::new(1);
         let mut request = StaticWildBattleRequest::new("PIDGEY", 30);
         request.battle_type = "BATTLETYPE_FORCESHINY".to_string();
+        request.battle_music = "MUSIC_JOHTO_WILD_BATTLE".to_string();
         request.source_script = "LakeOfRageRedGyarados".to_string();
 
         let start = static_wild_battle_start(
@@ -1478,6 +1558,7 @@ mod tests {
             BattleMemory::from(&start),
             BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 species: "PIDGEY".to_string(),
                 level: 30,
                 source_script: "LakeOfRageRedGyarados".to_string(),
@@ -1492,6 +1573,7 @@ mod tests {
         let mut rng = Random::new(1);
         let mut request = StaticWildBattleRequest::new("PIDGEY", 60);
         request.battle_type = "BATTLETYPE_FORCEITEM".to_string();
+        request.battle_music = "MUSIC_JOHTO_WILD_BATTLE".to_string();
 
         let start = static_wild_battle_start(
             &BTreeMap::from([("PIDGEY".to_string(), species_with_item())]),
@@ -1515,7 +1597,11 @@ mod tests {
             &learnsets(),
             &BTreeMap::new(),
             &growth_rates(),
-            StaticWildBattleRequest::new("pidgey", 30),
+            {
+                let mut request = StaticWildBattleRequest::new("pidgey", 30);
+                request.battle_music = "MUSIC_JOHTO_WILD_BATTLE".to_string();
+                request
+            },
             &mut rng,
         )
         .expect_err("species ids must match exactly");
@@ -1536,7 +1622,11 @@ mod tests {
             &learnsets(),
             &BTreeMap::new(),
             &growth_rates(),
-            StaticWildBattleRequest::new("PID GEY", 30),
+            {
+                let mut request = StaticWildBattleRequest::new("PID GEY", 30);
+                request.battle_music = "MUSIC_JOHTO_WILD_BATTLE".to_string();
+                request
+            },
             &mut rng,
         )
         .expect_err("malformed species ids are invalid pack input");
@@ -1545,6 +1635,39 @@ mod tests {
             error,
             StaticWildBattleError::InvalidSpecies {
                 species: "PID GEY".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn static_wild_battle_start_rejects_missing_or_malformed_battle_music() {
+        let mut rng = Random::new(1);
+        let missing = static_wild_battle_start(
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            StaticWildBattleRequest::new("PIDGEY", 30),
+            &mut rng,
+        )
+        .expect_err("static wild battle music must be explicit");
+        assert_eq!(missing, StaticWildBattleError::MissingBattleMusic);
+
+        let mut request = StaticWildBattleRequest::new("PIDGEY", 30);
+        request.battle_music = "MUSIC JOHTO WILD BATTLE".to_string();
+        let malformed = static_wild_battle_start(
+            &species_table(),
+            &learnsets(),
+            &BTreeMap::new(),
+            &growth_rates(),
+            request,
+            &mut rng,
+        )
+        .expect_err("static wild battle music must be an exact token");
+        assert_eq!(
+            malformed,
+            StaticWildBattleError::InvalidBattleMusic {
+                battle_music: "MUSIC JOHTO WILD BATTLE".to_string(),
             }
         );
     }
@@ -1652,7 +1775,11 @@ mod tests {
             &learnsets(),
             &BTreeMap::new(),
             &growth_rates(),
-            StaticWildBattleRequest::new("fallbackPIDGEY", 30),
+            {
+                let mut request = StaticWildBattleRequest::new("fallbackPIDGEY", 30);
+                request.battle_music = "MUSIC_JOHTO_WILD_BATTLE".to_string();
+                request
+            },
             &mut rng,
         )
         .expect_err("reserved static species ids are invalid pack input");

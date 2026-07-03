@@ -32,6 +32,7 @@ export type ExportedItem = {
   battle_stat_boost_stat: string | null;
   battle_stat_boost_stages: number | null;
   battle_escape_mode: string | null;
+  battle_capture_ball: boolean | null;
   battle_focus_energy: boolean | null;
   battle_stat_drop_guard: boolean | null;
   battle_stat_drop_guard_turns: number | null;
@@ -71,6 +72,7 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_stat_boost_stat: null,
     battle_stat_boost_stages: null,
     battle_escape_mode: null,
+    battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
     battle_stat_drop_guard_turns: null,
@@ -89,8 +91,8 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     parameter: 0,
     property: "CANT_SELECT | CANT_TOSS",
     pocket: "KEY_ITEM",
-    field_menu: "ITEMMENU_CLOSE",
-    field_usable: true,
+    field_menu: "ITEMMENU_NOUSE",
+    field_usable: false,
     battle_menu: "ITEMMENU_NOUSE",
     battle_usable: false,
     description: "A card that adds a region map to the Pokégear.",
@@ -108,6 +110,7 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_stat_boost_stat: null,
     battle_stat_boost_stages: null,
     battle_escape_mode: null,
+    battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
     battle_stat_drop_guard_turns: null,
@@ -126,8 +129,8 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     parameter: 0,
     property: "CANT_SELECT | CANT_TOSS",
     pocket: "KEY_ITEM",
-    field_menu: "ITEMMENU_CLOSE",
-    field_usable: true,
+    field_menu: "ITEMMENU_NOUSE",
+    field_usable: false,
     battle_menu: "ITEMMENU_NOUSE",
     battle_usable: false,
     description: "A card that enables Pokégear phone calls.",
@@ -145,6 +148,7 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_stat_boost_stat: null,
     battle_stat_boost_stages: null,
     battle_escape_mode: null,
+    battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
     battle_stat_drop_guard_turns: null,
@@ -163,8 +167,8 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     parameter: 0,
     property: "CANT_SELECT | CANT_TOSS",
     pocket: "KEY_ITEM",
-    field_menu: "ITEMMENU_CLOSE",
-    field_usable: true,
+    field_menu: "ITEMMENU_NOUSE",
+    field_usable: false,
     battle_menu: "ITEMMENU_NOUSE",
     battle_usable: false,
     description: "A card that lets the Pokégear tune into radio stations.",
@@ -182,6 +186,7 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_stat_boost_stat: null,
     battle_stat_boost_stages: null,
     battle_escape_mode: null,
+    battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
     battle_stat_drop_guard_turns: null,
@@ -200,8 +205,8 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     parameter: 0,
     property: "CANT_SELECT | CANT_TOSS",
     pocket: "KEY_ITEM",
-    field_menu: "ITEMMENU_CLOSE",
-    field_usable: true,
+    field_menu: "ITEMMENU_NOUSE",
+    field_usable: false,
     battle_menu: "ITEMMENU_NOUSE",
     battle_usable: false,
     description: "A card expanding the Pokégear radio with special programs.",
@@ -219,6 +224,7 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_stat_boost_stat: null,
     battle_stat_boost_stages: null,
     battle_escape_mode: null,
+    battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
     battle_stat_drop_guard_turns: null,
@@ -230,45 +236,13 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
   },
 };
 
-const SAFARI_BALL_ITEM: ExportedItem = {
-  name: "SAFARI BALL",
-  script_name: "SAFARI_BALL",
-  effect: "POKE_BALL",
-  price: 0,
-  held_effect: "HELD_NONE",
-  parameter: 0,
-  property: "CANT_SELECT",
-  pocket: "BALL",
-  field_menu: "ITEMMENU_NOUSE",
-  field_usable: false,
-  battle_menu: "ITEMMENU_CLOSE",
-  battle_usable: true,
-  description: "The Safari Game BALL.",
-  consumable: true,
-  status_heals: [],
-  revive_hp_percent: null,
-  party_revive_hp_percent: null,
-  pp_restore_scope: null,
-  pp_restore_points: null,
-  pp_up_stages: null,
-  vitamin_stat: null,
-  vitamin_stat_exp: null,
-  vitamin_max_stat_exp: null,
-  rare_candy_level_gain: null,
-  battle_stat_boost_stat: null,
-  battle_stat_boost_stages: null,
-  battle_escape_mode: null,
-  battle_focus_energy: null,
-  battle_stat_drop_guard: null,
-  battle_stat_drop_guard_turns: null,
-  confusion_heal: null,
-  repel_steps: null,
-  escape_rope_mode: null,
-  tmhm_index: null,
-  tmhm_move: null,
-};
-
 const ITEM_SLOT_COUNT = 0x100;
+
+const EXACT_FIELD_USABLE_EFFECTS = new Set(["TOWN_MAP"]);
+
+function exactFieldUsable(fieldMenu: string, effectId: string): boolean {
+  return fieldMenu !== "ITEMMENU_NOUSE" || EXACT_FIELD_USABLE_EFFECTS.has(effectId);
+}
 
 function parsePrice(value: string): number {
   const trimmed = value.trim();
@@ -878,6 +852,10 @@ function exactBattleEscapeMode(
   return mode;
 }
 
+function exactBattleCaptureBall(effect: string): boolean | null {
+  return effect === "POKE_BALL" ? true : null;
+}
+
 function parseBattleFocusEnergyRules(itemEffectsContent: string): Map<string, boolean> {
   const labels = parseItemEffectLabels(itemEffectsContent);
   const itemName = itemNameForEffectLabel(labels, "DireHitEffect");
@@ -1120,7 +1098,7 @@ export function exportItems(): ExportedItem[] {
       property: String(attr.property),
       pocket: String(attr.pocket),
       field_menu: String(attr.field_menu),
-      field_usable: String(attr.field_menu) !== "ITEMMENU_NOUSE",
+      field_usable: exactFieldUsable(String(attr.field_menu), effectId),
       battle_menu: String(attr.battle_menu),
       battle_usable: String(attr.battle_menu) !== "ITEMMENU_NOUSE",
       description,
@@ -1138,6 +1116,7 @@ export function exportItems(): ExportedItem[] {
       battle_stat_boost_stat: exactBattleStatBoostStat(attr, effectId, xItemStatRules),
       battle_stat_boost_stages: exactBattleStatBoostStages(attr, effectId, xItemStatRules),
       battle_escape_mode: exactBattleEscapeMode(attr, effectId, battleEscapeModeRules),
+      battle_capture_ball: exactBattleCaptureBall(effectId),
       battle_focus_energy: exactBattleFocusEnergy(attr, effectId, battleFocusEnergyRules),
       battle_stat_drop_guard: exactBattleStatDropGuard(attr, effectId, battleStatDropGuardRules),
       battle_stat_drop_guard_turns: exactBattleStatDropGuardTurns(attr, effectId),
@@ -1149,7 +1128,6 @@ export function exportItems(): ExportedItem[] {
     });
   }
 
-  items.push(SAFARI_BALL_ITEM);
   writeJsonToTargets("items.json", items, { indent: 2 });
   return items;
 }

@@ -28,6 +28,16 @@ type ConditionalState = {
   active: boolean;
 };
 
+const canonicalScriptArgs = (command: string, args: string[]): string[] => {
+  if (command === "warpfacing") {
+    if (args.length !== 4) {
+      throw new Error(`warpfacing requires 4 args, found ${args.length}: ${args.join(", ")}`);
+    }
+    return [args[1], args[2], args[3], args[0]];
+  }
+  return args;
+};
+
 const isConditionalStackActive = (stack: readonly ConditionalState[]): boolean =>
   stack.every((state) => state.active);
 
@@ -93,6 +103,28 @@ const applyKnownImplicitFallthroughs = (scripts: StoryScripts): void => {
     "AzaleaTownRivalBattleScene2",
     "AzaleaTownRivalBattleScript"
   );
+};
+
+const isMovementDataLabel = (label: string): boolean => label.startsWith("MovementData_");
+
+const materializeMovementFallthroughs = (scripts: StoryScripts): void => {
+  const entries = Object.entries(scripts);
+  for (let index = 0; index < entries.length; index += 1) {
+    const [label, commands] = entries[index];
+    if (!isMovementDataLabel(label) || commands.at(-1)?.command === "step_end") {
+      continue;
+    }
+    for (let nextIndex = index + 1; nextIndex < entries.length; nextIndex += 1) {
+      const [nextLabel, nextCommands] = entries[nextIndex];
+      if (!isMovementDataLabel(nextLabel)) {
+        break;
+      }
+      commands.push(...nextCommands.map((command) => ({ ...command })));
+      if (commands.at(-1)?.command === "step_end") {
+        break;
+      }
+    }
+  }
 };
 
 const parseUgDoorDefs = (lines: readonly string[]): UndergroundDoorPart[][] => {
@@ -272,7 +304,7 @@ export function parseAsmFile(filePath: string): StoryScripts {
       const commandDict: StoryCommand =
         command === "text" || command === "line" || command === "para" || command === "cont" || command === "done"
           ? { command, args: argsSource }
-          : { command, args: splitAsmArgs(argsSource) };
+          : { command, args: canonicalScriptArgs(command, splitAsmArgs(argsSource)) };
 
       const activeScript: StoryCommand[] | null = currentScript;
       const activeLocalScript = currentLocalScript as StoryCommand[] | null;
@@ -322,6 +354,7 @@ export function parseAsmFile(filePath: string): StoryScripts {
   const result = Object.fromEntries(
     Object.entries(orderedScripts).filter(([, value]) => value.length > 0)
   );
+  materializeMovementFallthroughs(result);
   applyKnownImplicitFallthroughs(result);
   return result;
 }

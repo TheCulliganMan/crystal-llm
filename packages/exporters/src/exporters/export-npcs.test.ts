@@ -44,8 +44,10 @@ describe("export-npcs", () => {
           object_type: "OBJECTTYPE_SCRIPT",
           radius: 0,
           script: "TestScript",
+          label: null,
           event_flag: "-1",
           object_identifier: "TESTMAP_YOUNGSTER",
+          sightline_direction_override: null,
         },
       ]);
     } finally {
@@ -55,6 +57,44 @@ describe("export-npcs", () => {
 
   it("parses bitwise time expressions", () => {
     expect(parseNumericExpression("MORN | DAY")).toBe(3);
+  });
+
+  it("exports trainer object event flags from exact trainer commands", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
+    const mapPath = path.join(tempDir, "TrainerMap.asm");
+    try {
+      fs.writeFileSync(
+        mapPath,
+        [
+          "	object_const_def",
+          "	const TRAINERMAP_BUG_CATCHER",
+          "",
+          "TrainerBugCatcherAl:",
+          "	trainer BUG_CATCHER, AL, EVENT_BEAT_BUG_CATCHER_AL, SeenText, BeatenText, 0, .AfterScript",
+          "	endifjustbattled",
+          "",
+          "TrainerMap_MapEvents:",
+          "	def_object_events",
+          "	object_event  1,  2, SPRITE_BUG_CATCHER, SPRITEMOVEDATA_STANDING_DOWN, 0, 0, -1, -1, PAL_NPC_BLUE, OBJECTTYPE_TRAINER, 3, TrainerBugCatcherAl, -1",
+          "",
+        ].join("\n")
+      );
+
+      expect(
+        parseNpcDataFromMapFile("TrainerMap", mapPath, {
+          PAL_NPC_BLUE: 9,
+        })
+      ).toEqual([
+        expect.objectContaining({
+          object_type: "OBJECTTYPE_TRAINER",
+          script: "TrainerBugCatcherAl",
+          event_flag: "EVENT_BEAT_BUG_CATCHER_AL",
+          object_identifier: "TRAINERMAP_BUG_CATCHER",
+        }),
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects unknown symbolic numeric tokens instead of coercing them to zero", () => {

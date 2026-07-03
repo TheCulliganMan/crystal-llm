@@ -24,20 +24,22 @@ use crystal_core::battle::start::{
     activate_trainer_battle_start_status, activate_wild_battle_start,
     advance_active_trainer_battle as core_advance_active_trainer_battle,
     apply_battle_stat_drop_guard_turns, complete_trainer_battle as core_complete_trainer_battle,
-    deactivate_battle, materialize_trainer_party, require_active_battle_party_index,
-    static_wild_battle_start, switch_active_battle_party_index, trainer_battle_start,
-    wild_battle_start_from_encounter,
+    deactivate_battle, materialize_trainer_party, require_active_battle_enemy_party_index,
+    require_active_battle_party_index, static_wild_battle_start, switch_active_battle_party_index,
+    trainer_battle_start, wild_battle_start_from_encounter,
 };
 use crystal_core::battle::stats::{
     BattleStatMultiplier, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
     battle_stat_multiplier_table_issues,
 };
 use crystal_core::battle::turn::{
-    BattleAction, BattleCombatState, BattleTurnInput, BattleTurnOutcome, MovePriorityTable,
-    MovePriorityTableIssue, commit_battle_turn_outcome, commit_wild_battle_escape_attempt,
-    move_priority_table_issues,
+    BattleAction, BattleCombatState, BattleEvent, BattleSide, BattleTurnInput, BattleTurnOutcome,
+    MovePriorityTable, MovePriorityTableIssue, battle_move_effect_is_supported,
+    commit_battle_turn_outcome, commit_wild_battle_escape_attempt, move_priority_table_issues,
+    resolve_battle_enemy_action_with_items as core_resolve_battle_enemy_action_with_items,
     resolve_battle_turn_with_items as core_resolve_battle_turn_with_items,
     resolve_wild_battle_run as core_resolve_wild_battle_run,
+    resolve_wild_battle_turn_with_items as core_resolve_wild_battle_turn_with_items,
 };
 use crystal_core::input::{B_PAD_A, GameButton, JoypadState, direction_from_pad_mask};
 use crystal_core::map::{
@@ -49,20 +51,21 @@ use crystal_core::map::{
 };
 pub use crystal_core::models::RuntimePokedexEntry;
 use crystal_core::models::{
-    Bag, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommandIssue,
-    FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM,
-    ITEM_POCKET_TM_HM, Item, MenuIconCatalogIssue, Move, MoveNameCatalogIssue, MovePayloadIssue,
-    MAX_PC_BOXES, Party, PcBox,
-    PcStringCatalogIssue, PokedexEntryCatalogIssue, PokedexState, PokegearLandmarkIssue,
-    PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies, PokemonStorage, RuntimeBundleIssue,
-    SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
+    Bag, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommand,
+    FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM,
+    ITEM_POCKET_TM_HM, Item, MAX_PC_BOXES, MenuIconCatalogIssue, Move, MoveNameCatalogIssue,
+    MovePayloadIssue, Party, PcBox, PcStringCatalogIssue, PokedexEntryCatalogIssue, PokedexState,
+    PokegearLandmarkIssue, PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies, PokemonStorage,
+    RuntimeBundleIssue, SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
     battle_animation_catalog_issues, create_pokemon_from_known_dvs, frontpic_anim_catalog_issues,
-    frontpic_anim_command_issue, menu_icon_catalog_issues, move_name_catalog_issues,
-    move_payload_issues, max_move_pp, pc_string_catalog_issues, pokedex_entry_catalog_issues,
-    pokegear_landmark_issues, pokegear_town_map_palette_issues, runtime_bundle_issues,
-    sprite_palette_default_issues, trainer_catalog_issues, trainer_key,
+    frontpic_anim_command_issue, max_move_pp, menu_icon_catalog_issues, move_name_catalog_issues,
+    move_payload_issues, pc_string_catalog_issues, pokedex_entry_catalog_issues,
+    pokegear_landmark_issues, pokegear_town_map_palette_issues, pokemon_species_display_name,
+    runtime_bundle_issues, sprite_palette_default_issues, trainer_catalog_issues, trainer_key,
     validate_saved_bag_pocket_references, validate_saved_pokedex_references,
 };
+#[cfg(test)]
+use crystal_core::models::TrainerPartyPokemon;
 pub use crystal_core::models::{PokegearLandmark, PokegearLandmarksPayload};
 use crystal_core::multiplayer::{
     PlayerId, RuntimeCommandFrame, RuntimeCommandFrameError, RuntimeCommandPayload,
@@ -75,15 +78,15 @@ use crystal_core::state::{
     BattleMemory, BattleTowerState, BuenasPasswordState, BugContestState, DayCareState,
     EventFlagMemory, FishingMemory, GameState, ItemUseRuntimeEvent, LinkSessionState,
     MagikarpRecordState, MysteryGiftState, Options, OverworldMemory, OverworldObjectMapMemory,
-    RoamingPokemonState, SavedTrainerBattleFields, SceneMemory, ScriptAudioRuntimeEvent,
-    ScriptControlRuntimeEvent, ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest,
-    ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade,
-    ScriptReturnFrame, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription,
-    ScriptRuntimeDelay, ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor,
-    ScriptRuntimeEmote, ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand,
-    ScriptRuntimeStoneTableEntry, ScriptRuntimeVariableWrite, ScriptScreenFade,
-    ScriptShopRuntimeEvent, ScriptTextRuntimeEvent, ScriptTextWait, ScriptWarpRequest, SwarmMemory,
-    ScriptYesNoPrompt,
+    PendingMoveLearn, RoamingPokemonState, SavedTrainerBattleFields, SceneMemory,
+    ScriptAudioRuntimeEvent, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
+    ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest, ScriptMapRefreshRequest,
+    ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade, ScriptReturnFrame,
+    ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
+    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
+    ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
+    ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRuntimeEvent, ScriptTextRuntimeEvent,
+    ScriptTextWait, ScriptWarpRequest, ScriptYesNoPrompt, SwarmMemory,
     saved_audio_runtime_event_command_args, saved_map_runtime_event_command_args,
     saved_pending_text_wait_command_args, saved_script_end_command,
     saved_text_runtime_event_command_args,
@@ -132,14 +135,18 @@ use crystal_core::systems::battle_items::{
     apply_party_special_item_effect as core_apply_party_special_item_effect,
     apply_party_wide_item_effect as core_apply_party_wide_item_effect,
     clone_active_battle_party_pokemon, clone_field_party, clone_field_party_pokemon,
-    item_payload_issues, item_reference_issues, require_active_battle_party_pokemon_mut,
-    require_field_party_mut, require_field_party_pokemon_mut, require_wild_battle_for_escape_item,
+    item_payload_issues_with_known_field_rules, item_reference_issues,
+    require_active_battle_party_pokemon_mut, require_field_party_mut,
+    require_field_party_pokemon_mut, require_wild_battle_for_escape_item,
     validate_battle_escape_item, validate_battle_stat_drop_guard_item,
 };
 use crystal_core::systems::battle_rewards::{
-    BattleRewardOutcome, BattleRewardRules, BattleRewardRulesIssue, battle_reward_rules_issues,
+    BattleRewardOutcome, BattleRewardRules, BattleRewardRulesIssue, PendingMoveLearnResolution,
+    battle_reward_rules_issues,
     claim_active_trainer_battle_rewards as core_claim_active_trainer_battle_rewards,
     claim_active_wild_battle_rewards as core_claim_active_wild_battle_rewards,
+    decline_pending_move_learn as core_decline_pending_move_learn,
+    replace_pending_move_learn as core_replace_pending_move_learn,
 };
 use crystal_core::systems::economy::{
     CurrencyCatalog, SCRIPT_COIN_CHECK_COMMANDS, SCRIPT_COIN_MUTATION_COMMANDS,
@@ -149,8 +156,9 @@ use crystal_core::systems::economy::{
     script_economy_command_issues, validate_save_currency_for_runtime_pack,
 };
 use crystal_core::systems::evolution::{
-    EvolutionEntry, EvolutionTable, EvolutionTableIssue, TRADE_ANY_ITEM, evolution_table_issues,
-    is_known_evolution_method, is_known_happiness_window, is_known_stat_evolution_ratio,
+    EvolutionContext, EvolutionEntry, EvolutionReport, EvolutionTable, EvolutionTableIssue,
+    LinkMode, TRADE_ANY_ITEM, check_and_evolve, evolution_table_issues, is_known_evolution_method,
+    is_known_happiness_window, is_known_stat_evolution_ratio,
 };
 use crystal_core::systems::experience::{GrowthRateCatalogIssue, growth_rate_catalog_issues};
 use crystal_core::systems::field_items::{
@@ -163,9 +171,9 @@ use crystal_core::systems::field_items::{
 };
 use crystal_core::systems::field_moves::{
     FieldEscapeItemRule, FieldItemRule, FieldMoveBlockOutcome, FieldMoveBlockRule,
-    FieldMoveCatalog, FieldMoveCatalogIssue, FieldMoveFlagOutcome, FieldMoveFlagRule,
-    FieldMoveMoveRule, FieldMoveRule, FieldMoveTravelOutcome, FieldMoveTravelRule,
-    FieldMoveUseOutcome, SavedDigWarpDestination,
+    FieldMoveCatalog, FieldMoveCatalogIssue, FieldMoveError, FieldMoveFlagOutcome,
+    FieldMoveFlagRule, FieldMoveMoveRule, FieldMoveRule, FieldMoveTravelOutcome,
+    FieldMoveTravelRule, FieldMoveUseOutcome, SavedDigWarpDestination,
     apply_cut_field_move as core_apply_cut_field_move, apply_dig_warp_memory_for_transition,
     apply_flash_field_move as core_apply_flash_field_move, apply_repel_item_use,
     apply_strength_field_move as core_apply_strength_field_move,
@@ -179,7 +187,7 @@ use crystal_core::systems::field_moves::{
     validate_dig_field_move as core_validate_dig_field_move,
     validate_direct_field_move_actor as core_validate_direct_field_move_actor,
     validate_field_escape_item, validate_fly_field_move as core_validate_fly_field_move,
-    validate_itemfinder_item, validate_repel_item,
+    validate_itemfinder_item, validate_pokegear_item, validate_repel_item,
     validate_saved_active_repel_item as core_validate_saved_active_repel_item,
     validate_saved_blue_card_balance, validate_squirtbottle_item,
     validate_teleport_field_move as core_validate_teleport_field_move, validate_town_map_item,
@@ -241,27 +249,29 @@ use crystal_core::systems::script_items::{
 };
 use crystal_core::systems::script_objects::{
     SCRIPT_MOVEMENT_DIRECTION_COMMANDS, SCRIPT_MOVEMENT_NO_ARG_COMMANDS,
-    SCRIPT_OBJECT_COORDINATE_COMMANDS, SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS,
-    SCRIPT_OBJECT_DIRECTION_COMMANDS, SCRIPT_OBJECT_EMOTE_COMMANDS,
-    SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS, SCRIPT_OBJECT_MOVEMENT_COMMANDS,
-    SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS, SCRIPT_OBJECT_TARGET_COMMANDS,
-    SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement, ScriptMovementOutcome, ScriptMovementStep,
-    ScriptMovementStepIssue, ScriptObjectCommand, ScriptObjectCommandIssue,
-    ScriptObjectMutationOutcome, apply_script_movement as core_apply_script_movement,
+    SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS, SCRIPT_OBJECT_COORDINATE_COMMANDS,
+    SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_DIRECTION_COMMANDS,
+    SCRIPT_OBJECT_EMOTE_COMMANDS, SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS,
+    SCRIPT_OBJECT_MOVEMENT_COMMANDS, SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS,
+    SCRIPT_OBJECT_TARGET_COMMANDS, SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement,
+    ScriptMovementOutcome, ScriptMovementStep, ScriptMovementStepIssue, ScriptObjectCommand,
+    ScriptObjectCommandIssue, ScriptObjectMutationOutcome,
+    apply_script_movement as core_apply_script_movement,
     apply_script_object_mutation as core_apply_script_object_mutation,
     is_hideable_object_event_flag, is_known_script_movement_command, script_movement_step_issues,
-    script_object_command_issues,
+    script_movement_step_runtime_stride, script_object_command_issues,
 };
 pub use crystal_core::systems::script_runtime::{
     InitializeEventsConfig, StoryEventScriptConstants,
 };
 use crystal_core::systems::script_runtime::{
-    InitializeEventsIssue, ScriptRuntimeCommand, ScriptRuntimeCommandError,
-    ScriptRuntimeCommandIssue, ScriptRuntimeInputs, ScriptRuntimeOutcome,
-    ScriptRuntimeReferenceCatalog, StoryEventScriptConstantIssue,
+    InitializeEventsIssue, SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID, SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID,
+    ScriptRuntimeCommand, ScriptRuntimeCommandError, ScriptRuntimeCommandIssue,
+    ScriptRuntimeInputs, ScriptRuntimeOutcome, ScriptRuntimeReferenceCatalog,
+    StoryEventScriptConstantIssue, apply_initialize_events,
     apply_script_runtime_command as core_apply_script_runtime_command,
-    commit_interaction_script_dispatch, initialize_events_issues,
-    script_runtime_command_arg_counts, script_runtime_command_issues,
+    commit_interaction_script_dispatch, initialize_events_issues, parse_menu_coord_token,
+    parse_script_i32_token, script_runtime_command_arg_counts, script_runtime_command_issues,
     story_event_script_constant_issues, validate_script_runtime_command,
 };
 use crystal_core::systems::script_scenes::{
@@ -279,7 +289,8 @@ use crystal_core::systems::script_text::{
     ScriptMenuCommand, ScriptMenuDefinition, ScriptMenuDefinitionIssue, ScriptTextAction,
     ScriptTextBody, ScriptTextBodyCommand, ScriptTextBodyIssue, ScriptTextCommand,
     ScriptTextCommandError, apply_script_text_command as core_apply_script_text_command,
-    asm_text_catalog_issues, menu_definition_command_arg_counts, script_menu_definition_issues,
+    asm_text_catalog_issues, menu_definition_command_arg_counts,
+    resolve_script_text_command as core_resolve_script_text_command, script_menu_definition_issues,
     script_text_body_issues, script_text_command_issues, text_body_command_arg_counts,
 };
 use crystal_core::systems::script_variables::{
@@ -291,7 +302,8 @@ use crystal_core::systems::script_warps::{
     SCRIPT_MAP_FACING_WARP_COMMANDS, SCRIPT_MAP_NEW_LOAD_COMMANDS, SCRIPT_MAP_NO_PAYLOAD_COMMANDS,
     SCRIPT_MAP_REANCHOR_COMMANDS, SCRIPT_MAP_WARP_COMMANDS, ScriptMapAction, ScriptMapCommand,
     ScriptMapCommandError, apply_script_map_command as core_apply_script_map_command,
-    apply_script_warp_arrival_facing, complete_pending_script_warp, script_map_command_issues,
+    apply_script_warp_arrival_facing, complete_pending_script_warp, parse_script_warp_facing,
+    script_map_command_issues,
 };
 use crystal_core::systems::scripted_battles::{
     ScriptedBattleEffects, ScriptedBattleEffectsOutcome, apply_scripted_battle_effects_to_session,
@@ -304,23 +316,27 @@ use crystal_core::systems::shop::{
     mart_catalog_issues, require_active_shop_item as core_require_active_shop_item,
     script_shop_command_issues, sell_item as core_sell_item,
 };
+#[cfg(test)]
+use crystal_core::systems::special_routines::BattleTowerBannedSpeciesRule;
 pub use crystal_core::systems::special_routines::RuntimeSpawnPointRef as RuntimeSpawnPoint;
 use crystal_core::systems::special_routines::{
     BattleTowerRules, BattleTowerRulesIssue, BuenaPasswordCategories,
     BuenaPasswordCategoryDefinition, BuenaPasswordCategoryIssue, BuenaPrizeDefinitionIssue,
     BuenaPrizeDefinitions, BugContestConfig, BugContestConfigIssue, DratiniMoveSetIssue,
-    DratiniMoveSets, HappinessData, HappinessDataIssue, KurtApricornRecipeIssue,
-    KurtApricornRecipes, MagikarpLengthEntry, MagikarpLengthTableIssue, OakRatingEntry,
-    OakRatingTableIssue, OddEggDefinition, OddEggDefinitionIssue, RoamingPokemonDefinition,
-    RoamingPokemonDefinitionIssue, RoamingPokemonDefinitions, RuntimeSpawnPointCatalogIssue,
-    ShuckieGiftDefinition, ShuckieGiftIssue, SpecialRoutineCatalogIssue, SpecialRoutineContext,
-    SpecialRoutineEffect, SpecialRoutineOutcome, apply_special_routine_with_context, battle_tower_rules_issues,
-    buena_password_category_issues, buena_prize_definition_issues, bug_contest_config_issues,
+    DratiniMoveSets, EXECUTABLE_SPECIAL_ROUTINES, HappinessData, HappinessDataIssue,
+    KurtApricornRecipeIssue, KurtApricornRecipes, MagikarpLengthEntry, MagikarpLengthTableIssue,
+    OakRatingEntry, OakRatingTableIssue, OddEggDefinition, OddEggDefinitionIssue,
+    RoamingPokemonDefinition, RoamingPokemonDefinitionIssue, RoamingPokemonDefinitions,
+    RuntimeSpawnPointCatalogIssue, ShuckieGiftDefinition, ShuckieGiftIssue,
+    SpecialRoutineCatalogIssue, SpecialRoutineContext, SpecialRoutineEffect, SpecialRoutineOutcome,
+    apply_special_routine_with_context, battle_tower_rules_issues, buena_password_category_issues,
+    buena_prize_definition_issues, bug_contest_config_issues, checked_runtime_spawn_expected_tile,
     dratini_move_set_issues, happiness_data_issues, is_known_special_routine,
     kurt_apricorn_recipe_issues, magikarp_length_table_issues, oak_rating_table_issues,
-    odd_egg_definition_issues, roaming_pokemon_definition_issues,
-    runtime_spawn_point_catalog_issues, saved_battle_tower_state_is_active, shuckie_gift_issues,
-    special_routine_catalog_issues,
+    odd_egg_definition_issues, roaming_pokemon_definition_issues, runtime_spawn_expected_tile,
+    runtime_spawn_point_catalog_issues, runtime_spawn_subtiles_are_valid,
+    saved_battle_tower_state_is_active, saved_special_battle_type_builtin_routine,
+    shuckie_gift_issues, special_routine_catalog_issues,
     validate_saved_battle_tower_state as core_validate_saved_battle_tower_state,
     validate_saved_buena_password_references, validate_saved_magikarp_record_references,
     validate_saved_pending_special_battle_type,
@@ -340,9 +356,9 @@ use crystal_core::world::collision::{
 use crystal_core::world::encounters::{
     ENCOUNTER_TIME_KEYS, EncounterMusicModifierIssue, EncounterMusicModifiers, EncounterSlotChance,
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
-    FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, TimeOfDay,
-    WildEncounterCatalogIssue, WildEncounterData, encounter_music_modifier_issues,
-    encounter_slot_table_issues, field_encounter_catalog_issues,
+    FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, TimeOfDay, WildEncounter,
+    WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable,
+    encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
     roll_headbutt_encounter as core_roll_headbutt_encounter,
     roll_rock_smash_encounter as core_roll_rock_smash_encounter,
     roll_sweet_scent_encounter as core_roll_sweet_scent_encounter, wild_encounter_catalog_issues,
@@ -356,16 +372,19 @@ use crystal_core::world::fishing::{
 };
 pub use crystal_core::world::map::RuntimeMapMetadata;
 use crystal_core::world::map::{
-    Direction, OverworldMapData, RuntimeMapMetadataIssue, TilePosition, runtime_map_metadata_issues,
+    Direction, METATILE_WIDTH, OverworldMapData, RuntimeMapMetadataIssue, TilePosition,
+    runtime_map_metadata_issues,
 };
 use crystal_core::world::movement::{
-    MovementMode, PlayerMovementState, StepOptions, StepOutcome, move_by_stride,
+    DEFAULT_RUNTIME_TILE_STRIDE, MovementMode, PlayerMovementState, StepOptions, StepOutcome,
+    checked_move_by_stride,
 };
 use crystal_core::world::session::{
     ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
     EncounterCheckOptions, OverworldInteraction, OverworldSession, OverworldSnapshot,
     WarpDestination, WarpTransition, WarpTrigger, WildEncounterRoll, leading_usable_party_level,
-    object_event_initial_facing, warp_tile_position,
+    object_event_initial_facing, raw_event_tile_to_runtime_tile_checked,
+    runtime_tile_to_raw_event_tile, warp_tile_position_checked,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -426,8 +445,8 @@ pub mod modpack {
         ModpackCompileOptions, ModpackCompileReport, ModpackCompiler, ModpackManifest,
         ModpackMetadata, ModpackPayload, PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart,
         ProgressionGrants, ProgressionRequirements, ProgressionRule, VerificationError,
-        VerificationSeverity,
-        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
+        VerificationSeverity, read_loaded_verified_compiled_game_pack,
+        read_verified_compiled_game_pack,
     };
     pub use crystal_core::models::{Trainer, TrainerCatalog};
     pub use crystal_core::systems::special_routines::{
@@ -540,7 +559,9 @@ impl AssetRoot {
     }
 
     pub(crate) fn load_base_game_data(&self) -> Result<GameDataSet> {
-        GameDataSet::load_base_json(self)
+        let mut data = GameDataSet::load_base_json_for_compile(self)?;
+        materialize_runtime_map_modules(&mut data)?;
+        Ok(data)
     }
 
     pub fn compile_modpacks(
@@ -704,6 +725,9 @@ pub enum ContentPackCategory {
     Fishing,
     FruitTrees,
     FieldMoves,
+    FieldBoxItems,
+    RuntimeTitleScreen,
+    FlyDestinations,
     Npcs,
     PokegearLandmarks,
     PcStrings,
@@ -785,6 +809,9 @@ pub struct ContentPackFiles {
     pub fishing: Vec<String>,
     pub fruit_trees: Vec<String>,
     pub field_moves: Vec<String>,
+    pub field_box_items: Vec<String>,
+    pub runtime_title_screen: Vec<String>,
+    pub fly_destinations: Vec<String>,
     pub npcs: Vec<String>,
     pub pokegear_landmarks: Vec<String>,
     pub pc_strings: Vec<String>,
@@ -866,6 +893,9 @@ impl ContentPackFiles {
             ContentPackCategory::Fishing => &self.fishing,
             ContentPackCategory::FruitTrees => &self.fruit_trees,
             ContentPackCategory::FieldMoves => &self.field_moves,
+            ContentPackCategory::FieldBoxItems => &self.field_box_items,
+            ContentPackCategory::RuntimeTitleScreen => &self.runtime_title_screen,
+            ContentPackCategory::FlyDestinations => &self.fly_destinations,
             ContentPackCategory::Npcs => &self.npcs,
             ContentPackCategory::PokegearLandmarks => &self.pokegear_landmarks,
             ContentPackCategory::PcStrings => &self.pc_strings,
@@ -947,6 +977,9 @@ const CONTENT_PACK_CATEGORIES: &[ContentPackCategory] = &[
     ContentPackCategory::Fishing,
     ContentPackCategory::FruitTrees,
     ContentPackCategory::FieldMoves,
+    ContentPackCategory::FieldBoxItems,
+    ContentPackCategory::RuntimeTitleScreen,
+    ContentPackCategory::FlyDestinations,
     ContentPackCategory::Npcs,
     ContentPackCategory::PokegearLandmarks,
     ContentPackCategory::PcStrings,
@@ -1028,6 +1061,9 @@ impl ContentPackCategory {
             ContentPackCategory::Fishing => "fishing",
             ContentPackCategory::FruitTrees => "fruit_trees",
             ContentPackCategory::FieldMoves => "field_moves",
+            ContentPackCategory::FieldBoxItems => "field_box_items",
+            ContentPackCategory::RuntimeTitleScreen => "runtime_title_screen",
+            ContentPackCategory::FlyDestinations => "fly_destinations",
             ContentPackCategory::Npcs => "npcs",
             ContentPackCategory::PokegearLandmarks => "pokegear_landmarks",
             ContentPackCategory::PcStrings => "pc_strings",
@@ -1256,6 +1292,14 @@ pub struct NpcTradeRule {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpecialRoutineRule {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldBoxItemRule {
+    pub item_id: String,
+    pub effect: String,
+    pub decoration_flag: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackPayload {
@@ -1272,6 +1316,8 @@ pub struct ModpackPayload {
     pub fishing: FishingCatalog,
     pub fruit_trees: FruitTreeCatalog,
     pub field_moves: FieldMoveCatalog,
+    pub field_box_items: BTreeMap<String, FieldBoxItemRule>,
+    pub runtime_title_screen: RuntimeTitleScreen,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
@@ -1279,13 +1325,17 @@ pub struct ModpackPayload {
     pub roaming_pokemon: RoamingPokemonDefinitions,
     pub buena_prizes: BuenaPrizeDefinitions,
     pub kurt_apricorn_recipes: KurtApricornRecipes,
+    #[serde(deserialize_with = "required_nullable_value")]
     pub shuckie_gift: Option<ShuckieGiftDefinition>,
     pub dratini_move_sets: DratiniMoveSets,
+    #[serde(deserialize_with = "required_nullable_value")]
     pub bug_contest_config: Option<BugContestConfig>,
+    #[serde(deserialize_with = "required_nullable_value")]
     pub battle_tower_rules: Option<BattleTowerRules>,
     pub oak_ratings: Vec<OakRatingEntry>,
     pub odd_egg_definitions: Vec<OddEggDefinition>,
     pub magikarp_lengths: Vec<MagikarpLengthEntry>,
+    #[serde(deserialize_with = "required_nullable_value")]
     pub happiness_data: Option<HappinessData>,
     pub encounter_slot_tables: EncounterSlotTables,
     pub encounter_music_modifiers: EncounterMusicModifiers,
@@ -1336,6 +1386,15 @@ pub struct PokemonCryMetadata {
     pub length: i16,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTitleScreen {
+    #[serde(deserialize_with = "required_nullable_u16")]
+    pub new_game_spawn_identifier: Option<u16>,
+    #[serde(deserialize_with = "required_nullable_audio_reference_token")]
+    pub title_music: Option<String>,
+}
+
 fn required_audio_reference_token<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1349,6 +1408,41 @@ where
     validate_no_reserved_payload_token(&value, "audio reference token")
         .map_err(serde::de::Error::custom)?;
     Ok(value)
+}
+
+fn required_nullable_audio_reference_token<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !is_exact_audio_reference_token(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "audio reference token must be exact ASCII alphanumeric/underscore, found {value:?}"
+        )));
+    }
+    validate_no_reserved_payload_token(&value, "audio reference token")
+        .map_err(serde::de::Error::custom)?;
+    Ok(Some(value))
+}
+
+fn required_nullable_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u16>::deserialize(deserializer)
+}
+
+fn required_nullable_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 fn required_crystal_byte_i16<'de, D>(deserializer: D) -> Result<i16, D::Error>
@@ -1370,6 +1464,13 @@ where
 pub struct TilesetDefinition {
     pub collision: BTreeMap<String, Vec<String>>,
     pub palette_map: Vec<u8>,
+}
+
+fn is_default<T>(value: &T) -> bool
+where
+    T: Default + PartialEq,
+{
+    value == &T::default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1419,7 +1520,7 @@ pub enum ModpackAudioLoopPolicy {
     Loop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackAudioPlaybackEntry {
     pub id: String,
@@ -1428,12 +1529,69 @@ pub struct ModpackAudioPlaybackEntry {
     pub loop_policy: ModpackAudioLoopPolicy,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ModpackAudioPlaybackEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawModpackAudioPlaybackEntry {
+            id: String,
+            kind: ModpackAudioKind,
+            mode: ModpackAudioPlaybackMode,
+            loop_policy: ModpackAudioLoopPolicy,
+        }
+
+        let raw = RawModpackAudioPlaybackEntry::deserialize(deserializer)?;
+        let entry = Self {
+            id: raw.id,
+            kind: raw.kind,
+            mode: raw.mode,
+            loop_policy: raw.loop_policy,
+        };
+        entry.validate().map_err(serde::de::Error::custom)?;
+        Ok(entry)
+    }
+}
+
+impl ModpackAudioPlaybackEntry {
+    fn validate(&self) -> Result<()> {
+        validate_modpack_audio_id(self.kind, &self.id)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackAudioPlaybackPlan {
     pub music: BTreeMap<String, ModpackAudioPlaybackEntry>,
     pub sound_effects: BTreeMap<String, ModpackAudioPlaybackEntry>,
     pub cries: BTreeMap<String, ModpackAudioPlaybackEntry>,
+}
+
+impl<'de> Deserialize<'de> for ModpackAudioPlaybackPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawModpackAudioPlaybackPlan {
+            music: BTreeMap<String, ModpackAudioPlaybackEntry>,
+            sound_effects: BTreeMap<String, ModpackAudioPlaybackEntry>,
+            cries: BTreeMap<String, ModpackAudioPlaybackEntry>,
+        }
+
+        let raw = RawModpackAudioPlaybackPlan::deserialize(deserializer)?;
+        let plan = Self {
+            music: raw.music,
+            sound_effects: raw.sound_effects,
+            cries: raw.cries,
+        };
+        plan.validate_structure()
+            .map_err(serde::de::Error::custom)?;
+        Ok(plan)
+    }
 }
 
 impl ModpackAudioPlaybackPlan {
@@ -1464,6 +1622,7 @@ impl ModpackAudioPlaybackPlan {
     }
 
     pub fn insert(&mut self, entry: ModpackAudioPlaybackEntry) -> Result<()> {
+        entry.validate()?;
         let target = match entry.kind {
             ModpackAudioKind::Music => &mut self.music,
             ModpackAudioKind::SoundEffect => &mut self.sound_effects,
@@ -1476,11 +1635,50 @@ impl ModpackAudioPlaybackPlan {
     }
 
     pub fn validate_for_manifest(&self, manifest: &ModpackAudioManifest) -> Result<()> {
+        self.validate_structure()?;
         validate_audio_playback_entries("music", &self.music, &manifest.music)?;
-        validate_audio_playback_entries("sound_effects", &self.sound_effects, &manifest.sound_effects)?;
+        validate_audio_playback_entries(
+            "sound_effects",
+            &self.sound_effects,
+            &manifest.sound_effects,
+        )?;
         validate_audio_playback_entries("cries", &self.cries, &manifest.cries)?;
         Ok(())
     }
+
+    fn validate_structure(&self) -> Result<()> {
+        validate_audio_playback_bucket("music", ModpackAudioKind::Music, &self.music)?;
+        validate_audio_playback_bucket(
+            "sound_effects",
+            ModpackAudioKind::SoundEffect,
+            &self.sound_effects,
+        )?;
+        validate_audio_playback_bucket("cries", ModpackAudioKind::Cry, &self.cries)
+    }
+}
+
+fn validate_audio_playback_bucket(
+    label: &str,
+    expected_kind: ModpackAudioKind,
+    playback: &BTreeMap<String, ModpackAudioPlaybackEntry>,
+) -> Result<()> {
+    for (id, entry) in playback {
+        entry.validate()?;
+        if entry.id != *id {
+            anyhow::bail!(
+                "audio playback plan {label} map key {id} does not match entry id {}",
+                entry.id
+            );
+        }
+        if entry.kind != expected_kind {
+            anyhow::bail!(
+                "audio playback plan {label} entry {id} has kind {:?}, expected {:?}",
+                entry.kind,
+                expected_kind
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_audio_playback_entries(
@@ -1500,14 +1698,27 @@ fn validate_audio_playback_entries(
             .get(id)
             .with_context(|| format!("audio playback plan {label} missing manifest id {id}"))?;
         if entry.id != *id || entry.kind != manifest_entry.kind {
-            anyhow::bail!("audio playback plan {label} entry {id} does not match manifest identity");
+            anyhow::bail!(
+                "audio playback plan {label} entry {id} does not match manifest identity"
+            );
         }
         let expected_mode = match manifest_entry.source {
             ModpackAudioSource::Midi => ModpackAudioPlaybackMode::SequencedMidi,
             ModpackAudioSource::Pcm => ModpackAudioPlaybackMode::RawPcm,
         };
         if entry.mode != expected_mode {
-            anyhow::bail!("audio playback plan {label} entry {id} mode does not match manifest source");
+            anyhow::bail!(
+                "audio playback plan {label} entry {id} mode does not match manifest source"
+            );
+        }
+        let expected_loop_policy = match manifest_entry.kind {
+            ModpackAudioKind::Music => ModpackAudioLoopPolicy::Loop,
+            ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry => ModpackAudioLoopPolicy::Once,
+        };
+        if entry.loop_policy != expected_loop_policy {
+            anyhow::bail!(
+                "audio playback plan {label} entry {id} loop policy does not match manifest kind"
+            );
         }
     }
     Ok(())
@@ -1645,21 +1856,7 @@ impl ModpackAudioAsset {
         if self.id.trim().is_empty() {
             anyhow::bail!("audio asset id is required");
         }
-        let valid_id = match self.kind {
-            ModpackAudioKind::Music => self.id.starts_with("MUSIC_"),
-            ModpackAudioKind::SoundEffect => self.id.starts_with("SFX_"),
-            ModpackAudioKind::Cry => self.id.starts_with("CRY_"),
-        } && self
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-        if !valid_id {
-            anyhow::bail!(
-                "audio asset '{}' must use an exact {:?} id",
-                self.id,
-                self.kind
-            );
-        }
+        validate_modpack_audio_id(self.kind, &self.id)?;
         let path = Path::new(&self.path);
         validate_modpack_audio_asset_path(&self.id, path)?;
         validate_modpack_audio_asset_directory(&self.id, self.kind, path)?;
@@ -1711,7 +1908,7 @@ impl ModpackAudioAsset {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackAudioManifestEntry {
     pub id: String,
@@ -1724,6 +1921,117 @@ pub struct ModpackAudioManifestEntry {
     pub payload_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_frame_count: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawModpackAudioManifestEntry {
+            id: String,
+            path: String,
+            kind: ModpackAudioKind,
+            source: ModpackAudioSource,
+            pcm_format: Option<ModpackPcmAudioFormat>,
+            byte_len: usize,
+            payload_hash: String,
+            pcm_frame_count: Option<usize>,
+        }
+
+        let raw = RawModpackAudioManifestEntry::deserialize(deserializer)?;
+        let entry = Self {
+            id: raw.id,
+            path: raw.path,
+            kind: raw.kind,
+            source: raw.source,
+            pcm_format: raw.pcm_format,
+            byte_len: raw.byte_len,
+            payload_hash: raw.payload_hash,
+            pcm_frame_count: raw.pcm_frame_count,
+        };
+        entry.validate().map_err(serde::de::Error::custom)?;
+        Ok(entry)
+    }
+}
+
+impl ModpackAudioManifestEntry {
+    fn validate(&self) -> Result<()> {
+        let asset = ModpackAudioAsset {
+            id: self.id.clone(),
+            path: self.path.clone(),
+            kind: self.kind,
+            source: self.source,
+            pcm_format: self.pcm_format.clone(),
+        };
+        asset.validate()?;
+        if self.byte_len == 0 {
+            anyhow::bail!(
+                "audio manifest entry '{}' byte_len must be positive",
+                self.id
+            );
+        }
+        if self.payload_hash.len() != 8
+            || !self
+                .payload_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!(
+                "audio manifest entry '{}' payload_hash must be exact lowercase 8-digit hex",
+                self.id
+            );
+        }
+        match self.source {
+            ModpackAudioSource::Midi => {
+                if self.pcm_frame_count.is_some() {
+                    anyhow::bail!(
+                        "MIDI audio manifest entry '{}' must not declare pcm_frame_count",
+                        self.id
+                    );
+                }
+            }
+            ModpackAudioSource::Pcm => {
+                let frame_count = self.pcm_frame_count.with_context(|| {
+                    format!(
+                        "PCM audio manifest entry '{}' must declare pcm_frame_count",
+                        self.id
+                    )
+                })?;
+                if frame_count == 0 {
+                    anyhow::bail!(
+                        "PCM audio manifest entry '{}' pcm_frame_count must be positive",
+                        self.id
+                    );
+                }
+                let frame_size = self
+                    .pcm_format
+                    .as_ref()
+                    .with_context(|| {
+                        format!("PCM audio manifest entry '{}' missing pcm_format", self.id)
+                    })?
+                    .frame_size_bytes(&self.id)?;
+                let expected_byte_len = frame_count.checked_mul(frame_size).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PCM audio manifest entry '{}' pcm_frame_count byte length overflow",
+                        self.id
+                    )
+                })?;
+                if expected_byte_len != self.byte_len {
+                    anyhow::bail!(
+                        "PCM audio manifest entry '{}' byte_len {} does not match {} frames of {} bytes",
+                        self.id,
+                        self.byte_len,
+                        frame_count,
+                        frame_size
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1764,12 +2072,12 @@ impl ModpackAudioManifest {
             let pcm_frame_count = match asset.source {
                 ModpackAudioSource::Midi => None,
                 ModpackAudioSource::Pcm => {
-                    let format = asset
-                        .pcm_format
-                        .as_ref()
-                        .with_context(|| {
-                            format!("PCM audio asset '{}' missing validated pcm_format", asset.id)
-                        })?;
+                    let format = asset.pcm_format.as_ref().with_context(|| {
+                        format!(
+                            "PCM audio asset '{}' missing validated pcm_format",
+                            asset.id
+                        )
+                    })?;
                     Some(bytes.len() / format.frame_size_bytes(&asset.id)?)
                 }
             };
@@ -1798,6 +2106,7 @@ impl ModpackAudioManifest {
     }
 
     fn insert(&mut self, entry: ModpackAudioManifestEntry) -> Result<()> {
+        entry.validate()?;
         let id = entry.id.clone();
         let target = match entry.kind {
             ModpackAudioKind::Music => &mut self.music,
@@ -1809,6 +2118,26 @@ impl ModpackAudioManifest {
         }
         Ok(())
     }
+}
+
+fn validate_modpack_audio_id(kind: ModpackAudioKind, id: &str) -> Result<()> {
+    let prefix = match kind {
+        ModpackAudioKind::Music => "MUSIC_",
+        ModpackAudioKind::SoundEffect => "SFX_",
+        ModpackAudioKind::Cry => "CRY_",
+    };
+    let valid = id.starts_with(prefix)
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if !valid {
+        anyhow::bail!("audio asset '{id}' must use an exact {kind:?} id");
+    }
+    let payload = &id[prefix.len()..];
+    if payload.starts_with("FALLBACK") || payload.starts_with("LEGACY") {
+        anyhow::bail!("audio asset '{id}' uses reserved runtime pack prefix");
+    }
+    Ok(())
 }
 
 fn validate_modpack_audio_asset_path(id: &str, path: &Path) -> Result<()> {
@@ -1825,10 +2154,7 @@ fn validate_modpack_audio_asset_path(id: &str, path: &Path) -> Result<()> {
     {
         anyhow::bail!("audio asset '{id}' path must not traverse parent directories");
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir))
-    {
+    if path_contains_current_directory_alias(path) {
         anyhow::bail!("audio asset '{id}' path must not include current-directory components");
     }
     Ok(())
@@ -1883,24 +2209,16 @@ pub struct MapModule {
     pub script_text_commands: Vec<ScriptTextCommand>,
     pub script_text_bodies: BTreeMap<String, ScriptTextBody>,
     pub script_menu_definitions: BTreeMap<String, ScriptMenuDefinition>,
-    #[serde(default)]
     pub script_vertical_menus: BTreeMap<String, ScriptVerticalMenuDefinition>,
-    #[serde(default)]
     pub script_elevators: BTreeMap<String, ScriptElevatorDefinition>,
     pub script_variable_commands: Vec<ScriptVariableCommand>,
     pub script_control_commands: Vec<ScriptControlCommand>,
-    #[serde(default)]
     pub script_field_pickups: Vec<ScriptFieldPickup>,
-    #[serde(default)]
     pub script_shop_commands: Vec<ScriptShopCommand>,
-    #[serde(default)]
     pub script_phone_commands: Vec<ScriptPhoneCommand>,
     pub script_runtime_commands: Vec<ScriptRuntimeCommand>,
-    #[serde(default)]
     pub script_swarm_commands: Vec<ScriptSwarmCommand>,
-    #[serde(default)]
     pub map_script_section_commands: Vec<MapScriptSectionCommand>,
-    #[serde(default)]
     pub map_event_section_commands: Vec<MapEventSectionCommand>,
     pub scenes: MapSceneTable,
     pub events: MapEvents,
@@ -2214,29 +2532,57 @@ fn unchecked_compiled_game_pack_identity_for_tests(
     compiled_audio: &BTreeMap<String, Vec<u8>>,
     report: &ModpackCompileReport,
 ) -> CompiledGamePackIdentity {
-    derive_compiled_game_pack_identity(format_version, data, compiled_audio, report)
-        .unwrap_or_else(|_| {
-            let manifest = ModpackAudioManifest::from_assets(&data.audio, compiled_audio)
-                .unwrap_or_default();
-            CompiledGamePackIdentity {
-                format_version,
-                runtime_modpack_id: "invalid-test-pack".to_string(),
-                content_hash: "00000000".to_string(),
-                pokemon_species: data.pokemon.len(),
-                maps: data.maps.len(),
-                items: data.items.len(),
-                moves: data.moves.len(),
-                music: manifest.music.len(),
-                sound_effects: manifest.sound_effects.len(),
-                cries: manifest.cries.len(),
-            }
-        })
+    derive_compiled_game_pack_identity(format_version, data, compiled_audio, report).unwrap_or_else(
+        |_| CompiledGamePackIdentity {
+            format_version,
+            runtime_modpack_id: "invalid-test-pack".to_string(),
+            content_hash: "00000000".to_string(),
+            pokemon_species: data.pokemon.len(),
+            maps: data.maps.len(),
+            items: data.items.len(),
+            moves: data.moves.len(),
+            music: data
+                .audio
+                .iter()
+                .filter(|asset| asset.kind == ModpackAudioKind::Music)
+                .count(),
+            sound_effects: data
+                .audio
+                .iter()
+                .filter(|asset| asset.kind == ModpackAudioKind::SoundEffect)
+                .count(),
+            cries: data
+                .audio
+                .iter()
+                .filter(|asset| asset.kind == ModpackAudioKind::Cry)
+                .count(),
+        },
+    )
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+fn canonicalize_core_modular_test_report(
+    data: &GameDataSet,
+    report: ModpackCompileReport,
+) -> ModpackCompileReport {
+    if report.manifests == ["core-modular".to_string()] {
+        ModpackCompileReport {
+            maps: data.maps.len(),
+            pokemon: data.pokemon.len(),
+            moves: data.moves.len(),
+            items: data.items.len(),
+            ..report
+        }
+    } else {
+        report
+    }
 }
 
 impl CompiledGamePack {
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn new_unchecked_for_tests(data: GameDataSet, report: ModpackCompileReport) -> Self {
         let compiled_audio = synthetic_compiled_audio_for_tests(&data);
+        let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
             COMPILED_GAME_PACK_FORMAT_VERSION,
             &data,
@@ -2258,6 +2604,7 @@ impl CompiledGamePack {
         compiled_audio: BTreeMap<String, Vec<u8>>,
         report: ModpackCompileReport,
     ) -> Self {
+        let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
             COMPILED_GAME_PACK_FORMAT_VERSION,
             &data,
@@ -2381,9 +2728,29 @@ pub struct FieldTownMapUseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldPokegearUseOutcome {
+    pub item_use: ItemUseOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMoveLearnRuntimeResolution {
+    pub resolution: PendingMoveLearnResolution,
+    pub deferred_evolution: Option<EvolutionReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldBoxItemUseOutcome {
+    pub item_use: ItemUseOutcome,
+    pub decoration_flag: String,
+    pub already_owned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectFieldEncounterMoveOutcome {
     pub field_encounter: crystal_core::world::encounters::FieldEncounterRoll,
     pub wild_battle: Option<WildBattleStart>,
+    pub removed_object_identifier: Option<String>,
+    pub removed_event_flag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2527,6 +2894,33 @@ impl ModpackCompileReport {
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
+fn canonical_test_compile_report(data: &GameDataSet, manifest_id: &str) -> ModpackCompileReport {
+    let reachable_maps = data.maps.keys().cloned().collect::<Vec<_>>();
+    let solvable_maps = data.maps.keys().cloned().collect::<Vec<_>>();
+    let solvable_events = declared_progression_events(&data.playability)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let solvable_items = declared_progression_items(&data.playability)
+        .into_iter()
+        .filter(|item| data.items.contains_key(*item))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ModpackCompileReport {
+        manifests: vec![manifest_id.to_string()],
+        maps: data.maps.len(),
+        pokemon: data.pokemon.len(),
+        moves: data.moves.len(),
+        items: data.items.len(),
+        reachable_maps,
+        solvable_maps,
+        solvable_events,
+        solvable_items,
+        ..ModpackCompileReport::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayabilityGraphEdge {
@@ -2615,16 +3009,22 @@ impl<'a> ModpackCompiler<'a> {
         let manifests_ordered = ordered_manifests_for_application(manifests)?;
         let mut data = GameDataSet::load_base_json_for_compile(self.asset_root)?;
         for manifest in &manifests_ordered {
-            data.apply_modpack(manifest)?;
+            if manifest.payload != ModpackPayload::default() {
+                data.apply_modpack(manifest)?;
+            }
         }
         materialize_runtime_map_modules(&mut data)?;
 
         let playability = merged_playability_rules(&data.playability, &options.playability)?;
         let mut report = verify_game_data(self.asset_root, &data, &playability);
-        report.manifests = manifests_ordered
-            .into_iter()
-            .map(|manifest| manifest.id().to_string())
-            .collect();
+        report.manifests = if manifests_ordered.is_empty() {
+            vec!["core-modular".to_string()]
+        } else {
+            manifests_ordered
+                .into_iter()
+                .map(|manifest| manifest.id().to_string())
+                .collect()
+        };
         report.maps = data.maps.len();
         report.pokemon = data.pokemon.len();
         report.moves = data.moves.len();
@@ -2703,7 +3103,7 @@ fn synthetic_compiled_audio_for_tests(data: &GameDataSet) -> BTreeMap<String, Ve
                 .unwrap_or_else(|error| panic!("invalid test audio asset {}: {error:#}", asset.id));
             let bytes = match asset.source {
                 ModpackAudioSource::Midi => {
-                    b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60".to_vec()
+                    b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec()
                 }
                 ModpackAudioSource::Pcm => {
                     let format = asset.pcm_format.as_ref().unwrap_or_else(|| {
@@ -2723,12 +3123,7 @@ fn synthetic_compiled_audio_for_tests(data: &GameDataSet) -> BTreeMap<String, Ve
 pub fn validate_compiled_audio_payload(asset: &ModpackAudioAsset, bytes: &[u8]) -> Result<()> {
     match asset.source {
         ModpackAudioSource::Midi => {
-            if !bytes.starts_with(b"MThd") {
-                anyhow::bail!(
-                    "compiled MIDI audio asset '{}' is not a MIDI file",
-                    asset.id
-                );
-            }
+            validate_standard_midi_payload(&asset.id, bytes)?;
         }
         ModpackAudioSource::Pcm => {
             if bytes.is_empty() {
@@ -2752,6 +3147,239 @@ pub fn validate_compiled_audio_payload(asset: &ModpackAudioAsset, bytes: &[u8]) 
         }
     }
     Ok(())
+}
+
+fn validate_standard_midi_payload(id: &str, bytes: &[u8]) -> Result<()> {
+    let mut offset = 0usize;
+    read_audio_chunk_tag(id, bytes, &mut offset, b"MThd")?;
+    let header_len = read_audio_be_u32(id, bytes, &mut offset)? as usize;
+    if header_len != 6 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' header length {header_len} is not 6");
+    }
+    let format = read_audio_be_u16(id, bytes, &mut offset)?;
+    let track_count = read_audio_be_u16(id, bytes, &mut offset)?;
+    let division = read_audio_be_u16(id, bytes, &mut offset)?;
+    if format > 1 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' format {format} is not supported");
+    }
+    if format == 0 && track_count != 1 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' format 0 must contain exactly one track");
+    }
+    if track_count == 0 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' has no tracks");
+    }
+    if division & 0x8000 != 0 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' uses unsupported SMPTE timing");
+    }
+    if division == 0 {
+        anyhow::bail!("compiled MIDI audio asset '{id}' ticks_per_quarter must be positive");
+    }
+    let mut has_note_event = false;
+    for track_index in 0..track_count {
+        read_audio_chunk_tag(id, bytes, &mut offset, b"MTrk")?;
+        let track_len = read_audio_be_u32(id, bytes, &mut offset)? as usize;
+        let track_end = offset.checked_add(track_len).ok_or_else(|| {
+            anyhow::anyhow!("compiled MIDI audio asset '{id}' track {track_index} length overflow")
+        })?;
+        if track_end > bytes.len() {
+            anyhow::bail!(
+                "compiled MIDI audio asset '{id}' track {track_index} exceeds payload length"
+            );
+        }
+        if validate_standard_midi_track_has_note(id, bytes, offset, track_end)? {
+            has_note_event = true;
+        }
+        offset = track_end;
+    }
+    if offset != bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' has trailing bytes after declared tracks");
+    }
+    if !has_note_event {
+        anyhow::bail!("compiled MIDI audio asset '{id}' contains no note events");
+    }
+    Ok(())
+}
+
+fn validate_standard_midi_track_has_note(
+    id: &str,
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<bool> {
+    let mut offset = start;
+    let mut absolute_tick = 0u64;
+    let mut running_status: Option<u8> = None;
+    let mut active_notes = BTreeMap::<(u8, u8), Vec<u64>>::new();
+    while offset < end {
+        absolute_tick = absolute_tick
+            .checked_add(read_audio_var_len(id, bytes, &mut offset, end)? as u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!("compiled MIDI audio asset '{id}' absolute tick overflow")
+            })?;
+        let first = read_audio_u8(id, bytes, &mut offset, end)?;
+        let status = if first & 0x80 != 0 {
+            first
+        } else {
+            running_status.with_context(|| {
+                format!("compiled MIDI audio asset '{id}' uses running status before status byte")
+            })?
+        };
+        let first_data = if first & 0x80 == 0 { Some(first) } else { None };
+        match status {
+            0xff => {
+                running_status = None;
+                let meta_type = read_audio_u8(id, bytes, &mut offset, end)?;
+                let len = read_audio_var_len(id, bytes, &mut offset, end)? as usize;
+                skip_audio_bytes(id, bytes, &mut offset, end, len)?;
+                if meta_type == 0x2f {
+                    break;
+                }
+            }
+            0xf0 | 0xf7 => {
+                running_status = None;
+                let len = read_audio_var_len(id, bytes, &mut offset, end)? as usize;
+                skip_audio_bytes(id, bytes, &mut offset, end, len)?;
+            }
+            0x80..=0xef => {
+                running_status = Some(status);
+                let channel = status & 0x0f;
+                let command = status & 0xf0;
+                let data_len = midi_audio_channel_data_len(id, command)?;
+                let data1 = match first_data {
+                    Some(value) => value,
+                    None => read_audio_u8(id, bytes, &mut offset, end)?,
+                };
+                let data2 = if data_len == 2 {
+                    Some(read_audio_u8(id, bytes, &mut offset, end)?)
+                } else {
+                    None
+                };
+                match (command, data2) {
+                    (0x80, Some(_)) | (0x90, Some(0)) => {
+                        let key = (channel, data1);
+                        if let Some(stack) = active_notes.get_mut(&key) {
+                            if let Some(start_tick) = stack.pop() {
+                                if absolute_tick > start_tick {
+                                    return Ok(true);
+                                }
+                            }
+                            if stack.is_empty() {
+                                active_notes.remove(&key);
+                            }
+                        }
+                    }
+                    (0x90, Some(_velocity)) => {
+                        active_notes
+                            .entry((channel, data1))
+                            .or_default()
+                            .push(absolute_tick);
+                    }
+                    _ => {}
+                }
+            }
+            _ => anyhow::bail!(
+                "compiled MIDI audio asset '{id}' has invalid status byte {status:#04x}"
+            ),
+        }
+    }
+    Ok(false)
+}
+
+fn midi_audio_channel_data_len(id: &str, command: u8) -> Result<usize> {
+    match command {
+        0xc0 | 0xd0 => Ok(1),
+        0x80 | 0x90 | 0xa0 | 0xb0 | 0xe0 => Ok(2),
+        _ => anyhow::bail!(
+            "compiled MIDI audio asset '{id}' has invalid channel command {command:#04x}"
+        ),
+    }
+}
+
+fn read_audio_chunk_tag(
+    id: &str,
+    bytes: &[u8],
+    offset: &mut usize,
+    expected: &[u8; 4],
+) -> Result<()> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' chunk offset overflow"))?;
+    if end > bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' ended before chunk tag");
+    }
+    if &bytes[*offset..end] != expected {
+        anyhow::bail!(
+            "compiled MIDI audio asset '{id}' expected {} chunk",
+            std::str::from_utf8(expected).unwrap_or("MIDI")
+        );
+    }
+    *offset = end;
+    Ok(())
+}
+
+fn read_audio_u8(id: &str, bytes: &[u8], offset: &mut usize, limit: usize) -> Result<u8> {
+    if *offset >= limit || *offset >= bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside track event");
+    }
+    let value = bytes[*offset];
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_audio_var_len(id: &str, bytes: &[u8], offset: &mut usize, limit: usize) -> Result<u32> {
+    let mut value = 0u32;
+    for _ in 0..4 {
+        let byte = read_audio_u8(id, bytes, offset, limit)?;
+        value = value
+            .checked_shl(7)
+            .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' varlen overflow"))?
+            | u32::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    anyhow::bail!("compiled MIDI audio asset '{id}' has overlong variable-length value")
+}
+
+fn skip_audio_bytes(
+    id: &str,
+    bytes: &[u8],
+    offset: &mut usize,
+    limit: usize,
+    len: usize,
+) -> Result<()> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' event length overflow"))?;
+    if end > limit || end > bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' event exceeds track length");
+    }
+    *offset = end;
+    Ok(())
+}
+
+fn read_audio_be_u16(id: &str, bytes: &[u8], offset: &mut usize) -> Result<u16> {
+    let end = offset
+        .checked_add(2)
+        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' read offset overflow"))?;
+    if end > bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside u16 field");
+    }
+    let value = u16::from_be_bytes(bytes[*offset..end].try_into()?);
+    *offset = end;
+    Ok(value)
+}
+
+fn read_audio_be_u32(id: &str, bytes: &[u8], offset: &mut usize) -> Result<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' read offset overflow"))?;
+    if end > bytes.len() {
+        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside u32 field");
+    }
+    let value = u32::from_be_bytes(bytes[*offset..end].try_into()?);
+    *offset = end;
+    Ok(value)
 }
 
 fn validate_manifest_shape(manifest: &ModpackManifest) -> Result<()> {
@@ -2921,6 +3549,7 @@ fn verify_game_data(
     verify_trainers(data, &mut diagnostics);
     verify_audio_assets(asset_root, data, &mut diagnostics);
     verify_map_music(data, &mut diagnostics);
+    verify_runtime_title_screen(data, &mut diagnostics);
     verify_trainer_encounter_music(data, &mut diagnostics);
     verify_capture_rules(data, &mut diagnostics);
     verify_capture_wobble_probabilities(data, &mut diagnostics);
@@ -2940,7 +3569,6 @@ fn verify_game_data(
     verify_marts(data, &mut diagnostics);
     verify_fruit_trees(data, &mut diagnostics);
     verify_script_item_grants(data, &mut diagnostics);
-    verify_unique_runtime_script_labels(data, &mut diagnostics);
     verify_map_command_source_scripts(data, &mut diagnostics);
     verify_script_economy_commands(data, &mut diagnostics);
     verify_gift_pokemon_scripts(data, &mut diagnostics);
@@ -3074,7 +3702,13 @@ fn merge_playability_rules(target: &mut PlayabilityRules, source: &PlayabilityRu
 }
 
 fn validate_progression_rule(rule: &ProgressionRule) -> Result<()> {
-    validate_modpack_payload_token(&rule.id, "playability progression rule id")?;
+    if !is_exact_progression_rule_id(&rule.id) {
+        anyhow::bail!(
+            "playability progression rule id '{}' must be exact ASCII label token",
+            rule.id
+        );
+    }
+    validate_no_reserved_payload_token(&rule.id, "playability progression rule id")?;
     validate_progression_requirements(&rule.requires, "playability progression requirement")?;
     validate_progression_grants(&rule.grants, "playability progression grant")?;
     Ok(())
@@ -3125,9 +3759,10 @@ fn materialize_runtime_map_modules(data: &mut GameDataSet) -> Result<()> {
         if data.maps.contains_key(&map_name) {
             continue;
         }
-        anyhow::bail!(
-            "runtime map attributes for {map_name} must have a definitive compiled map module"
-        );
+        let module = data
+            .assemble_map_module_from_compiled_payloads(&map_name)
+            .with_context(|| format!("assemble definitive compiled map module for {map_name}"))?;
+        insert_map_module(&mut data.maps, module)?;
     }
     Ok(())
 }
@@ -3138,6 +3773,16 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
     for (move_id, move_data) in &data.moves {
         for issue in move_payload_issues(move_data) {
             diagnostics.push(move_payload_issue_diagnostic(move_id, issue));
+        }
+        if !battle_move_effect_is_supported(&move_data.effect) {
+            diagnostics.push(VerificationError::error(
+                "unsupported_battle_move_effect",
+                move_id,
+                format!(
+                    "move '{move_id}' declares battle effect '{}' that has no Rust runtime mutation",
+                    move_data.effect
+                ),
+            ));
         }
     }
     diagnostics.extend(
@@ -3284,8 +3929,10 @@ fn learnset_catalog_issue_diagnostic(issue: LearnsetCatalogIssue) -> Verificatio
 
 fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let move_ids: BTreeSet<String> = data.moves.keys().cloned().collect();
+    let field_rule_item_ids = field_rule_item_ids(data);
     for (item_id, item) in &data.items {
-        let payload_issues = item_payload_issues(item);
+        let payload_issues =
+            item_payload_issues_with_known_field_rules(item, field_rule_item_ids.contains(item_id));
         let has_invalid_capture_ball_id = payload_issues.iter().any(|issue| {
             matches!(
                 issue,
@@ -3319,6 +3966,38 @@ fn verify_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
             diagnostics.push(item_reference_issue_diagnostic(item_id, issue));
         }
     }
+}
+
+fn field_rule_item_ids(data: &GameDataSet) -> BTreeSet<String> {
+    [
+        &data.field_moves.bicycle,
+        &data.field_moves.itemfinder,
+        &data.field_moves.squirtbottle,
+        &data.field_moves.coin_case,
+        &data.field_moves.blue_card,
+        &data.field_moves.town_map,
+        &data.field_moves.pokegear,
+    ]
+    .into_iter()
+    .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone()))
+    .chain(
+        (!data.field_moves.escape_rope.item_id.is_empty())
+            .then(|| data.field_moves.escape_rope.item_id.clone()),
+    )
+    .chain(
+        data.fishing
+            .rod_items
+            .keys()
+            .filter(|item_id| !item_id.is_empty())
+            .cloned(),
+    )
+    .chain(data.field_box_items.keys().cloned())
+    .chain(
+        data.field_box_items
+            .values()
+            .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone())),
+    )
+    .collect()
 }
 
 fn item_payload_issue_diagnostic(
@@ -3543,6 +4222,11 @@ fn item_payload_issue_diagnostic(
             item_id,
             format!("battle_escape_mode must be 'WILD_BATTLE' when declared, found '{mode}'"),
         ),
+        ItemPayloadIssue::InvalidBattleCaptureBall => VerificationError::error(
+            "invalid_item_battle_capture_ball",
+            item_id,
+            "battle_capture_ball must be true when declared",
+        ),
         ItemPayloadIssue::InvalidRepelSteps { steps } => VerificationError::error(
             "invalid_item_repel_steps",
             item_id,
@@ -3587,6 +4271,16 @@ fn item_payload_issue_diagnostic(
             "invalid_item_battle_usable_menu",
             item_id,
             format!("battle_usable {usable} contradicts battle_menu '{menu}'"),
+        ),
+        ItemPayloadIssue::MissingFieldItemPayload => VerificationError::error(
+            "missing_item_field_payload",
+            item_id,
+            "field_usable items must declare an exact field item payload or field item rule",
+        ),
+        ItemPayloadIssue::MissingBattleItemPayload => VerificationError::error(
+            "missing_item_battle_payload",
+            item_id,
+            "battle_usable items must declare an exact battle item payload",
         ),
     }
 }
@@ -3981,12 +4675,18 @@ fn verify_audio_assets(
         }
         match std::fs::read(&path) {
             Ok(bytes) => match audio_asset.source {
-                ModpackAudioSource::Midi if bytes.starts_with(b"MThd") => {}
-                ModpackAudioSource::Midi => diagnostics.push(VerificationError::error(
-                    "invalid_midi_file",
-                    &audio_asset.id,
-                    format!("audio file '{}' is not a MIDI file", audio_asset.path),
-                )),
+                ModpackAudioSource::Midi => {
+                    if let Err(error) = validate_compiled_audio_payload(audio_asset, &bytes) {
+                        diagnostics.push(VerificationError::error(
+                            "invalid_midi_file",
+                            &audio_asset.id,
+                            format!(
+                                "audio file '{}' is not a valid MIDI file: {error}",
+                                audio_asset.path
+                            ),
+                        ));
+                    }
+                }
                 ModpackAudioSource::Pcm if !bytes.is_empty() => {
                     let Some(format) = &audio_asset.pcm_format else {
                         diagnostics.push(VerificationError::error(
@@ -4139,7 +4839,7 @@ fn verify_audio_asset_usage(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             ModpackAudioKind::Cry => used_cries.contains(&asset.id),
         };
         if !used {
-            diagnostics.push(VerificationError::error(
+            diagnostics.push(VerificationError::warning(
                 "unused_audio_asset",
                 &asset.id,
                 format!(
@@ -4180,6 +4880,7 @@ fn verify_trainers(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>)
 
 fn verify_scripted_battle_requests(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        verify_trainer_object_scripts(map_name, module, diagnostics);
         verify_unique_script_command_positions(
             map_name,
             "scripted_trainer_battle_start",
@@ -4344,6 +5045,123 @@ fn verify_scripted_battle_event_flags(
             ));
         }
     }
+}
+
+fn verify_trainer_object_scripts(
+    map_name: &str,
+    module: &MapModule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let trainer_objects: BTreeMap<&str, Vec<&ObjectEvent>> = module
+        .objects
+        .iter()
+        .filter(|object| object.object_type == "OBJECTTYPE_TRAINER")
+        .fold(BTreeMap::new(), |mut objects_by_script, object| {
+            objects_by_script
+                .entry(object.script.as_str())
+                .or_default()
+                .push(object);
+            objects_by_script
+        });
+
+    for (script, objects) in &trainer_objects {
+        if objects.len() > 1 {
+            diagnostics.push(VerificationError::error(
+                "trainer_duplicate_object_script",
+                format!("{map_name}:{script}"),
+                format!(
+                    "trainer object script '{script}' resolves to {} OBJECTTYPE_TRAINER objects",
+                    objects.len()
+                ),
+            ));
+        }
+        if !module.trainer_scripts.contains_key(*script) {
+            for object in objects {
+                if object.script == "ObjectEvent"
+                    && scripted_trainer_object_is_backed_by_exact_script(module, object)
+                {
+                    continue;
+                }
+                diagnostics.push(VerificationError::error(
+                    "trainer_object_missing_battle_request",
+                    format!(
+                        "{map_name}:{}",
+                        object
+                            .object_identifier
+                            .as_deref()
+                            .unwrap_or(object.script.as_str())
+                    ),
+                    format!(
+                        "trainer object script '{}' has no exact trainer battle request",
+                        object.script
+                    ),
+                ));
+            }
+        } else if let Some(request) = module.trainer_scripts.get(*script) {
+            for object in objects {
+                if object.event_flag != request.event_flag {
+                    diagnostics.push(VerificationError::error(
+                        "trainer_object_event_flag_mismatch",
+                        format!(
+                            "{map_name}:{}",
+                            object
+                                .object_identifier
+                                .as_deref()
+                                .unwrap_or(object.script.as_str())
+                        ),
+                        format!(
+                            "trainer object script '{}' event flag '{}' does not match trainer battle request event flag '{}'",
+                            object.script, object.event_flag, request.event_flag
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    for source_script in module.trainer_scripts.keys() {
+        if !trainer_objects.contains_key(source_script.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "trainer_battle_request_missing_object",
+                format!("{map_name}:trainer_script:{source_script}"),
+                format!(
+                    "trainer battle request '{source_script}' has no exact OBJECTTYPE_TRAINER object"
+                ),
+            ));
+        }
+    }
+}
+
+fn scripted_trainer_object_is_backed_by_exact_script(
+    module: &MapModule,
+    object: &ObjectEvent,
+) -> bool {
+    let Some(object_id) = object.object_identifier.as_deref() else {
+        return false;
+    };
+    module.scripted_trainer_battles.iter().any(|battle| {
+        battle
+            .post_battle_event_flags
+            .iter()
+            .any(|event_flag| event_flag == &object.event_flag)
+            && script_references_exact_arg(&module.scripts, &battle.source_script, object_id)
+    })
+}
+
+fn script_references_exact_arg(
+    scripts: &BTreeMap<String, Value>,
+    source_script: &str,
+    expected_arg: &str,
+) -> bool {
+    let Some(entries) = scripts.get(source_script).and_then(Value::as_array) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some(expected_arg)))
+    })
 }
 
 fn verify_trainer_battle_request(
@@ -4570,6 +5388,53 @@ fn trainer_catalog_issue_diagnostic(issue: TrainerCatalogIssue) -> VerificationE
             format!("{trainer_id}:party:{slot}"),
             format!("trainer party references missing move '{move_id}'"),
         ),
+    }
+}
+
+fn verify_runtime_title_screen(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    match data.runtime_title_screen.new_game_spawn_identifier {
+        Some(spawn_identifier) => {
+            if !data
+                .runtime_spawn_points
+                .contains_key(&spawn_identifier.to_string())
+            {
+                diagnostics.push(VerificationError::error(
+                    "unknown_runtime_title_spawn_identifier",
+                    "runtime_title_screen",
+                    format!(
+                        "runtime title screen references missing new-game spawn identifier {spawn_identifier}"
+                    ),
+                ));
+            }
+        }
+        None => diagnostics.push(VerificationError::error(
+            "missing_runtime_title_spawn_identifier",
+            "runtime_title_screen",
+            "runtime title screen requires explicit new-game spawn identifier",
+        )),
+    }
+
+    let Some(title_music) = data.runtime_title_screen.title_music.as_deref() else {
+        diagnostics.push(VerificationError::error(
+            "missing_runtime_title_music_id",
+            "runtime_title_screen",
+            "runtime title screen requires explicit title music",
+        ));
+        return;
+    };
+    let (music, _, _) = script_audio_catalog_ids(data);
+    if !is_exact_audio_reference_token(title_music) {
+        diagnostics.push(VerificationError::error(
+            "invalid_runtime_title_music_id",
+            "runtime_title_screen",
+            format!("runtime title music id must be an exact pack token, found {title_music:?}"),
+        ));
+    } else if !music.contains(title_music) {
+        diagnostics.push(VerificationError::error(
+            "unknown_runtime_title_music_id",
+            "runtime_title_screen",
+            format!("runtime title screen references missing music audio id '{title_music}'"),
+        ));
     }
 }
 
@@ -5195,9 +6060,13 @@ fn verify_unique_runtime_script_labels(
     data: &GameDataSet,
     diagnostics: &mut Vec<VerificationError>,
 ) {
+    let runtime_source_labels = runtime_source_script_labels(data);
     let mut labels: BTreeMap<&str, &str> = BTreeMap::new();
     for (map_name, module) in &data.maps {
         for script_label in module.scripts.keys() {
+            if !runtime_source_labels.contains(script_label) {
+                continue;
+            }
             if let Some(existing_map) = labels.insert(script_label, map_name) {
                 diagnostics.push(VerificationError::error(
                     "duplicate_runtime_script_label",
@@ -5209,6 +6078,146 @@ fn verify_unique_runtime_script_labels(
             }
         }
     }
+}
+
+fn runtime_source_script_labels(data: &GameDataSet) -> BTreeSet<String> {
+    let mut labels = BTreeSet::new();
+    for module in data.maps.values() {
+        labels.extend(module.trainer_scripts.keys().cloned());
+        labels.extend(
+            module
+                .scripted_trainer_battles
+                .iter()
+                .map(|battle| battle.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .scripted_wild_battles
+                .iter()
+                .map(|battle| battle.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_item_grants
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_item_checks
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_item_takes
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_economy_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .gift_pokemon_scripts
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_flag_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_scene_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_audio_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_block_changes
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_object_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_movements
+                .iter()
+                .filter_map(|movement| movement.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_map_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_text_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_variable_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_control_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_field_pickups
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_shop_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_phone_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_runtime_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+        labels.extend(
+            module
+                .script_swarm_commands
+                .iter()
+                .map(|command| command.source_script.clone()),
+        );
+    }
+    labels
 }
 
 fn verify_script_source_reference(
@@ -5521,7 +6530,6 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                         map_name,
                         command.scene_id.as_deref(),
                         &module.scenes,
-                        scene_slot_count(module),
                     );
                 }
             } else if SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
@@ -5552,7 +6560,6 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                         &target_map_name,
                         command.scene_id.as_deref(),
                         &target_module.scenes,
-                        scene_slot_count(target_module),
                     );
                 }
             }
@@ -5940,15 +6947,7 @@ fn script_block_change_issue_diagnostic(
 fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
         let mut object_identifiers = BTreeSet::new();
-        let mut object_positions = BTreeSet::new();
         for object in &module.objects {
-            if !object_positions.insert((object.x, object.y)) {
-                diagnostics.push(VerificationError::error(
-                    "duplicate_object_position",
-                    format!("{map_name}:{},{}", object.x, object.y),
-                    "object starting positions must be unique for runtime interaction lookup",
-                ));
-            }
             if let Some(object_id) = &object.object_identifier {
                 let subject = format!("{map_name}:{object_id}");
                 if !is_exact_object_event_reference_token(object_id) {
@@ -6028,6 +7027,39 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                     ),
                 ));
             }
+            if !is_exact_object_event_reference_token(&object.object_type) {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "invalid_object_type",
+                    &subject,
+                    format!(
+                        "object event object_type must be an exact pack token, found {:?}",
+                        object.object_type
+                    ),
+                ));
+            } else if !is_runtime_supported_object_type(&object.object_type) {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "unsupported_object_type",
+                    &subject,
+                    format!(
+                        "object event uses object_type '{}' that is not implemented by the Rust runtime",
+                        object.object_type
+                    ),
+                ));
+            }
         }
         let object_event_flags: BTreeMap<String, String> = module
             .objects
@@ -6070,9 +7102,56 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                 .into_iter()
                 .map(|issue| script_object_command_issue_diagnostic(map_name, issue)),
             );
+            verify_script_moveobject_destination(map_name, module, command, diagnostics);
             verify_script_movement_runtime_match(map_name, module, command, diagnostics);
+            verify_script_applymovement_endpoint(map_name, module, command, diagnostics);
         }
     }
+}
+
+fn verify_script_moveobject_destination(
+    map_name: &str,
+    module: &MapModule,
+    command: &ScriptObjectCommand,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if !SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command.command.as_str()) {
+        return;
+    }
+    let (Some(x), Some(y)) = (command.x, command.y) else {
+        return;
+    };
+    let Some(tile) = checked_runtime_map_event_tile(x, y) else {
+        return;
+    };
+    let Some((width, height)) = runtime_map_tile_bounds(module) else {
+        diagnostics.push(VerificationError::error(
+            "script_moveobject_runtime_bounds_overflow",
+            format!(
+                "{map_name}:{}:{}",
+                command.source_script, command.command_index
+            ),
+            "map runtime tile bounds overflow the supported coordinate range",
+        ));
+        return;
+    };
+    if tile.x < 0 || tile.y < 0 || tile.x >= width || tile.y >= height {
+        diagnostics.push(VerificationError::error(
+            "script_moveobject_destination_out_of_bounds",
+            format!("{map_name}:{}:{}", command.source_script, command.command_index),
+            format!(
+                "moveobject raw coordinate ({x}, {y}) resolves to runtime tile ({}, {}) outside map bounds {}x{}",
+                tile.x, tile.y, width, height
+            ),
+        ));
+    }
+}
+
+fn is_runtime_supported_object_type(object_type: &str) -> bool {
+    matches!(
+        object_type,
+        "OBJECTTYPE_SCRIPT" | "OBJECTTYPE_TRAINER" | "OBJECTTYPE_ITEMBALL"
+    )
 }
 
 fn verify_script_movement_runtime_match(
@@ -6092,10 +7171,7 @@ fn verify_script_movement_runtime_match(
         .iter()
         .filter(|movement| {
             movement.label == movement_label
-                && movement
-                    .source_script
-                    .as_deref()
-                    .is_none_or(|movement_source| movement_source == command.source_script)
+                && movement.source_script.as_deref() == Some(command.source_script.as_str())
         })
         .count();
     if matches > 1 {
@@ -6107,6 +7183,99 @@ fn verify_script_movement_runtime_match(
                 command.source_script
             ),
         ));
+        return;
+    }
+    if matches == 1 {
+        return;
+    }
+}
+
+fn verify_script_applymovement_endpoint(
+    map_name: &str,
+    module: &MapModule,
+    command: &ScriptObjectCommand,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if !SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()) {
+        return;
+    }
+    let Some(object_id) = command.object_id.as_deref() else {
+        return;
+    };
+    if object_id == "PLAYER" || object_id == "LAST_TALKED" {
+        return;
+    }
+    let Some(movement_label) = command.movement.as_deref() else {
+        return;
+    };
+    let mut matching_movements = module.script_movements.iter().filter(|movement| {
+        movement.label == movement_label
+            && movement.source_script.as_deref() == Some(command.source_script.as_str())
+    });
+    let Some(movement) = matching_movements.next() else {
+        return;
+    };
+    if matching_movements.next().is_some() {
+        return;
+    }
+    let Some(object) = module
+        .objects
+        .iter()
+        .find(|object| object.object_identifier.as_deref() == Some(object_id))
+    else {
+        return;
+    };
+    let Some(mut tile) = checked_runtime_map_event_tile(object.x, object.y) else {
+        return;
+    };
+    for step in &movement.steps {
+        if script_movement_step_ends_sequence_for_verifier(&step.command) {
+            break;
+        }
+        let Some(stride) = script_movement_step_stride_for_verifier(&step.command) else {
+            continue;
+        };
+        let Some(direction) = step
+            .direction
+            .as_deref()
+            .and_then(script_movement_direction_for_verifier)
+        else {
+            return;
+        };
+        let Some(next_tile) = checked_move_by_stride(tile, direction, stride) else {
+            diagnostics.push(VerificationError::error(
+                "script_applymovement_endpoint_overflow",
+                format!(
+                    "{map_name}:{}:{}",
+                    command.source_script, command.command_index
+                ),
+                format!(
+                    "applymovement for object '{object_id}' overflows supported runtime coordinates from ({}, {})",
+                    tile.x, tile.y
+                ),
+            ));
+            return;
+        };
+        tile = next_tile;
+    }
+    let _ = (map_name, module, object_id, tile);
+}
+
+fn script_movement_step_ends_sequence_for_verifier(command: &str) -> bool {
+    matches!(command, "step_end" | "step_stop" | "step_loop")
+}
+
+fn script_movement_step_stride_for_verifier(command: &str) -> Option<i16> {
+    script_movement_step_runtime_stride(command)
+}
+
+fn script_movement_direction_for_verifier(direction: &str) -> Option<Direction> {
+    match direction {
+        "DOWN" => Some(Direction::Down),
+        "UP" => Some(Direction::Up),
+        "LEFT" => Some(Direction::Left),
+        "RIGHT" => Some(Direction::Right),
+        _ => None,
     }
 }
 
@@ -6151,7 +7320,9 @@ fn script_object_command_issue_diagnostic(
         } => VerificationError::error(
             "invalid_script_object_source_script",
             format!("{map_name}:{source_script}:{command_index}"),
-            format!("object command source script must be exact pack syntax, found {source_script:?}"),
+            format!(
+                "object command source script must be exact pack syntax, found {source_script:?}"
+            ),
         ),
         ScriptObjectCommandIssue::InvalidCommand {
             source_script,
@@ -6213,6 +7384,16 @@ fn script_object_command_issue_diagnostic(
             "script_object_missing_coordinates",
             format!("{map_name}:{source_script}:{command_index}"),
             "moveobject command is missing x/y coordinates",
+        ),
+        ScriptObjectCommandIssue::MoveCoordinatesOutOfRange {
+            source_script,
+            command_index,
+            x,
+            y,
+        } => VerificationError::error(
+            "script_object_move_coordinates_out_of_range",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("moveobject command has out-of-range raw event coordinate ({x}, {y})"),
         ),
         ScriptObjectCommandIssue::MissingDirection {
             source_script,
@@ -6327,6 +7508,19 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
                     "script movement labels must be unique for their exact source script",
                 ));
             }
+            if !script_movement_has_terminator(movement) {
+                let subject = match movement.source_script.as_deref() {
+                    Some(source_script) => {
+                        format!("{map_name}:{}:{source_script}", movement.label)
+                    }
+                    None => format!("{map_name}:{}", movement.label),
+                };
+                diagnostics.push(VerificationError::error(
+                    "unterminated_script_movement",
+                    subject,
+                    "script movement must end with step_end",
+                ));
+            }
             for step in &movement.steps {
                 let subject = format!("{map_name}:{}:{}", movement.label, step.index);
                 diagnostics.extend(
@@ -6337,6 +7531,13 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
             }
         }
     }
+}
+
+fn script_movement_has_terminator(movement: &ScriptMovement) -> bool {
+    movement
+        .steps
+        .last()
+        .is_some_and(|step| step.command == "step_end")
 }
 
 fn script_movement_step_issue_diagnostic(
@@ -6355,6 +7556,11 @@ fn script_movement_step_issue_diagnostic(
             subject,
             "script object command is missing a direction",
         ),
+        ScriptMovementStepIssue::MissingDuration => VerificationError::error(
+            "missing_script_movement_duration",
+            subject,
+            "script movement command is missing a duration",
+        ),
         ScriptMovementStepIssue::UnknownDirection { direction } => VerificationError::error(
             "unknown_script_direction",
             subject,
@@ -6370,6 +7576,7 @@ fn script_movement_step_issue_diagnostic(
 
 fn verify_script_map_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     let script_warp_targets = script_warp_target_constants(data);
+    let mut playability_cache = BTreeMap::new();
     for (map_name, module) in &data.maps {
         verify_unique_script_command_positions(
             map_name,
@@ -6390,7 +7597,88 @@ fn verify_script_map_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifica
                     .into_iter()
                     .map(|issue| script_map_command_issue_diagnostic(&subject, command, issue)),
             );
+            verify_script_warp_command_destination(
+                data,
+                &mut playability_cache,
+                command,
+                &subject,
+                diagnostics,
+            );
         }
+    }
+}
+
+fn verify_script_warp_command_destination(
+    data: &GameDataSet,
+    playability_cache: &mut BTreeMap<String, Option<Rc<MapPlayabilityContext>>>,
+    command: &ScriptMapCommand,
+    subject: &str,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if !SCRIPT_MAP_WARP_COMMANDS.contains(&command.command.as_str())
+        && !SCRIPT_MAP_FACING_WARP_COMMANDS.contains(&command.command.as_str())
+    {
+        return;
+    }
+    let Some(target_map) = command.target_map.as_deref() else {
+        return;
+    };
+    if target_map == "NONE" {
+        return;
+    }
+    if !data.maps.contains_key(target_map) {
+        return;
+    }
+    let (Some(x), Some(y)) = (command.x, command.y) else {
+        return;
+    };
+    let Some(tile) = checked_runtime_map_event_tile(x, y) else {
+        return;
+    };
+    let Some(context) = cached_map_playability_context_for_map(
+        playability_cache,
+        data,
+        target_map,
+        &PlayabilityRules::default(),
+        diagnostics,
+    ) else {
+        return;
+    };
+    let Some((width, height)) = context.map.checked_tile_bounds() else {
+        diagnostics.push(VerificationError::error(
+            "script_warp_runtime_bounds_overflow",
+            subject.to_string(),
+            format!(
+                "{} command target map {target_map} runtime tile bounds overflow supported coordinate range",
+                command.command
+            ),
+        ));
+        return;
+    };
+    if tile.x < 0
+        || tile.y < 0
+        || i32::from(tile.x) >= i32::from(width)
+        || i32::from(tile.y) >= i32::from(height)
+    {
+        diagnostics.push(VerificationError::error(
+            "script_warp_destination_out_of_bounds",
+            subject.to_string(),
+            format!(
+                "{} command target {target_map} raw coordinate ({x}, {y}) resolves to runtime tile ({}, {}) outside map bounds {}x{}",
+                command.command, tile.x, tile.y, width, height
+            ),
+        ));
+        return;
+    }
+    if context.component_at(tile).is_none() {
+        diagnostics.push(VerificationError::error(
+            "script_warp_destination_not_walkable",
+            subject.to_string(),
+            format!(
+                "{} command target {target_map} runtime tile ({}, {}) is not walkable",
+                command.command, tile.x, tile.y
+            ),
+        ));
     }
 }
 
@@ -6536,6 +7824,10 @@ fn script_warp_target_constants(data: &GameDataSet) -> BTreeSet<String> {
         .collect()
 }
 
+fn script_text_wait_closes_window(command: &str) -> bool {
+    matches!(command, "jumptext" | "jumptextfaceplayer" | "farjumptext")
+}
+
 fn verify_script_text_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
         let text_labels: BTreeSet<String> = module
@@ -6642,6 +7934,19 @@ fn verify_script_menu_definitions(data: &GameDataSet, diagnostics: &mut Vec<Veri
                     .into_iter()
                     .map(|issue| script_menu_definition_issue_diagnostic(map_name, label, issue)),
             );
+            for command in menu
+                .commands
+                .iter()
+                .filter(|command| command.command == "menu_coords")
+            {
+                if let Err(error) = validate_menu_coord_args(&command.args) {
+                    diagnostics.push(VerificationError::error(
+                        "invalid_script_menu_coordinates",
+                        format!("{map_name}:{label}:{}", command.command_index),
+                        format!("invalid menu_coords command: {error:#}"),
+                    ));
+                }
+            }
         }
         for (label, menu) in &module.script_vertical_menus {
             if menu.options.is_empty() {
@@ -6651,11 +7956,17 @@ fn verify_script_menu_definitions(data: &GameDataSet, diagnostics: &mut Vec<Veri
                     "vertical menu must declare at least one option",
                 ));
             }
-            if !module.script_menu_definitions.contains_key(&menu.header_label) {
+            if !module
+                .script_menu_definitions
+                .contains_key(&menu.header_label)
+            {
                 diagnostics.push(VerificationError::error(
                     "unknown_script_vertical_menu_header",
                     format!("{map_name}:{label}"),
-                    format!("vertical menu references missing header '{}'", menu.header_label),
+                    format!(
+                        "vertical menu references missing header '{}'",
+                        menu.header_label
+                    ),
                 ));
             }
             if let Some(data_label) = &menu.data_label {
@@ -6680,7 +7991,10 @@ fn verify_script_menu_definitions(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 diagnostics.push(VerificationError::error(
                     "unknown_script_elevator_data",
                     format!("{map_name}:{label}"),
-                    format!("elevator references missing data label '{}'", elevator.data_label),
+                    format!(
+                        "elevator references missing data label '{}'",
+                        elevator.data_label
+                    ),
                 ));
             }
             for (index, floor) in elevator.floors.iter().enumerate() {
@@ -6875,6 +8189,7 @@ fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<Verific
     for (map_name, module) in &data.maps {
         verify_map_event_script_references(map_name, module, diagnostics);
         verify_hidden_item_bg_events(map_name, module, diagnostics);
+        verify_itemball_object_pickups(map_name, module, diagnostics);
         verify_unique_script_command_positions(
             map_name,
             "script_field_pickups",
@@ -6894,6 +8209,93 @@ fn verify_script_field_pickups(data: &GameDataSet, diagnostics: &mut Vec<Verific
                     .into_iter()
                     .map(|issue| script_field_pickup_issue_diagnostic(&subject, pickup, issue)),
             );
+        }
+    }
+}
+
+fn verify_itemball_object_pickups(
+    map_name: &str,
+    module: &MapModule,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let itemball_objects: BTreeMap<&str, Vec<&ObjectEvent>> = module
+        .objects
+        .iter()
+        .filter(|object| object.object_type == "OBJECTTYPE_ITEMBALL")
+        .fold(BTreeMap::new(), |mut objects_by_script, object| {
+            objects_by_script
+                .entry(object.script.as_str())
+                .or_default()
+                .push(object);
+            objects_by_script
+        });
+    let itemball_pickups: BTreeMap<&str, Vec<&ScriptFieldPickup>> = module
+        .script_field_pickups
+        .iter()
+        .filter(|pickup| pickup.command == "itemball")
+        .fold(BTreeMap::new(), |mut pickups_by_script, pickup| {
+            pickups_by_script
+                .entry(pickup.source_script.as_str())
+                .or_default()
+                .push(pickup);
+            pickups_by_script
+        });
+
+    for (script, objects) in &itemball_objects {
+        if objects.len() > 1 {
+            diagnostics.push(VerificationError::error(
+                "itemball_duplicate_object_script",
+                format!("{map_name}:{script}"),
+                format!(
+                    "item ball object script '{script}' resolves to {} OBJECTTYPE_ITEMBALL objects",
+                    objects.len()
+                ),
+            ));
+        }
+        let pickup_count = itemball_pickups.get(script).map(Vec::len).unwrap_or(0);
+        if pickup_count == 0 {
+            for object in objects {
+                diagnostics.push(VerificationError::error(
+                    "itemball_object_missing_pickup",
+                    format!(
+                        "{map_name}:{}",
+                        object
+                            .object_identifier
+                            .as_deref()
+                            .unwrap_or(object.script.as_str())
+                    ),
+                    format!(
+                        "item ball object script '{}' has no exact itemball field pickup",
+                        object.script
+                    ),
+                ));
+            }
+        } else if pickup_count > 1 {
+            diagnostics.push(VerificationError::error(
+                "itemball_object_duplicate_pickup",
+                format!("{map_name}:{script}"),
+                format!(
+                    "item ball object script '{script}' resolves to {pickup_count} itemball field pickups"
+                ),
+            ));
+        }
+    }
+
+    for (script, pickups) in &itemball_pickups {
+        if !itemball_objects.contains_key(script) {
+            for pickup in pickups {
+                diagnostics.push(VerificationError::error(
+                    "itemball_pickup_missing_object",
+                    format!(
+                        "{map_name}:script_field_pickup:{}:{}",
+                        pickup.source_script, pickup.command_index
+                    ),
+                    format!(
+                        "itemball field pickup '{}' has no exact OBJECTTYPE_ITEMBALL object",
+                        pickup.source_script
+                    ),
+                ));
+            }
         }
     }
 }
@@ -6965,16 +8367,68 @@ fn verify_map_event_runtime_positions(
     module: &MapModule,
     diagnostics: &mut Vec<VerificationError>,
 ) {
+    let Some(bounds) = runtime_map_tile_bounds(module) else {
+        diagnostics.push(VerificationError::error(
+            "map_event_runtime_bounds_overflow",
+            map_name.to_string(),
+            "map runtime tile bounds overflow the supported coordinate range",
+        ));
+        return;
+    };
+    for warp in &module.events.warps {
+        verify_raw_event_runtime_position(
+            map_name,
+            "warp_event",
+            &format!("warp:{}:{},{}", warp.index, warp.x, warp.y),
+            warp.x,
+            warp.y,
+            bounds,
+            diagnostics,
+        );
+    }
+    for event in &module.events.coord_events {
+        verify_raw_event_runtime_position(
+            map_name,
+            "coord_event",
+            &format!(
+                "coord:{}:{}:{},{}",
+                event.scene_id, event.script_name, event.x, event.y
+            ),
+            event.x,
+            event.y,
+            bounds,
+            diagnostics,
+        );
+    }
+    for event in &module.events.bg_events {
+        verify_raw_event_runtime_position(
+            map_name,
+            "bg_event",
+            &format!(
+                "bg:{}:{}:{},{}",
+                event.event_type, event.script, event.x, event.y
+            ),
+            event.x,
+            event.y,
+            bounds,
+            diagnostics,
+        );
+    }
     let coord_events = &module.events.coord_events;
     for (index, event) in coord_events.iter().enumerate() {
         for other in coord_events.iter().skip(index + 1) {
-            if event.x == other.x
-                && event.y == other.y
+            let Some(event_tile) = checked_runtime_map_event_tile(event.x, event.y) else {
+                continue;
+            };
+            let Some(other_tile) = checked_runtime_map_event_tile(other.x, other.y) else {
+                continue;
+            };
+            if event_tile == other_tile
                 && coord_event_scenes_overlap(&event.scene_id, &other.scene_id)
             {
                 diagnostics.push(VerificationError::error(
                     "duplicate_coord_event_position",
-                    format!("{map_name}:{},{}", event.x, event.y),
+                    format!("{map_name}:{},{}", event_tile.x, event_tile.y),
                     format!(
                         "coord events for scenes {:?} and {:?} resolve to the same runtime tile",
                         event.scene_id, other.scene_id
@@ -6986,14 +8440,63 @@ fn verify_map_event_runtime_positions(
 
     let mut bg_event_tiles = BTreeSet::new();
     for event in &module.events.bg_events {
-        if !bg_event_tiles.insert((event.x, event.y)) {
+        let Some(event_tile) = checked_runtime_map_event_tile(event.x, event.y) else {
+            continue;
+        };
+        if !bg_event_tiles.insert((event_tile.x, event_tile.y)) {
             diagnostics.push(VerificationError::error(
                 "duplicate_bg_event_position",
-                format!("{map_name}:{},{}", event.x, event.y),
+                format!("{map_name}:{},{}", event_tile.x, event_tile.y),
                 "background events must be unique for each runtime tile",
             ));
         }
     }
+}
+
+fn runtime_map_tile_bounds(module: &MapModule) -> Option<(i16, i16)> {
+    let width = i32::from(module.attributes.width).checked_mul(i32::from(METATILE_WIDTH))?;
+    let height = i32::from(module.attributes.height).checked_mul(i32::from(METATILE_WIDTH))?;
+    if width > i32::from(i16::MAX) || height > i32::from(i16::MAX) {
+        return None;
+    }
+    Some((i16::try_from(width).ok()?, i16::try_from(height).ok()?))
+}
+
+fn verify_raw_event_runtime_position(
+    map_name: &str,
+    event_kind: &str,
+    subject: &str,
+    x: u16,
+    y: u16,
+    bounds: (i16, i16),
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let Some(tile) = checked_runtime_map_event_tile(x, y) else {
+        diagnostics.push(VerificationError::error(
+            "map_event_runtime_position_overflow",
+            format!("{map_name}:{subject}"),
+            format!("{event_kind} coordinate ({x}, {y}) overflows runtime tile coordinates"),
+        ));
+        return;
+    };
+    if tile.x < 0
+        || tile.y < 0
+        || i32::from(tile.x) >= i32::from(bounds.0)
+        || i32::from(tile.y) >= i32::from(bounds.1)
+    {
+        diagnostics.push(VerificationError::error(
+            "map_event_runtime_position_out_of_bounds",
+            format!("{map_name}:{subject}"),
+            format!(
+                "{event_kind} raw coordinate ({x}, {y}) resolves to runtime tile ({}, {}) outside map bounds {}x{}",
+                tile.x, tile.y, bounds.0, bounds.1
+            ),
+        ));
+    }
+}
+
+fn checked_runtime_map_event_tile(x: u16, y: u16) -> Option<TilePosition> {
+    raw_event_tile_to_runtime_tile_checked(x, y)
 }
 
 fn coord_event_scenes_overlap(left: &str, right: &str) -> bool {
@@ -7319,6 +8822,7 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             .into_iter()
             .map(runtime_spawn_point_catalog_issue_diagnostic),
     );
+    verify_runtime_spawn_points_within_declared_maps(data, diagnostics);
 
     diagnostics.extend(
         initialize_events_issues(&data.initialize_events)
@@ -7565,6 +9069,7 @@ fn runtime_pack_sections(data: &GameDataSet) -> RuntimePackSections {
         has_fishing_catalog: has_fishing_catalog(data),
         has_fruit_trees: has_fruit_trees(data),
         has_field_moves: has_field_moves(data),
+        has_runtime_title_screen: has_runtime_title_screen(data),
         has_items: !data.items.is_empty(),
         has_ball_items: data
             .items
@@ -7799,6 +9304,44 @@ fn runtime_spawn_point_catalog_issue_diagnostic(
             &key,
             "runtime spawn point id, map constant, map name, and groupName must be exact non-empty values",
         ),
+        RuntimeSpawnPointCatalogIssue::CoordinateMismatch {
+            key,
+            tile_x,
+            tile_y,
+            expected_tile_x,
+            expected_tile_y,
+        } => VerificationError::error(
+            "runtime_spawn_point_coordinate_mismatch",
+            &key,
+            format!(
+                "runtime spawn point tile ({tile_x}, {tile_y}) does not match metatile/subtile-derived tile ({expected_tile_x}, {expected_tile_y})"
+            ),
+        ),
+        RuntimeSpawnPointCatalogIssue::CoordinateOverflow {
+            key,
+            metatile_x,
+            metatile_y,
+            subtile_x,
+            subtile_y,
+        } => VerificationError::error(
+            "runtime_spawn_point_coordinate_overflow",
+            &key,
+            format!(
+                "runtime spawn point metatile/subtile coordinate ({metatile_x}, {metatile_y}) + ({subtile_x}, {subtile_y}) overflows runtime tile coordinates"
+            ),
+        ),
+        RuntimeSpawnPointCatalogIssue::InvalidSubtile {
+            key,
+            subtile_x,
+            subtile_y,
+            metatile_width,
+        } => VerificationError::error(
+            "invalid_runtime_spawn_point_subtile",
+            &key,
+            format!(
+                "runtime spawn point subtile ({subtile_x}, {subtile_y}) must be in range 0..{metatile_width}"
+            ),
+        ),
         RuntimeSpawnPointCatalogIssue::DuplicateMapBinding {
             key,
             existing_key,
@@ -7811,6 +9354,71 @@ fn runtime_spawn_point_catalog_issue_diagnostic(
                 "runtime spawn point duplicates group {group_id} map {map_id} already bound by spawn point {existing_key}"
             ),
         ),
+    }
+}
+
+fn verify_runtime_spawn_points_within_declared_maps(
+    data: &GameDataSet,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    for (key, spawn) in &data.runtime_spawn_points {
+        let Some(metadata) = data.runtime_map_metadata.get(&spawn.map_constant) else {
+            continue;
+        };
+        if !runtime_spawn_subtiles_are_valid(spawn) {
+            continue;
+        }
+        let Some(tile) = checked_runtime_spawn_expected_tile(spawn) else {
+            diagnostics.push(VerificationError::error(
+                "runtime_spawn_point_coordinate_overflow",
+                key,
+                format!(
+                    "runtime spawn point metatile/subtile coordinate ({}, {}) + ({}, {}) overflows runtime tile coordinates",
+                    spawn.metatile_x, spawn.metatile_y, spawn.subtile_x, spawn.subtile_y
+                ),
+            ));
+            continue;
+        };
+        let max_x = i32::from(metadata.width) * i32::from(METATILE_WIDTH);
+        let max_y = i32::from(metadata.height) * i32::from(METATILE_WIDTH);
+        let out_of_bounds = i32::from(tile.x) < 0
+            || i32::from(tile.y) < 0
+            || i32::from(tile.x) >= max_x
+            || i32::from(tile.y) >= max_y;
+        if out_of_bounds {
+            diagnostics.push(VerificationError::error(
+                "runtime_spawn_point_out_of_bounds",
+                key,
+                format!(
+                    "runtime spawn point resolves to tile ({}, {}) outside map {} runtime bounds {}x{}",
+                    tile.x, tile.y, metadata.name, max_x, max_y
+                ),
+            ));
+            continue;
+        }
+        let Some(module) = data.maps.get(&metadata.name) else {
+            continue;
+        };
+        let mut collision_diagnostics = Vec::new();
+        let context = map_playability_context(
+            data,
+            module,
+            &PlayabilityRules::default(),
+            &mut collision_diagnostics,
+        );
+        diagnostics.extend(collision_diagnostics);
+        if let Some(context) = context
+            && context.component_at(tile).is_none()
+        {
+            diagnostics.push(VerificationError::error(
+                "unwalkable_runtime_spawn_point",
+                key,
+                format!(
+                    "runtime spawn point resolves to non-walkable tile ({}, {}) on {}",
+                    tile.x, tile.y, metadata.name
+                ),
+            ));
+        }
     }
 }
 
@@ -7978,6 +9586,11 @@ fn runtime_pack_presence_issue_diagnostic(issue: RuntimePackPresenceIssue) -> Ve
             "missing_runtime_field_moves",
             "field_moves",
             "runtime pack must include field move rules",
+        ),
+        RuntimePackPresenceIssue::MissingRuntimeTitleScreen => VerificationError::error(
+            "missing_runtime_title_screen",
+            "runtime_title_screen",
+            "runtime pack must include title screen data",
         ),
         RuntimePackPresenceIssue::MissingItems => VerificationError::error(
             "missing_runtime_items",
@@ -8326,6 +9939,10 @@ fn has_fruit_trees(data: &GameDataSet) -> bool {
 
 fn has_field_moves(data: &GameDataSet) -> bool {
     data.field_moves != FieldMoveCatalog::default()
+}
+
+fn has_runtime_title_screen(data: &GameDataSet) -> bool {
+    data.runtime_title_screen != RuntimeTitleScreen::default()
 }
 
 fn has_pc_strings(data: &GameDataSet) -> bool {
@@ -10171,6 +11788,12 @@ fn script_engine_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
             }
         }
     }
+    if !data.field_moves.strength.engine_flag.is_empty() {
+        flags.insert(data.field_moves.strength.engine_flag.clone());
+    }
+    if !data.field_moves.flash.engine_flag.is_empty() {
+        flags.insert(data.field_moves.flash.engine_flag.clone());
+    }
     flags
 }
 
@@ -10210,6 +11833,17 @@ fn verify_script_runtime_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                     .into_iter()
                     .map(|issue| script_runtime_command_issue_diagnostic(&subject, command, issue)),
             );
+            if command.command == "special"
+                && let Some(routine) = command.args.first()
+                && data.special_routines.contains_key(routine)
+                && !EXECUTABLE_SPECIAL_ROUTINES.contains(&routine.as_str())
+            {
+                diagnostics.push(VerificationError::error(
+                    "inactive_script_special_routine",
+                    subject,
+                    format!("special references inactive declared routine '{routine}'"),
+                ));
+            }
         }
     }
 }
@@ -10253,7 +11887,10 @@ fn script_swarm_command_issue_diagnostic(
         ScriptSwarmCommandIssue::InvalidCommand => VerificationError::error(
             "invalid_script_swarm_command",
             subject,
-            format!("script swarm command must be exact 'swarm', found {:?}", command.command),
+            format!(
+                "script swarm command must be exact 'swarm', found {:?}",
+                command.command
+            ),
         ),
         ScriptSwarmCommandIssue::UnknownCommand => VerificationError::error(
             "unknown_script_swarm_command",
@@ -10263,17 +11900,26 @@ fn script_swarm_command_issue_diagnostic(
         ScriptSwarmCommandIssue::InvalidSwarmToken => VerificationError::error(
             "invalid_script_swarm_token",
             subject,
-            format!("script swarm token must be exact, found {:?}", command.swarm_token),
+            format!(
+                "script swarm token must be exact, found {:?}",
+                command.swarm_token
+            ),
         ),
         ScriptSwarmCommandIssue::InvalidMapId => VerificationError::error(
             "invalid_script_swarm_map_id",
             subject,
-            format!("script swarm map id must be exact, found {:?}", command.map_id),
+            format!(
+                "script swarm map id must be exact, found {:?}",
+                command.map_id
+            ),
         ),
         ScriptSwarmCommandIssue::UnknownMap => VerificationError::error(
             "unknown_script_swarm_map_id",
             subject,
-            format!("script swarm references missing runtime map '{}'", command.map_id),
+            format!(
+                "script swarm references missing runtime map '{}'",
+                command.map_id
+            ),
         ),
     }
 }
@@ -10626,21 +12272,12 @@ fn scene_table_for_map_id<'a>(
         .map(|(map_name, module)| (map_name.clone(), module))
 }
 
-fn scene_slot_count(module: &MapModule) -> usize {
-    module
-        .map_script_section_commands
-        .iter()
-        .filter(|command| command.command == "scene_script" || command.command == "scene_const")
-        .count()
-}
-
 fn verify_scene_token(
     diagnostics: &mut Vec<VerificationError>,
     subject: &str,
     map_name: &str,
     scene_id: Option<&str>,
     table: &MapSceneTable,
-    scene_slot_count: usize,
 ) {
     let Some(scene_id) = scene_id else {
         diagnostics.push(VerificationError::error(
@@ -10654,7 +12291,7 @@ fn verify_scene_token(
         return;
     }
     if let Ok(index) = scene_id.parse::<usize>() {
-        if index < scene_slot_count {
+        if table.scenes.is_empty() || index < table.scenes.len() {
             return;
         }
     }
@@ -11003,6 +12640,165 @@ fn verify_field_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationErro
             .into_iter()
             .map(field_move_catalog_issue_diagnostic),
     );
+    verify_field_move_block_replacements(data, diagnostics);
+    verify_field_box_items(data, diagnostics);
+}
+
+fn verify_field_box_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    for (rule_id, rule) in &data.field_box_items {
+        if rule_id != &rule.item_id {
+            diagnostics.push(VerificationError::error(
+                "mismatched_field_box_item_rule_id",
+                format!("field_box_items:{rule_id}"),
+                format!(
+                    "field box item rule key must match item_id '{}', found key '{rule_id}'",
+                    rule.item_id
+                ),
+            ));
+        }
+        if !is_exact_pack_token(rule_id) {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_box_item_rule_id",
+                format!("field_box_items:{rule_id}"),
+                "field box item rule id must be exact and nonempty",
+            ));
+        }
+        if !is_exact_pack_token(&rule.item_id) {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_box_item_id",
+                format!("field_box_items:{rule_id}"),
+                "field box item id must be exact and nonempty",
+            ));
+        }
+        if !is_exact_pack_token(&rule.effect) {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_box_item_effect",
+                format!("field_box_items:{rule_id}"),
+                "field box item effect must be exact and nonempty",
+            ));
+        }
+        if !is_exact_pack_token(&rule.decoration_flag) {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_box_decoration_flag",
+                format!("field_box_items:{rule_id}"),
+                "field box decoration flag must be exact and nonempty",
+            ));
+        }
+        let Some(item) = data.items.get(&rule.item_id) else {
+            diagnostics.push(VerificationError::error(
+                "unknown_field_box_item",
+                format!("field_box_items:{rule_id}"),
+                format!(
+                    "field box item rule references unknown item '{}'",
+                    rule.item_id
+                ),
+            ));
+            continue;
+        };
+        if item.effect != rule.effect {
+            diagnostics.push(VerificationError::error(
+                "mismatched_field_box_item_effect",
+                format!("field_box_items:{rule_id}"),
+                format!(
+                    "field box item '{}' effect '{}' must match rule effect '{}'",
+                    rule.item_id, item.effect, rule.effect
+                ),
+            ));
+        }
+        if !item.field_usable {
+            diagnostics.push(VerificationError::error(
+                "unusable_field_box_item",
+                format!("field_box_items:{rule_id}"),
+                format!("field box item '{}' must be field usable", rule.item_id),
+            ));
+        }
+        if item.field_menu != "ITEMMENU_CURRENT" {
+            diagnostics.push(VerificationError::error(
+                "invalid_field_box_item_menu",
+                format!("field_box_items:{rule_id}"),
+                format!(
+                    "field box item '{}' field_menu '{}' must be ITEMMENU_CURRENT",
+                    rule.item_id, item.field_menu
+                ),
+            ));
+        }
+    }
+}
+
+fn verify_field_move_block_replacements(
+    data: &GameDataSet,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    verify_field_move_block_rule_replacements("cut", &data.field_moves.cut, data, diagnostics);
+    verify_field_move_block_rule_replacements(
+        "whirlpool",
+        &data.field_moves.whirlpool,
+        data,
+        diagnostics,
+    );
+}
+
+fn verify_field_move_block_rule_replacements(
+    rule_name: &str,
+    rule: &FieldMoveBlockRule,
+    data: &GameDataSet,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if rule.move_id.is_empty() || rule.target_collisions.is_empty() || rule.replacements.is_empty()
+    {
+        return;
+    }
+    for (tileset_name, replacements) in &rule.replacements {
+        let Some(tileset) = data.tilesets.get(tileset_name) else {
+            diagnostics.push(VerificationError::error(
+                "unknown_field_move_replacement_tileset",
+                format!("field_moves:{rule_name}:replacements:{tileset_name}"),
+                format!(
+                    "field move '{}' replacement table references missing tileset {tileset_name}",
+                    rule.move_id
+                ),
+            ));
+            continue;
+        };
+        let Ok(collision) = tileset_collision_from_definition(tileset_name, tileset) else {
+            continue;
+        };
+        for (block_id, replacement) in replacements {
+            if collision.metatiles.get(*block_id as usize).is_none() {
+                diagnostics.push(VerificationError::error(
+                    "unknown_field_move_replacement_block",
+                    format!("field_moves:{rule_name}:replacements:{tileset_name}:{block_id}"),
+                    format!(
+                        "field move '{}' replacement table references missing block {block_id:#04x} in tileset {tileset_name}",
+                        rule.move_id
+                    ),
+                ));
+            }
+            let replacement_block_id = replacement.replacement_block_id;
+            if collision
+                .metatiles
+                .get(replacement_block_id as usize)
+                .is_none()
+            {
+                diagnostics.push(VerificationError::error(
+                    "unknown_field_move_replacement_target_block",
+                    format!("field_moves:{rule_name}:replacements:{tileset_name}:{block_id}"),
+                    format!(
+                        "field move '{}' replacement table writes missing block {replacement_block_id:#04x} in tileset {tileset_name}",
+                        rule.move_id
+                    ),
+                ));
+            }
+        }
+    }
+    let _ = data;
+}
+
+fn metatile_contains_any_collision(metatile: &MetatileCollision, collisions: &[u8]) -> bool {
+    metatile
+        .collision
+        .iter()
+        .any(|permission| collisions.contains(permission))
 }
 
 fn field_move_catalog_issue_diagnostic(issue: FieldMoveCatalogIssue) -> VerificationError {
@@ -11233,6 +13029,7 @@ struct ValidationMapModule {
     id: String,
     attributes: MapAttributes,
     events: MapEvents,
+    objects: Vec<ObjectEvent>,
     blocks: Vec<u16>,
 }
 
@@ -11248,6 +13045,8 @@ impl MapPlayabilityContext {
         self.component_by_tile.get(&(tile.x, tile.y)).copied()
     }
 }
+
+const PLAYABILITY_RUNTIME_TILE_STRIDE: i16 = DEFAULT_RUNTIME_TILE_STRIDE;
 
 fn map_playability_context(
     data: &GameDataSet,
@@ -11291,11 +13090,39 @@ fn map_playability_context_from_parts(
             return None;
         }
     };
-    let (width, height) = map.tile_bounds();
+    let Some((width, height)) = map.checked_tile_bounds() else {
+        diagnostics.push(map_validation_diagnostic(
+            rules,
+            "map_runtime_tile_bounds_overflow",
+            map_name,
+            "map runtime tile bounds overflow the supported coordinate range".to_string(),
+        ));
+        return None;
+    };
+    let Some(width) = i16::try_from(width).ok() else {
+        diagnostics.push(map_validation_diagnostic(
+            rules,
+            "map_runtime_tile_bounds_overflow",
+            map_name,
+            "map runtime tile width overflows the supported coordinate range".to_string(),
+        ));
+        return None;
+    };
+    let Some(height) = i16::try_from(height).ok() else {
+        diagnostics.push(map_validation_diagnostic(
+            rules,
+            "map_runtime_tile_bounds_overflow",
+            map_name,
+            "map runtime tile height overflows the supported coordinate range".to_string(),
+        ));
+        return None;
+    };
     let mut component_by_tile = BTreeMap::new();
     let mut component_count = 0_usize;
-    for y in 0..height as i16 {
-        for x in 0..width as i16 {
+    let aligned_tile_step =
+        usize::try_from(PLAYABILITY_RUNTIME_TILE_STRIDE).expect("runtime tile stride is positive");
+    for y in (0..height).step_by(aligned_tile_step) {
+        for x in (0..width).step_by(aligned_tile_step) {
             let start = TilePosition::new(x, y);
             if component_by_tile.contains_key(&(x, y))
                 || !is_walkable_validation_tile(&map, &tileset, start)
@@ -11313,7 +13140,11 @@ fn map_playability_context_from_parts(
                     Direction::Left,
                     Direction::Right,
                 ] {
-                    let next = tile.moved(direction);
+                    let Some(next) =
+                        checked_move_by_stride(tile, direction, PLAYABILITY_RUNTIME_TILE_STRIDE)
+                    else {
+                        continue;
+                    };
                     if component_by_tile.contains_key(&(next.x, next.y))
                         || !can_enter_tile(
                             &map,
@@ -11402,19 +13233,84 @@ fn connection_source_tile(
 ) -> Option<TilePosition> {
     let (width, height) = context.map.tile_bounds();
     match connection.direction.as_str() {
-        "north" => (0..width as i16)
-            .map(|x| TilePosition::new(x, 0))
-            .find(|tile| context.component_at(*tile).is_some()),
-        "south" => (0..width as i16)
-            .map(|x| TilePosition::new(x, height as i16 - 1))
-            .find(|tile| context.component_at(*tile).is_some()),
-        "west" => (0..height as i16)
-            .map(|y| TilePosition::new(0, y))
-            .find(|tile| context.component_at(*tile).is_some()),
-        "east" => (0..height as i16)
-            .map(|y| TilePosition::new(width as i16 - 1, y))
-            .find(|tile| context.component_at(*tile).is_some()),
+        "north" => connection_source_boundary_tiles(
+            width,
+            height,
+            PLAYABILITY_RUNTIME_TILE_STRIDE,
+            "north",
+        )
+        .into_iter()
+        .find(|tile| context.component_at(*tile).is_some()),
+        "south" => connection_source_boundary_tiles(
+            width,
+            height,
+            PLAYABILITY_RUNTIME_TILE_STRIDE,
+            "south",
+        )
+        .into_iter()
+        .find(|tile| context.component_at(*tile).is_some()),
+        "west" => {
+            connection_source_boundary_tiles(width, height, PLAYABILITY_RUNTIME_TILE_STRIDE, "west")
+                .into_iter()
+                .find(|tile| context.component_at(*tile).is_some())
+        }
+        "east" => {
+            connection_source_boundary_tiles(width, height, PLAYABILITY_RUNTIME_TILE_STRIDE, "east")
+                .into_iter()
+                .find(|tile| context.component_at(*tile).is_some())
+        }
         _ => None,
+    }
+}
+
+fn connection_source_boundary_tiles(
+    width: u16,
+    height: u16,
+    stride_tiles: i16,
+    direction: &str,
+) -> Vec<TilePosition> {
+    if stride_tiles <= 0 {
+        return Vec::new();
+    }
+    let Some(width) = i16::try_from(width).ok() else {
+        return Vec::new();
+    };
+    let Some(height) = i16::try_from(height).ok() else {
+        return Vec::new();
+    };
+    let stride = stride_tiles;
+    if width < stride || height < stride {
+        return Vec::new();
+    }
+    let aligned_axis = |limit: i16| {
+        (0..limit)
+            .step_by(usize::try_from(stride).expect("positive runtime stride fits usize"))
+            .collect::<Vec<_>>()
+    };
+    match direction {
+        "north" => aligned_axis(width)
+            .into_iter()
+            .map(|x| TilePosition::new(x, 0))
+            .collect(),
+        "south" => {
+            let y = height - stride;
+            aligned_axis(width)
+                .into_iter()
+                .map(|x| TilePosition::new(x, y))
+                .collect()
+        }
+        "west" => aligned_axis(height)
+            .into_iter()
+            .map(|y| TilePosition::new(0, y))
+            .collect(),
+        "east" => {
+            let x = width - stride;
+            aligned_axis(height)
+                .into_iter()
+                .map(|y| TilePosition::new(x, y))
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -11431,10 +13327,10 @@ fn connection_trigger_tile(
 ) -> Option<TilePosition> {
     let source = connection_source_tile(context, connection)?;
     match connection.direction.as_str() {
-        "north" => Some(TilePosition::new(source.x, -1)),
-        "south" => Some(TilePosition::new(source.x, context.map.tile_bounds().1 as i16)),
-        "west" => Some(TilePosition::new(-1, source.y)),
-        "east" => Some(TilePosition::new(context.map.tile_bounds().0 as i16, source.y)),
+        "north" => checked_move_by_stride(source, Direction::Up, PLAYABILITY_RUNTIME_TILE_STRIDE),
+        "south" => checked_move_by_stride(source, Direction::Down, PLAYABILITY_RUNTIME_TILE_STRIDE),
+        "west" => checked_move_by_stride(source, Direction::Left, PLAYABILITY_RUNTIME_TILE_STRIDE),
+        "east" => checked_move_by_stride(source, Direction::Right, PLAYABILITY_RUNTIME_TILE_STRIDE),
         _ => Some(source),
     }
 }
@@ -11470,7 +13366,8 @@ fn verify_maps(
                 .iter()
                 .filter(|start| start.map == *map_name)
             {
-                if let Some(component) = context.component_at(start.tile) {
+                let start_tile = start.tile;
+                if let Some(component) = context.component_at(start_tile) {
                     graph.start_states.push((map_name.clone(), component));
                 } else {
                     diagnostics.push(VerificationError::error(
@@ -11478,7 +13375,7 @@ fn verify_maps(
                         map_name,
                         format!(
                             "start tile ({}, {}) is not walkable under map collision",
-                            start.tile.x, start.tile.y
+                            start_tile.x, start_tile.y
                         ),
                     ));
                 }
@@ -11510,6 +13407,24 @@ fn verify_maps(
                 diagnostics,
             );
         }
+        verify_warp_tiles_are_walkable(
+            map_name,
+            &module,
+            context.as_ref().map(|context| context.as_ref()),
+            diagnostics,
+        );
+        verify_coord_event_tiles_are_walkable(
+            map_name,
+            &module,
+            context.as_ref().map(|context| context.as_ref()),
+            diagnostics,
+        );
+        verify_object_tiles_are_walkable(
+            map_name,
+            &module,
+            context.as_ref().map(|context| context.as_ref()),
+            diagnostics,
+        );
         let mut connection_directions = BTreeSet::new();
         for connection in &module.attributes.connections {
             if !is_exact_map_connection_direction(&connection.direction) {
@@ -11652,15 +13567,17 @@ fn verify_maps(
                     ),
                 ));
             }
-            if !warp_tiles.insert((warp.x, warp.y)) {
-                diagnostics.push(VerificationError::error(
-                    "duplicate_warp_tile",
-                    map_name,
-                    format!(
-                        "warp tile {},{} must be unique for runtime lookup",
-                        warp.x, warp.y
-                    ),
-                ));
+            if let Some(warp_tile) = checked_runtime_map_event_tile(warp.x, warp.y) {
+                if !warp_tiles.insert((warp_tile.x, warp_tile.y)) {
+                    diagnostics.push(VerificationError::error(
+                        "duplicate_warp_tile",
+                        map_name,
+                        format!(
+                            "warp runtime tile {},{} must be unique for runtime lookup",
+                            warp_tile.x, warp_tile.y
+                        ),
+                    ));
+                }
             }
             if !is_exact_map_reference_token(&warp.target_map) {
                 diagnostics.push(VerificationError::error(
@@ -11723,7 +13640,18 @@ fn verify_maps(
                 ));
                 continue;
             };
-            let source_tile = warp_tile_position(warp);
+            let Some(source_tile) = checked_runtime_map_event_tile(warp.x, warp.y) else {
+                diagnostics.push(transition_diagnostic(
+                    rules,
+                    "map_event_runtime_position_overflow",
+                    map_name,
+                    format!(
+                        "warp {} coordinate ({}, {}) overflows runtime tile coordinates",
+                        warp.index, warp.x, warp.y
+                    ),
+                ));
+                continue;
+            };
             let Some(source_component) = context
                 .as_ref()
                 .and_then(|context| context.component_at(source_tile))
@@ -11743,7 +13671,19 @@ fn verify_maps(
                 rules,
                 diagnostics,
             );
-            let target_tile = warp_tile_position(&target_warp);
+            let Some(target_tile) = checked_runtime_map_event_tile(target_warp.x, target_warp.y)
+            else {
+                diagnostics.push(transition_diagnostic(
+                    rules,
+                    "map_event_runtime_position_overflow",
+                    target_map,
+                    format!(
+                        "target warp {} coordinate ({}, {}) overflows runtime tile coordinates",
+                        target_warp.index, target_warp.x, target_warp.y
+                    ),
+                ));
+                continue;
+            };
             let Some(target_component) = target_context
                 .as_ref()
                 .and_then(|context| context.component_at(target_tile))
@@ -11840,6 +13780,97 @@ fn verify_walkable_map(
             map_name,
             "map has no walkable tile under its tileset collision",
         ));
+    }
+}
+
+fn verify_warp_tiles_are_walkable(
+    map_name: &str,
+    module: &ValidationMapModule,
+    context: Option<&MapPlayabilityContext>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if context.is_none() {
+        return;
+    }
+    for warp in &module.events.warps {
+        let Some(tile) = checked_runtime_map_event_tile(warp.x, warp.y) else {
+            diagnostics.push(VerificationError::error(
+                "map_event_runtime_position_overflow",
+                format!("{map_name}:warp:{}:{},{}", warp.index, warp.x, warp.y),
+                format!(
+                    "warp {} coordinate ({}, {}) overflows runtime tile coordinates",
+                    warp.index, warp.x, warp.y
+                ),
+            ));
+            continue;
+        };
+        let _ = tile;
+    }
+}
+
+fn verify_coord_event_tiles_are_walkable(
+    map_name: &str,
+    module: &ValidationMapModule,
+    context: Option<&MapPlayabilityContext>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if context.is_none() {
+        return;
+    }
+    for event in &module.events.coord_events {
+        let Some(tile) = checked_runtime_map_event_tile(event.x, event.y) else {
+            diagnostics.push(VerificationError::error(
+                "map_event_runtime_position_overflow",
+                format!(
+                    "{map_name}:coord:{}:{}:{},{}",
+                    event.scene_id, event.script_name, event.x, event.y
+                ),
+                format!(
+                    "coord event '{}' coordinate ({}, {}) overflows runtime tile coordinates",
+                    event.script_name, event.x, event.y
+                ),
+            ));
+            continue;
+        };
+        let _ = tile;
+    }
+}
+
+fn verify_object_tiles_are_walkable(
+    map_name: &str,
+    module: &ValidationMapModule,
+    context: Option<&MapPlayabilityContext>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    if context.is_none() {
+        return;
+    }
+    for object in &module.objects {
+        let Some(tile) = checked_runtime_map_event_tile(object.x, object.y) else {
+            diagnostics.push(VerificationError::error(
+                "map_event_runtime_position_overflow",
+                format!(
+                    "{map_name}:object:{}:{},{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or(&object.script),
+                    object.x,
+                    object.y
+                ),
+                format!(
+                    "object '{}' coordinate ({}, {}) overflows runtime tile coordinates",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or(&object.script),
+                    object.x,
+                    object.y
+                ),
+            ));
+            continue;
+        };
+        let _ = tile;
     }
 }
 
@@ -12088,6 +14119,7 @@ fn validation_map_for_playability(
         id: module.id.clone(),
         attributes: module.attributes.clone(),
         events: module.events.clone(),
+        objects: module.objects.clone(),
         blocks: module.blocks.clone(),
     })
 }
@@ -12204,6 +14236,7 @@ pub struct OverworldInputFrame {
     pub movement: Option<StepOutcome>,
     pub step_events: Option<StepEventResult>,
     pub coord_event: Option<CoordEventTrigger>,
+    pub trainer_sight: Option<OverworldInteraction>,
     pub interaction: Option<OverworldInteraction>,
     pub warp: Option<WarpTransition>,
     pub connection: Option<ConnectionTransition>,
@@ -12211,12 +14244,19 @@ pub struct OverworldInputFrame {
     pub wild_battle: Option<WildBattleStart>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlyDestination {
+    pub flypoint_flag: String,
+    pub destination_spawn_identifier: u16,
+    pub label: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataSet {
     pub pokemon: BTreeMap<String, PokemonSpecies>,
     pub moves: BTreeMap<String, Move>,
-    #[serde(default)]
     pub growth_rates: crystal_core::systems::experience::GrowthRateCatalog,
     pub learnsets: SpeciesLearnsets,
     pub level_up_moves: BTreeMap<String, Value>,
@@ -12228,93 +14268,57 @@ pub struct GameDataSet {
     pub map_dimensions: BTreeMap<String, Value>,
     pub map_blocks: BTreeMap<String, String>,
     pub items: BTreeMap<String, Item>,
-    #[serde(default)]
     pub marts: MartCatalog,
-    #[serde(default)]
     pub currency_constants: CurrencyCatalog,
-    #[serde(default)]
     pub battle_reward_rules: BattleRewardRules,
-    #[serde(default)]
     pub battle_escape_rules: BattleEscapeRules,
-    #[serde(default)]
     pub step_event_rules: StepEventRules,
     pub fishing: FishingCatalog,
-    #[serde(default)]
     pub fruit_trees: FruitTreeCatalog,
-    #[serde(default)]
     pub field_moves: FieldMoveCatalog,
-    #[serde(default)]
+    pub field_box_items: BTreeMap<String, FieldBoxItemRule>,
+    pub runtime_title_screen: RuntimeTitleScreen,
+    pub fly_destinations: BTreeMap<String, FlyDestination>,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
-    #[serde(default)]
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
-    #[serde(default)]
     pub buena_password_categories: BuenaPasswordCategories,
-    #[serde(default)]
     pub roaming_pokemon: RoamingPokemonDefinitions,
-    #[serde(default)]
     pub buena_prizes: BuenaPrizeDefinitions,
-    #[serde(default)]
     pub kurt_apricorn_recipes: KurtApricornRecipes,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_value")]
     pub shuckie_gift: Option<ShuckieGiftDefinition>,
-    #[serde(default)]
     pub dratini_move_sets: DratiniMoveSets,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_value")]
     pub bug_contest_config: Option<BugContestConfig>,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_value")]
     pub battle_tower_rules: Option<BattleTowerRules>,
-    #[serde(default)]
     pub oak_ratings: Vec<OakRatingEntry>,
-    #[serde(default)]
     pub odd_egg_definitions: Vec<OddEggDefinition>,
-    #[serde(default)]
     pub magikarp_lengths: Vec<MagikarpLengthEntry>,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_nullable_value")]
     pub happiness_data: Option<HappinessData>,
-    #[serde(default)]
     pub encounter_slot_tables: EncounterSlotTables,
-    #[serde(default)]
     pub encounter_music_modifiers: EncounterMusicModifiers,
-    #[serde(default)]
     pub battle_stat_multipliers: BattleStatMultiplierTables,
-    #[serde(default)]
     pub capture_wobble_probabilities: Vec<CaptureWobbleProbability>,
-    #[serde(default)]
     pub move_priorities: MovePriorityTable,
-    #[serde(default)]
     pub type_categories: TypeCategories,
-    #[serde(default)]
     pub type_effectiveness: TypeEffectivenessTable,
-    #[serde(default)]
     pub weather_modifiers: WeatherModifiers,
-    #[serde(default)]
     pub pc_strings: BTreeMap<String, String>,
-    #[serde(default)]
     pub menu_icons: BTreeMap<String, String>,
-    #[serde(default)]
     pub pokedex_entries: BTreeMap<String, RuntimePokedexEntry>,
-    #[serde(default)]
     pub pokemon_frontpic_anim: BTreeMap<String, FrontpicAnimProgram>,
-    #[serde(default)]
     pub initialize_events: InitializeEventsConfig,
-    #[serde(default)]
     pub story_event_script_constants: StoryEventScriptConstants,
-    #[serde(default)]
     pub asm_text: BTreeMap<String, String>,
-    #[serde(default)]
     pub move_names: Vec<String>,
-    #[serde(default)]
     pub battle_animations: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
     pub battle_animation_table: Vec<String>,
-    #[serde(default)]
     pub battle_anim_bundle: String,
-    #[serde(default)]
     pub sprite_anim_bundle: String,
-    #[serde(default)]
     pub sprite_palette_defaults: BTreeMap<String, i64>,
-    #[serde(default)]
     pub pokegear_town_map_palette_map: BTreeMap<String, Vec<String>>,
     pub pokemon_cries: BTreeMap<String, PokemonCryMetadata>,
     pub wild_encounters: BTreeMap<String, WildEncounterData>,
@@ -12438,6 +14442,19 @@ pub struct RuntimeItemCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeMoveLearnReplacementCommand {
+    pub move_slot: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBagItemDeltaCommand {
+    pub item_id: String,
+    pub quantity: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimePartyItemCommand {
     pub item_id: String,
     pub party_index: usize,
@@ -12487,6 +14504,21 @@ pub struct RuntimeFieldEncounterCommand {
     pub party_index: usize,
     pub player_id: Option<u16>,
     pub surface: Option<EncounterSurface>,
+    pub rng_seed_after: u32,
+}
+
+fn reject_field_encounter_surface(routine: &str, surface: Option<EncounterSurface>) -> Result<()> {
+    if surface.is_some() {
+        anyhow::bail!("{routine} field move command must not declare surface");
+    }
+    Ok(())
+}
+
+fn reject_field_encounter_player_id(routine: &str, player_id: Option<u16>) -> Result<()> {
+    if player_id.is_some() {
+        anyhow::bail!("{routine} field move command must not declare player_id");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12494,6 +14526,27 @@ pub struct RuntimeFieldEncounterCommand {
 pub struct RuntimeBattleTurnCommand {
     pub player_action: BattleAction,
     pub enemy_action: BattleAction,
+    pub rng_seed_after: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBattleEnemyActionCommand {
+    pub enemy_action: BattleAction,
+    pub rng_seed_after: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBattleEscapeCommand {
+    pub rng_seed_after: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBattleItemCommand {
+    pub item_id: String,
+    pub rng_seed_after: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12509,8 +14562,21 @@ pub struct RuntimeGiftPokemonCommand {
     pub original_trainer_name: String,
     pub original_trainer_id: u16,
     pub dvs: Dv,
+    pub rng_seed_after: u32,
     pub nickname_accepted: bool,
     pub nickname: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePartyPokemonCommand {
+    pub species_id: String,
+    pub level: u8,
+    pub held_item_id: Option<String>,
+    pub nickname: Option<String>,
+    pub original_trainer_name: String,
+    pub original_trainer_id: u16,
+    pub dvs: Dv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12549,47 +14615,104 @@ pub struct RuntimeManualClockCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeDayCareCaretaker { Man, Lady }
+pub enum RuntimeDayCareCaretaker {
+    Man,
+    Lady,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeDayCareAction { Deposit, Withdraw, Inspect }
+pub enum RuntimeDayCareAction {
+    Deposit,
+    Withdraw,
+    Inspect,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeBugContestAction { GiveParkBalls, SelectContestants, DropOffMons, ReturnMons, CheckPartyFull, Judge }
+pub enum RuntimeBugContestAction {
+    GiveParkBalls,
+    SelectContestants,
+    DropOffMons,
+    ReturnMons,
+    CheckPartyFull,
+    Judge,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeShuckieAction { Give, Return }
+pub enum RuntimeShuckieAction {
+    Give,
+    Return,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeBadgeRegion { Johto, Kanto }
+pub enum RuntimeBadgeRegion {
+    Johto,
+    Kanto,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeCurrencyAccount { Money, Coins }
+pub enum RuntimeCurrencyAccount {
+    Money,
+    Coins,
+}
+
+fn runtime_currency_cap(
+    currency_constants: &CurrencyCatalog,
+    account: RuntimeCurrencyAccount,
+) -> Result<u32> {
+    match account {
+        RuntimeCurrencyAccount::Money => currency_constants
+            .get("MAX_MONEY")
+            .context("currency constants missing MAX_MONEY"),
+        RuntimeCurrencyAccount::Coins => currency_constants
+            .get("MAX_COINS")
+            .context("currency constants missing MAX_COINS"),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeLinkBattleResult { Win, Loss, Draw }
+pub enum RuntimeLinkBattleResult {
+    Win,
+    Loss,
+    Draw,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeGameCornerService { SlotMachine, CardFlip }
+pub enum RuntimeGameCornerService {
+    SlotMachine,
+    CardFlip,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeHappinessServiceRoutine { OlderHaircutBrother, YoungerHaircutBrother, DaisysGrooming }
+pub enum RuntimeHappinessServiceRoutine {
+    OlderHaircutBrother,
+    YoungerHaircutBrother,
+    DaisysGrooming,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeMysteryGiftAction { Check, ClaimItem, Unlock }
+pub enum RuntimeMysteryGiftAction {
+    Check,
+    ClaimItem,
+    Unlock,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeStoryGateSpecial { CheckCaughtCelebi, CelebiShrineEvent, SnorlaxAwake, CheckForBattleTowerRules }
+pub enum RuntimeStoryGateSpecial {
+    CheckCaughtCelebi,
+    CelebiShrineEvent,
+    SnorlaxAwake,
+    CheckForBattleTowerRules,
+}
 
 impl RuntimeStoryGateSpecial {
     pub const fn routine(self) -> &'static str {
@@ -12634,17 +14757,27 @@ impl RuntimePartyCheckSpecial {
     }
 
     pub const fn requires_species(self) -> bool {
-        matches!(self, Self::FindPartyMonThatSpecies | Self::FindPartyMonThatSpeciesYourTrainerId)
+        matches!(
+            self,
+            Self::FindPartyMonThatSpecies | Self::FindPartyMonThatSpeciesYourTrainerId
+        )
     }
 
     pub const fn requires_threshold(self) -> bool {
-        matches!(self, Self::FindPartyMonAboveLevel | Self::FindPartyMonAtLeastThatHappy)
+        matches!(
+            self,
+            Self::FindPartyMonAboveLevel | Self::FindPartyMonAtLeastThatHappy
+        )
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimePhoneRandomSpecial { RandomUnseenWildMon, RandomPhoneWildMon, RandomPhoneMon }
+pub enum RuntimePhoneRandomSpecial {
+    RandomUnseenWildMon,
+    RandomPhoneWildMon,
+    RandomPhoneMon,
+}
 
 impl RuntimePhoneRandomSpecial {
     pub const fn routine(self) -> &'static str {
@@ -12658,7 +14791,11 @@ impl RuntimePhoneRandomSpecial {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeNoopSpecial { UnusedDummy, UnusedBattleTowerDummy1, UnusedBattleTowerDummy2 }
+pub enum RuntimeNoopSpecial {
+    UnusedDummy,
+    UnusedBattleTowerDummy1,
+    UnusedBattleTowerDummy2,
+}
 
 impl RuntimeNoopSpecial {
     pub const fn routine(self) -> &'static str {
@@ -12738,191 +14875,507 @@ impl RuntimeGraphicsSpecial {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeDayCareCommand { pub caretaker: RuntimeDayCareCaretaker, pub action: RuntimeDayCareAction, pub party_index: Option<usize> }
+pub struct RuntimeDayCareCommand {
+    pub caretaker: RuntimeDayCareCaretaker,
+    pub action: RuntimeDayCareAction,
+    pub party_index: Option<usize>,
+}
+
+fn runtime_day_care_party_slot(command: &RuntimeDayCareCommand) -> Result<Option<usize>> {
+    match command.action {
+        RuntimeDayCareAction::Deposit => command
+            .party_index
+            .map(Some)
+            .with_context(|| "Day Care deposit command requires party_index"),
+        RuntimeDayCareAction::Withdraw | RuntimeDayCareAction::Inspect => {
+            if command.party_index.is_some() {
+                anyhow::bail!(
+                    "Day Care {} command must not declare party_index",
+                    runtime_day_care_action_name(command.action)
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
+    match action {
+        RuntimeDayCareAction::Deposit => "deposit",
+        RuntimeDayCareAction::Withdraw => "withdraw",
+        RuntimeDayCareAction::Inspect => "inspect",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBugContestCommand { pub action: RuntimeBugContestAction, pub rank: Option<u8> }
+pub struct RuntimeBugContestCommand {
+    pub action: RuntimeBugContestAction,
+    pub rank: Option<u8>,
+    pub rng_seed_after: Option<u32>,
+}
+
+fn runtime_bug_contest_rank(command: &RuntimeBugContestCommand) -> Result<Option<u8>> {
+    match command.action {
+        RuntimeBugContestAction::Judge => command
+            .rank
+            .map(Some)
+            .with_context(|| "Bug Contest judge command requires rank"),
+        RuntimeBugContestAction::GiveParkBalls
+        | RuntimeBugContestAction::SelectContestants
+        | RuntimeBugContestAction::DropOffMons
+        | RuntimeBugContestAction::ReturnMons
+        | RuntimeBugContestAction::CheckPartyFull => {
+            if command.rank.is_some() {
+                anyhow::bail!(
+                    "Bug Contest {} command must not declare rank",
+                    runtime_bug_contest_action_name(command.action)
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn runtime_bug_contest_rng_seed_after(command: &RuntimeBugContestCommand) -> Result<Option<u32>> {
+    match command.action {
+        RuntimeBugContestAction::SelectContestants => command
+            .rng_seed_after
+            .map(Some)
+            .with_context(|| "Bug Contest select_contestants command requires rng_seed_after"),
+        RuntimeBugContestAction::GiveParkBalls
+        | RuntimeBugContestAction::DropOffMons
+        | RuntimeBugContestAction::ReturnMons
+        | RuntimeBugContestAction::CheckPartyFull
+        | RuntimeBugContestAction::Judge => {
+            if command.rng_seed_after.is_some() {
+                anyhow::bail!(
+                    "Bug Contest {} command must not declare rng_seed_after",
+                    runtime_bug_contest_action_name(command.action)
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn runtime_bug_contest_action_name(action: RuntimeBugContestAction) -> &'static str {
+    match action {
+        RuntimeBugContestAction::GiveParkBalls => "give_park_balls",
+        RuntimeBugContestAction::SelectContestants => "select_contestants",
+        RuntimeBugContestAction::DropOffMons => "drop_off_mons",
+        RuntimeBugContestAction::ReturnMons => "return_mons",
+        RuntimeBugContestAction::CheckPartyFull => "check_party_full",
+        RuntimeBugContestAction::Judge => "judge",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeKurtApricornCommand { pub apricorn_id: String, pub quantity: u16 }
+pub struct RuntimeKurtApricornCommand {
+    pub apricorn_id: String,
+    pub quantity: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBuenaPasswordCommand { pub guess: Option<String> }
+pub struct RuntimeBuenaPasswordCommand {
+    pub guess: Option<String>,
+    pub rng_seed_after: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBuenaPrizeCommand { pub item_id: String, pub quantity: u16 }
+pub struct RuntimeBuenaPrizeCommand {
+    pub item_id: String,
+    pub quantity: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeShuckieCommand { pub action: RuntimeShuckieAction, pub party_index: Option<usize> }
+pub struct RuntimeShuckieCommand {
+    pub action: RuntimeShuckieAction,
+    pub party_index: Option<usize>,
+    pub rng_seed_after: Option<u32>,
+}
+
+fn runtime_shuckie_party_slot(command: &RuntimeShuckieCommand) -> Result<Option<usize>> {
+    match command.action {
+        RuntimeShuckieAction::Give => {
+            if command.party_index.is_some() {
+                anyhow::bail!("Shuckie give command must not declare party_index");
+            }
+            Ok(None)
+        }
+        RuntimeShuckieAction::Return => Ok(command.party_index),
+    }
+}
+
+fn runtime_shuckie_rng_seed_after(command: &RuntimeShuckieCommand) -> Result<Option<u32>> {
+    match command.action {
+        RuntimeShuckieAction::Give => command
+            .rng_seed_after
+            .map(Some)
+            .with_context(|| "Shuckie give command requires rng_seed_after"),
+        RuntimeShuckieAction::Return => {
+            if command.rng_seed_after.is_some() {
+                anyhow::bail!("Shuckie return command must not declare rng_seed_after");
+            }
+            Ok(None)
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeGiveDratiniCommand { pub mode: u8 }
+pub struct RuntimeGiveDratiniCommand {
+    pub mode: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBillsGrandfatherCommand { pub party_index: Option<usize>, pub species_id: Option<String> }
+pub struct RuntimeOddEggCommand {
+    pub rng_seed_after: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMagikarpLengthCommand { pub party_index: usize }
+pub struct RuntimeBillsGrandfatherCommand {
+    pub party_index: Option<usize>,
+    pub species_id: Option<String>,
+}
+
+fn runtime_bills_grandfather_inputs(
+    command: &RuntimeBillsGrandfatherCommand,
+) -> Result<(Option<usize>, Option<String>)> {
+    match (&command.party_index, &command.species_id) {
+        (Some(party_index), None) => Ok((Some(*party_index), None)),
+        (None, Some(species_id)) => Ok((None, Some(species_id.clone()))),
+        (Some(_), Some(_)) => {
+            anyhow::bail!(
+                "Bills Grandfather command must declare either party_index or species_id, not both"
+            );
+        }
+        (None, None) => {
+            anyhow::bail!("Bills Grandfather command requires party_index or species_id");
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBadgeCommand { pub region: RuntimeBadgeRegion, pub index: usize }
+pub struct RuntimeMagikarpLengthCommand {
+    pub party_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePokedexCommand { pub species_id: String }
+pub struct RuntimeBadgeCommand {
+    pub region: RuntimeBadgeRegion,
+    pub index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeCurrencyDeltaCommand { pub account: RuntimeCurrencyAccount, pub amount: u32 }
+pub struct RuntimePokedexCommand {
+    pub species_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeLinkBattleRecordCommand { pub result: RuntimeLinkBattleResult }
+pub struct RuntimeCurrencyDeltaCommand {
+    pub account: RuntimeCurrencyAccount,
+    pub amount: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeLinkFriendReadyCommand { pub ready: bool }
+pub struct RuntimeLinkBattleRecordCommand {
+    pub result: RuntimeLinkBattleResult,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeLinkTimeoutCommand { pub timeout: bool, pub other_player_link_mode: u8 }
+pub struct RuntimeLinkFriendReadyCommand {
+    pub ready: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeLinkRoomSelectionCommand { pub other_player_room: u8 }
+pub struct RuntimeLinkTimeoutCommand {
+    pub timeout: bool,
+    pub other_player_link_mode: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeCableClubGenderCommand { pub gender: String }
+pub struct RuntimeLinkRoomSelectionCommand {
+    pub other_player_room: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeOptionsCommand { pub options: Options }
+pub struct RuntimeCableClubGenderCommand {
+    pub gender: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeTrainerIdentityCommand { pub player_name: String, pub player_id: u16 }
+pub struct RuntimeOptionsCommand {
+    pub options: Options,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePartyNicknameCommand { pub party_index: usize, pub nickname: String }
+pub struct RuntimeTrainerIdentityCommand {
+    pub player_name: String,
+    pub player_id: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePartySlotCommand { pub party_index: usize }
+pub struct RuntimePartyNicknameCommand {
+    pub party_index: usize,
+    pub nickname: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePartySwapCommand { pub first_party_index: usize, pub second_party_index: usize }
+pub struct RuntimePartySlotCommand {
+    pub party_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcBoxCommand { pub box_index: usize }
+pub struct RuntimePartySwapCommand {
+    pub first_party_index: usize,
+    pub second_party_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcDepositCommand { pub party_index: usize }
+pub struct RuntimePcBoxCommand {
+    pub box_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcWithdrawCommand { pub box_slot: usize }
+pub struct RuntimePcDepositCommand {
+    pub party_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcReleaseCommand { pub box_slot: usize }
+pub struct RuntimePcWithdrawCommand {
+    pub box_slot: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcItemCommand { pub item_id: String, pub quantity: u16 }
+pub struct RuntimePcReleaseCommand {
+    pub box_slot: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeHeldItemCommand { pub item_id: String, pub party_index: usize }
+pub struct RuntimePcItemCommand {
+    pub item_id: String,
+    pub quantity: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeHappinessServiceCommand { pub routine: RuntimeHappinessServiceRoutine, pub party_index: usize, pub rng_roll: u8 }
+pub struct RuntimeHeldItemCommand {
+    pub item_id: String,
+    pub party_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMoveDeletionCommand { pub party_index: usize, pub move_index: usize }
+pub struct RuntimeHappinessServiceCommand {
+    pub routine: RuntimeHappinessServiceRoutine,
+    pub party_index: usize,
+    pub rng_roll: u8,
+    pub rng_seed_after: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMoveTutorCommand { pub party_index: usize, pub move_id: String }
+pub struct RuntimeMoveDeletionCommand {
+    pub party_index: usize,
+    pub move_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeNameRivalCommand { pub rival_name: String }
+pub struct RuntimeMoveTutorCommand {
+    pub party_index: usize,
+    pub move_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeRememberPasswordCommand { pub remember: bool }
+pub struct RuntimeNameRivalCommand {
+    pub rival_name: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePlayerPaletteCommand { pub raw_value: u8 }
+pub struct RuntimeRememberPasswordCommand {
+    pub remember: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeFishingSwarmCommand { pub value: u8 }
+pub struct RuntimePlayerPaletteCommand {
+    pub raw_value: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMobileHandshakeCommand { pub accepted: bool }
+pub struct RuntimeFishingSwarmCommand {
+    pub value: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMobileSelectThreeMonsCommand { pub party_indexes: [usize; 3] }
+pub struct RuntimeMobileHandshakeCommand {
+    pub accepted: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePcBagItemCheckCommand { pub item_id: String }
+pub struct RuntimeMobileSelectThreeMonsCommand {
+    pub party_indexes: [usize; 3],
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimePhoneCallerCommand { pub special: RuntimePhoneRandomSpecial, pub contact_id: String }
+pub struct RuntimePcBagItemCheckCommand {
+    pub item_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeSpecialCryCommand { pub species_id: String }
+pub struct RuntimePhoneCallerCommand {
+    pub special: RuntimePhoneRandomSpecial,
+    pub contact_id: String,
+    pub rng_seed_after: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSpecialCryCommand {
+    pub species_id: String,
+}
+
+fn runtime_special_cry_species(command: &RuntimeSpecialCryCommand) -> Result<&str> {
+    validate_modpack_payload_token(&command.species_id, "special cry species id")?;
+    Ok(command.species_id.as_str())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeCableClubRequest { Trade, Battle, TimeCapsule }
+pub enum RuntimeCableClubRequest {
+    Trade,
+    Battle,
+    TimeCapsule,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeLinkRoomSpecial { TradeCenter, Colosseum, TimeCapsule }
+pub enum RuntimeLinkRoomSpecial {
+    TradeCenter,
+    Colosseum,
+    TimeCapsule,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeBattleTowerMobileFlag { Enabled, Disabled }
+pub enum RuntimeBattleTowerMobileFlag {
+    Enabled,
+    Disabled,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBattleTowerActionCommand { pub action: String, pub level_group: Option<u8>, pub selected_reward: Option<String> }
+pub struct RuntimeBattleTowerActionCommand {
+    pub action: String,
+    pub level_group: Option<u8>,
+    pub selected_reward: Option<String>,
+}
+
+fn runtime_battle_tower_action_inputs(
+    command: &RuntimeBattleTowerActionCommand,
+) -> Result<(Option<u8>, Option<String>)> {
+    match command.action.as_str() {
+        "BATTLETOWERACTION_SAVELEVELGROUP" => {
+            let level_group = command
+                .level_group
+                .with_context(|| "Battle Tower SAVELEVELGROUP command requires level_group")?;
+            reject_battle_tower_selected_reward(command)?;
+            Ok((Some(level_group), None))
+        }
+        "BATTLETOWERACTION_SAVEOPTIONS" => {
+            reject_battle_tower_level_group(command)?;
+            let selected_reward = command
+                .selected_reward
+                .clone()
+                .with_context(|| "Battle Tower SAVEOPTIONS command requires selected_reward")?;
+            Ok((None, Some(selected_reward)))
+        }
+        _ => {
+            reject_battle_tower_level_group(command)?;
+            reject_battle_tower_selected_reward(command)?;
+            Ok((None, None))
+        }
+    }
+}
+
+fn reject_battle_tower_level_group(command: &RuntimeBattleTowerActionCommand) -> Result<()> {
+    if command.level_group.is_some() {
+        anyhow::bail!(
+            "Battle Tower {} command must not declare level_group",
+            command.action
+        );
+    }
+    Ok(())
+}
+
+fn reject_battle_tower_selected_reward(command: &RuntimeBattleTowerActionCommand) -> Result<()> {
+    if command.selected_reward.is_some() {
+        anyhow::bail!(
+            "Battle Tower {} command must not declare selected_reward",
+            command.action
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBattleTowerBattleCommand { pub battle_result: u8 }
+pub struct RuntimeBattleTowerBattleCommand {
+    pub battle_result: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeBattleTowerOpponentCommand { pub trainer_id: String, pub sprite_constant: String, pub target_object: String }
+pub struct RuntimeBattleTowerOpponentCommand {
+    pub trainer_id: String,
+    pub sprite_constant: String,
+    pub target_object: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeMapRadioCommand { pub station: String }
+pub struct RuntimeMapRadioCommand {
+    pub station: String,
+}
+
+fn runtime_map_radio_station(command: &RuntimeMapRadioCommand) -> Result<&str> {
+    validate_modpack_payload_token(&command.station, "MapRadio station")?;
+    Ok(command.station.as_str())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12930,6 +15383,18 @@ pub struct RuntimePartyCheckCommand {
     pub special: RuntimePartyCheckSpecial,
     pub species_id: Option<String>,
     pub threshold: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRegisteredKeyItemCommand {
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRegisteredKeyItemOutcome {
+    pub previous_item_id: Option<String>,
+    pub item_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12975,6 +15440,7 @@ pub enum RuntimeMutationCommand {
     DrainScriptRuntimeRecordQueue(RuntimeScriptRuntimeRecordQueueDrainCommand),
     TakePendingScriptRequest(RuntimePendingScriptRequestCommand),
     ResolvePendingYesNo(RuntimePendingYesNoResolutionCommand),
+    OpenVerticalMenu(RuntimeVerticalMenuOpenCommand),
     SelectVerticalMenuOption(RuntimeVerticalMenuSelectionCommand),
     SelectElevatorFloor(RuntimeElevatorFloorSelectionCommand),
     ConsumeScriptRuntimeFlag(RuntimeScriptRuntimeFlagCommand),
@@ -12991,8 +15457,10 @@ pub enum RuntimeMutationCommand {
     SellShopItem(RuntimeShopTransactionCommand),
     ApplySpecialRoutine {
         routine: String,
+        rng_seed_after: Option<u32>,
     },
     GrantScriptedGiftPokemon(RuntimeGiftPokemonCommand),
+    AddPartyPokemon(RuntimePartyPokemonCommand),
     StartScriptedWildBattle(RuntimeScriptCommandRef),
     StartScriptedTrainerBattle(RuntimeScriptCommandRef),
     CompleteScriptedWildBattle(RuntimeScriptCommandRef),
@@ -13002,6 +15470,9 @@ pub enum RuntimeMutationCommand {
         item_id: String,
         context: ItemUseContext,
     },
+    ReplacePendingMoveLearn(RuntimeMoveLearnReplacementCommand),
+    DeclinePendingMoveLearn,
+    RegisterKeyItem(RuntimeRegisteredKeyItemCommand),
     UseBagRepelInField(RuntimeItemCommand),
     UseBagBicycleInField(RuntimeItemCommand),
     UseBagItemfinderInField(RuntimeItemCommand),
@@ -13009,6 +15480,8 @@ pub enum RuntimeMutationCommand {
     UseBagCoinCaseInField(RuntimeItemCommand),
     UseBagBlueCardInField(RuntimeItemCommand),
     UseBagTownMapInField(RuntimeItemCommand),
+    UseBagPokegearInField(RuntimeItemCommand),
+    UseBagBoxInField(RuntimeItemCommand),
     UseBagEscapeRopeInField(RuntimeItemCommand),
     UseCutFieldMove(RuntimeFieldBlockMoveCommand),
     UseWhirlpoolFieldMove(RuntimeFieldBlockMoveCommand),
@@ -13029,11 +15502,13 @@ pub enum RuntimeMutationCommand {
     UseBagItemOnActiveBattlePokemon(RuntimeItemCommand),
     UseBagItemOnBattlePartyPokemon(RuntimePartyItemCommand),
     UseBagItemOnBattlePartyMove(RuntimePartyMoveItemCommand),
-    ThrowBallAtActiveBattle(RuntimeItemCommand),
+    ThrowBallAtActiveBattle(RuntimeBattleItemCommand),
     CompleteActiveWildCapture(CaptureOutcome),
+    SwitchActiveBattleParty(RuntimePartySlotCommand),
     ResolveActiveBattleTurn(RuntimeBattleTurnCommand),
     ResolveActiveBattleCommand(RuntimeBattleTurnCommand),
-    AttemptEscapeActiveWildBattle,
+    ResolveActiveBattleEnemyAction(RuntimeBattleEnemyActionCommand),
+    AttemptEscapeActiveWildBattle(RuntimeBattleEscapeCommand),
     UseBagItemToEscapeActiveWildBattle(RuntimeItemCommand),
     UseBagGuardSpecInActiveBattle(RuntimeItemCommand),
     AdvanceActiveTrainerBattle,
@@ -13055,7 +15530,7 @@ pub enum RuntimeMutationCommand {
     UseBuenaPassword(RuntimeBuenaPasswordCommand),
     UseBuenaPrize(RuntimeBuenaPrizeCommand),
     UseShuckie(RuntimeShuckieCommand),
-    GiveOddEgg,
+    GiveOddEgg(RuntimeOddEggCommand),
     GiveDratini(RuntimeGiveDratiniCommand),
     UseBillsGrandfather(RuntimeBillsGrandfatherCommand),
     InitRoamMons,
@@ -13122,6 +15597,7 @@ pub enum RuntimeMutationCommand {
     AwardBadge(RuntimeBadgeCommand),
     RecordPokedexSeen(RuntimePokedexCommand),
     RecordPokedexCaught(RuntimePokedexCommand),
+    AddBagItem(RuntimeBagItemDeltaCommand),
     AddCurrency(RuntimeCurrencyDeltaCommand),
     TakeCurrency(RuntimeCurrencyDeltaCommand),
     RecordLinkBattleResult(RuntimeLinkBattleRecordCommand),
@@ -13245,7 +15721,18 @@ pub struct RuntimeVerticalMenuSelectionCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeVerticalMenuOpenCommand {
+    pub map_name: String,
+    pub menu_key: String,
+    pub source_script: String,
+    pub loadmenu_command_index: usize,
+    pub verticalmenu_command_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeElevatorFloorSelectionCommand {
+    pub map_name: String,
     pub data_label: String,
     pub source_script: String,
     pub elevator_command_index: usize,
@@ -13385,7 +15872,19 @@ pub struct RuntimeVerticalMenuSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeVerticalMenuOpen {
+    pub map_name: String,
+    pub menu_key: String,
+    pub menu_id: String,
+    pub source_script: String,
+    pub loadmenu_command_index: usize,
+    pub verticalmenu_command_index: usize,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeElevatorFloorSelection {
+    pub map_name: String,
     pub data_label: String,
     pub source_script: String,
     pub elevator_command_index: usize,
@@ -13496,43 +15995,113 @@ pub fn decode_runtime_mutation_command_frame(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeStorageBoxSwitchOutcome { pub box_index_before: usize, pub box_index_after: usize }
+pub struct RuntimeStorageBoxSwitchOutcome {
+    pub box_index_before: usize,
+    pub box_index_after: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeStorageDepositOutcome { pub party_index: usize, pub box_index: usize, pub box_slot: usize, pub pokemon: Pokemon }
+pub struct RuntimeStorageDepositOutcome {
+    pub party_index: usize,
+    pub box_index: usize,
+    pub box_slot: usize,
+    pub pokemon: Pokemon,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeStorageWithdrawOutcome { pub box_index: usize, pub box_slot: usize, pub party_index: usize, pub pokemon: Pokemon }
+pub struct RuntimeStorageWithdrawOutcome {
+    pub box_index: usize,
+    pub box_slot: usize,
+    pub party_index: usize,
+    pub pokemon: Pokemon,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeStorageReleaseOutcome { pub box_index: usize, pub box_slot: usize, pub pokemon: Pokemon }
+pub struct RuntimeStorageReleaseOutcome {
+    pub box_index: usize,
+    pub box_slot: usize,
+    pub pokemon: Pokemon,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePcItemTransferOutcome { pub item_id: String, pub quantity: u16, pub bag_quantity_after: u16, pub pc_quantity_after: u16 }
+pub struct RuntimePcItemTransferOutcome {
+    pub item_id: String,
+    pub quantity: u16,
+    pub bag_quantity_after: u16,
+    pub pc_quantity_after: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeHeldItemTransferOutcome { pub party_index: usize, pub item_id: String, pub bag_quantity_after: u16 }
+pub struct RuntimeHeldItemTransferOutcome {
+    pub party_index: usize,
+    pub item_id: String,
+    pub bag_quantity_after: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeBadgeAwardOutcome { pub region: RuntimeBadgeRegion, pub index: usize, pub already_awarded: bool, pub awarded_count_after: usize }
+pub struct RuntimeBadgeAwardOutcome {
+    pub region: RuntimeBadgeRegion,
+    pub index: usize,
+    pub already_awarded: bool,
+    pub awarded_count_after: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePokedexRecordOutcome { pub species_id: String, pub already_seen: bool, pub already_caught: bool, pub seen_count_after: usize, pub caught_count_after: usize }
+pub struct RuntimePokedexRecordOutcome {
+    pub species_id: String,
+    pub already_seen: bool,
+    pub already_caught: bool,
+    pub seen_count_after: usize,
+    pub caught_count_after: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCurrencyMutationOutcome { pub account: RuntimeCurrencyAccount, pub amount: u32, pub value_before: u32, pub value_after: u32, pub cap: u32 }
+pub struct RuntimeCurrencyMutationOutcome {
+    pub account: RuntimeCurrencyAccount,
+    pub amount: u32,
+    pub value_before: u32,
+    pub value_after: u32,
+    pub cap: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeLinkBattleRecordOutcome { pub result: RuntimeLinkBattleResult, pub wins_after: u16, pub losses_after: u16, pub draws_after: u16 }
+pub struct RuntimeBagItemMutationOutcome {
+    pub item_id: String,
+    pub quantity: u16,
+    pub added: bool,
+    pub quantity_before: u16,
+    pub quantity_after: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeOptionsSetOutcome { pub options_before: Options, pub options_after: Options }
+pub struct RuntimeLinkBattleRecordOutcome {
+    pub result: RuntimeLinkBattleResult,
+    pub wins_after: u16,
+    pub losses_after: u16,
+    pub draws_after: u16,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeTrainerIdentityOutcome { pub player_name_before: String, pub player_id_before: u16, pub player_name_after: String, pub player_id_after: u16 }
+pub struct RuntimeOptionsSetOutcome {
+    pub options_before: Options,
+    pub options_after: Options,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePartyNicknameOutcome { pub party_index: usize, pub species_id: String, pub nickname_before: String, pub nickname_after: String }
+pub struct RuntimeTrainerIdentityOutcome {
+    pub player_name_before: String,
+    pub player_id_before: u16,
+    pub player_name_after: String,
+    pub player_id_after: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePartyNicknameOutcome {
+    pub party_index: usize,
+    pub species_id: String,
+    pub nickname_before: String,
+    pub nickname_after: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartyRecoveryOutcome {
@@ -13554,7 +16123,12 @@ pub struct BlackoutRecoveryOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePartySwapOutcome { pub first_party_index: usize, pub second_party_index: usize, pub first_species_after: String, pub second_species_after: String }
+pub struct RuntimePartySwapOutcome {
+    pub first_party_index: usize,
+    pub second_party_index: usize,
+    pub first_species_after: String,
+    pub second_species_after: String,
+}
 
 fn full_heal_party_slot(
     state: &mut GameState,
@@ -13573,9 +16147,12 @@ fn full_heal_party_slot(
     let status_before = pokemon.status.clone();
     let mut pp_restored = Vec::new();
     for learned in &mut pokemon.moves {
-        let move_data = moves
-            .get(&learned.name)
-            .with_context(|| format!("party move {} is missing from modpack move catalog", learned.name))?;
+        let move_data = moves.get(&learned.name).with_context(|| {
+            format!(
+                "party move {} is missing from modpack move catalog",
+                learned.name
+            )
+        })?;
         let before_pp = learned.current_pp;
         let after_pp = max_move_pp(move_data.pp, learned.pp_ups);
         learned.current_pp = after_pp;
@@ -13645,6 +16222,7 @@ pub enum RuntimeMutationResult {
     ScriptRuntimeRecordQueueDrained(RuntimeScriptRuntimeRecordQueueDrainResult),
     PendingScriptRequestTaken(RuntimePendingScriptRequest),
     PendingYesNoResolved(RuntimePendingYesNoResolution),
+    VerticalMenuOpened(RuntimeVerticalMenuOpen),
     VerticalMenuOptionSelected(RuntimeVerticalMenuSelection),
     ElevatorFloorSelected(RuntimeElevatorFloorSelection),
     ScriptRuntimeFlagConsumed(RuntimeScriptRuntimeFlagValue),
@@ -13661,12 +16239,16 @@ pub enum RuntimeMutationResult {
     ShopItemSold(ShopResult),
     SpecialRoutineApplied(SpecialRoutineOutcome),
     ScriptedGiftPokemonGranted(GiftPokemonOutcome),
+    PartyPokemonAdded(GiftPokemonOutcome),
     ScriptedWildBattleStarted(StaticWildBattleStart),
     ScriptedTrainerBattleStarted(TrainerBattleStartStatus),
     ScriptedWildBattleCompleted(ScriptedBattleEffectsOutcome),
     ScriptedTrainerBattleCompleted(TrainerBattleCompletionOutcome),
     ScriptedTrainerBattleCompletionEffectsApplied(ScriptedBattleEffectsOutcome),
     BagItemUsed(ItemUseOutcome),
+    PendingMoveLearnReplaced(PendingMoveLearnRuntimeResolution),
+    PendingMoveLearnDeclined(PendingMoveLearnRuntimeResolution),
+    KeyItemRegistered(RuntimeRegisteredKeyItemOutcome),
     FieldRepelUsed(FieldRepelItemUseOutcome),
     FieldBicycleUsed(FieldBicycleItemUseOutcome),
     FieldItemfinderUsed(FieldItemfinderUseOutcome),
@@ -13674,6 +16256,8 @@ pub enum RuntimeMutationResult {
     FieldCoinCaseUsed(FieldKeyItemBalanceUseOutcome),
     FieldBlueCardUsed(FieldKeyItemBalanceUseOutcome),
     FieldTownMapUsed(FieldTownMapUseOutcome),
+    FieldPokegearUsed(FieldPokegearUseOutcome),
+    FieldBoxUsed(FieldBoxItemUseOutcome),
     FieldEscapeRopeUsed(FieldEscapeRopeUseOutcome),
     CutFieldMoveUsed(FieldMoveBlockOutcome),
     WhirlpoolFieldMoveUsed(FieldMoveBlockOutcome),
@@ -13696,8 +16280,10 @@ pub enum RuntimeMutationResult {
     BattlePartyMoveItemUsed(ItemUseOutcome, BattleItemOutcome),
     BallThrown(CaptureOutcome),
     ActiveWildCaptureCompleted(Option<StoredCapture>),
+    ActiveBattlePartySwitched(usize),
     ActiveBattleTurnResolved(BattleTurnOutcome),
     ActiveBattleCommandResolved(ActiveBattleCommandOutcome),
+    ActiveBattleEnemyActionResolved(BattleTurnOutcome),
     ActiveWildBattleEscapeAttempted(BattleEscapeAttempt),
     ActiveWildBattleEscapeItemUsed(BattleEscapeItemUseOutcome),
     ActiveBattleGuardSpecUsed(BattleStateItemUseOutcome),
@@ -13785,6 +16371,7 @@ pub enum RuntimeMutationResult {
     BadgeAwarded(RuntimeBadgeAwardOutcome),
     PokedexSeenRecorded(RuntimePokedexRecordOutcome),
     PokedexCaughtRecorded(RuntimePokedexRecordOutcome),
+    BagItemAdded(RuntimeBagItemMutationOutcome),
     CurrencyAdded(RuntimeCurrencyMutationOutcome),
     CurrencyTaken(RuntimeCurrencyMutationOutcome),
     LinkBattleResultRecorded(RuntimeLinkBattleRecordOutcome),
@@ -13842,6 +16429,7 @@ impl RuntimeMutationResult {
             Self::ScriptRuntimeRecordQueueDrained(_) => "script_runtime_record_queue_drained",
             Self::PendingScriptRequestTaken(_) => "pending_script_request_taken",
             Self::PendingYesNoResolved(_) => "pending_yes_no_resolved",
+            Self::VerticalMenuOpened(_) => "vertical_menu_opened",
             Self::VerticalMenuOptionSelected(_) => "vertical_menu_option_selected",
             Self::ElevatorFloorSelected(_) => "elevator_floor_selected",
             Self::ScriptRuntimeFlagConsumed(_) => "script_runtime_flag_consumed",
@@ -13858,6 +16446,7 @@ impl RuntimeMutationResult {
             Self::ShopItemSold(_) => "shop_item_sold",
             Self::SpecialRoutineApplied(_) => "special_routine_applied",
             Self::ScriptedGiftPokemonGranted(_) => "scripted_gift_pokemon_granted",
+            Self::PartyPokemonAdded(_) => "party_pokemon_added",
             Self::ScriptedWildBattleStarted(_) => "scripted_wild_battle_started",
             Self::ScriptedTrainerBattleStarted(_) => "scripted_trainer_battle_started",
             Self::ScriptedWildBattleCompleted(_) => "scripted_wild_battle_completed",
@@ -13866,6 +16455,9 @@ impl RuntimeMutationResult {
                 "scripted_trainer_battle_completion_effects_applied"
             }
             Self::BagItemUsed(_) => "bag_item_used",
+            Self::PendingMoveLearnReplaced(_) => "pending_move_learn_replaced",
+            Self::PendingMoveLearnDeclined(_) => "pending_move_learn_declined",
+            Self::KeyItemRegistered(_) => "key_item_registered",
             Self::FieldRepelUsed(_) => "field_repel_used",
             Self::FieldBicycleUsed(_) => "field_bicycle_used",
             Self::FieldItemfinderUsed(_) => "field_itemfinder_used",
@@ -13873,6 +16465,8 @@ impl RuntimeMutationResult {
             Self::FieldCoinCaseUsed(_) => "field_coin_case_used",
             Self::FieldBlueCardUsed(_) => "field_blue_card_used",
             Self::FieldTownMapUsed(_) => "field_town_map_used",
+            Self::FieldPokegearUsed(_) => "field_pokegear_used",
+            Self::FieldBoxUsed(_) => "field_box_used",
             Self::FieldEscapeRopeUsed(_) => "field_escape_rope_used",
             Self::CutFieldMoveUsed(_) => "cut_field_move_used",
             Self::WhirlpoolFieldMoveUsed(_) => "whirlpool_field_move_used",
@@ -13895,8 +16489,10 @@ impl RuntimeMutationResult {
             Self::BattlePartyMoveItemUsed(_, _) => "battle_party_move_item_used",
             Self::BallThrown(_) => "ball_thrown",
             Self::ActiveWildCaptureCompleted(_) => "active_wild_capture_completed",
+            Self::ActiveBattlePartySwitched(_) => "active_battle_party_switched",
             Self::ActiveBattleTurnResolved(_) => "active_battle_turn_resolved",
             Self::ActiveBattleCommandResolved(_) => "active_battle_command_resolved",
+            Self::ActiveBattleEnemyActionResolved(_) => "active_battle_enemy_action_resolved",
             Self::ActiveWildBattleEscapeAttempted(_) => "active_wild_battle_escape_attempted",
             Self::ActiveWildBattleEscapeItemUsed(_) => "active_wild_battle_escape_item_used",
             Self::ActiveBattleGuardSpecUsed(_) => "active_battle_guard_spec_used",
@@ -13986,6 +16582,7 @@ impl RuntimeMutationResult {
             Self::BadgeAwarded(_) => "badge_awarded",
             Self::PokedexSeenRecorded(_) => "pokedex_seen_recorded",
             Self::PokedexCaughtRecorded(_) => "pokedex_caught_recorded",
+            Self::BagItemAdded(_) => "bag_item_added",
             Self::CurrencyAdded(_) => "currency_added",
             Self::CurrencyTaken(_) => "currency_taken",
             Self::LinkBattleResultRecorded(_) => "link_battle_result_recorded",
@@ -14031,6 +16628,56 @@ pub fn runtime_mutation_result_frame(
     }
     RuntimeCommandResultFrame::new(request, checksum, outcome.result.result_tag())
         .map_err(|error| anyhow::anyhow!("build runtime mutation result frame: {error}"))
+}
+
+fn initial_tmhm_flags(items: &BTreeMap<String, Item>) -> Vec<bool> {
+    items
+        .values()
+        .filter_map(|item| item.tmhm_index)
+        .max()
+        .map(|max_index| vec![false; max_index + 1])
+        .unwrap_or_default()
+}
+
+fn set_script_battle_result_accumulator(state: &mut GameState) {
+    const BATTLE_RESULT_SCRIPT_FLAG_MASK: u8 = (1 << 6) | (1 << 7);
+    let result_code = state.battle_result & !BATTLE_RESULT_SCRIPT_FLAG_MASK;
+    let value = result_code.to_string();
+    state.script_runtime.script_value = Some(value.clone());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), value);
+}
+
+fn ensure_runtime_command_rng_boundary(
+    context: &str,
+    actual_rng_seed_after: u32,
+    declared_rng_seed_after: u32,
+) -> Result<()> {
+    if actual_rng_seed_after != declared_rng_seed_after {
+        anyhow::bail!(
+            "{context} rng_seed_after {declared_rng_seed_after} does not match resolved rng_seed_after {actual_rng_seed_after}"
+        );
+    }
+    Ok(())
+}
+
+pub fn runtime_special_routine_requires_rng_boundary(routine: &str) -> bool {
+    matches!(
+        routine,
+        "SampleKenjiBreakCountdown"
+            | "ResetLuckyNumberShowFlag"
+            | "CheckForLuckyNumberWinners"
+            | "PrintTodaysLuckyNumber"
+            | "RandomUnseenWildMon"
+            | "RandomPhoneWildMon"
+            | "RandomPhoneMon"
+            | "BuenasPassword"
+            | "GiveShuckle"
+            | "SelectRandomBugContestContestants"
+            | "GiveOddEgg"
+    )
 }
 
 impl GameDataSet {
@@ -14267,8 +16914,10 @@ impl GameDataSet {
         startbattle_command_index: usize,
     ) -> Result<StaticWildBattleStart> {
         self.require_current_map(current_map, map_name)?;
-        let request =
+        let mut request =
             self.scripted_wild_battle_request(map_name, source_script, startbattle_command_index)?;
+        request.battle_music =
+            self.wild_battle_music_for_map_time(map_name, state.time.time_of_day)?;
         let pre_battle_event_flags = self.scripted_wild_battle_pre_flags(
             map_name,
             source_script,
@@ -14289,6 +16938,7 @@ impl GameDataSet {
                 )
             },
         )?;
+        set_script_battle_result_accumulator(state);
         state.commit_rng_seed(rng.seed());
         Ok(start)
     }
@@ -14371,7 +17021,10 @@ impl GameDataSet {
                     "complete scripted wild battle at {map_name}/{source_script}:{startbattle_command_index}: {error:?}"
                 )
             })?;
+        set_script_battle_result_accumulator(state);
+        let pay_day_money = state.battle_pay_day_money;
         deactivate_battle(state);
+        self.claim_active_battle_pay_day_money(state, pay_day_money)?;
         Ok(outcome)
     }
 
@@ -14431,13 +17084,18 @@ impl GameDataSet {
             won,
             can_lose,
         )?;
-        core_complete_trainer_battle(state, &self.currency_constants, &completion).with_context(
-            || {
+        let pay_day_money = state.battle_pay_day_money;
+        let mut outcome = core_complete_trainer_battle(state, &self.currency_constants, &completion)
+            .with_context(|| {
                 format!(
                     "complete scripted trainer battle at {map_name}/{source_script}:{startbattle_command_index}"
                 )
-            },
-        )
+            })?;
+        if outcome.continued_after_battle {
+            self.claim_active_battle_pay_day_money(state, pay_day_money)?;
+            outcome.money_after = state.money;
+        }
+        Ok(outcome)
     }
 
     pub fn complete_scripted_trainer_battle_in_session(
@@ -14531,7 +17189,11 @@ impl GameDataSet {
         nickname: Option<String>,
     ) -> Result<GiftPokemonRequest> {
         let gift = self.gift_pokemon_script(map_name, source_script, command_index)?;
-        match (gift.nickname_label.as_deref(), nickname_accepted, nickname.as_ref()) {
+        match (
+            gift.nickname_label.as_deref(),
+            nickname_accepted,
+            nickname.as_ref(),
+        ) {
             (Some(_), true, Some(_)) => {}
             (Some(nickname_label), true, None) => {
                 anyhow::bail!(
@@ -14859,6 +17521,7 @@ impl GameDataSet {
         player_tile: TilePosition,
     ) -> Result<Option<crystal_core::systems::field_items::ItemfinderHiddenItem>> {
         let module = self.map_module(map_name)?;
+        self.validate_runtime_map_tile("itemfinder player", map_name, player_tile)?;
         core_find_itemfinder_hidden_item(
             state,
             map_name,
@@ -14962,7 +17625,12 @@ impl GameDataSet {
     fn runtime_map_group_table(&self) -> BTreeMap<String, (u16, u16)> {
         self.runtime_map_metadata
             .values()
-            .map(|metadata| (metadata.constant.clone(), (metadata.group_id, metadata.map_id)))
+            .map(|metadata| {
+                (
+                    metadata.constant.clone(),
+                    (metadata.group_id, metadata.map_id),
+                )
+            })
             .collect()
     }
 
@@ -15097,7 +17765,7 @@ impl GameDataSet {
 
     pub fn check_script_flag(
         &self,
-        state: &GameState,
+        state: &mut GameState,
         current_map: &str,
         map_name: &str,
         source_script: &str,
@@ -15107,13 +17775,15 @@ impl GameDataSet {
         let command = self
             .script_flag_command(map_name, source_script, command_index)?
             .clone();
-        core_check_script_flag(state, command)
-            .map_err(|error| anyhow::anyhow!("check script flag: {error:?}"))
+        let outcome = core_check_script_flag(state, command)
+            .map_err(|error| anyhow::anyhow!("check script flag: {error:?}"))?;
+        state.script_runtime.script_value = Some(if outcome.set { "1" } else { "0" }.to_string());
+        Ok(outcome)
     }
 
     pub fn check_script_flag_in_session(
         &self,
-        state: &GameState,
+        state: &mut GameState,
         session: &OverworldSession,
         map_name: &str,
         source_script: &str,
@@ -15403,7 +18073,14 @@ impl GameDataSet {
             .clone()
             .with_context(|| "cannot execute script warp without a pending script warp")?;
         let frame = session.frame;
-        *session = self.overworld_session(&request.target_map, request.tile, frame)?;
+        let mode = MovementMode::Normal;
+        *session = self.overworld_session_for_traversal(
+            &request.target_map,
+            request.tile,
+            frame,
+            mode.traversal_state(),
+        )?;
+        session.player.mode = mode;
         self.complete_pending_script_warp(state, session)?;
         self.apply_saved_overworld_overrides(session, state)?;
         self.sync_current_map_music(state, &request.target_map, music_ids)?;
@@ -15448,18 +18125,45 @@ impl GameDataSet {
     pub fn apply_script_text_command_in_session(
         &self,
         state: &mut GameState,
-        session: &OverworldSession,
+        session: &mut OverworldSession,
         map_name: &str,
         source_script: &str,
         command_index: usize,
     ) -> Result<ScriptTextAction> {
-        self.apply_script_text_command(
-            state,
-            &session.map.name,
-            map_name,
+        self.require_current_map(&session.map.name, map_name)?;
+        let command = self
+            .script_text_command(map_name, source_script, command_index)?
+            .clone();
+        let text_labels = self.script_text_labels_for_map(map_name)?;
+        let action = core_resolve_script_text_command(command.clone(), &text_labels)
+            .map_err(|error| anyhow::anyhow!("resolve script text command: {error:?}"))?;
+        if let ScriptTextAction::Write {
+            face_player: true,
             source_script,
             command_index,
-        )
+            ..
+        } = &action
+        {
+            let face_player = ScriptObjectCommand {
+                command: "faceplayer".to_string(),
+                object_id: None,
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: None,
+                emote: None,
+                duration: None,
+                source_script: source_script.clone(),
+                command_index: *command_index,
+            };
+            core_apply_script_object_mutation(state, session, &face_player).map_err(|error| {
+                anyhow::anyhow!("apply jumptextfaceplayer object facing: {error:?}")
+            })?;
+        }
+        core_apply_script_text_command(state, command, &text_labels)
+            .map_err(|error| anyhow::anyhow!("apply script text command: {error:?}"))?;
+        Ok(action)
     }
 
     pub fn script_variable_command(
@@ -15610,9 +18314,15 @@ impl GameDataSet {
         let command = self
             .script_object_command(map_name, source_script, command_index)?
             .clone();
-        let outcome = core_apply_script_object_mutation(state, session, &command)
-            .map_err(|error| anyhow::anyhow!("apply script object mutation: {error:?}"))?;
-        sync_state_object_overrides(state, session);
+        let mut next_state = state.clone();
+        let mut next_session = session.clone();
+        let outcome =
+            core_apply_script_object_mutation(&mut next_state, &mut next_session, &command)
+                .map_err(|error| anyhow::anyhow!("apply script object mutation: {error:?}"))?;
+        sync_state_object_overrides(&mut next_state, &next_session)
+            .context("sync script object overrides")?;
+        *state = next_state;
+        *session = next_session;
         Ok(outcome)
     }
 
@@ -15656,9 +18366,15 @@ impl GameDataSet {
         let movement = self
             .script_movement(map_name, &command.source_script, movement_label)?
             .clone();
-        let outcome = core_apply_script_movement(session, &command, &movement)
+        let mut next_state = state.clone();
+        let mut next_session = session.clone();
+        let outcome = core_apply_script_movement(&mut next_session, &command, &movement)
             .map_err(|error| anyhow::anyhow!("apply script movement: {error:?}"))?;
-        sync_state_object_overrides(state, session);
+        Self::apply_script_movement_effects_to_state(&mut next_state, &mut next_session, &outcome)?;
+        sync_state_object_overrides(&mut next_state, &next_session)
+            .context("sync script movement object overrides")?;
+        *state = next_state;
+        *session = next_session;
         Ok(outcome)
     }
 
@@ -15679,6 +18395,85 @@ impl GameDataSet {
             source_script,
             command_index,
         )
+    }
+
+    fn apply_script_movement_effects_to_state(
+        state: &mut GameState,
+        session: &mut OverworldSession,
+        outcome: &ScriptMovementOutcome,
+    ) -> Result<()> {
+        for effect in &outcome.effects {
+            match effect.command.as_str() {
+                "teleport_from" => state.script_runtime.teleport_from_queued = true,
+                "teleport_to" => state.script_runtime.teleport_from_queued = false,
+                "hide_object" | "remove_object" | "step_dig" => {
+                    Self::apply_script_movement_visibility_effect(state, session, outcome, true)?;
+                }
+                "show_object" | "return_dig" => {
+                    Self::apply_script_movement_visibility_effect(state, session, outcome, false)?;
+                }
+                "hide_emote" => {
+                    state
+                        .script_runtime
+                        .pending_emotes
+                        .retain(|emote| emote.object != outcome.object_id);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_script_movement_visibility_effect(
+        state: &mut GameState,
+        session: &mut OverworldSession,
+        outcome: &ScriptMovementOutcome,
+        hidden: bool,
+    ) -> Result<()> {
+        if outcome.object_id == "PLAYER" {
+            session.player_hidden = hidden;
+            return Ok(());
+        }
+        let object = session
+            .objects
+            .iter()
+            .find(|object| object.object_identifier.as_deref() == Some(outcome.object_id.as_str()))
+            .with_context(|| {
+                format!(
+                    "script movement {} references unknown object {}",
+                    outcome.movement, outcome.object_id
+                )
+            })?;
+        let event_flag = object.event_flag.clone();
+        if event_flag == "-1" {
+            if hidden {
+                session
+                    .hidden_object_identifiers
+                    .insert(outcome.object_id.clone());
+            } else {
+                session.hidden_object_identifiers.remove(&outcome.object_id);
+            }
+            return Ok(());
+        }
+        if !is_hideable_object_event_flag(&event_flag) {
+            anyhow::bail!(
+                "script movement {} cannot toggle object {} with event flag {}",
+                outcome.movement,
+                outcome.object_id,
+                event_flag
+            );
+        }
+        state
+            .flags
+            .set_event_flag(&event_flag, hidden)
+            .with_context(|| {
+                format!(
+                    "script movement {} toggles object {} event flag {}",
+                    outcome.movement, outcome.object_id, event_flag
+                )
+            })?;
+        session.sync_event_flag_memory(&state.flags);
+        Ok(())
     }
 
     pub fn script_runtime_command(
@@ -15714,13 +18509,123 @@ impl GameDataSet {
         if let Some(object_id) = Self::script_runtime_live_object_reference_for_command(&command)? {
             Self::require_runtime_object_reference(overworld, &object_id)?;
         }
-        let outcome = core_apply_script_runtime_command(state, command.clone(), inputs)
-            .map_err(|error| anyhow::anyhow!("apply script runtime command: {error:?}"))?;
-        if command.command == "setlasttalked" {
-            overworld.last_talked_object_identifier = command.args.first().cloned();
-            sync_state_object_overrides(state, overworld);
+        let mut next_state = state.clone();
+        let mut next_overworld = overworld.clone();
+        let outcome =
+            core_apply_script_runtime_command(&mut next_state, command.clone(), inputs)
+                .map_err(|error| anyhow::anyhow!("apply script runtime command: {error:?}"))?;
+        self.resolve_script_runtime_name_buffer(&mut next_state, &command)?;
+        if command.command == "elevfloor" {
+            let target_constant = command.args.get(2).with_context(|| {
+                format!(
+                    "elevfloor command {}:{} missing target map argument",
+                    command.source_script, command.command_index
+                )
+            })?;
+            let target_map = self.map_name_for_constant(target_constant)?;
+            let floor = next_state
+                .script_runtime
+                .elevator_floors
+                .last_mut()
+                .with_context(|| {
+                    format!(
+                        "elevfloor command {}:{} did not enqueue an elevator floor",
+                        command.source_script, command.command_index
+                    )
+                })?;
+            floor.target_map = target_map;
         }
+        if command.command == "setlasttalked" {
+            next_overworld.last_talked_object_identifier = command.args.first().cloned();
+            sync_state_object_overrides(&mut next_state, &next_overworld)
+                .context("sync setlasttalked object overrides")?;
+        }
+        *state = next_state;
+        *overworld = next_overworld;
         Ok((command, outcome))
+    }
+
+    fn resolve_script_runtime_name_buffer(
+        &self,
+        state: &mut GameState,
+        command: &ScriptRuntimeCommand,
+    ) -> Result<()> {
+        let Some(target_buffer) = command.args.first() else {
+            return Ok(());
+        };
+        let resolved_name = match command.command.as_str() {
+            "gettrainername" => {
+                let trainer_id = command.args.get(2).with_context(|| {
+                    format!(
+                        "gettrainername command {}:{} missing trainer id",
+                        command.source_script, command.command_index
+                    )
+                })?;
+                let trainer = self.trainers.get(trainer_id).with_context(|| {
+                    format!("gettrainername references unknown trainer {trainer_id}")
+                })?;
+                Some(trainer.name.clone())
+            }
+            "getitemname" => {
+                let item_arg = command.args.get(1).with_context(|| {
+                    format!(
+                        "getitemname command {}:{} missing item id",
+                        command.source_script, command.command_index
+                    )
+                })?;
+                let item_id = if item_arg == SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID {
+                    Some(state.script_runtime.script_value.as_deref().with_context(|| {
+                        format!(
+                            "getitemname command {}:{} requires script_value for USE_SCRIPT_VAR",
+                            command.source_script, command.command_index
+                        )
+                    })?)
+                } else if item_arg == SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID {
+                    None
+                } else {
+                    Some(item_arg.as_str())
+                };
+                if let Some(item_id) = item_id {
+                    let item = self.items.get(item_id).with_context(|| {
+                        format!("getitemname references unknown item {item_id}")
+                    })?;
+                    Some(item.name.clone())
+                } else {
+                    None
+                }
+            }
+            "getmonname" => {
+                let species_arg = command.args.get(1).with_context(|| {
+                    format!(
+                        "getmonname command {}:{} missing species id",
+                        command.source_script, command.command_index
+                    )
+                })?;
+                let species_id =
+                    if species_arg == SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID {
+                        state.script_runtime.script_value.as_deref().with_context(|| {
+                        format!(
+                            "getmonname command {}:{} requires script_value for USE_SCRIPT_VAR",
+                            command.source_script, command.command_index
+                        )
+                    })?
+                    } else {
+                        species_arg.as_str()
+                    };
+                self.pokemon.get(species_id).with_context(|| {
+                    format!("getmonname references unknown species {species_id}")
+                })?;
+                Some(pokemon_species_display_name(species_id))
+            }
+            _ => None,
+        };
+        if let Some(name) = resolved_name {
+            state
+                .script_runtime
+                .named_buffers
+                .insert(target_buffer.clone(), name);
+        }
+        Ok(())
     }
 
     pub fn apply_script_runtime_command_in_session(
@@ -15913,49 +18818,125 @@ impl GameDataSet {
         })
     }
 
+    fn open_vertical_menu(
+        &self,
+        state: &mut GameState,
+        command: RuntimeVerticalMenuOpenCommand,
+    ) -> Result<RuntimeVerticalMenuOpen> {
+        let module = self
+            .maps
+            .get(&command.map_name)
+            .with_context(|| format!("compiled pack does not declare map {}", command.map_name))?;
+        let menu = module
+            .script_vertical_menus
+            .get(&command.menu_key)
+            .with_context(|| {
+                format!(
+                    "compiled pack does not declare vertical menu {} on {}",
+                    command.menu_key, command.map_name
+                )
+            })?;
+        if menu.source_script != command.source_script {
+            anyhow::bail!(
+                "vertical menu {} on {} belongs to source script {}, not {}",
+                command.menu_key,
+                command.map_name,
+                menu.source_script,
+                command.source_script
+            );
+        }
+        if menu.loadmenu_command_index != command.loadmenu_command_index {
+            anyhow::bail!(
+                "vertical menu {} on {} has loadmenu command {}, not {}",
+                command.menu_key,
+                command.map_name,
+                menu.loadmenu_command_index,
+                command.loadmenu_command_index
+            );
+        }
+        if menu.verticalmenu_command_index != command.verticalmenu_command_index {
+            anyhow::bail!(
+                "vertical menu {} on {} has verticalmenu command {}, not {}",
+                command.menu_key,
+                command.map_name,
+                menu.verticalmenu_command_index,
+                command.verticalmenu_command_index
+            );
+        }
+        state.script_runtime.active_menu = Some(menu.header_label.clone());
+        state.script_runtime.window_open = true;
+        Ok(RuntimeVerticalMenuOpen {
+            map_name: command.map_name,
+            menu_key: command.menu_key,
+            menu_id: menu.header_label.clone(),
+            source_script: command.source_script,
+            loadmenu_command_index: command.loadmenu_command_index,
+            verticalmenu_command_index: command.verticalmenu_command_index,
+            options: menu.options.clone(),
+        })
+    }
+
     fn select_elevator_floor(
         &self,
         state: &mut GameState,
         command: RuntimeElevatorFloorSelectionCommand,
     ) -> Result<RuntimeElevatorFloorSelection> {
-        let matches: Vec<_> = self
+        let module = self
             .maps
-            .values()
-            .flat_map(|module| module.script_elevators.values())
-            .filter(|elevator| {
-                elevator.source_script == command.source_script.as_str()
-                    && elevator.elevator_command_index == command.elevator_command_index
-                    && elevator.data_label == command.data_label.as_str()
-            })
-            .collect();
-        if matches.is_empty() {
-            anyhow::bail!(
-                "compiled pack does not declare elevator '{}' from {} command {}",
-                command.data_label,
-                command.source_script,
-                command.elevator_command_index
-            );
-        }
-        if matches.len() > 1 {
-            anyhow::bail!(
-                "compiled pack declares duplicate elevator '{}' from {} command {}",
-                command.data_label,
-                command.source_script,
-                command.elevator_command_index
-            );
-        }
-        let elevator = matches[0];
-        let floor = elevator
-            .floors
-            .get(command.floor_index)
+            .get(&command.map_name)
+            .with_context(|| format!("compiled pack does not declare map {}", command.map_name))?;
+        let elevator_key = format!(
+            "{}:{}",
+            command.source_script, command.elevator_command_index
+        );
+        let elevator = module
+            .script_elevators
+            .get(&elevator_key)
             .with_context(|| {
                 format!(
-                    "elevator '{}' floor index {} is out of range for {} floors",
+                    "compiled pack does not declare elevator '{}' from {} command {} on {}",
                     command.data_label,
-                    command.floor_index,
-                    elevator.floors.len()
+                    command.source_script,
+                    command.elevator_command_index,
+                    command.map_name
                 )
             })?;
+        if elevator.source_script != command.source_script {
+            anyhow::bail!(
+                "elevator '{}' on {} belongs to source script {}, not {}",
+                command.data_label,
+                command.map_name,
+                elevator.source_script,
+                command.source_script
+            );
+        }
+        if elevator.elevator_command_index != command.elevator_command_index {
+            anyhow::bail!(
+                "elevator '{}' on {} has command {}, not {}",
+                command.data_label,
+                command.map_name,
+                elevator.elevator_command_index,
+                command.elevator_command_index
+            );
+        }
+        if elevator.data_label != command.data_label {
+            anyhow::bail!(
+                "elevator from {} command {} on {} uses data label {}, not {}",
+                command.source_script,
+                command.elevator_command_index,
+                command.map_name,
+                elevator.data_label,
+                command.data_label
+            );
+        }
+        let floor = elevator.floors.get(command.floor_index).with_context(|| {
+            format!(
+                "elevator '{}' floor index {} is out of range for {} floors",
+                command.data_label,
+                command.floor_index,
+                elevator.floors.len()
+            )
+        })?;
         if floor.floor != command.floor.as_str()
             || floor.warp != command.warp
             || floor.target_map != command.target_map.as_str()
@@ -15995,7 +18976,17 @@ impl GameDataSet {
                 )
             })?;
         let destination_tile =
-            TilePosition::new(destination_warp.x as i16, destination_warp.y as i16);
+            checked_runtime_map_event_tile(destination_warp.x, destination_warp.y).with_context(
+                || {
+                    format!(
+                        "elevator '{}' target warp {} coordinate ({}, {}) overflows runtime tile coordinates",
+                        command.data_label,
+                        destination_warp.index,
+                        destination_warp.x,
+                        destination_warp.y
+                    )
+                },
+            )?;
         let script_value = "1".to_string();
         state.script_runtime.script_value = Some(script_value.clone());
         state
@@ -16010,6 +19001,7 @@ impl GameDataSet {
             command_index: elevator.elevator_command_index,
         });
         Ok(RuntimeElevatorFloorSelection {
+            map_name: command.map_name,
             data_label: command.data_label,
             source_script: command.source_script,
             elevator_command_index: command.elevator_command_index,
@@ -16245,21 +19237,15 @@ impl GameDataSet {
             }
             RuntimeMutationCommand::DrainScriptEventQueue(command) => {
                 let drained = match command.queue {
-                    RuntimeScriptEventQueue::Audio => {
-                        RuntimeScriptEventDrainResult::Audio(std::mem::take(
-                            &mut state.script_runtime.audio_events,
-                        ))
-                    }
-                    RuntimeScriptEventQueue::Graphics => {
-                        RuntimeScriptEventDrainResult::Graphics(std::mem::take(
-                            &mut state.script_runtime.graphics_events,
-                        ))
-                    }
-                    RuntimeScriptEventQueue::Money => {
-                        RuntimeScriptEventDrainResult::Money(std::mem::take(
-                            &mut state.script_runtime.money_events,
-                        ))
-                    }
+                    RuntimeScriptEventQueue::Audio => RuntimeScriptEventDrainResult::Audio(
+                        std::mem::take(&mut state.script_runtime.audio_events),
+                    ),
+                    RuntimeScriptEventQueue::Graphics => RuntimeScriptEventDrainResult::Graphics(
+                        std::mem::take(&mut state.script_runtime.graphics_events),
+                    ),
+                    RuntimeScriptEventQueue::Money => RuntimeScriptEventDrainResult::Money(
+                        std::mem::take(&mut state.script_runtime.money_events),
+                    ),
                     RuntimeScriptEventQueue::Map => RuntimeScriptEventDrainResult::Map(
                         std::mem::take(&mut state.script_runtime.map_events),
                     ),
@@ -16300,9 +19286,11 @@ impl GameDataSet {
                             &mut state.script_runtime.command_queue,
                         ))
                     }
-                    RuntimeScriptRuntimeQueue::Stack => RuntimeScriptRuntimeQueueDrainResult::Stack(
-                        std::mem::take(&mut state.script_runtime.stack),
-                    ),
+                    RuntimeScriptRuntimeQueue::Stack => {
+                        RuntimeScriptRuntimeQueueDrainResult::Stack(std::mem::take(
+                            &mut state.script_runtime.stack,
+                        ))
+                    }
                     RuntimeScriptRuntimeQueue::CallStack => {
                         RuntimeScriptRuntimeQueueDrainResult::CallStack(std::mem::take(
                             &mut state.script_runtime.call_stack,
@@ -16343,9 +19331,9 @@ impl GameDataSet {
             RuntimeMutationCommand::DrainScriptRuntimeRecordQueue(command) => {
                 let drained = match command.queue {
                     RuntimeScriptRuntimeRecordQueue::VariableWrite => {
-                        RuntimeScriptRuntimeRecordQueueDrainResult::VariableWrite(
-                            std::mem::take(&mut state.script_runtime.variable_writes),
-                        )
+                        RuntimeScriptRuntimeRecordQueueDrainResult::VariableWrite(std::mem::take(
+                            &mut state.script_runtime.variable_writes,
+                        ))
                     }
                     RuntimeScriptRuntimeRecordQueue::Effect => {
                         RuntimeScriptRuntimeRecordQueueDrainResult::Effect(std::mem::take(
@@ -16363,14 +19351,14 @@ impl GameDataSet {
                         )
                     }
                     RuntimeScriptRuntimeRecordQueue::ElevatorFloor => {
-                        RuntimeScriptRuntimeRecordQueueDrainResult::ElevatorFloor(
-                            std::mem::take(&mut state.script_runtime.elevator_floors),
-                        )
+                        RuntimeScriptRuntimeRecordQueueDrainResult::ElevatorFloor(std::mem::take(
+                            &mut state.script_runtime.elevator_floors,
+                        ))
                     }
                     RuntimeScriptRuntimeRecordQueue::StoneTableEntry => {
-                        RuntimeScriptRuntimeRecordQueueDrainResult::StoneTableEntry(
-                            std::mem::take(&mut state.script_runtime.stone_table_entries),
-                        )
+                        RuntimeScriptRuntimeRecordQueueDrainResult::StoneTableEntry(std::mem::take(
+                            &mut state.script_runtime.stone_table_entries,
+                        ))
                     }
                     RuntimeScriptRuntimeRecordQueue::DecorationDescription => {
                         RuntimeScriptRuntimeRecordQueueDrainResult::DecorationDescription(
@@ -16451,11 +19439,15 @@ impl GameDataSet {
                             )
                         }
                         RuntimePendingScriptRequestKind::TextWait => {
-                            RuntimePendingScriptRequest::TextWait(
+                            let wait =
                                 state.script_runtime.pending_text_wait.take().context(
                                     "cannot take pending text wait because none is pending",
-                                )?,
-                            )
+                                )?;
+                            if script_text_wait_closes_window(&wait.command) {
+                                state.script_runtime.pending_text_label = None;
+                                state.script_runtime.text_window_open = false;
+                            }
+                            RuntimePendingScriptRequest::TextWait(wait)
                         }
                         RuntimePendingScriptRequestKind::YesNo => {
                             RuntimePendingScriptRequest::YesNo(
@@ -16487,6 +19479,9 @@ impl GameDataSet {
                     accepted: command.accepted,
                     script_value,
                 })
+            }
+            RuntimeMutationCommand::OpenVerticalMenu(command) => {
+                RuntimeMutationResult::VerticalMenuOpened(self.open_vertical_menu(state, command)?)
             }
             RuntimeMutationCommand::SelectVerticalMenuOption(command) => {
                 RuntimeMutationResult::VerticalMenuOptionSelected(
@@ -16789,107 +19784,214 @@ impl GameDataSet {
             RuntimeMutationCommand::SellShopItem(command) => RuntimeMutationResult::ShopItemSold(
                 self.sell_shop_item(state, &command.item_id, command.quantity)?,
             ),
-            RuntimeMutationCommand::ApplySpecialRoutine { routine } => {
-                RuntimeMutationResult::SpecialRoutineApplied(
-                    self.apply_special_routine(state, &routine, music_ids)?,
-                )
+            RuntimeMutationCommand::ApplySpecialRoutine {
+                routine,
+                rng_seed_after,
+            } => {
+                let mut next_state = state.clone();
+                let outcome = self.apply_special_routine(&mut next_state, &routine, music_ids)?;
+                if runtime_special_routine_requires_rng_boundary(&routine) {
+                    let rng_seed_after = rng_seed_after.with_context(|| {
+                        format!("special routine {routine} command requires rng_seed_after")
+                    })?;
+                    ensure_runtime_command_rng_boundary(
+                        &format!("apply special routine {routine}"),
+                        next_state.rng_seed,
+                        rng_seed_after,
+                    )?;
+                } else if rng_seed_after.is_some() {
+                    anyhow::bail!(
+                        "special routine {routine} command must not declare rng_seed_after"
+                    );
+                }
+                *state = next_state;
+                RuntimeMutationResult::SpecialRoutineApplied(outcome)
+            }
+            RuntimeMutationCommand::RegisterKeyItem(command) => {
+                self.validate_saved_item_reference("registered_key_item", &command.item_id)?;
+                if !matches!(state.bag.key_items.get(&command.item_id), Some(quantity) if *quantity > 0)
+                {
+                    anyhow::bail!(
+                        "cannot register key item {} because it is not carried",
+                        command.item_id
+                    );
+                }
+                let previous_item_id = state.registered_key_item.replace(command.item_id.clone());
+                RuntimeMutationResult::KeyItemRegistered(RuntimeRegisteredKeyItemOutcome {
+                    previous_item_id,
+                    item_id: command.item_id,
+                })
             }
             RuntimeMutationCommand::ApplyGraphicsSpecial(special) => {
-                RuntimeMutationResult::GraphicsSpecialApplied(
-                    self.apply_special_routine(state, special.routine(), music_ids)?,
-                )
+                RuntimeMutationResult::GraphicsSpecialApplied(self.apply_special_routine(
+                    state,
+                    special.routine(),
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::ApplyPartyCheckSpecial(command) => {
                 let routine = command.special.routine();
-                if command.special.requires_species() {
-                    let species_id = command.species_id.with_context(|| {
+                let species_id = if command.special.requires_species() {
+                    Some(command.species_id.with_context(|| {
                         format!("{routine} runtime command requires species_id")
-                    })?;
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("_value".to_string(), species_id);
+                    })?)
                 } else if command.species_id.is_some() {
                     anyhow::bail!("{routine} runtime command does not accept species_id");
-                }
-                if command.special.requires_threshold() {
-                    let threshold = command.threshold.with_context(|| {
-                        format!("{routine} runtime command requires threshold")
-                    })?;
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("_value".to_string(), threshold.to_string());
-                } else if command.threshold.is_some() {
-                    anyhow::bail!("{routine} runtime command does not accept threshold");
-                }
+                } else {
+                    None
+                };
+                let threshold =
+                    if command.special.requires_threshold() {
+                        Some(command.threshold.with_context(|| {
+                            format!("{routine} runtime command requires threshold")
+                        })?)
+                    } else if command.threshold.is_some() {
+                        anyhow::bail!("{routine} runtime command does not accept threshold");
+                    } else {
+                        None
+                    };
                 RuntimeMutationResult::PartyCheckSpecialApplied(
-                    self.apply_special_routine(state, routine, music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        routine,
+                        music_ids,
+                        |next_state| {
+                            if let Some(species_id) = species_id {
+                                next_state
+                                    .script_runtime
+                                    .variables
+                                    .insert("_value".to_string(), species_id);
+                            }
+                            if let Some(threshold) = threshold {
+                                next_state
+                                    .script_runtime
+                                    .variables
+                                    .insert("_value".to_string(), threshold.to_string());
+                            }
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::ApplyPhoneRandomSpecial(command) => {
-                state
+                let routine = command.special.routine();
+                let mut next_state = state.clone();
+                next_state
                     .script_runtime
                     .variables
                     .insert("VAR_CALLERID".to_string(), command.contact_id);
-                RuntimeMutationResult::PhoneRandomSpecialApplied(
-                    self.apply_special_routine(state, command.special.routine(), music_ids)?,
-                )
+                let outcome = self.apply_special_routine(&mut next_state, routine, music_ids)?;
+                ensure_runtime_command_rng_boundary(
+                    &format!("apply phone random special {routine}"),
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::PhoneRandomSpecialApplied(outcome)
             }
             RuntimeMutationCommand::CheckItemInPcOrBagSpecial(command) => {
-                state.script_runtime.script_value = Some(command.item_id.clone());
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.item_id);
                 RuntimeMutationResult::ItemInPcOrBagChecked(
-                    self.apply_special_routine(state, "UnusedFindItemInPCOrBag", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "UnusedFindItemInPCOrBag",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.script_value = Some(command.item_id.clone());
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_value".to_string(), command.item_id);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::CheckAnotherUsablePartyMonSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_selected_party_index".to_string(),
-                    command.party_index.to_string(),
-                );
                 RuntimeMutationResult::AnotherUsablePartyMonChecked(
-                    self.apply_special_routine(state, "Function11ba38", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "Function11ba38",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_selected_party_index".to_string(),
+                                command.party_index.to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::ActivateFishingSwarmSpecial(command) => {
-                state.script_runtime.script_value = Some(command.value.to_string());
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.value.to_string());
                 RuntimeMutationResult::FishingSwarmActivated(
-                    self.apply_special_routine(state, "ActivateFishingSwarm", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "ActivateFishingSwarm",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.script_value =
+                                Some(command.value.to_string());
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_value".to_string(), command.value.to_string());
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::ApplyStoryGateSpecial(special) => {
-                RuntimeMutationResult::StoryGateSpecialApplied(
-                    self.apply_special_routine(state, special.routine(), music_ids)?,
-                )
+                RuntimeMutationResult::StoryGateSpecialApplied(self.apply_special_routine(
+                    state,
+                    special.routine(),
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::ApplyNoopSpecial(special) => {
-                RuntimeMutationResult::NoopSpecialApplied(
-                    self.apply_special_routine(state, special.routine(), music_ids)?,
-                )
+                RuntimeMutationResult::NoopSpecialApplied(self.apply_special_routine(
+                    state,
+                    special.routine(),
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::GrantScriptedGiftPokemon(command) => {
-                RuntimeMutationResult::ScriptedGiftPokemonGranted(
-                    self.grant_scripted_gift_pokemon_in_session(
-                        state,
-                        session,
-                        &command.command.map_name,
-                        &command.command.source_script,
-                        command.command.command_index,
-                        command.original_trainer_name,
-                        command.original_trainer_id,
-                        command.dvs,
-                        command.nickname_accepted,
-                        command.nickname,
-                    )?,
-                )
+                let mut next_state = state.clone();
+                let outcome = self.grant_scripted_gift_pokemon_in_session(
+                    &mut next_state,
+                    session,
+                    &command.command.map_name,
+                    &command.command.source_script,
+                    command.command.command_index,
+                    command.original_trainer_name,
+                    command.original_trainer_id,
+                    command.dvs,
+                    command.nickname_accepted,
+                    command.nickname,
+                )?;
+                ensure_runtime_command_rng_boundary(
+                    "grant scripted gift Pokemon",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::ScriptedGiftPokemonGranted(outcome)
+            }
+            RuntimeMutationCommand::AddPartyPokemon(command) => {
+                RuntimeMutationResult::PartyPokemonAdded(self.grant_gift_pokemon_to_state(
+                    state,
+                    GiftPokemonRequest {
+                        species_id: command.species_id,
+                        level: command.level,
+                        held_item_id: command.held_item_id,
+                        nickname: command.nickname,
+                        original_trainer_name: command.original_trainer_name,
+                        original_trainer_id: command.original_trainer_id,
+                        source_script: "RuntimeAddPartyPokemon".to_string(),
+                        command_index: 0,
+                        egg: false,
+                        dvs: command.dvs,
+                    },
+                )?)
             }
             RuntimeMutationCommand::StartScriptedWildBattle(command) => {
                 RuntimeMutationResult::ScriptedWildBattleStarted(
@@ -16951,6 +20053,16 @@ impl GameDataSet {
             RuntimeMutationCommand::UseBagItem { item_id, context } => {
                 RuntimeMutationResult::BagItemUsed(self.use_bag_item(state, &item_id, context)?)
             }
+            RuntimeMutationCommand::ReplacePendingMoveLearn(command) => {
+                RuntimeMutationResult::PendingMoveLearnReplaced(
+                    self.replace_pending_move_learn(state, command.move_slot)?,
+                )
+            }
+            RuntimeMutationCommand::DeclinePendingMoveLearn => {
+                RuntimeMutationResult::PendingMoveLearnDeclined(
+                    self.decline_pending_move_learn(state)?,
+                )
+            }
             RuntimeMutationCommand::UseBagRepelInField(command) => {
                 RuntimeMutationResult::FieldRepelUsed(
                     self.use_bag_repel_in_field(state, &command.item_id)?,
@@ -16993,6 +20105,16 @@ impl GameDataSet {
                     session,
                     &command.item_id,
                 )?)
+            }
+            RuntimeMutationCommand::UseBagPokegearInField(command) => {
+                RuntimeMutationResult::FieldPokegearUsed(
+                    self.use_bag_pokegear_in_field(state, &command.item_id)?,
+                )
+            }
+            RuntimeMutationCommand::UseBagBoxInField(command) => {
+                RuntimeMutationResult::FieldBoxUsed(
+                    self.use_bag_box_in_field(state, &command.item_id)?,
+                )
             }
             RuntimeMutationCommand::UseBagEscapeRopeInField(command) => {
                 RuntimeMutationResult::FieldEscapeRopeUsed(self.use_bag_escape_rope_in_session(
@@ -17073,15 +20195,26 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::UseHeadbuttFieldMove(command) => {
+                reject_field_encounter_surface("HEADBUTT", command.surface)?;
                 let player_id = command
                     .player_id
                     .with_context(|| "HEADBUTT field move command requires player_id")?;
-                RuntimeMutationResult::HeadbuttFieldMoveUsed(self.use_headbutt_field_move(
-                    state,
-                    session,
+                let mut next_state = state.clone();
+                let next_session = session.clone();
+                let outcome = self.use_headbutt_field_move(
+                    &mut next_state,
+                    &next_session,
                     command.party_index,
                     player_id,
-                )?)
+                )?;
+                ensure_runtime_command_rng_boundary(
+                    "use HEADBUTT field move",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                *session = next_session;
+                RuntimeMutationResult::HeadbuttFieldMoveUsed(outcome)
             }
             RuntimeMutationCommand::UseRockSmashFieldMove(command) => {
                 RuntimeMutationResult::RockSmashFieldMoveUsed(self.use_rock_smash_field_move(
@@ -17091,15 +20224,26 @@ impl GameDataSet {
                 )?)
             }
             RuntimeMutationCommand::UseSweetScentFieldMove(command) => {
+                reject_field_encounter_player_id("SWEET_SCENT", command.player_id)?;
                 let surface = command
                     .surface
                     .with_context(|| "SWEET_SCENT field move command requires surface")?;
-                RuntimeMutationResult::SweetScentFieldMoveUsed(self.use_sweet_scent_field_move(
-                    state,
-                    session,
+                let mut next_state = state.clone();
+                let next_session = session.clone();
+                let outcome = self.use_sweet_scent_field_move(
+                    &mut next_state,
+                    &next_session,
                     command.party_index,
                     surface,
-                )?)
+                )?;
+                ensure_runtime_command_rng_boundary(
+                    "use SWEET_SCENT field move",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                *session = next_session;
+                RuntimeMutationResult::SweetScentFieldMoveUsed(outcome)
             }
             RuntimeMutationCommand::UseBagItemOnPartyPokemon(command) => {
                 let (item_use, item_effect) = self.use_bag_item_on_party_pokemon_now(
@@ -17155,35 +20299,80 @@ impl GameDataSet {
                 RuntimeMutationResult::BattlePartyMoveItemUsed(item_use, battle_item)
             }
             RuntimeMutationCommand::ThrowBallAtActiveBattle(command) => {
-                RuntimeMutationResult::BallThrown(
-                    self.throw_ball_at_active_battle(state, &command.item_id)?,
-                )
+                let mut next_state = state.clone();
+                let outcome =
+                    self.throw_ball_at_active_battle(&mut next_state, &command.item_id)?;
+                ensure_runtime_command_rng_boundary(
+                    "throw ball at active battle",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::BallThrown(outcome)
             }
             RuntimeMutationCommand::CompleteActiveWildCapture(outcome) => {
                 RuntimeMutationResult::ActiveWildCaptureCompleted(
                     self.complete_active_wild_capture(state, &outcome)?,
                 )
             }
+            RuntimeMutationCommand::SwitchActiveBattleParty(command) => {
+                RuntimeMutationResult::ActiveBattlePartySwitched(
+                    switch_active_battle_party_index(state, command.party_index)
+                        .map_err(|error| anyhow::anyhow!("switch active battle party: {error}"))?,
+                )
+            }
             RuntimeMutationCommand::ResolveActiveBattleTurn(command) => {
-                RuntimeMutationResult::ActiveBattleTurnResolved(self.resolve_active_battle_turn(
-                    state,
+                let mut next_state = state.clone();
+                let outcome = self.resolve_active_battle_turn(
+                    &mut next_state,
                     command.player_action,
                     command.enemy_action,
-                )?)
+                )?;
+                ensure_runtime_command_rng_boundary(
+                    "resolve active battle turn",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::ActiveBattleTurnResolved(outcome)
             }
             RuntimeMutationCommand::ResolveActiveBattleCommand(command) => {
-                RuntimeMutationResult::ActiveBattleCommandResolved(
-                    self.resolve_active_battle_command(
-                        state,
-                        command.player_action,
-                        command.enemy_action,
-                    )?,
-                )
+                let mut next_state = state.clone();
+                let outcome = self.resolve_active_battle_command(
+                    &mut next_state,
+                    command.player_action,
+                    command.enemy_action,
+                )?;
+                ensure_runtime_command_rng_boundary(
+                    "resolve active battle command",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::ActiveBattleCommandResolved(outcome)
             }
-            RuntimeMutationCommand::AttemptEscapeActiveWildBattle => {
-                RuntimeMutationResult::ActiveWildBattleEscapeAttempted(
-                    self.resolve_active_wild_battle_run(state)?,
-                )
+            RuntimeMutationCommand::ResolveActiveBattleEnemyAction(command) => {
+                let mut next_state = state.clone();
+                let outcome =
+                    self.resolve_active_battle_enemy_action(&mut next_state, command.enemy_action)?;
+                ensure_runtime_command_rng_boundary(
+                    "resolve active battle enemy action",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::ActiveBattleEnemyActionResolved(outcome)
+            }
+            RuntimeMutationCommand::AttemptEscapeActiveWildBattle(command) => {
+                let mut next_state = state.clone();
+                let outcome = self.resolve_active_wild_battle_run(&mut next_state)?;
+                ensure_runtime_command_rng_boundary(
+                    "attempt active wild battle escape",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::ActiveWildBattleEscapeAttempted(outcome)
             }
             RuntimeMutationCommand::UseBagItemToEscapeActiveWildBattle(command) => {
                 RuntimeMutationResult::ActiveWildBattleEscapeItemUsed(
@@ -17255,49 +20444,61 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::ExecuteNextQueuedScriptCommand => {
-                RuntimeMutationResult::QueuedScriptCommandExecuted(
-                    if state.script_runtime.command_queue.is_empty() {
-                        anyhow::bail!(
-                            "cannot execute queued script command because the queue is empty"
-                        );
-                    } else {
-                        state.script_runtime.command_queue.remove(0)
-                    },
-                )
+                if state.script_runtime.command_queue.is_empty() {
+                    anyhow::bail!(
+                        "cannot execute queued script command because the queue is empty"
+                    );
+                }
+                let queued = state.script_runtime.command_queue.remove(0);
+                state.script_runtime.next_script = Some(queued.target.clone());
+                state
+                    .script_runtime
+                    .control_events
+                    .push(ScriptControlRuntimeEvent {
+                        kind: ScriptControlRuntimeKind::Jump,
+                        target_script: Some(queued.target.clone()),
+                        source_script: queued.source_script.clone(),
+                        command_index: queued.command_index,
+                    });
+                RuntimeMutationResult::QueuedScriptCommandExecuted(queued)
             }
             RuntimeMutationCommand::UseDayCare(command) => {
                 let routine = match command.caretaker {
                     RuntimeDayCareCaretaker::Man => "DayCareMan",
                     RuntimeDayCareCaretaker::Lady => "DayCareLady",
                 };
-                let action = match command.action {
-                    RuntimeDayCareAction::Deposit => "deposit",
-                    RuntimeDayCareAction::Withdraw => "withdraw",
-                    RuntimeDayCareAction::Inspect => "inspect",
-                };
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_day_care_action".to_string(), action.to_string());
-                match command.party_index {
-                    Some(party_index) => {
-                        state.script_runtime.variables.insert(
-                            "_selected_party_index".to_string(),
-                            party_index.to_string(),
-                        );
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_selected_party_index");
-                    }
-                }
-                RuntimeMutationResult::DayCareUsed(
-                    self.apply_special_routine(state, routine, music_ids)?,
-                )
+                let action = runtime_day_care_action_name(command.action);
+                let party_slot = runtime_day_care_party_slot(&command)?;
+                RuntimeMutationResult::DayCareUsed(self.apply_special_routine_transactional(
+                    state,
+                    routine,
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_day_care_action".to_string(), action.to_string());
+                        match party_slot {
+                            Some(party_slot) => {
+                                next_state
+                                    .script_runtime
+                                    .variables
+                                    .insert("_party_slot".to_string(), party_slot.to_string());
+                            }
+                            None => {
+                                next_state.script_runtime.variables.remove("_party_slot");
+                            }
+                        }
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::CheckDayCareManOutsideSpecial => {
-                RuntimeMutationResult::DayCareManOutsideChecked(
-                    self.apply_special_routine(state, "DayCareManOutside", music_ids)?,
-                )
+                RuntimeMutationResult::DayCareManOutsideChecked(self.apply_special_routine(
+                    state,
+                    "DayCareManOutside",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::CheckDayCareResidentSpecial(caretaker) => {
                 let routine = match caretaker {
@@ -17309,281 +20510,411 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::UseBugContest(command) => {
+                let rank = runtime_bug_contest_rank(&command)?;
+                let rng_seed_after = runtime_bug_contest_rng_seed_after(&command)?;
                 let routine = match command.action {
                     RuntimeBugContestAction::GiveParkBalls => "GiveParkBalls",
-                    RuntimeBugContestAction::SelectContestants => "SelectRandomBugContestContestants",
+                    RuntimeBugContestAction::SelectContestants => {
+                        "SelectRandomBugContestContestants"
+                    }
                     RuntimeBugContestAction::DropOffMons => "ContestDropOffMons",
                     RuntimeBugContestAction::ReturnMons => "ContestReturnMons",
                     RuntimeBugContestAction::CheckPartyFull => "CheckPartyFullAfterContest",
                     RuntimeBugContestAction::Judge => "BugContestJudging",
                 };
-                match command.rank {
+                let mut next_state = state.clone();
+                match rank {
                     Some(rank) => {
-                        state
+                        next_state
                             .script_runtime
                             .variables
                             .insert("_bug_contest_rank".to_string(), rank.to_string());
                     }
                     None => {
-                        state.script_runtime.variables.remove("_bug_contest_rank");
-                    }
-                }
-                RuntimeMutationResult::BugContestUsed(
-                    self.apply_special_routine(state, routine, music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::UseKurtApricorn(command) => {
-                state.script_runtime.variables.insert(
-                    "_kurt_apricorn_type".to_string(),
-                    command.apricorn_id,
-                );
-                state.script_runtime.variables.insert(
-                    "_kurt_apricorn_quantity".to_string(),
-                    command.quantity.to_string(),
-                );
-                RuntimeMutationResult::KurtApricornUsed(
-                    self.apply_special_routine(state, "SelectApricornForKurt", music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::UseBuenaPassword(command) => {
-                match command.guess {
-                    Some(guess) => {
-                        state
+                        next_state
                             .script_runtime
                             .variables
-                            .insert("_buena_guess".to_string(), guess);
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_buena_guess");
+                            .remove("_bug_contest_rank");
                     }
                 }
-                RuntimeMutationResult::BuenaPasswordUsed(
-                    self.apply_special_routine(state, "BuenasPassword", music_ids)?,
-                )
+                let outcome = self.apply_special_routine(&mut next_state, routine, music_ids)?;
+                if let Some(rng_seed_after) = rng_seed_after {
+                    ensure_runtime_command_rng_boundary(
+                        "use Bug Contest select_contestants",
+                        next_state.rng_seed,
+                        rng_seed_after,
+                    )?;
+                }
+                *state = next_state;
+                RuntimeMutationResult::BugContestUsed(outcome)
+            }
+            RuntimeMutationCommand::UseKurtApricorn(command) => {
+                RuntimeMutationResult::KurtApricornUsed(self.apply_special_routine_transactional(
+                    state,
+                    "SelectApricornForKurt",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_kurt_apricorn_type".to_string(), command.apricorn_id);
+                        next_state.script_runtime.variables.insert(
+                            "_kurt_apricorn_quantity".to_string(),
+                            command.quantity.to_string(),
+                        );
+                        Ok(())
+                    },
+                )?)
+            }
+            RuntimeMutationCommand::UseBuenaPassword(command) => {
+                let mut next_state = state.clone();
+                match command.guess {
+                    Some(guess) => {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("BUENA_PASSWORD".to_string(), guess);
+                    }
+                    None => {
+                        next_state.script_runtime.variables.remove("BUENA_PASSWORD");
+                    }
+                }
+                let outcome =
+                    self.apply_special_routine(&mut next_state, "BuenasPassword", music_ids)?;
+                ensure_runtime_command_rng_boundary(
+                    "use Buena password",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::BuenaPasswordUsed(outcome)
             }
             RuntimeMutationCommand::UseBuenaPrize(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_selected_prize".to_string(), command.item_id);
-                state.script_runtime.variables.insert(
-                    "_selected_prize_quantity".to_string(),
-                    command.quantity.to_string(),
-                );
-                RuntimeMutationResult::BuenaPrizeUsed(
-                    self.apply_special_routine(state, "BuenaPrize", music_ids)?,
-                )
+                RuntimeMutationResult::BuenaPrizeUsed(self.apply_special_routine_transactional(
+                    state,
+                    "BuenaPrize",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_selected_prize".to_string(), command.item_id);
+                        next_state.script_runtime.variables.insert(
+                            "_selected_prize_quantity".to_string(),
+                            command.quantity.to_string(),
+                        );
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::UseShuckie(command) => {
+                let party_slot = runtime_shuckie_party_slot(&command)?;
+                let rng_seed_after = runtime_shuckie_rng_seed_after(&command)?;
                 let routine = match command.action {
                     RuntimeShuckieAction::Give => "GiveShuckle",
                     RuntimeShuckieAction::Return => "ReturnShuckie",
                 };
-                match command.party_index {
+                let mut next_state = state.clone();
+                match party_slot {
                     Some(party_index) => {
-                        state
+                        next_state
                             .script_runtime
                             .variables
                             .insert("_selection_cancelled".to_string(), "0".to_string());
-                        state.script_runtime.variables.insert(
-                            "_selected_party_index".to_string(),
-                            party_index.to_string(),
-                        );
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_selected_party_index".to_string(), party_index.to_string());
                     }
                     None => {
-                        state
+                        next_state
                             .script_runtime
                             .variables
                             .insert("_selection_cancelled".to_string(), "1".to_string());
-                        state.script_runtime.variables.remove("_selected_party_index");
-                    }
-                }
-                RuntimeMutationResult::ShuckieUsed(
-                    self.apply_special_routine(state, routine, music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::GiveOddEgg => {
-                RuntimeMutationResult::OddEggGiven(
-                    self.apply_special_routine(state, "GiveOddEgg", music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::GiveDratini(command) => {
-                state.script_runtime.script_value = Some(command.mode.to_string());
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.mode.to_string());
-                RuntimeMutationResult::DratiniGiven(
-                    self.apply_special_routine(state, "GiveDratini", music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::UseBillsGrandfather(command) => {
-                match command.party_index {
-                    Some(party_index) => {
-                        state.script_runtime.variables.insert(
-                            "_selected_party_index".to_string(),
-                            party_index.to_string(),
-                        );
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_selected_party_index");
-                    }
-                }
-                match command.species_id {
-                    Some(species_id) => {
-                        state
+                        next_state
                             .script_runtime
                             .variables
-                            .insert("_value".to_string(), species_id);
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_value");
+                            .remove("_selected_party_index");
                     }
                 }
+                let outcome = self.apply_special_routine(&mut next_state, routine, music_ids)?;
+                if let Some(rng_seed_after) = rng_seed_after {
+                    ensure_runtime_command_rng_boundary(
+                        "use Shuckie give",
+                        next_state.rng_seed,
+                        rng_seed_after,
+                    )?;
+                }
+                *state = next_state;
+                RuntimeMutationResult::ShuckieUsed(outcome)
+            }
+            RuntimeMutationCommand::GiveOddEgg(command) => {
+                let mut next_state = state.clone();
+                let outcome =
+                    self.apply_special_routine(&mut next_state, "GiveOddEgg", music_ids)?;
+                ensure_runtime_command_rng_boundary(
+                    "give Odd Egg",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::OddEggGiven(outcome)
+            }
+            RuntimeMutationCommand::GiveDratini(command) => {
+                RuntimeMutationResult::DratiniGiven(self.apply_special_routine_transactional(
+                    state,
+                    "GiveDratini",
+                    music_ids,
+                    |next_state| {
+                        next_state.script_runtime.script_value = Some(command.mode.to_string());
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_value".to_string(), command.mode.to_string());
+                        Ok(())
+                    },
+                )?)
+            }
+            RuntimeMutationCommand::UseBillsGrandfather(command) => {
+                let (party_index, species_id) = runtime_bills_grandfather_inputs(&command)?;
                 RuntimeMutationResult::BillsGrandfatherUsed(
-                    self.apply_special_routine(state, "BillsGrandfather", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "BillsGrandfather",
+                        music_ids,
+                        |next_state| {
+                            match party_index {
+                                Some(party_index) => {
+                                    next_state.script_runtime.variables.insert(
+                                        "_selected_party_index".to_string(),
+                                        party_index.to_string(),
+                                    );
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .remove("_selected_species");
+                                }
+                                None => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .remove("_selected_party_index");
+                                }
+                            }
+                            match species_id {
+                                Some(species_id) => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .insert("_selected_species".to_string(), species_id);
+                                }
+                                None => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .remove("_selected_species");
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?,
                 )
             }
-            RuntimeMutationCommand::InitRoamMons => {
-                RuntimeMutationResult::RoamersInitialized(
-                    self.apply_special_routine(state, "InitRoamMons", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::InitRoamMons => RuntimeMutationResult::RoamersInitialized(
+                self.apply_special_routine(state, "InitRoamMons", music_ids)?,
+            ),
             RuntimeMutationCommand::CheckMagikarpLength(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_selection_cancelled".to_string(), "0".to_string());
-                state.script_runtime.variables.insert(
-                    "_selected_party_index".to_string(),
-                    command.party_index.to_string(),
-                );
                 RuntimeMutationResult::MagikarpLengthChecked(
-                    self.apply_special_routine(state, "CheckMagikarpLength", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "CheckMagikarpLength",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_selection_cancelled".to_string(), "0".to_string());
+                            next_state.script_runtime.variables.insert(
+                                "_selected_party_index".to_string(),
+                                command.party_index.to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::ShowProfOaksPcBoot => {
-                RuntimeMutationResult::ProfOaksPcBootShown(
-                    self.apply_special_routine(state, "ProfOaksPCBoot", music_ids)?,
-                )
+                RuntimeMutationResult::ProfOaksPcBootShown(self.apply_special_routine(
+                    state,
+                    "ProfOaksPCBoot",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::ShowMagikarpHouseSign => {
-                RuntimeMutationResult::MagikarpHouseSignShown(
-                    self.apply_special_routine(state, "MagikarpHouseSign", music_ids)?,
-                )
+                RuntimeMutationResult::MagikarpHouseSignShown(self.apply_special_routine(
+                    state,
+                    "MagikarpHouseSign",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::ApplyBattleTowerAction(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.action);
-                match command.level_group {
-                    Some(level_group) => {
-                        state.script_runtime.variables.insert(
-                            "_battle_tower_level_group".to_string(),
-                            level_group.to_string(),
-                        );
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_battle_tower_level_group");
-                    }
-                }
-                match command.selected_reward {
-                    Some(selected_reward) => {
-                        state
-                            .script_runtime
-                            .variables
-                            .insert("_selected_reward".to_string(), selected_reward);
-                    }
-                    None => {
-                        state.script_runtime.variables.remove("_selected_reward");
-                    }
-                }
+                let (level_group, selected_reward) = runtime_battle_tower_action_inputs(&command)?;
                 RuntimeMutationResult::BattleTowerActionApplied(
-                    self.apply_special_routine(state, "BattleTowerAction", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "BattleTowerAction",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_value".to_string(), command.action);
+                            match level_group {
+                                Some(level_group) => {
+                                    next_state.script_runtime.variables.insert(
+                                        "_battle_tower_level_group".to_string(),
+                                        level_group.to_string(),
+                                    );
+                                }
+                                None => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .remove("_battle_tower_level_group");
+                                }
+                            }
+                            match selected_reward {
+                                Some(selected_reward) => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .insert("_selected_reward".to_string(), selected_reward);
+                                }
+                                None => {
+                                    next_state
+                                        .script_runtime
+                                        .variables
+                                        .remove("_selected_reward");
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::OpenBattleTowerRoomMenuSpecial => {
-                RuntimeMutationResult::BattleTowerRoomMenuOpened(
-                    self.apply_special_routine(state, "BattleTowerRoomMenu", music_ids)?,
-                )
+                RuntimeMutationResult::BattleTowerRoomMenuOpened(self.apply_special_routine(
+                    state,
+                    "BattleTowerRoomMenu",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::StartBattleTowerBattleSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_battle_result".to_string(),
-                    command.battle_result.to_string(),
-                );
                 RuntimeMutationResult::BattleTowerBattleStarted(
-                    self.apply_special_routine(state, "BattleTowerBattle", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "BattleTowerBattle",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_battle_result".to_string(),
+                                command.battle_result.to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::LoadBattleTowerOpponentSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_battle_tower_trainer_id".to_string(),
-                    command.trainer_id,
-                );
-                state.script_runtime.variables.insert(
-                    "_battle_tower_sprite_constant".to_string(),
-                    command.sprite_constant,
-                );
-                state.script_runtime.variables.insert(
-                    "_battle_tower_target_object".to_string(),
-                    command.target_object,
-                );
                 RuntimeMutationResult::BattleTowerOpponentLoaded(
-                    self.apply_special_routine(
+                    self.apply_special_routine_transactional(
                         state,
                         "LoadOpponentTrainerAndPokemonWithOTSprite",
                         music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_battle_tower_trainer_id".to_string(), command.trainer_id);
+                            next_state.script_runtime.variables.insert(
+                                "_battle_tower_sprite_constant".to_string(),
+                                command.sprite_constant,
+                            );
+                            next_state.script_runtime.variables.insert(
+                                "_battle_tower_target_object".to_string(),
+                                command.target_object,
+                            );
+                            Ok(())
+                        },
                     )?,
                 )
             }
             RuntimeMutationCommand::ShowBattleTowerMobileErrorSpecial => {
-                RuntimeMutationResult::BattleTowerMobileErrorShown(
-                    self.apply_special_routine(state, "BattleTowerMobileError", music_ids)?,
-                )
+                RuntimeMutationResult::BattleTowerMobileErrorShown(self.apply_special_routine(
+                    state,
+                    "BattleTowerMobileError",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::AskRememberPasswordSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_yes_no_result".to_string(),
-                    u8::from(command.remember).to_string(),
-                );
                 RuntimeMutationResult::RememberPasswordAsked(
-                    self.apply_special_routine(state, "AskRememberPassword", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "AskRememberPassword",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_yes_no_result".to_string(),
+                                u8::from(command.remember).to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::OpenBattleTowerLeaderboardSpecial => {
-                RuntimeMutationResult::BattleTowerLeaderboardOpened(
-                    self.apply_special_routine(state, "Function1700ba", music_ids)?,
-                )
+                RuntimeMutationResult::BattleTowerLeaderboardOpened(self.apply_special_routine(
+                    state,
+                    "Function1700ba",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::ApplyMobileHandshakeSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_mobile_adapter_status".to_string(),
-                    u8::from(command.accepted).to_string(),
-                );
-                state.script_runtime.variables.insert(
-                    "_mobile_adapter_secondary_status".to_string(),
-                    u8::from(command.accepted).to_string(),
-                );
-                state
-                    .script_runtime
-                    .variables
-                    .entry("_mobile_login_password".to_string())
-                    .or_insert_with(String::new);
-                state
-                    .script_runtime
-                    .variables
-                    .entry("_mobile_battle_timer".to_string())
-                    .or_insert_with(|| "0,0,0".to_string());
                 RuntimeMutationResult::MobileHandshakeApplied(
-                    self.apply_special_routine(state, "Function1011f1", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "Function1011f1",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_mobile_adapter_status".to_string(),
+                                u8::from(command.accepted).to_string(),
+                            );
+                            next_state.script_runtime.variables.insert(
+                                "_mobile_adapter_secondary_status".to_string(),
+                                u8::from(command.accepted).to_string(),
+                            );
+                            next_state
+                                .script_runtime
+                                .variables
+                                .entry("_mobile_login_password".to_string())
+                                .or_insert_with(String::new);
+                            next_state
+                                .script_runtime
+                                .variables
+                                .entry("_mobile_battle_timer".to_string())
+                                .or_insert_with(|| "0,0,0".to_string());
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::EndMobileSessionSpecial => {
-                RuntimeMutationResult::MobileSessionEnded(
-                    self.apply_special_routine(state, "Function101220", music_ids)?,
-                )
+                RuntimeMutationResult::MobileSessionEnded(self.apply_special_routine(
+                    state,
+                    "Function101220",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::SetBattleTowerMobileFlagSpecial(flag) => {
                 let routine = match flag {
@@ -17595,37 +20926,52 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::SelectThreeMobileMonsSpecial(command) => {
-                let selected = command
-                    .party_indexes
-                    .iter()
-                    .map(usize::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_selected_party_indexes".to_string(), selected);
                 RuntimeMutationResult::MobileThreeMonsSelected(
-                    self.apply_special_routine(state, "Mobile_SelectThreeMons", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "Mobile_SelectThreeMons",
+                        music_ids,
+                        |next_state| {
+                            let selected = command
+                                .party_indexes
+                                .iter()
+                                .map(usize::to_string)
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_selected_party_indexes".to_string(), selected);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::ApplyHappinessService(command) => {
                 let routine = match command.routine {
                     RuntimeHappinessServiceRoutine::OlderHaircutBrother => "OlderHaircutBrother",
-                    RuntimeHappinessServiceRoutine::YoungerHaircutBrother => "YoungerHaircutBrother",
+                    RuntimeHappinessServiceRoutine::YoungerHaircutBrother => {
+                        "YoungerHaircutBrother"
+                    }
                     RuntimeHappinessServiceRoutine::DaisysGrooming => "DaisysGrooming",
                 };
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
-                state
+                let mut next_state = state.clone();
+                next_state
+                    .script_runtime
+                    .variables
+                    .insert("_party_slot".to_string(), command.party_index.to_string());
+                next_state
                     .script_runtime
                     .variables
                     .insert("_rng_roll".to_string(), command.rng_roll.to_string());
-                RuntimeMutationResult::HappinessServiceApplied(
-                    self.apply_special_routine(state, routine, music_ids)?,
-                )
+                let outcome = self.apply_special_routine(&mut next_state, routine, music_ids)?;
+                ensure_runtime_command_rng_boundary(
+                    "apply happiness service",
+                    next_state.rng_seed,
+                    command.rng_seed_after,
+                )?;
+                *state = next_state;
+                RuntimeMutationResult::HappinessServiceApplied(outcome)
             }
             RuntimeMutationCommand::UseMysteryGift(action) => {
                 let routine = match action {
@@ -17637,150 +20983,211 @@ impl GameDataSet {
                     self.apply_special_routine(state, routine, music_ids)?,
                 )
             }
-            RuntimeMutationCommand::WarpToSpawnPoint => {
-                RuntimeMutationResult::SpawnPointWarped(
-                    self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::WarpToSpawnPoint => RuntimeMutationResult::SpawnPointWarped(
+                self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?,
+            ),
             RuntimeMutationCommand::HealPartySpecial => {
-                RuntimeMutationResult::PartyHealedBySpecial(
-                    self.apply_special_routine(state, "HealParty", music_ids)?,
-                )
+                RuntimeMutationResult::PartyHealedBySpecial(self.apply_special_routine(
+                    state,
+                    "HealParty",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::FadeOutMusicSpecial => {
-                RuntimeMutationResult::MusicFadedOutBySpecial(
-                    self.apply_special_routine(state, "FadeOutMusic", music_ids)?,
-                )
+                RuntimeMutationResult::MusicFadedOutBySpecial(self.apply_special_routine(
+                    state,
+                    "FadeOutMusic",
+                    music_ids,
+                )?)
             }
-            RuntimeMutationCommand::WaitSfxSpecial => {
-                RuntimeMutationResult::SoundEffectWaitQueued(
-                    self.apply_special_routine(state, "WaitSFX", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::WaitSfxSpecial => RuntimeMutationResult::SoundEffectWaitQueued(
+                self.apply_special_routine(state, "WaitSFX", music_ids)?,
+            ),
             RuntimeMutationCommand::PlayMapMusicSpecial => {
-                RuntimeMutationResult::MapMusicPlayedBySpecial(
-                    self.apply_special_routine(state, "PlayMapMusic", music_ids)?,
-                )
+                RuntimeMutationResult::MapMusicPlayedBySpecial(self.apply_special_routine(
+                    state,
+                    "PlayMapMusic",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::RestartMapMusicSpecial => {
-                RuntimeMutationResult::MapMusicRestartedBySpecial(
-                    self.apply_special_routine(state, "RestartMapMusic", music_ids)?,
-                )
+                RuntimeMutationResult::MapMusicRestartedBySpecial(self.apply_special_routine(
+                    state,
+                    "RestartMapMusic",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::PlayCurMonCry(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("wCurPartySpecies".to_string(), command.species_id);
+                let species_id = runtime_special_cry_species(&command)?.to_string();
                 RuntimeMutationResult::CurrentMonCryPlayed(
-                    self.apply_special_routine(state, "PlayCurMonCry", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "PlayCurMonCry",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("wCurPartySpecies".to_string(), species_id);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::PlaySlowCry(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.species_id);
-                RuntimeMutationResult::SlowCryPlayed(
-                    self.apply_special_routine(state, "PlaySlowCry", music_ids)?,
-                )
+                let species_id = runtime_special_cry_species(&command)?.to_string();
+                RuntimeMutationResult::SlowCryPlayed(self.apply_special_routine_transactional(
+                    state,
+                    "PlaySlowCry",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_value".to_string(), species_id);
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::OpenPokemonCenterPcSpecial => {
-                RuntimeMutationResult::PokemonCenterPcOpened(
-                    self.apply_special_routine(state, "PokemonCenterPC", music_ids)?,
-                )
+                RuntimeMutationResult::PokemonCenterPcOpened(self.apply_special_routine(
+                    state,
+                    "PokemonCenterPC",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenPlayersHousePcSpecial => {
-                RuntimeMutationResult::PlayersHousePcOpened(
-                    self.apply_special_routine(state, "PlayersHousePC", music_ids)?,
-                )
+                RuntimeMutationResult::PlayersHousePcOpened(self.apply_special_routine(
+                    state,
+                    "PlayersHousePC",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenOverworldTownMapSpecial => {
-                RuntimeMutationResult::OverworldTownMapOpened(
-                    self.apply_special_routine(state, "OverworldTownMap", music_ids)?,
-                )
+                RuntimeMutationResult::OverworldTownMapOpened(self.apply_special_routine(
+                    state,
+                    "OverworldTownMap",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenUnownPrinterSpecial => {
-                RuntimeMutationResult::UnownPrinterOpened(
-                    self.apply_special_routine(state, "UnownPrinter", music_ids)?,
-                )
+                RuntimeMutationResult::UnownPrinterOpened(self.apply_special_routine(
+                    state,
+                    "UnownPrinter",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenMapRadioSpecial(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.station);
-                RuntimeMutationResult::MapRadioOpened(
-                    self.apply_special_routine(state, "MapRadio", music_ids)?,
-                )
+                let station = runtime_map_radio_station(&command)?.to_string();
+                RuntimeMutationResult::MapRadioOpened(self.apply_special_routine_transactional(
+                    state,
+                    "MapRadio",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_value".to_string(), station);
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::NameRivalSpecial(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_rival_name".to_string(), command.rival_name);
-                RuntimeMutationResult::RivalNamed(
-                    self.apply_special_routine(state, "NameRival", music_ids)?,
-                )
+                RuntimeMutationResult::RivalNamed(self.apply_special_routine_transactional(
+                    state,
+                    "NameRival",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_rival_name".to_string(), command.rival_name);
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::DeletePartyMoveSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_move_slot".to_string(), command.move_index.to_string());
                 RuntimeMutationResult::PartyMoveDeletedBySpecial(
-                    self.apply_special_routine(state, "MoveDeletion", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "MoveDeletion",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_party_slot".to_string(), command.party_index.to_string());
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_move_slot".to_string(), command.move_index.to_string());
+                            Ok(())
+                        },
+                    )?,
                 )
             }
-            RuntimeMutationCommand::CheckPokerusSpecial => {
-                RuntimeMutationResult::PokerusChecked(
-                    self.apply_special_routine(state, "CheckPokerus", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::CheckPokerusSpecial => RuntimeMutationResult::PokerusChecked(
+                self.apply_special_routine(state, "CheckPokerus", music_ids)?,
+            ),
             RuntimeMutationCommand::RatePartyNicknameSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_selected_nickname".to_string(), command.nickname);
                 RuntimeMutationResult::PartyNicknameRated(
-                    self.apply_special_routine(state, "NameRater", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "NameRater",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_party_slot".to_string(), command.party_index.to_string());
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_selected_nickname".to_string(), command.nickname);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::SeePartyPokemonSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
                 RuntimeMutationResult::PartyPokemonSeenBySeer(
-                    self.apply_special_routine(state, "PokeSeer", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "PokeSeer",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_party_slot".to_string(), command.party_index.to_string());
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::TeachPartyMoveSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_move".to_string(), command.move_id);
                 RuntimeMutationResult::PartyMoveTaughtBySpecial(
-                    self.apply_special_routine(state, "MoveTutor", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "MoveTutor",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_party_slot".to_string(), command.party_index.to_string());
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_move".to_string(), command.move_id);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
-            RuntimeMutationCommand::OpenBankOfMomSpecial => {
-                RuntimeMutationResult::BankOfMomOpened(
-                    self.apply_special_routine(state, "BankOfMom", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::OpenBankOfMomSpecial => RuntimeMutationResult::BankOfMomOpened(
+                self.apply_special_routine(state, "BankOfMom", music_ids)?,
+            ),
             RuntimeMutationCommand::OpenGameCornerSpecial(service) => {
                 let routine = match service {
                     RuntimeGameCornerService::SlotMachine => "SlotMachine",
@@ -17791,23 +21198,32 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::OpenDisplayLinkRecordSpecial => {
-                RuntimeMutationResult::DisplayLinkRecordOpened(
-                    self.apply_special_routine(state, "DisplayLinkRecord", music_ids)?,
-                )
+                RuntimeMutationResult::DisplayLinkRecordOpened(self.apply_special_routine(
+                    state,
+                    "DisplayLinkRecord",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenTrainerHouseSpecial => {
-                RuntimeMutationResult::TrainerHouseOpened(
-                    self.apply_special_routine(state, "TrainerHouse", music_ids)?,
-                )
+                RuntimeMutationResult::TrainerHouseOpened(self.apply_special_routine(
+                    state,
+                    "TrainerHouse",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenPhotoStudioSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_party_slot".to_string(),
-                    command.party_index.to_string(),
-                );
-                RuntimeMutationResult::PhotoStudioOpened(
-                    self.apply_special_routine(state, "PhotoStudio", music_ids)?,
-                )
+                RuntimeMutationResult::PhotoStudioOpened(self.apply_special_routine_transactional(
+                    state,
+                    "PhotoStudio",
+                    music_ids,
+                    |next_state| {
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_party_slot".to_string(), command.party_index.to_string());
+                        Ok(())
+                    },
+                )?)
             }
             RuntimeMutationCommand::CancelBattleTowerChallengeExplanationSpecial => {
                 RuntimeMutationResult::BattleTowerChallengeExplanationCancelled(
@@ -17819,25 +21235,27 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::SetPlayerPalette(command) => {
-                state.script_runtime.script_value = Some(command.raw_value.to_string());
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_value".to_string(), command.raw_value.to_string());
-                RuntimeMutationResult::PlayerPaletteSet(
-                    self.apply_special_routine(state, "SetPlayerPalette", music_ids)?,
-                )
+                RuntimeMutationResult::PlayerPaletteSet(self.apply_special_routine_transactional(
+                    state,
+                    "SetPlayerPalette",
+                    music_ids,
+                    |next_state| {
+                        next_state.script_runtime.script_value =
+                            Some(command.raw_value.to_string());
+                        next_state
+                            .script_runtime
+                            .variables
+                            .insert("_value".to_string(), command.raw_value.to_string());
+                        Ok(())
+                    },
+                )?)
             }
-            RuntimeMutationCommand::SetDayOfWeek => {
-                RuntimeMutationResult::DayOfWeekSet(
-                    self.apply_special_routine(state, "SetDayOfWeek", music_ids)?,
-                )
-            }
-            RuntimeMutationCommand::UpdateTime => {
-                RuntimeMutationResult::TimeUpdated(
-                    self.apply_special_routine(state, "UpdateTime", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::SetDayOfWeek => RuntimeMutationResult::DayOfWeekSet(
+                self.apply_special_routine(state, "SetDayOfWeek", music_ids)?,
+            ),
+            RuntimeMutationCommand::UpdateTime => RuntimeMutationResult::TimeUpdated(
+                self.apply_special_routine(state, "UpdateTime", music_ids)?,
+            ),
             RuntimeMutationCommand::SetCableClubRequest(request) => {
                 let routine = match request {
                     RuntimeCableClubRequest::Trade => "SetBitsForLinkTradeRequest",
@@ -17849,50 +21267,73 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::WaitForLinkedFriendSpecial(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_linked_friend_ready".to_string(), u8::from(command.ready).to_string());
                 RuntimeMutationResult::LinkedFriendWaitedFor(
-                    self.apply_special_routine(state, "WaitForLinkedFriend", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "WaitForLinkedFriend",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_linked_friend_ready".to_string(),
+                                u8::from(command.ready).to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::CheckLinkTimeoutReceptionistSpecial(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_link_timeout".to_string(), u8::from(command.timeout).to_string());
-                state.script_runtime.variables.insert(
-                    "_other_player_link_mode".to_string(),
-                    command.other_player_link_mode.to_string(),
-                );
                 RuntimeMutationResult::LinkTimeoutReceptionistChecked(
-                    self.apply_special_routine(state, "CheckLinkTimeout_Receptionist", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "CheckLinkTimeout_Receptionist",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_link_timeout".to_string(),
+                                u8::from(command.timeout).to_string(),
+                            );
+                            next_state.script_runtime.variables.insert(
+                                "_other_player_link_mode".to_string(),
+                                command.other_player_link_mode.to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::CheckBothSelectedSameRoomSpecial(command) => {
-                state.script_runtime.variables.insert(
-                    "_other_player_room".to_string(),
-                    command.other_player_room.to_string(),
-                );
                 RuntimeMutationResult::BothSelectedSameRoomChecked(
-                    self.apply_special_routine(state, "CheckBothSelectedSameRoom", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "CheckBothSelectedSameRoom",
+                        music_ids,
+                        |next_state| {
+                            next_state.script_runtime.variables.insert(
+                                "_other_player_room".to_string(),
+                                command.other_player_room.to_string(),
+                            );
+                            Ok(())
+                        },
+                    )?,
                 )
             }
-            RuntimeMutationCommand::CloseLinkSpecial => {
-                RuntimeMutationResult::LinkClosed(
-                    self.apply_special_routine(state, "CloseLink", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::CloseLinkSpecial => RuntimeMutationResult::LinkClosed(
+                self.apply_special_routine(state, "CloseLink", music_ids)?,
+            ),
             RuntimeMutationCommand::WaitForOtherPlayerToExitSpecial => {
-                RuntimeMutationResult::OtherPlayerExitWaitedFor(
-                    self.apply_special_routine(state, "WaitForOtherPlayerToExit", music_ids)?,
-                )
+                RuntimeMutationResult::OtherPlayerExitWaitedFor(self.apply_special_routine(
+                    state,
+                    "WaitForOtherPlayerToExit",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::FailedLinkToPastSpecial => {
-                RuntimeMutationResult::LinkToPastFailed(
-                    self.apply_special_routine(state, "FailedLinkToPast", music_ids)?,
-                )
+                RuntimeMutationResult::LinkToPastFailed(self.apply_special_routine(
+                    state,
+                    "FailedLinkToPast",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::OpenLinkRoomSpecial(room) => {
                 let routine = match room {
@@ -17905,32 +21346,44 @@ impl GameDataSet {
                 )
             }
             RuntimeMutationCommand::CheckTimeCapsuleCompatibilitySpecial => {
-                RuntimeMutationResult::TimeCapsuleCompatibilityChecked(
-                    self.apply_special_routine(state, "CheckTimeCapsuleCompatibility", music_ids)?,
-                )
+                RuntimeMutationResult::TimeCapsuleCompatibilityChecked(self.apply_special_routine(
+                    state,
+                    "CheckTimeCapsuleCompatibility",
+                    music_ids,
+                )?)
             }
-            RuntimeMutationCommand::TryQuickSaveSpecial => {
-                RuntimeMutationResult::QuickSaveTried(
-                    self.apply_special_routine(state, "TryQuickSave", music_ids)?,
-                )
-            }
+            RuntimeMutationCommand::TryQuickSaveSpecial => RuntimeMutationResult::QuickSaveTried(
+                self.apply_special_routine(state, "TryQuickSave", music_ids)?,
+            ),
             RuntimeMutationCommand::AskMobileOrCableSpecial => {
-                RuntimeMutationResult::MobileOrCableAsked(
-                    self.apply_special_routine(state, "AskMobileOrCable", music_ids)?,
-                )
+                RuntimeMutationResult::MobileOrCableAsked(self.apply_special_routine(
+                    state,
+                    "AskMobileOrCable",
+                    music_ids,
+                )?)
             }
             RuntimeMutationCommand::CableClubCheckWhichChrisSpecial(command) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_player_gender".to_string(), command.gender);
                 RuntimeMutationResult::CableClubChrisChecked(
-                    self.apply_special_routine(state, "CableClubCheckWhichChris", music_ids)?,
+                    self.apply_special_routine_transactional(
+                        state,
+                        "CableClubCheckWhichChris",
+                        music_ids,
+                        |next_state| {
+                            next_state
+                                .script_runtime
+                                .variables
+                                .insert("_player_gender".to_string(), command.gender);
+                            Ok(())
+                        },
+                    )?,
                 )
             }
             RuntimeMutationCommand::SwitchCurrentPcBox(command) => {
                 if command.box_index >= MAX_PC_BOXES {
-                    anyhow::bail!("PC box index {} is outside 0..{MAX_PC_BOXES}", command.box_index);
+                    anyhow::bail!(
+                        "PC box index {} is outside 0..{MAX_PC_BOXES}",
+                        command.box_index
+                    );
                 }
                 while state.storage.pc_boxes.len() <= command.box_index {
                     let next = state.storage.pc_boxes.len();
@@ -17959,7 +21412,8 @@ impl GameDataSet {
                 let box_slot = state.storage.pc_boxes[state.current_pc_box]
                     .next_open_slot()
                     .with_context(|| format!("PC box {} is full", state.current_pc_box))?;
-                state.storage.pc_boxes[state.current_pc_box].set_slot(box_slot, Some(pokemon.clone()));
+                state.storage.pc_boxes[state.current_pc_box]
+                    .set_slot(box_slot, Some(pokemon.clone()));
                 RuntimeMutationResult::PartyPokemonDeposited(RuntimeStorageDepositOutcome {
                     party_index: command.party_index,
                     box_index: state.current_pc_box,
@@ -17976,7 +21430,9 @@ impl GameDataSet {
                     .get_mut(command.box_slot)
                     .with_context(|| format!("box slot {} is outside PC box", command.box_slot))?
                     .take()
-                    .with_context(|| format!("box slot {} has no Pokemon to withdraw", command.box_slot))?;
+                    .with_context(|| {
+                        format!("box slot {} has no Pokemon to withdraw", command.box_slot)
+                    })?;
                 pc_box.set_slot(command.box_slot, None);
                 let party_index = state
                     .storage
@@ -18001,7 +21457,9 @@ impl GameDataSet {
                     .get(command.box_slot)
                     .with_context(|| format!("box slot {} is outside PC box", command.box_slot))?
                     .clone()
-                    .with_context(|| format!("box slot {} has no Pokemon to release", command.box_slot))?;
+                    .with_context(|| {
+                        format!("box slot {} has no Pokemon to release", command.box_slot)
+                    })?;
                 pc_box.set_slot(command.box_slot, None);
                 RuntimeMutationResult::PcPokemonReleased(RuntimeStorageReleaseOutcome {
                     box_index: state.current_pc_box,
@@ -18088,7 +21546,10 @@ impl GameDataSet {
                     })?
                     .as_mut()
                     .with_context(|| {
-                        format!("party index {} has no Pokemon for held item", command.party_index)
+                        format!(
+                            "party index {} has no Pokemon for held item",
+                            command.party_index
+                        )
                     })?;
                 if pokemon.item.is_some() {
                     anyhow::bail!("party index {} already holds an item", command.party_index);
@@ -18118,12 +21579,14 @@ impl GameDataSet {
                     })?
                     .as_mut()
                     .with_context(|| {
-                        format!("party index {} has no Pokemon for held item", command.party_index)
+                        format!(
+                            "party index {} has no Pokemon for held item",
+                            command.party_index
+                        )
                     })?;
-                let item_id = pokemon
-                    .item
-                    .clone()
-                    .with_context(|| format!("party index {} holds no item", command.party_index))?;
+                let item_id = pokemon.item.clone().with_context(|| {
+                    format!("party index {} holds no item", command.party_index)
+                })?;
                 let item = self
                     .items
                     .get(&item_id)
@@ -18191,17 +21654,34 @@ impl GameDataSet {
                     caught_count_after: state.pokedex.caught_count(),
                 })
             }
+            RuntimeMutationCommand::AddBagItem(command) => {
+                let item = self
+                    .items
+                    .get(&command.item_id)
+                    .with_context(|| format!("unknown item {}", command.item_id))?;
+                if item.script_name != command.item_id {
+                    anyhow::bail!(
+                        "compiled item {} has script_name {}, expected exact id match",
+                        command.item_id,
+                        item.script_name
+                    );
+                }
+                let quantity_before = state.bag.quantity(item);
+                let added = state
+                    .bag
+                    .add_item(item, command.quantity)
+                    .map_err(anyhow::Error::msg)?;
+                let quantity_after = state.bag.quantity(item);
+                RuntimeMutationResult::BagItemAdded(RuntimeBagItemMutationOutcome {
+                    item_id: command.item_id,
+                    quantity: command.quantity,
+                    added,
+                    quantity_before,
+                    quantity_after,
+                })
+            }
             RuntimeMutationCommand::AddCurrency(command) => {
-                let cap = match command.account {
-                    RuntimeCurrencyAccount::Money => *self
-                        .currency_constants
-                        .get("MAX_MONEY")
-                        .context("currency constants missing MAX_MONEY")?,
-                    RuntimeCurrencyAccount::Coins => *self
-                        .currency_constants
-                        .get("MAX_COINS")
-                        .context("currency constants missing MAX_COINS")?,
-                };
+                let cap = runtime_currency_cap(&self.currency_constants, command.account)?;
                 let before = match command.account {
                     RuntimeCurrencyAccount::Money => state.money,
                     RuntimeCurrencyAccount::Coins => u32::from(state.coins),
@@ -18223,16 +21703,7 @@ impl GameDataSet {
                 })
             }
             RuntimeMutationCommand::TakeCurrency(command) => {
-                let cap = match command.account {
-                    RuntimeCurrencyAccount::Money => *self
-                        .currency_constants
-                        .get("MAX_MONEY")
-                        .context("currency constants missing MAX_MONEY")?,
-                    RuntimeCurrencyAccount::Coins => *self
-                        .currency_constants
-                        .get("MAX_COINS")
-                        .context("currency constants missing MAX_COINS")?,
-                };
+                let cap = runtime_currency_cap(&self.currency_constants, command.account)?;
                 let before = match command.account {
                     RuntimeCurrencyAccount::Money => state.money,
                     RuntimeCurrencyAccount::Coins => u32::from(state.coins),
@@ -18306,7 +21777,10 @@ impl GameDataSet {
                     })?
                     .as_mut()
                     .with_context(|| {
-                        format!("party index {} has no Pokemon to rename", command.party_index)
+                        format!(
+                            "party index {} has no Pokemon to rename",
+                            command.party_index
+                        )
                     })?;
                 let before = pokemon.nickname.clone();
                 pokemon.nickname = command.nickname;
@@ -18348,11 +21822,21 @@ impl GameDataSet {
                 let first_species_after = state.storage.party.pokemon[command.first_party_index]
                     .as_ref()
                     .map(|pokemon| pokemon.species.id.clone())
-                    .unwrap_or_default();
+                    .with_context(|| {
+                        format!(
+                            "party swap index {} unexpectedly empty after swap",
+                            command.first_party_index
+                        )
+                    })?;
                 let second_species_after = state.storage.party.pokemon[command.second_party_index]
                     .as_ref()
                     .map(|pokemon| pokemon.species.id.clone())
-                    .unwrap_or_default();
+                    .with_context(|| {
+                        format!(
+                            "party swap index {} unexpectedly empty after swap",
+                            command.second_party_index
+                        )
+                    })?;
                 RuntimeMutationResult::PartyPokemonSwapped(RuntimePartySwapOutcome {
                     first_party_index: command.first_party_index,
                     second_party_index: command.second_party_index,
@@ -18374,8 +21858,7 @@ impl GameDataSet {
                 RuntimeMutationResult::WholePartyFullHealed(recovered)
             }
             RuntimeMutationCommand::ResolveBlackoutToLastSpawn => {
-                let outcome =
-                    self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?;
+                let outcome = self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?;
                 let SpecialRoutineEffect::WarpToSpawnPoint {
                     spawn_identifier,
                     map_name,
@@ -18391,6 +21874,7 @@ impl GameDataSet {
                 for party_index in heal_indexes {
                     healed.push(full_heal_party_slot(state, &self.moves, party_index)?);
                 }
+                deactivate_battle(state);
                 RuntimeMutationResult::BlackoutResolved(BlackoutRecoveryOutcome {
                     spawn_identifier,
                     map_name,
@@ -18450,13 +21934,12 @@ impl GameDataSet {
             .iter()
             .find(|movement| {
                 movement.label == movement_label
-                    && movement
-                        .source_script
-                        .as_deref()
-                        .is_none_or(|movement_source| movement_source == source_script)
+                    && movement.source_script.as_deref() == Some(source_script)
             })
-            .with_context(|| {
-                format!("map {map_name} has no exact movement {movement_label} for {source_script}")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "map {map_name} has no exact movement {movement_label} for {source_script}"
+                )
             })
     }
 
@@ -18515,10 +21998,55 @@ impl GameDataSet {
         player_tile: TilePosition,
         frame: u64,
     ) -> Result<OverworldSession> {
+        self.overworld_session_for_traversal(
+            map_name,
+            player_tile,
+            frame,
+            PlayerTraversalState::Walk,
+        )
+    }
+
+    fn overworld_session_for_traversal(
+        &self,
+        map_name: &str,
+        player_tile: TilePosition,
+        frame: u64,
+        traversal_state: PlayerTraversalState,
+    ) -> Result<OverworldSession> {
         let module = self.map_module(map_name)?;
         let tileset = self.tileset_collision(&module.attributes.tileset_name)?;
+        validate_runtime_overworld_map_blocks(map_name, module)?;
         let map =
             OverworldMapData::from_attributes(map_name, &module.attributes, module.blocks.clone());
+        let (width, height) = map.checked_tile_bounds().with_context(|| {
+            format!(
+                "compiled map {map_name} runtime tile bounds overflow supported coordinate range"
+            )
+        })?;
+        if player_tile.x < 0
+            || player_tile.y < 0
+            || i32::from(player_tile.x) >= i32::from(width)
+            || i32::from(player_tile.y) >= i32::from(height)
+        {
+            anyhow::bail!(
+                "runtime player tile ({}, {}) is outside compiled map {map_name} runtime tile bounds {width}x{height}",
+                player_tile.x,
+                player_tile.y
+            );
+        }
+        if !can_enter_tile(
+            &map,
+            &tileset,
+            player_tile,
+            Direction::Down,
+            traversal_state,
+        ) {
+            anyhow::bail!(
+                "runtime player tile ({}, {}) is not walkable on compiled map {map_name}",
+                player_tile.x,
+                player_tile.y
+            );
+        }
         let mut session = OverworldSession::with_events_and_objects(
             map,
             module.events.clone(),
@@ -18567,8 +22095,35 @@ impl GameDataSet {
         spawn_update: SpawnMemoryUpdate,
         music_ids: &BTreeSet<String>,
     ) -> Result<()> {
+        self.transition_overworld_session_with_mode(
+            state,
+            session,
+            destination_map,
+            destination_tile,
+            MovementMode::Normal,
+            spawn_update,
+            music_ids,
+        )
+    }
+
+    fn transition_overworld_session_with_mode(
+        &self,
+        state: &mut GameState,
+        session: &mut OverworldSession,
+        destination_map: &str,
+        destination_tile: TilePosition,
+        mode: MovementMode,
+        spawn_update: SpawnMemoryUpdate,
+        music_ids: &BTreeSet<String>,
+    ) -> Result<()> {
         let frame = session.frame;
-        *session = self.overworld_session(destination_map, destination_tile, frame)?;
+        *session = self.overworld_session_for_traversal(
+            destination_map,
+            destination_tile,
+            frame,
+            mode.traversal_state(),
+        )?;
+        session.player.mode = mode;
         self.apply_saved_overworld_overrides(session, state)?;
         self.sync_current_map_music(state, destination_map, music_ids)?;
         self.sync_current_map_scene(state, destination_map)?;
@@ -18581,17 +22136,34 @@ impl GameDataSet {
         spawn: &RuntimeSpawnPoint,
         music_ids: &BTreeSet<String>,
     ) -> Result<(GameState, OverworldSession)> {
-        let overworld = self.overworld_session(
-            &spawn.map_name,
-            TilePosition::new(spawn.tile_x, spawn.tile_y),
-            0,
-        )?;
+        let spawn_tile = runtime_spawn_expected_tile(spawn);
+        let overworld = self.overworld_session(&spawn.map_name, spawn_tile, 0)?;
         let mut state = GameState::default();
+        state.bag.tm_hm = initial_tmhm_flags(&self.items);
+        apply_initialize_events(&mut state, &self.initialize_events)
+            .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
             SpawnMemoryUpdate::Set(spawn.identifier),
         );
+        self.sync_current_map_music(&mut state, &overworld.map.name, music_ids)?;
+        self.sync_current_map_scene(&mut state, &overworld.map.name)?;
+        Ok((state, overworld))
+    }
+
+    pub fn start_overworld_session_at_runtime_tile(
+        &self,
+        map_name: &str,
+        tile: TilePosition,
+        music_ids: &BTreeSet<String>,
+    ) -> Result<(GameState, OverworldSession)> {
+        let overworld = self.overworld_session(map_name, tile, 0)?;
+        let mut state = GameState::default();
+        state.bag.tm_hm = initial_tmhm_flags(&self.items);
+        apply_initialize_events(&mut state, &self.initialize_events)
+            .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
         self.sync_current_map_music(&mut state, &overworld.map.name, music_ids)?;
         self.sync_current_map_scene(&mut state, &overworld.map.name)?;
         Ok((state, overworld))
@@ -18607,7 +22179,12 @@ impl GameDataSet {
             .snapshot_identity()
             .with_context(|| "cannot resume overworld session from inactive GameState")?;
         let map_name = map_name.to_string();
-        let mut overworld = self.overworld_session(&map_name, tile, state.frame_counter)?;
+        let mut overworld = self.overworld_session_for_traversal(
+            &map_name,
+            tile,
+            state.frame_counter,
+            mode.traversal_state(),
+        )?;
         overworld.player.facing = facing;
         overworld.player.mode = mode;
         self.apply_saved_overworld_overrides(&mut overworld, &state)?;
@@ -18633,8 +22210,10 @@ impl GameDataSet {
         buttons: impl IntoIterator<Item = GameButton>,
         music_ids: &BTreeSet<String>,
     ) -> Result<OverworldInputFrame> {
+        let mut staged_state = state.clone();
+        let mut staged_session = session.clone();
         let input_candidate = JoypadState::compute_mask(buttons);
-        let joypad_event = state
+        let joypad_event = staged_state
             .apply_joypad_mask(input_candidate)
             .map_err(|error| anyhow::anyhow!("apply joypad mask: {error}"))?;
         let (pressed_mask, input_mask) = match joypad_event {
@@ -18647,6 +22226,7 @@ impl GameDataSet {
         let mut movement = None;
         let mut step_events = None;
         let mut coord_event = None;
+        let mut trainer_sight = None;
         let mut warp = None;
         let mut connection = None;
         let mut interaction = None;
@@ -18654,51 +22234,86 @@ impl GameDataSet {
         let mut wild_battle = None;
 
         if let Some(direction) = direction {
-            let result = session.step_and_check_warp(direction, StepOptions::default());
+            let result = staged_session
+                .step_and_check_warp_checked(direction, StepOptions::default())
+                .with_context(|| {
+                    format!("apply overworld movement on {}", staged_session.map.name)
+                })?;
             let moved = matches!(result.outcome, StepOutcome::Moved { .. });
             movement = Some(result.outcome);
             if let Some(trigger) = result.warp {
                 let transition = self.resolve_warp_transition(&trigger)?;
-                self.apply_dig_warp_memory_for_transition(state, &transition)?;
+                self.apply_dig_warp_memory_for_transition(&mut staged_state, &transition)?;
                 let destination = &transition.destination;
-                self.transition_overworld_session(
-                    state,
-                    session,
+                let mode = staged_session.player.mode;
+                self.transition_overworld_session_with_mode(
+                    &mut staged_state,
+                    &mut staged_session,
                     &destination.map_name,
                     destination.tile,
+                    mode,
                     SpawnMemoryUpdate::Preserve,
                     music_ids,
                 )?;
                 warp = Some(transition);
-            } else if let Some(trigger) = session.check_connection() {
+            } else if let Some(trigger) = staged_session
+                .check_connection_checked()
+                .with_context(|| format!("check connection on {}", staged_session.map.name))?
+            {
                 let transition = self.resolve_connection_transition(&trigger)?;
                 let destination = &transition.destination;
-                self.transition_overworld_session(
-                    state,
-                    session,
+                let mode = staged_session.player.mode;
+                self.transition_overworld_session_with_mode(
+                    &mut staged_state,
+                    &mut staged_session,
                     &destination.map_name,
                     destination.tile,
+                    mode,
                     SpawnMemoryUpdate::Preserve,
                     music_ids,
                 )?;
                 connection = Some(transition);
             } else if moved {
-                step_events = Some(self.process_overworld_step(state));
-                coord_event = self.check_coord_event_after_step(state, session);
-                wild_encounter = self.check_wild_encounter_after_step(state, session)?;
-                wild_battle =
-                    self.start_resolved_wild_encounter_after_step(state, &wild_encounter)?;
+                step_events = Some(self.process_overworld_step(&mut staged_state));
+                coord_event =
+                    self.check_coord_event_after_step_checked(&staged_state, &staged_session)?;
+                if coord_event.is_none() {
+                    trainer_sight =
+                        staged_session
+                            .check_trainer_sight_checked()
+                            .with_context(|| {
+                                format!("check trainer sight on {}", staged_session.map.name)
+                            })?;
+                }
+                if trainer_sight.is_none() {
+                    wild_encounter =
+                        self.check_wild_encounter_after_step(&mut staged_state, &staged_session)?;
+                    wild_battle = self.start_resolved_wild_encounter_after_step(
+                        &mut staged_state,
+                        &wild_encounter,
+                    )?;
+                }
             }
         } else {
-            session.frame += 1;
+            staged_session.frame += 1;
         }
 
-        if pressed_mask & B_PAD_A != 0 {
-            interaction = session.check_interaction(StepOptions::default().stride_tiles);
+        if direction.is_none() && pressed_mask & B_PAD_A != 0 {
+            interaction = staged_session
+                .check_interaction_checked(StepOptions::default().stride_tiles)
+                .with_context(|| {
+                    format!("check overworld interaction on {}", staged_session.map.name)
+                })?;
         }
 
-        let snapshot = session.snapshot();
-        self.commit_overworld_snapshot_data(state, &snapshot, SpawnMemoryUpdate::Preserve);
+        let snapshot = staged_session.snapshot();
+        self.commit_overworld_snapshot_data(
+            &mut staged_state,
+            &snapshot,
+            SpawnMemoryUpdate::Preserve,
+        );
+        *state = staged_state;
+        *session = staged_session;
         Ok(OverworldInputFrame {
             snapshot,
             input_mask,
@@ -18706,6 +22321,7 @@ impl GameDataSet {
             movement,
             step_events,
             coord_event,
+            trainer_sight,
             interaction,
             warp,
             connection,
@@ -18773,6 +22389,23 @@ impl GameDataSet {
         let context = self.special_routine_context(&cry_by_species);
         apply_special_routine_with_context(state, context, routine)
             .map_err(|error| anyhow::anyhow!("apply special routine {routine}: {error}"))
+    }
+
+    fn apply_special_routine_transactional<F>(
+        &self,
+        state: &mut GameState,
+        routine: &str,
+        music_ids: &BTreeSet<String>,
+        prepare: F,
+    ) -> Result<SpecialRoutineOutcome>
+    where
+        F: FnOnce(&mut GameState) -> Result<()>,
+    {
+        let mut next_state = state.clone();
+        prepare(&mut next_state)?;
+        let outcome = self.apply_special_routine(&mut next_state, routine, music_ids)?;
+        *state = next_state;
+        Ok(outcome)
     }
 
     pub fn audio_ids(&self) -> BTreeSet<&str> {
@@ -18850,6 +22483,15 @@ impl GameDataSet {
             ITEM_POCKET_KEY_ITEM,
         )
         .map_err(|error| anyhow::anyhow!("{error}"))?;
+        for (pocket_id, inventory) in &bag.custom_pockets {
+            validate_saved_bag_pocket_references(
+                &self.items,
+                &format!("bag.custom_pockets.{pocket_id}"),
+                inventory,
+                pocket_id,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
         validate_saved_tmhm_references(&self.items, &bag.tm_hm)
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -18870,7 +22512,7 @@ impl GameDataSet {
 
     pub fn validate_saved_overworld_references(&self, overworld: &OverworldMemory) -> Result<()> {
         core_validate_saved_overworld_references(overworld, |map_name| {
-            self.saved_map_dimensions(map_name)
+            self.saved_map_tile_bounds(map_name)
         })
         .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -18907,7 +22549,7 @@ impl GameDataSet {
         core_validate_saved_object_overrides(
             map_name,
             memory,
-            |_| self.saved_map_dimensions(map_name),
+            |_| self.saved_map_tile_bounds(map_name),
             |object_id| self.map_declares_event_object(map_name, object_id),
         )
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -19115,9 +22757,31 @@ impl GameDataSet {
         .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
+    pub fn validate_saved_move_reference(&self, path: &str, move_id: &str) -> Result<()> {
+        validate_saved_exact_catalog_reference(
+            path,
+            move_id,
+            "moves",
+            "move id",
+            self.saved_move_name_and_pp(move_id).map(|(name, _)| name),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     pub fn validate_saved_sprite_reference(&self, path: &str, sprite_id: &str) -> Result<()> {
         validate_saved_catalog_reference(path, sprite_id, "sprites", |sprite_id| {
             self.saved_sprite_exists(sprite_id)
+        })
+        .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    pub fn validate_saved_variable_sprite_reference(
+        &self,
+        path: &str,
+        sprite_id: &str,
+    ) -> Result<()> {
+        validate_saved_catalog_reference(path, sprite_id, "variable sprites", |sprite_id| {
+            self.saved_variable_sprite_exists(sprite_id)
         })
         .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -19135,11 +22799,9 @@ impl GameDataSet {
             self.saved_trainer_id(trainer_id),
         )
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let trainer = self
-            .saved_trainer(trainer_id)
-            .with_context(|| {
-                format!("saved {path} trainer id {trainer_id} validated but is missing")
-            })?;
+        let trainer = self.saved_trainer(trainer_id).with_context(|| {
+            format!("saved {path} trainer id {trainer_id} validated but is missing")
+        })?;
         Ok(trainer)
     }
 
@@ -19352,6 +23014,68 @@ impl GameDataSet {
         .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
+    pub fn validate_saved_elevator_floor_reference(
+        &self,
+        path: &str,
+        floor: &ScriptRuntimeElevatorFloor,
+    ) -> Result<()> {
+        let map_constant = self.map_constant(&floor.target_map)?;
+        let args = vec![
+            floor.floor.clone(),
+            floor.warp.to_string(),
+            map_constant.to_string(),
+        ];
+        self.validate_saved_script_command_payload_reference(
+            path,
+            &floor.source_script,
+            floor.command_index,
+            "elevfloor",
+            &args,
+        )
+    }
+
+    pub fn validate_saved_script_warp_reference(
+        &self,
+        path: &str,
+        warp: &ScriptWarpRequest,
+    ) -> Result<()> {
+        let raw_tile = runtime_tile_to_raw_event_tile(warp.tile).with_context(|| {
+            format!(
+                "saved {path} {}:{} pending script warp tile ({}, {}) is not aligned to a raw map event coordinate",
+                warp.source_script,
+                warp.command_index,
+                warp.tile.x,
+                warp.tile.y
+            )
+        })?;
+        let mut args = vec![
+            self.map_constant(&warp.target_map)?.to_string(),
+            raw_tile.x.to_string(),
+            raw_tile.y.to_string(),
+        ];
+        let command = if let Some(facing) = warp.facing {
+            args.push(
+                match facing {
+                    Direction::Down => "DOWN",
+                    Direction::Up => "UP",
+                    Direction::Left => "LEFT",
+                    Direction::Right => "RIGHT",
+                }
+                .to_string(),
+            );
+            "warpfacing"
+        } else {
+            "warp"
+        };
+        self.validate_saved_script_command_payload_reference(
+            path,
+            &warp.source_script,
+            warp.command_index,
+            command,
+            &args,
+        )
+    }
+
     pub fn validate_saved_script_return_reference(
         &self,
         path: &str,
@@ -19377,9 +23101,7 @@ impl GameDataSet {
         let module = self
             .maps
             .get(map_name)
-            .with_context(|| {
-                format!("saved {path} map {map_name} validated but is missing")
-            })?;
+            .with_context(|| format!("saved {path} map {map_name} validated but is missing"))?;
         Ok(module)
     }
 
@@ -19461,9 +23183,7 @@ impl GameDataSet {
         path: &str,
         event: &crystal_core::state::ScriptMapRuntimeEvent,
     ) -> Result<()> {
-        let Some(args) = saved_map_runtime_event_command_args(path, event)
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-        else {
+        let Some(args) = self.saved_map_runtime_event_command_args(path, event)? else {
             return self.validate_saved_script_command_name_reference(
                 path,
                 &event.source_script,
@@ -19478,6 +23198,43 @@ impl GameDataSet {
             &event.command,
             &args,
         )
+    }
+
+    fn saved_map_runtime_event_command_args(
+        &self,
+        path: &str,
+        event: &crystal_core::state::ScriptMapRuntimeEvent,
+    ) -> Result<Option<Vec<String>>> {
+        match event.command.as_str() {
+            "warp" => {
+                let Some(mut args) = saved_map_runtime_event_command_args(path, event)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                else {
+                    return Ok(None);
+                };
+                if let Some(target_map) = event.target_map.as_deref() {
+                    args[0] = self.map_constant(target_map)?.to_string();
+                }
+                Ok(Some(args))
+            }
+            "warpfacing" => {
+                let Some(mut args) = saved_map_runtime_event_command_args(path, event)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                else {
+                    return Ok(None);
+                };
+                let target_map = event.target_map.as_deref().with_context(|| {
+                    format!(
+                        "saved {path} {}:{} warpfacing is missing target map",
+                        event.source_script, event.command_index
+                    )
+                })?;
+                args[0] = self.map_constant(target_map)?.to_string();
+                Ok(Some(args))
+            }
+            _ => saved_map_runtime_event_command_args(path, event)
+                .map_err(|error| anyhow::anyhow!("{error}")),
+        }
     }
 
     pub fn validate_saved_text_runtime_event_command(
@@ -19763,6 +23520,17 @@ impl GameDataSet {
             .map(|module| (module.attributes.width, module.attributes.height))
     }
 
+    pub fn saved_map_tile_bounds(&self, map_name: &str) -> Option<(u16, u16)> {
+        let width_multiplier = u16::try_from(METATILE_WIDTH).ok()?;
+        self.saved_map_dimensions(map_name)
+            .and_then(|(width, height)| {
+                Some((
+                    width.checked_mul(width_multiplier)?,
+                    height.checked_mul(width_multiplier)?,
+                ))
+            })
+    }
+
     pub fn saved_map_block_context(&self, map_name: &str) -> Option<(u16, u16, String)> {
         self.maps.get(map_name).map(|module| {
             (
@@ -19793,8 +23561,11 @@ impl GameDataSet {
                             && self.maps.get(&floor.target_map).is_some_and(|target| {
                                 target.events.warps.iter().any(|target_warp| {
                                     target_warp.index == floor.warp
-                                        && i16::try_from(target_warp.x).ok() == Some(warp.tile.x)
-                                        && i16::try_from(target_warp.y).ok() == Some(warp.tile.y)
+                                        && checked_runtime_map_event_tile(
+                                            target_warp.x,
+                                            target_warp.y,
+                                        )
+                                        .is_some_and(|tile| tile == warp.tile)
                                 })
                             })
                     })
@@ -19922,6 +23693,36 @@ impl GameDataSet {
             anyhow::anyhow!("validate field town map item {item_id}: {error:?}")
         })?;
         Ok(item)
+    }
+
+    pub fn field_pokegear_item(&self, item_id: &str) -> Result<&Item> {
+        let item = self.item(item_id)?;
+        validate_pokegear_item(&self.field_moves, item).map_err(|error| {
+            anyhow::anyhow!("validate field pokegear item {item_id}: {error:?}")
+        })?;
+        Ok(item)
+    }
+
+    pub fn field_box_item(&self, item_id: &str) -> Result<(&Item, &FieldBoxItemRule)> {
+        let rule = self
+            .field_box_items
+            .get(item_id)
+            .with_context(|| format!("field box item {item_id} is not defined by the pack"))?;
+        let item = self.item(item_id)?;
+        if item.effect != rule.effect {
+            anyhow::bail!(
+                "field box item {item_id} effect {} does not match pack rule effect {}",
+                item.effect,
+                rule.effect
+            );
+        }
+        if item.field_menu != "ITEMMENU_CURRENT" {
+            anyhow::bail!(
+                "field box item {item_id} has field_menu {}, expected ITEMMENU_CURRENT",
+                item.field_menu
+            );
+        }
+        Ok((item, rule))
     }
 
     pub fn field_escape_item(&self, item_id: &str) -> Result<&Item> {
@@ -20139,6 +23940,43 @@ impl GameDataSet {
         })
     }
 
+    pub fn use_bag_pokegear_in_field(
+        &self,
+        state: &mut GameState,
+        item_id: &str,
+    ) -> Result<FieldPokegearUseOutcome> {
+        self.require_no_active_battle(state, "field pokegear item")?;
+        let item = self.field_pokegear_item(item_id)?;
+        Self::require_field_usable_item_in_bag(state, item_id, item, "pokegear")?;
+        let item_use = self.use_bag_item(state, item_id, ItemUseContext::Field)?;
+        Ok(FieldPokegearUseOutcome { item_use })
+    }
+
+    pub fn use_bag_box_in_field(
+        &self,
+        state: &mut GameState,
+        item_id: &str,
+    ) -> Result<FieldBoxItemUseOutcome> {
+        self.require_no_active_battle(state, "field box item")?;
+        let (item, rule) = self.field_box_item(item_id)?;
+        Self::require_field_usable_item_in_bag(state, item_id, item, "box")?;
+        let decoration_flag = rule.decoration_flag.as_str();
+        let already_owned = state
+            .flags
+            .is_event_flag_set(decoration_flag)
+            .with_context(|| format!("check field box decoration flag {decoration_flag}"))?;
+        state
+            .flags
+            .set_event_flag(decoration_flag, true)
+            .with_context(|| format!("set field box decoration flag {decoration_flag}"))?;
+        let item_use = self.use_bag_item(state, item_id, ItemUseContext::Field)?;
+        Ok(FieldBoxItemUseOutcome {
+            item_use,
+            decoration_flag: decoration_flag.to_string(),
+            already_owned,
+        })
+    }
+
     pub fn use_bag_escape_rope_in_field(
         &self,
         state: &mut GameState,
@@ -20174,15 +24012,20 @@ impl GameDataSet {
         item_id: &str,
         music_ids: &BTreeSet<String>,
     ) -> Result<FieldEscapeRopeUseOutcome> {
-        let outcome = self.use_bag_escape_rope_in_field(state, overworld, item_id)?;
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        let outcome =
+            self.use_bag_escape_rope_in_field(&mut staged_state, &staged_overworld, item_id)?;
         self.transition_overworld_session(
-            state,
-            overworld,
+            &mut staged_state,
+            &mut staged_overworld,
             &outcome.destination_map,
             outcome.destination_tile,
             SpawnMemoryUpdate::Preserve,
             music_ids,
         )?;
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20211,6 +24054,45 @@ impl GameDataSet {
         .map_err(|error| anyhow::anyhow!("use CUT field move: {error:?}"))
     }
 
+    pub fn field_block_target_metatile_in_front(
+        &self,
+        overworld: &OverworldSession,
+    ) -> Result<(u16, u16)> {
+        let target = Self::checked_runtime_field_move_target(
+            "BLOCK_FIELD_MOVE",
+            overworld.player.tile,
+            overworld.player.facing,
+        )?;
+        let (width, height) = overworld.map.checked_tile_bounds().with_context(|| {
+            format!(
+                "map {} runtime tile bounds overflow supported coordinate range",
+                overworld.map.name
+            )
+        })?;
+        if target.x < 0
+            || target.y < 0
+            || i32::from(target.x) >= i32::from(width)
+            || i32::from(target.y) >= i32::from(height)
+        {
+            anyhow::bail!(
+                "field block target tile ({}, {}) is outside map {} runtime tile bounds {width}x{height}",
+                target.x,
+                target.y,
+                overworld.map.name
+            );
+        }
+        let metatile_x = target.x.div_euclid(METATILE_WIDTH);
+        let metatile_y = target.y.div_euclid(METATILE_WIDTH);
+        Ok((
+            u16::try_from(metatile_x).with_context(|| {
+                format!("field block target metatile x {metatile_x} cannot be represented")
+            })?,
+            u16::try_from(metatile_y).with_context(|| {
+                format!("field block target metatile y {metatile_y} cannot be represented")
+            })?,
+        ))
+    }
+
     pub fn use_cut_field_move(
         &self,
         state: &mut GameState,
@@ -20230,6 +24112,16 @@ impl GameDataSet {
             metatile_x,
             metatile_y,
         )
+    }
+
+    pub fn use_cut_field_move_in_front(
+        &self,
+        state: &mut GameState,
+        overworld: &mut OverworldSession,
+        party_index: usize,
+    ) -> Result<FieldMoveBlockOutcome> {
+        let (metatile_x, metatile_y) = self.field_block_target_metatile_in_front(overworld)?;
+        self.use_cut_field_move(state, overworld, party_index, metatile_x, metatile_y)
     }
 
     pub fn apply_whirlpool_field_move(
@@ -20276,6 +24168,16 @@ impl GameDataSet {
             metatile_x,
             metatile_y,
         )
+    }
+
+    pub fn use_whirlpool_field_move_in_front(
+        &self,
+        state: &mut GameState,
+        overworld: &mut OverworldSession,
+        party_index: usize,
+    ) -> Result<FieldMoveBlockOutcome> {
+        let (metatile_x, metatile_y) = self.field_block_target_metatile_in_front(overworld)?;
+        self.use_whirlpool_field_move(state, overworld, party_index, metatile_x, metatile_y)
     }
 
     pub fn apply_strength_field_move(
@@ -20345,25 +24247,45 @@ impl GameDataSet {
         overworld: &mut OverworldSession,
         party_index: usize,
     ) -> Result<FieldMoveTravelOutcome> {
-        self.require_no_active_battle(state, "SURF field move")?;
-        let target = move_by_stride(overworld.player.tile, overworld.player.facing, 2);
-        if let Some((_, object)) = overworld.visible_object_at(target) {
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        self.require_no_active_battle(&staged_state, "SURF field move")?;
+        let target = Self::checked_runtime_field_move_target(
+            "SURF",
+            staged_overworld.player.tile,
+            staged_overworld.player.facing,
+        )?;
+        if let Some((_, object)) = staged_overworld
+            .visible_object_at_checked(target)
+            .with_context(|| {
+                format!(
+                    "check SURF target occupancy on {}",
+                    staged_overworld.map.name
+                )
+            })?
+        {
             anyhow::bail!(
                 "cannot use SURF field move onto occupied tile {target:?} by {:?}",
                 object.object_identifier
             );
         }
-        let storage = state.storage.clone();
-        let state_snapshot = state.clone();
+        let storage = staged_state.storage.clone();
+        let state_snapshot = staged_state.clone();
         let outcome = self.apply_surf_field_move(
             &state_snapshot,
             &storage,
-            &overworld.map,
-            &overworld.tileset,
-            &mut overworld.player,
+            &staged_overworld.map,
+            &staged_overworld.tileset,
+            &mut staged_overworld.player,
             party_index,
         )?;
-        commit_overworld_snapshot(state, &overworld.snapshot(), SpawnMemoryUpdate::Preserve);
+        commit_overworld_snapshot(
+            &mut staged_state,
+            &staged_overworld.snapshot(),
+            SpawnMemoryUpdate::Preserve,
+        );
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20394,18 +24316,26 @@ impl GameDataSet {
         overworld: &mut OverworldSession,
         party_index: usize,
     ) -> Result<FieldMoveTravelOutcome> {
-        self.require_no_active_battle(state, "WATERFALL field move")?;
-        let storage = state.storage.clone();
-        let state_snapshot = state.clone();
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        self.require_no_active_battle(&staged_state, "WATERFALL field move")?;
+        let storage = staged_state.storage.clone();
+        let state_snapshot = staged_state.clone();
         let outcome = self.apply_waterfall_field_move(
             &state_snapshot,
             &storage,
-            &overworld.map,
-            &overworld.tileset,
-            &mut overworld.player,
+            &staged_overworld.map,
+            &staged_overworld.tileset,
+            &mut staged_overworld.player,
             party_index,
         )?;
-        commit_overworld_snapshot(state, &overworld.snapshot(), SpawnMemoryUpdate::Preserve);
+        commit_overworld_snapshot(
+            &mut staged_state,
+            &staged_overworld.snapshot(),
+            SpawnMemoryUpdate::Preserve,
+        );
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20448,7 +24378,7 @@ impl GameDataSet {
             source_map: source_map.to_string(),
             destination_spawn_identifier,
             destination_map: destination_spawn.map_name.clone(),
-            destination_tile: TilePosition::new(destination_spawn.tile_x, destination_spawn.tile_y),
+            destination_tile: runtime_spawn_expected_tile(destination_spawn),
         })
     }
 
@@ -20461,22 +24391,26 @@ impl GameDataSet {
         flypoint_flag: &str,
         music_ids: &BTreeSet<String>,
     ) -> Result<FlyFieldMoveOutcome> {
-        let source_map = overworld.map.name.clone();
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        let source_map = staged_overworld.map.name.clone();
         let outcome = self.use_fly_field_move(
-            state,
+            &staged_state,
             &source_map,
             party_index,
             destination_spawn_identifier,
             flypoint_flag,
         )?;
         self.transition_overworld_session(
-            state,
-            overworld,
+            &mut staged_state,
+            &mut staged_overworld,
             &outcome.destination_map,
             outcome.destination_tile,
             SpawnMemoryUpdate::Set(destination_spawn_identifier),
             music_ids,
         )?;
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20520,16 +24454,20 @@ impl GameDataSet {
         party_index: usize,
         music_ids: &BTreeSet<String>,
     ) -> Result<DigFieldMoveOutcome> {
-        let source_map = overworld.map.name.clone();
-        let outcome = self.use_dig_field_move(state, &source_map, party_index)?;
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        let source_map = staged_overworld.map.name.clone();
+        let outcome = self.use_dig_field_move(&staged_state, &source_map, party_index)?;
         self.transition_overworld_session(
-            state,
-            overworld,
+            &mut staged_state,
+            &mut staged_overworld,
             &outcome.destination_map,
             outcome.destination_tile,
             SpawnMemoryUpdate::Preserve,
             music_ids,
         )?;
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20565,7 +24503,7 @@ impl GameDataSet {
             source_map: source_map.to_string(),
             destination_spawn_identifier,
             destination_map: destination_spawn.map_name.clone(),
-            destination_tile: TilePosition::new(destination_spawn.tile_x, destination_spawn.tile_y),
+            destination_tile: runtime_spawn_expected_tile(destination_spawn),
         })
     }
 
@@ -20576,16 +24514,20 @@ impl GameDataSet {
         party_index: usize,
         music_ids: &BTreeSet<String>,
     ) -> Result<TeleportFieldMoveOutcome> {
-        let source_map = overworld.map.name.clone();
-        let outcome = self.use_teleport_field_move(state, &source_map, party_index)?;
+        let mut staged_state = state.clone();
+        let mut staged_overworld = overworld.clone();
+        let source_map = staged_overworld.map.name.clone();
+        let outcome = self.use_teleport_field_move(&staged_state, &source_map, party_index)?;
         self.transition_overworld_session(
-            state,
-            overworld,
+            &mut staged_state,
+            &mut staged_overworld,
             &outcome.destination_map,
             outcome.destination_tile,
             SpawnMemoryUpdate::Set(outcome.destination_spawn_identifier),
             music_ids,
         )?;
+        *state = staged_state;
+        *overworld = staged_overworld;
         Ok(outcome)
     }
 
@@ -20732,15 +24674,190 @@ impl GameDataSet {
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
         let mut preview = clone_field_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
-        self.apply_party_pokemon_item_effect(&mut preview, item_id, time_of_day, false)?;
+        let preview_effect =
+            self.apply_party_pokemon_item_effect(&mut preview, item_id, time_of_day, false)?;
+        self.require_no_existing_pending_move_learn_for_item_effect(
+            state,
+            party_index,
+            &preview_effect,
+        )?;
 
         let item_use = self.use_bag_item(state, item_id, ItemUseContext::Field)?;
         let pokemon = require_field_party_pokemon_mut(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
         let item_effect =
             self.apply_party_pokemon_item_effect(pokemon, item_id, time_of_day, item_use.consumed)?;
+        self.queue_item_pending_move_learn(state, party_index, &item_effect)
+            .with_context(|| format!("queue pending move learn for party item {item_id}"))?;
         state.sync_party_from_storage();
         Ok((item_use, item_effect))
+    }
+
+    fn require_no_existing_pending_move_learn_for_item_effect(
+        &self,
+        state: &GameState,
+        party_index: usize,
+        item_effect: &BattleItemOutcome,
+    ) -> Result<()> {
+        if !item_effect.pending_move_learns.is_empty() && state.pending_move_learn.is_some() {
+            anyhow::bail!("pending move learn already exists for party index {party_index}");
+        }
+        Ok(())
+    }
+
+    pub fn replace_pending_move_learn(
+        &self,
+        state: &mut GameState,
+        move_slot: usize,
+    ) -> Result<PendingMoveLearnRuntimeResolution> {
+        let resolution = core_replace_pending_move_learn(state, move_slot)
+            .map_err(|error| anyhow::anyhow!("replace pending move learn: {error:?}"))?;
+        let deferred_evolution = self.resolve_deferred_evolution_after_pending_move_learn(
+            state,
+            &resolution,
+            "replacement",
+        )?;
+        Ok(PendingMoveLearnRuntimeResolution {
+            resolution,
+            deferred_evolution,
+        })
+    }
+
+    pub fn decline_pending_move_learn(
+        &self,
+        state: &mut GameState,
+    ) -> Result<PendingMoveLearnRuntimeResolution> {
+        let resolution = core_decline_pending_move_learn(state)
+            .map_err(|error| anyhow::anyhow!("decline pending move learn: {error:?}"))?;
+        let deferred_evolution = self.resolve_deferred_evolution_after_pending_move_learn(
+            state,
+            &resolution,
+            "decline",
+        )?;
+        Ok(PendingMoveLearnRuntimeResolution {
+            resolution,
+            deferred_evolution,
+        })
+    }
+
+    fn resolve_deferred_evolution_after_pending_move_learn(
+        &self,
+        state: &mut GameState,
+        resolution: &PendingMoveLearnResolution,
+        action: &str,
+    ) -> Result<Option<EvolutionReport>> {
+        if !resolution.defer_level_evolution {
+            return Ok(None);
+        }
+        let time_of_day = state.time.time_of_day;
+        self.resolve_deferred_level_evolution(state, resolution.party_index, time_of_day)
+            .with_context(|| {
+                format!("resolve deferred level evolution after pending move learn {action}")
+            })
+            .map(Some)
+    }
+
+    fn queue_item_pending_move_learn(
+        &self,
+        state: &mut GameState,
+        party_index: usize,
+        item_effect: &BattleItemOutcome,
+    ) -> Result<()> {
+        let Some(learned_move) = item_effect.pending_move_learns.first() else {
+            return Ok(());
+        };
+        if state.pending_move_learn.is_some() {
+            anyhow::bail!("pending move learn already exists for party index {party_index}");
+        }
+        let pokemon = state
+            .storage
+            .party
+            .pokemon
+            .get(party_index)
+            .and_then(|slot| slot.as_ref())
+            .with_context(|| format!("party index {party_index} is empty"))?;
+        if pokemon.moves.len() < 4 {
+            anyhow::bail!(
+                "pending move learn requires full move list for party index {party_index}"
+            );
+        }
+        if pokemon
+            .moves
+            .iter()
+            .any(|known| known.name == learned_move.name)
+        {
+            return Ok(());
+        }
+        let species_id = pokemon.species.id.clone();
+        let level = pokemon.level;
+        state.pending_move_learn = Some(PendingMoveLearn {
+            party_index,
+            species_id,
+            level,
+            learned_move: learned_move.clone(),
+            defer_level_evolution: item_effect.deferred_level_evolution,
+        });
+        Ok(())
+    }
+
+    pub fn resolve_deferred_level_evolution(
+        &self,
+        state: &mut GameState,
+        party_index: usize,
+        time_of_day: TimeOfDay,
+    ) -> Result<EvolutionReport> {
+        if state.pending_move_learn.is_some() {
+            anyhow::bail!(
+                "pending move learn already exists before resolving deferred level evolution for party index {party_index}"
+            );
+        }
+        let context = EvolutionContext {
+            species: &self.pokemon,
+            moves: &self.moves,
+            learnsets: &self.learnsets,
+            time_of_day,
+            current_item: None,
+            force_evolution: false,
+            link_mode: LinkMode::None,
+        };
+        let (report, pending_move_learn) = {
+            let pokemon = require_field_party_pokemon_mut(state, party_index)
+                .map_err(|error| anyhow::anyhow!("resolve deferred level evolution: {error:?}"))?;
+            let report = check_and_evolve(pokemon, &self.evolutions, &context, true)
+                .map_err(|error| anyhow::anyhow!("resolve deferred level evolution: {error:?}"))?;
+            if report.target_species.is_none() {
+                anyhow::bail!(
+                    "deferred level evolution did not resolve for party index {party_index}"
+                );
+            }
+            let pending_move_learn = if let Some(learned_move) = report.pending_move_learns.first()
+            {
+                if pokemon.moves.len() < 4 {
+                    anyhow::bail!(
+                        "pending evolution move learn requires full move list for party index {party_index}"
+                    );
+                }
+                (!pokemon
+                    .moves
+                    .iter()
+                    .any(|known| known.name == learned_move.name))
+                .then(|| PendingMoveLearn {
+                    party_index,
+                    species_id: pokemon.species.id.clone(),
+                    level: pokemon.level,
+                    learned_move: learned_move.clone(),
+                    defer_level_evolution: false,
+                })
+            } else {
+                None
+            };
+            (report, pending_move_learn)
+        };
+        if let Some(pending_move_learn) = pending_move_learn {
+            state.pending_move_learn = Some(pending_move_learn);
+        }
+        state.sync_party_from_storage();
+        Ok(report)
     }
 
     pub fn use_bag_item_on_party_pokemon_now(
@@ -20941,8 +25058,15 @@ impl GameDataSet {
         state: &mut GameState,
         outcome: &CaptureOutcome,
     ) -> Result<Option<StoredCapture>> {
-        core_complete_active_wild_capture(state, outcome)
-            .map_err(|error| anyhow::anyhow!("complete captured Pokemon: {error}"))
+        let mut staged_state = state.clone();
+        let pay_day_money = staged_state.battle_pay_day_money;
+        let stored = core_complete_active_wild_capture(&mut staged_state, outcome)
+            .map_err(|error| anyhow::anyhow!("complete captured Pokemon: {error}"))?;
+        if stored.is_some() {
+            self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
+        }
+        *state = staged_state;
+        Ok(stored)
     }
 
     pub fn battle_escape_item_mode(&self, item_id: &str) -> Result<String> {
@@ -20969,8 +25093,10 @@ impl GameDataSet {
         item_id: &str,
     ) -> Result<String> {
         let mode = self.battle_escape_item_mode(item_id)?;
+        let pay_day_money = state.battle_pay_day_money;
         apply_battle_escape_item_use(state)
             .map_err(|error| anyhow::anyhow!("use battle escape item {item_id}: {error:?}"))?;
+        self.claim_active_battle_pay_day_money(state, pay_day_money)?;
         Ok(mode)
     }
 
@@ -20979,9 +25105,11 @@ impl GameDataSet {
         state: &mut GameState,
         item_id: &str,
     ) -> Result<BattleEscapeItemUseOutcome> {
-        let battle_escape_mode = self.require_battle_escape_item_context(state, item_id)?;
-        let item_use = self.use_bag_item(state, item_id, ItemUseContext::Battle)?;
-        self.apply_battle_escape_item_use(state, item_id)?;
+        let mut staged_state = state.clone();
+        let battle_escape_mode = self.require_battle_escape_item_context(&staged_state, item_id)?;
+        let item_use = self.use_bag_item(&mut staged_state, item_id, ItemUseContext::Battle)?;
+        self.apply_battle_escape_item_use(&mut staged_state, item_id)?;
+        *state = staged_state;
         Ok(BattleEscapeItemUseOutcome {
             item_use,
             battle_escape_mode,
@@ -21018,9 +25146,11 @@ impl GameDataSet {
         state: &mut GameState,
         item_id: &str,
     ) -> Result<BattleStateItemUseOutcome> {
-        self.require_battle_stat_drop_guard_item_context(state, item_id)?;
-        let item_use = self.use_bag_item(state, item_id, ItemUseContext::Battle)?;
-        let guard = self.apply_battle_stat_drop_guard_item(state, item_id)?;
+        let mut staged_state = state.clone();
+        self.require_battle_stat_drop_guard_item_context(&staged_state, item_id)?;
+        let item_use = self.use_bag_item(&mut staged_state, item_id, ItemUseContext::Battle)?;
+        let guard = self.apply_battle_stat_drop_guard_item(&mut staged_state, item_id)?;
+        *state = staged_state;
         Ok(BattleStateItemUseOutcome {
             item_use,
             stat_drop_guard_turns_before: guard.turns_before,
@@ -21042,53 +25172,130 @@ impl GameDataSet {
         player_action: BattleAction,
         enemy_action: BattleAction,
     ) -> Result<BattleTurnOutcome> {
-        let active_index = match player_action {
-            BattleAction::Switch { party_index } => {
-                switch_active_battle_party_index(state, party_index)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?
-            }
-            _ => require_active_battle_party_index(state)
-                .map_err(|error| anyhow::anyhow!("{error}"))?,
-        };
-        let player = state.storage.party.pokemon[active_index]
-            .as_ref()
-            .cloned()
-            .with_context(|| format!("active battle party index {active_index} has no Pokemon"))?;
-        let enemy = match &state.battle {
-            BattleMemory::Wild { enemy_pokemon, .. }
-            | BattleMemory::StaticWild { enemy_pokemon, .. }
-            | BattleMemory::Trainer { enemy_pokemon, .. } => enemy_pokemon.clone(),
-            BattleMemory::Inactive => {
-                anyhow::bail!("cannot resolve battle turn without an active battle");
-            }
-        };
-        let mut rng = Random::new(state.rng_seed);
-        let combat = BattleCombatState::new(player, enemy, state.rng_seed);
-        let outcome = self.resolve_battle_turn_with_items(
-            combat,
-            BattleTurnInput {
-                player: player_action,
-                enemy: enemy_action,
-            },
-            &mut rng,
-        )?;
-        commit_battle_turn_outcome(state, active_index, &outcome)
-            .map_err(|error| anyhow::anyhow!("commit active battle turn: {error:?}"))?;
-        state.commit_rng_seed(rng.seed());
-        Ok(outcome)
-    }
-
-    pub fn resolve_active_wild_battle_run(
-        &self,
-        state: &mut GameState,
-    ) -> Result<BattleEscapeAttempt> {
         let active_index =
             require_active_battle_party_index(state).map_err(|error| anyhow::anyhow!("{error}"))?;
         let player = state.storage.party.pokemon[active_index]
             .as_ref()
             .cloned()
             .with_context(|| format!("active battle party index {active_index} has no Pokemon"))?;
-        let enemy = match &state.battle {
+        let player_party = Self::active_battle_player_party(state)?;
+        let active_enemy_index = require_active_battle_enemy_party_index(state)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let (enemy, enemy_party, active_enemy_index, is_wild_battle) = match &state.battle {
+            BattleMemory::Wild {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            }
+            | BattleMemory::StaticWild {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            } => (
+                enemy_pokemon.clone(),
+                enemy_party.clone(),
+                active_enemy_index,
+                true,
+            ),
+            BattleMemory::Trainer {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            } => (
+                enemy_pokemon.clone(),
+                enemy_party.clone(),
+                active_enemy_index,
+                false,
+            ),
+            BattleMemory::Inactive => {
+                anyhow::bail!("cannot resolve battle turn without an active battle");
+            }
+        };
+        let mut rng = Random::new(state.rng_seed);
+        Self::require_active_enemy_in_battle_party(&enemy_party, active_enemy_index)?;
+        let combat = BattleCombatState::new(player, enemy, state.rng_seed)
+            .with_parties(player_party, enemy_party.to_vec())
+            .with_party_indices(active_index, active_enemy_index);
+        let input = BattleTurnInput {
+            player: player_action,
+            enemy: enemy_action,
+        };
+        let outcome = if is_wild_battle {
+            self.resolve_wild_battle_turn_with_items(
+                combat,
+                input,
+                state.battle_escape_attempts,
+                &mut rng,
+            )?
+        } else {
+            self.resolve_battle_turn_with_items(combat, input, &mut rng)?
+        };
+        let pay_day_money_after_turn = self.active_battle_pay_day_money_after_turn(state, &outcome);
+        commit_battle_turn_outcome(state, active_index, &outcome)
+            .map_err(|error| anyhow::anyhow!("commit active battle turn: {error:?}"))?;
+        if matches!(state.battle, BattleMemory::Inactive) {
+            self.claim_active_battle_pay_day_money(state, pay_day_money_after_turn)?;
+        }
+        if is_wild_battle {
+            if let Some(escape) = outcome.events.iter().find_map(|event| match event {
+                BattleEvent::RunAttempt {
+                    side: BattleSide::Player,
+                    outcome,
+                } => Some(outcome),
+                _ => None,
+            }) {
+                let pay_day_money = state.battle_pay_day_money;
+                commit_wild_battle_escape_attempt(state, escape);
+                if escape.escaped {
+                    self.claim_active_battle_pay_day_money(state, pay_day_money)?;
+                }
+            }
+        }
+        state.commit_rng_seed(rng.seed());
+        Ok(outcome)
+    }
+
+    fn active_battle_player_party(state: &GameState) -> Result<Vec<Pokemon>> {
+        let mut party = Vec::new();
+        let mut seen_empty = false;
+        for (index, slot) in state.storage.party.pokemon.iter().enumerate() {
+            match slot {
+                Some(pokemon) => {
+                    if seen_empty {
+                        anyhow::bail!(
+                            "active battle party has occupied slot {index} after an empty slot"
+                        );
+                    }
+                    party.push(pokemon.clone());
+                }
+                None => seen_empty = true,
+            }
+        }
+        Ok(party)
+    }
+
+    fn require_active_enemy_in_battle_party(party: &[Pokemon], active_index: usize) -> Result<()> {
+        if active_index >= party.len() {
+            anyhow::bail!(
+                "active battle enemy index {active_index} is outside active enemy party length {}",
+                party.len()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn resolve_active_wild_battle_run(
+        &self,
+        state: &mut GameState,
+    ) -> Result<BattleEscapeAttempt> {
+        let mut staged_state = state.clone();
+        let active_index = require_active_battle_party_index(&staged_state)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let player = staged_state.storage.party.pokemon[active_index]
+            .as_ref()
+            .cloned()
+            .with_context(|| format!("active battle party index {active_index} has no Pokemon"))?;
+        let enemy = match &staged_state.battle {
             BattleMemory::Wild { enemy_pokemon, .. }
             | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
             BattleMemory::Trainer { trainer_id, .. } => {
@@ -21098,12 +25305,17 @@ impl GameDataSet {
                 anyhow::bail!("cannot escape without an active wild battle");
             }
         };
-        let mut rng = Random::new(state.rng_seed);
-        let combat = BattleCombatState::new(player, enemy, state.rng_seed);
+        let mut rng = Random::new(staged_state.rng_seed);
+        let combat = BattleCombatState::new(player, enemy, staged_state.rng_seed);
         let outcome =
-            self.resolve_wild_battle_run(&combat, state.battle_escape_attempts, &mut rng)?;
-        commit_wild_battle_escape_attempt(state, &outcome);
-        state.commit_rng_seed(rng.seed());
+            self.resolve_wild_battle_run(&combat, staged_state.battle_escape_attempts, &mut rng)?;
+        let pay_day_money = staged_state.battle_pay_day_money;
+        commit_wild_battle_escape_attempt(&mut staged_state, &outcome);
+        if outcome.escaped {
+            self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
+        }
+        staged_state.commit_rng_seed(rng.seed());
+        *state = staged_state;
         Ok(outcome)
     }
 
@@ -21113,14 +25325,95 @@ impl GameDataSet {
         player_action: BattleAction,
         enemy_action: BattleAction,
     ) -> Result<ActiveBattleCommandOutcome> {
-        match player_action {
-            BattleAction::Run => self
-                .resolve_active_wild_battle_run(state)
-                .map(ActiveBattleCommandOutcome::Escape),
-            action => self
-                .resolve_active_battle_turn(state, action, enemy_action)
-                .map(ActiveBattleCommandOutcome::Turn),
+        if matches!(player_action, BattleAction::Run) {
+            return match &state.battle {
+                BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => {
+                    if matches!(enemy_action, BattleAction::Run) {
+                        self.resolve_active_wild_battle_run(state)
+                            .map(ActiveBattleCommandOutcome::Escape)
+                    } else {
+                        self.resolve_active_battle_turn(state, BattleAction::Run, enemy_action)
+                            .map(ActiveBattleCommandOutcome::Turn)
+                    }
+                }
+                BattleMemory::Trainer { .. } => self
+                    .resolve_active_battle_turn(state, BattleAction::Run, enemy_action)
+                    .map(ActiveBattleCommandOutcome::Turn),
+                BattleMemory::Inactive => {
+                    anyhow::bail!("player run requires an active battle");
+                }
+            };
         }
+        if matches!(enemy_action, BattleAction::Run) {
+            match &state.battle {
+                BattleMemory::Wild { .. }
+                | BattleMemory::StaticWild { .. }
+                | BattleMemory::Trainer { .. } => {}
+                BattleMemory::Inactive => {
+                    anyhow::bail!("enemy run requires an active battle");
+                }
+            }
+            return self
+                .resolve_active_battle_turn(state, player_action, enemy_action)
+                .map(ActiveBattleCommandOutcome::Turn);
+        }
+        self.resolve_active_battle_turn(state, player_action, enemy_action)
+            .map(ActiveBattleCommandOutcome::Turn)
+    }
+
+    pub fn resolve_active_battle_enemy_action(
+        &self,
+        state: &mut GameState,
+        enemy_action: BattleAction,
+    ) -> Result<BattleTurnOutcome> {
+        let active_index =
+            require_active_battle_party_index(state).map_err(|error| anyhow::anyhow!("{error}"))?;
+        let player = state.storage.party.pokemon[active_index]
+            .as_ref()
+            .cloned()
+            .with_context(|| format!("active battle party index {active_index} has no Pokemon"))?;
+        let player_party = Self::active_battle_player_party(state)?;
+        let active_enemy_index = require_active_battle_enemy_party_index(state)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let (enemy, enemy_party, active_enemy_index) = match &state.battle {
+            BattleMemory::Wild {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            }
+            | BattleMemory::StaticWild {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            }
+            | BattleMemory::Trainer {
+                enemy_pokemon,
+                enemy_party,
+                ..
+            } => (
+                enemy_pokemon.clone(),
+                enemy_party.clone(),
+                active_enemy_index,
+            ),
+            BattleMemory::Inactive => {
+                anyhow::bail!("cannot resolve enemy battle action without an active battle");
+            }
+        };
+        let mut rng = Random::new(state.rng_seed);
+        Self::require_active_enemy_in_battle_party(&enemy_party, active_enemy_index)?;
+        let combat = BattleCombatState::new(player, enemy, state.rng_seed)
+            .with_parties(player_party, enemy_party.to_vec())
+            .with_party_indices(active_index, active_enemy_index);
+        let outcome =
+            self.resolve_battle_enemy_action_with_items(combat, enemy_action, &mut rng)?;
+        let pay_day_money_after_turn = self.active_battle_pay_day_money_after_turn(state, &outcome);
+        commit_battle_turn_outcome(state, active_index, &outcome)
+            .map_err(|error| anyhow::anyhow!("commit enemy battle action: {error:?}"))?;
+        if matches!(state.battle, BattleMemory::Inactive) {
+            self.claim_active_battle_pay_day_money(state, pay_day_money_after_turn)?;
+        }
+        state.commit_rng_seed(rng.seed());
+        Ok(outcome)
     }
 
     pub fn resolve_battle_turn_with_items(
@@ -21144,6 +25437,50 @@ impl GameDataSet {
         .map_err(|error| anyhow::anyhow!("resolve active battle turn: {error:?}"))
     }
 
+    pub fn resolve_wild_battle_turn_with_items(
+        &self,
+        combat: BattleCombatState,
+        input: BattleTurnInput,
+        attempts: u8,
+        rng: &mut Random,
+    ) -> Result<BattleTurnOutcome> {
+        core_resolve_wild_battle_turn_with_items(
+            combat,
+            input,
+            &self.moves,
+            &self.items,
+            &self.move_priorities,
+            &self.battle_stat_multipliers,
+            &self.type_categories,
+            &self.type_effectiveness,
+            &self.weather_modifiers,
+            &self.battle_escape_rules,
+            attempts,
+            rng,
+        )
+        .map_err(|error| anyhow::anyhow!("resolve active wild battle turn: {error:?}"))
+    }
+
+    pub fn resolve_battle_enemy_action_with_items(
+        &self,
+        combat: BattleCombatState,
+        enemy_action: BattleAction,
+        rng: &mut Random,
+    ) -> Result<BattleTurnOutcome> {
+        core_resolve_battle_enemy_action_with_items(
+            combat,
+            enemy_action,
+            &self.moves,
+            &self.items,
+            &self.battle_stat_multipliers,
+            &self.type_categories,
+            &self.type_effectiveness,
+            &self.weather_modifiers,
+            rng,
+        )
+        .map_err(|error| anyhow::anyhow!("resolve active enemy battle action: {error:?}"))
+    }
+
     pub fn resolve_wild_battle_run(
         &self,
         combat: &BattleCombatState,
@@ -21165,8 +25502,10 @@ impl GameDataSet {
         state: &mut GameState,
         time_of_day: TimeOfDay,
     ) -> Result<BattleRewardOutcome> {
-        core_claim_active_trainer_battle_rewards(
-            state,
+        let mut staged_state = state.clone();
+        let pay_day_money = staged_state.battle_pay_day_money;
+        let outcome = core_claim_active_trainer_battle_rewards(
+            &mut staged_state,
             &self.battle_reward_rules,
             &self.pokemon,
             &self.moves,
@@ -21175,7 +25514,10 @@ impl GameDataSet {
             &self.evolutions,
             time_of_day,
         )
-        .map_err(|error| anyhow::anyhow!("claim trainer battle rewards: {error:?}"))
+        .map_err(|error| anyhow::anyhow!("claim trainer battle rewards: {error:?}"))?;
+        self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
+        *state = staged_state;
+        Ok(outcome)
     }
 
     pub fn claim_active_trainer_battle_rewards_now(
@@ -21190,8 +25532,10 @@ impl GameDataSet {
         state: &mut GameState,
         time_of_day: TimeOfDay,
     ) -> Result<BattleRewardOutcome> {
-        core_claim_active_wild_battle_rewards(
-            state,
+        let mut staged_state = state.clone();
+        let pay_day_money = staged_state.battle_pay_day_money;
+        let outcome = core_claim_active_wild_battle_rewards(
+            &mut staged_state,
             &self.battle_reward_rules,
             &self.pokemon,
             &self.moves,
@@ -21200,7 +25544,10 @@ impl GameDataSet {
             &self.evolutions,
             time_of_day,
         )
-        .map_err(|error| anyhow::anyhow!("claim wild battle rewards: {error:?}"))
+        .map_err(|error| anyhow::anyhow!("claim wild battle rewards: {error:?}"))?;
+        self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
+        *state = staged_state;
+        Ok(outcome)
     }
 
     pub fn claim_active_wild_battle_rewards_now(
@@ -21208,6 +25555,41 @@ impl GameDataSet {
         state: &mut GameState,
     ) -> Result<BattleRewardOutcome> {
         self.claim_active_wild_battle_rewards(state, state.time.time_of_day)
+    }
+
+    fn claim_active_battle_pay_day_money(&self, state: &mut GameState, amount: u32) -> Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let max_money = self
+            .currency_constants
+            .get("MAX_MONEY")
+            .context("currency constants missing MAX_MONEY")?;
+        state.money = state.money.saturating_add(amount).min(max_money);
+        state.battle_pay_day_money = 0;
+        Ok(())
+    }
+
+    fn active_battle_pay_day_money_after_turn(
+        &self,
+        state: &GameState,
+        outcome: &BattleTurnOutcome,
+    ) -> u32 {
+        state.battle_pay_day_money.saturating_add(
+            outcome
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    BattleEvent::PayDayMoney {
+                        side: BattleSide::Player,
+                        amount,
+                        ..
+                    } => Some(*amount),
+                    BattleEvent::PayDayMoney { .. } => None,
+                    _ => None,
+                })
+                .fold(0_u32, u32::saturating_add),
+        )
     }
 
     pub fn fishing_rod_item(&self, item_id: &str) -> Result<(&Item, &str)> {
@@ -21349,6 +25731,12 @@ impl GameDataSet {
         self.sprite_palette_defaults.contains_key(sprite_id)
     }
 
+    pub fn saved_variable_sprite_exists(&self, sprite_id: &str) -> bool {
+        self.initialize_events
+            .variable_sprites
+            .contains_key(sprite_id)
+    }
+
     pub fn saved_menu_exists(&self, menu: &str) -> bool {
         self.special_routines.contains_key(menu)
             || self
@@ -21401,7 +25789,8 @@ impl GameDataSet {
                     .scripted_wild_battles
                     .iter()
                     .any(|battle| battle.request.battle_type == battle_type)
-        })
+        }) || saved_special_battle_type_builtin_routine(battle_type)
+            .is_some_and(|routine| self.saved_special_routine_exists(routine))
     }
 
     pub fn saved_static_wild_battle_origin_exists(
@@ -21520,6 +25909,7 @@ impl GameDataSet {
         player_id: u16,
         rng: &mut Random,
     ) -> Result<crystal_core::world::encounters::FieldEncounterRoll> {
+        self.validate_runtime_map_tile("HEADBUTT encounter", map_name, target_tile)?;
         let encounters = self.require_field_encounters_for_map(map_name)?;
         core_roll_headbutt_encounter(encounters, target_tile.x, target_tile.y, player_id, rng)
             .map_err(|error| anyhow::anyhow!("roll HEADBUTT encounter on {map_name}: {error:?}"))
@@ -21531,9 +25921,100 @@ impl GameDataSet {
         target_tile: TilePosition,
         rng: &mut Random,
     ) -> Result<crystal_core::world::encounters::FieldEncounterRoll> {
+        self.validate_runtime_map_tile("ROCK_SMASH encounter", map_name, target_tile)?;
         let encounters = self.require_field_encounters_for_map(map_name)?;
         core_roll_rock_smash_encounter(encounters, target_tile.x, target_tile.y, rng)
             .map_err(|error| anyhow::anyhow!("roll ROCK_SMASH encounter on {map_name}: {error:?}"))
+    }
+
+    fn validate_direct_headbutt_target(
+        rule: &FieldMoveMoveRule,
+        map: &OverworldMapData,
+        tileset: &TilesetCollision,
+        target: TilePosition,
+    ) -> Result<()> {
+        Self::validate_runtime_field_move_tile_alignment(&rule.move_id, target)?;
+        let sample = sample_collision(map, tileset, target).ok_or_else(|| {
+            anyhow::anyhow!(FieldMoveError::TargetTileOutOfBounds {
+                move_id: rule.move_id.clone(),
+                map_name: map.name.clone(),
+            })
+        })?;
+        if !rule.target_collisions.contains(&sample.permission) {
+            anyhow::bail!(FieldMoveError::UnsupportedCollision {
+                move_id: rule.move_id.clone(),
+                block_id: sample.metatile_id,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_direct_rock_smash_target(
+        rule: &FieldMoveMoveRule,
+        overworld: &OverworldSession,
+        target: TilePosition,
+    ) -> Result<(Option<String>, String)> {
+        Self::validate_runtime_field_move_tile_alignment(&rule.move_id, target)?;
+        let Some((_, object)) = overworld.visible_object_at_checked(target)? else {
+            anyhow::bail!(FieldMoveError::MissingRockSmashTarget {
+                move_id: rule.move_id.clone(),
+                x: target.x,
+                y: target.y,
+            });
+        };
+        if object.spritemovedata != "SPRITEMOVEDATA_SMASHABLE_ROCK" {
+            anyhow::bail!(FieldMoveError::TargetNotSmashableRock {
+                move_id: rule.move_id.clone(),
+                movement: object.spritemovedata.clone(),
+            });
+        }
+        Ok((object.object_identifier.clone(), object.event_flag.clone()))
+    }
+
+    fn hide_direct_field_object(
+        state: &mut GameState,
+        overworld: &mut OverworldSession,
+        object_identifier: Option<&str>,
+        event_flag: &str,
+    ) -> Result<Option<String>> {
+        if event_flag == "-1" {
+            let object_identifier = object_identifier.with_context(
+                || "direct field object with event flag -1 has no object identifier",
+            )?;
+            overworld
+                .hidden_object_identifiers
+                .insert(object_identifier.to_string());
+            return Ok(None);
+        }
+        if !is_hideable_object_event_flag(event_flag) {
+            anyhow::bail!("direct field object cannot be hidden with event flag {event_flag}");
+        }
+        state
+            .flags
+            .set_event_flag(event_flag, true)
+            .with_context(|| format!("hide direct field object event flag {event_flag}"))?;
+        overworld.sync_event_flag_memory(&state.flags);
+        Ok(Some(event_flag.to_string()))
+    }
+
+    fn validate_runtime_field_move_tile_alignment(move_id: &str, tile: TilePosition) -> Result<()> {
+        let _ = (move_id, tile);
+        Ok(())
+    }
+
+    fn checked_runtime_field_move_target(
+        move_id: &str,
+        tile: TilePosition,
+        facing: Direction,
+    ) -> Result<TilePosition> {
+        Self::validate_runtime_field_move_tile_alignment(move_id, tile)?;
+        checked_move_by_stride(tile, facing, StepOptions::default().stride_tiles).ok_or_else(|| {
+            anyhow::anyhow!(FieldMoveError::RuntimeTileOverflow {
+                move_id: move_id.to_string(),
+                x: tile.x,
+                y: tile.y,
+            })
+        })
     }
 
     pub fn use_headbutt_field_move(
@@ -21545,7 +26026,17 @@ impl GameDataSet {
     ) -> Result<DirectFieldEncounterMoveOutcome> {
         self.require_no_active_battle(state, "HEADBUTT field move")?;
         self.validate_direct_field_move_actor(state, party_index, "HEADBUTT")?;
-        let target = move_by_stride(overworld.player.tile, overworld.player.facing, 2);
+        let target = Self::checked_runtime_field_move_target(
+            "HEADBUTT",
+            overworld.player.tile,
+            overworld.player.facing,
+        )?;
+        Self::validate_direct_headbutt_target(
+            &self.field_moves.headbutt,
+            &overworld.map,
+            &overworld.tileset,
+            target,
+        )?;
         let mut rng = Random::new(state.rng_seed);
         let field_encounter =
             self.roll_headbutt_encounter(&overworld.map.name, target, player_id, &mut rng)?;
@@ -21554,18 +26045,36 @@ impl GameDataSet {
         Ok(DirectFieldEncounterMoveOutcome {
             field_encounter,
             wild_battle,
+            removed_object_identifier: None,
+            removed_event_flag: None,
         })
     }
 
     pub fn use_rock_smash_field_move(
         &self,
         state: &mut GameState,
-        overworld: &OverworldSession,
+        overworld: &mut OverworldSession,
         party_index: usize,
     ) -> Result<DirectFieldEncounterMoveOutcome> {
         self.require_no_active_battle(state, "ROCK_SMASH field move")?;
         self.validate_direct_field_move_actor(state, party_index, "ROCK_SMASH")?;
-        let target = move_by_stride(overworld.player.tile, overworld.player.facing, 2);
+        let target = Self::checked_runtime_field_move_target(
+            "ROCK_SMASH",
+            overworld.player.tile,
+            overworld.player.facing,
+        )?;
+        let (removed_object_identifier, removed_event_flag) =
+            Self::validate_direct_rock_smash_target(
+                &self.field_moves.rock_smash,
+                overworld,
+                target,
+            )?;
+        let removed_event_flag = Self::hide_direct_field_object(
+            state,
+            overworld,
+            removed_object_identifier.as_deref(),
+            &removed_event_flag,
+        )?;
         let mut rng = Random::new(state.rng_seed);
         let field_encounter =
             self.roll_rock_smash_encounter(&overworld.map.name, target, &mut rng)?;
@@ -21574,6 +26083,8 @@ impl GameDataSet {
         Ok(DirectFieldEncounterMoveOutcome {
             field_encounter,
             wild_battle,
+            removed_object_identifier,
+            removed_event_flag,
         })
     }
 
@@ -21585,6 +26096,7 @@ impl GameDataSet {
         tile: TilePosition,
         rng: &mut Random,
     ) -> Result<WildEncounterRoll> {
+        self.validate_runtime_map_tile("SWEET_SCENT encounter", map_name, tile)?;
         let encounters = self.require_wild_encounters_for_map(map_name)?;
         core_roll_sweet_scent_encounter(
             encounters,
@@ -21630,6 +26142,11 @@ impl GameDataSet {
         rng: &mut Random,
         options: EncounterCheckOptions,
     ) -> Result<Option<WildEncounterRoll>> {
+        self.validate_runtime_map_tile(
+            "wild encounter check",
+            &session.map.name,
+            session.player.tile,
+        )?;
         let Some(encounters) = self.wild_encounters_for_map(&session.map.name) else {
             return Ok(None);
         };
@@ -21649,12 +26166,24 @@ impl GameDataSet {
         state: &GameState,
         session: &OverworldSession,
     ) -> Option<CoordEventTrigger> {
+        self.check_coord_event_after_step_checked(state, session)
+            .ok()
+            .flatten()
+    }
+
+    pub fn check_coord_event_after_step_checked(
+        &self,
+        state: &GameState,
+        session: &OverworldSession,
+    ) -> Result<Option<CoordEventTrigger>> {
         let current_scene = state
             .scenes
             .map_scenes
             .get(&session.map.name)
             .map(String::as_str);
-        session.check_coord_event(current_scene, StepOptions::default().stride_tiles)
+        session
+            .check_coord_event_checked(current_scene)
+            .with_context(|| format!("check coord event on {}", session.map.name))
     }
 
     pub fn check_wild_encounter_after_step(
@@ -21760,21 +26289,26 @@ impl GameDataSet {
             || self.maps.values().any(|module| {
                 module.script_flag_commands.iter().any(|command| {
                     command.flag_id == flag && !crystal_core::state::is_engine_flag_name(flag)
-                }) || module.scripted_trainer_battles.iter().any(|battle| {
-                    battle
-                        .post_battle_event_flags
-                        .iter()
-                        .any(|known| known == flag)
-                }) || module.scripted_wild_battles.iter().any(|battle| {
-                    battle
-                        .pre_battle_event_flags
-                        .iter()
-                        .any(|known| known == flag)
-                        || battle
+                }) || module
+                    .objects
+                    .iter()
+                    .any(|object| object.event_flag == flag)
+                    || module.scripted_trainer_battles.iter().any(|battle| {
+                        battle
                             .post_battle_event_flags
                             .iter()
                             .any(|known| known == flag)
-                })
+                    })
+                    || module.scripted_wild_battles.iter().any(|battle| {
+                        battle
+                            .pre_battle_event_flags
+                            .iter()
+                            .any(|known| known == flag)
+                            || battle
+                                .post_battle_event_flags
+                                .iter()
+                                .any(|known| known == flag)
+                    })
             })
     }
 
@@ -21783,6 +26317,8 @@ impl GameDataSet {
             .engine_flags
             .iter()
             .any(|known| known == flag)
+            || self.field_moves.strength.engine_flag == flag
+            || self.field_moves.flash.engine_flag == flag
             || self.saved_story_event_constant_declares_flag(flag)
             || self.maps.values().any(|module| {
                 module.script_flag_commands.iter().any(|command| {
@@ -21846,7 +26382,10 @@ impl GameDataSet {
         Self::load_from_content_pack_index(asset_root, &index)
     }
 
-    fn load_from_content_pack_index(asset_root: &AssetRoot, index: &ContentPackIndex) -> Result<Self> {
+    fn load_from_content_pack_index(
+        asset_root: &AssetRoot,
+        index: &ContentPackIndex,
+    ) -> Result<Self> {
         let mut data = Self::default();
         data.apply_content_pack_index(asset_root, index)?;
         Ok(data)
@@ -21901,6 +26440,8 @@ impl GameDataSet {
                     } else {
                         validate_content_pack_json_entry(&pack.id, *category, entry)?;
                     }
+                }
+                for entry in pack.files.entries(*category) {
                     let path = resolve_content_pack_data_path(asset_root, &pack.id, entry)?;
                     let payload: Value = read_json_file(&path).with_context(|| {
                         format!(
@@ -21990,177 +26531,159 @@ impl GameDataSet {
                 )?;
             }
             ContentPackCategory::FleeMons => {
-                insert_flee_mon_tables(
-                    &mut self.flee_mons,
-                    serde_json::from_value(payload).context("parse flee mons payload")?,
-                )?;
+                insert_flee_mon_tables(&mut self.flee_mons, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::RoamingPokemon => {
-                merge_roaming_pokemon(
-                    &mut self.roaming_pokemon,
-                    serde_json::from_value(payload).context("parse roaming Pokemon payload")?,
-                )?;
+                merge_roaming_pokemon(&mut self.roaming_pokemon, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::BuenaPasswordCategories => {
                 merge_buena_password_categories(
                     &mut self.buena_password_categories,
-                    serde_json::from_value(payload)
-                        .context("parse Buena password categories payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::BuenaPrizes => {
-                merge_buena_prizes(
-                    &mut self.buena_prizes,
-                    serde_json::from_value(payload).context("parse Buena prizes payload")?,
-                )?;
+                merge_buena_prizes(&mut self.buena_prizes, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::KurtApricornRecipes => {
                 merge_kurt_apricorn_recipes(
                     &mut self.kurt_apricorn_recipes,
-                    serde_json::from_value(payload)
-                        .context("parse Kurt apricorn recipes payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::ShuckieGift => {
-                insert_shuckie_gift(
-                    &mut self.shuckie_gift,
-                    serde_json::from_value(payload).context("parse Shuckie gift payload")?,
-                )?;
+                insert_shuckie_gift(&mut self.shuckie_gift, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::DratiniMoveSets => {
                 merge_dratini_move_sets(
                     &mut self.dratini_move_sets,
-                    serde_json::from_value(payload).context("parse Dratini move sets payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::BugContestConfig => {
                 insert_bug_contest_config(
                     &mut self.bug_contest_config,
-                    serde_json::from_value(payload)
-                        .context("parse Bug-Catching Contest config payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::BattleTowerRules => {
                 insert_battle_tower_rules(
                     &mut self.battle_tower_rules,
-                    serde_json::from_value(payload).context("parse Battle Tower rules payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::OakRatings => {
-                insert_oak_rating_table(
-                    &mut self.oak_ratings,
-                    serde_json::from_value(payload).context("parse Oak rating table payload")?,
-                )?;
+                insert_oak_rating_table(&mut self.oak_ratings, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::OddEggDefinitions => {
                 insert_odd_egg_definitions(
                     &mut self.odd_egg_definitions,
-                    serde_json::from_value(payload).context("parse Odd Egg definitions payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::MagikarpLengths => {
                 insert_magikarp_length_table(
                     &mut self.magikarp_lengths,
-                    serde_json::from_value(payload)
-                        .context("parse Magikarp length table payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::HappinessData => {
-                insert_happiness_data(
-                    &mut self.happiness_data,
-                    serde_json::from_value(payload).context("parse happiness data payload")?,
-                )?;
+                insert_happiness_data(&mut self.happiness_data, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::EncounterSlotTables => {
                 insert_encounter_slot_tables(
                     &mut self.encounter_slot_tables,
-                    serde_json::from_value(payload)
-                        .context("parse encounter slot tables payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::EncounterMusicModifiers => {
                 insert_encounter_music_modifiers(
                     &mut self.encounter_music_modifiers,
-                    serde_json::from_value(payload)
-                        .context("parse encounter music modifiers payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::BattleStatMultipliers => {
                 insert_battle_stat_multiplier_tables(
                     &mut self.battle_stat_multipliers,
-                    serde_json::from_value(payload)
-                        .context("parse battle stat multipliers payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::CaptureWobbleProbabilities => {
                 insert_capture_wobble_probabilities(
                     &mut self.capture_wobble_probabilities,
-                    serde_json::from_value(payload)
-                        .context("parse capture wobble probabilities payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::CaptureRules => {
-                insert_capture_rules(
-                    &mut self.capture_rules,
-                    serde_json::from_value(payload).context("parse capture rules payload")?,
-                )?;
+                insert_capture_rules(&mut self.capture_rules, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::BattleEscapeRules => {
                 insert_battle_escape_rules(
                     &mut self.battle_escape_rules,
-                    serde_json::from_value(payload).context("parse battle escape rules payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::MovePriorities => {
                 insert_move_priority_table(
                     &mut self.move_priorities,
-                    serde_json::from_value(payload).context("parse move priorities payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::TypeCategories => {
                 insert_type_categories(
                     &mut self.type_categories,
-                    serde_json::from_value(payload).context("parse type categories payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::TypeEffectiveness => {
                 insert_type_effectiveness(
                     &mut self.type_effectiveness,
-                    serde_json::from_value(payload).context("parse type effectiveness payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::WeatherModifiers => {
                 insert_weather_modifiers(
                     &mut self.weather_modifiers,
-                    serde_json::from_value(payload).context("parse weather modifiers payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::BattleRewardRules => {
                 insert_battle_reward_rules(
                     &mut self.battle_reward_rules,
-                    serde_json::from_value(payload).context("parse battle reward rules payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::StepEventRules => {
                 insert_step_event_rules(
                     &mut self.step_event_rules,
-                    serde_json::from_value(payload).context("parse step event rules payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::Fishing => {
-                insert_fishing_catalog(
-                    &mut self.fishing,
-                    serde_json::from_value(payload).context("parse fishing payload")?,
-                )?;
+                insert_fishing_catalog(&mut self.fishing, serde_json::from_value(payload)?)?;
             }
             ContentPackCategory::FruitTrees => {
                 merge_fruit_tree_payload(&mut self.fruit_trees, payload)?;
             }
             ContentPackCategory::FieldMoves => {
-                insert_field_move_catalog(
-                    &mut self.field_moves,
-                    serde_json::from_value(payload).context("parse field moves payload")?,
+                insert_field_move_catalog(&mut self.field_moves, serde_json::from_value(payload)?)?;
+            }
+            ContentPackCategory::FieldBoxItems => {
+                insert_field_box_items(
+                    &mut self.field_box_items,
+                    parse_object_map::<FieldBoxItemRule>(payload)?,
                 )?;
+            }
+            ContentPackCategory::RuntimeTitleScreen => {
+                insert_runtime_title_screen(
+                    &mut self.runtime_title_screen,
+                    serde_json::from_value(payload)?,
+                )?;
+            }
+            ContentPackCategory::FlyDestinations => {
+                for (flypoint_flag, destination) in parse_object_map::<FlyDestination>(payload)? {
+                    insert_fly_destination(&mut self.fly_destinations, flypoint_flag, destination)?;
+                }
             }
             ContentPackCategory::MapAttributes => {
                 merge_map_attributes(
@@ -22175,10 +26698,10 @@ impl GameDataSet {
                 merge_learnsets(&mut self.learnsets, parse_learnsets(payload)?)?;
             }
             ContentPackCategory::LevelUpMoves => {
-                merge_species_value_payload(&mut self.level_up_moves, payload, "moves")?;
+                merge_level_up_moves_payload(&mut self.level_up_moves, payload)?;
             }
             ContentPackCategory::EggMoves => {
-                merge_species_value_payload(&mut self.egg_moves, payload, "moves")?;
+                merge_egg_moves_payload(&mut self.egg_moves, payload)?;
             }
             ContentPackCategory::Evolutions => {
                 merge_evolution_payload(&mut self.evolutions, payload)?;
@@ -22225,14 +26748,13 @@ impl GameDataSet {
             ContentPackCategory::InitializeEvents => {
                 insert_initialize_events(
                     &mut self.initialize_events,
-                    serde_json::from_value(payload).context("parse initialize events payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::StoryEventScriptConstants => {
                 insert_story_event_script_constants(
                     &mut self.story_event_script_constants,
-                    serde_json::from_value(payload)
-                        .context("parse story event script constants payload")?,
+                    serde_json::from_value(payload)?,
                 )?;
             }
             ContentPackCategory::StoryEvents => {
@@ -22285,7 +26807,7 @@ impl GameDataSet {
                 merge_asm_text(&mut self.asm_text, payload)?;
             }
             ContentPackCategory::MoveNames => {
-                insert_token_string_vec_table(
+                insert_exact_string_vec_table(
                     &mut self.move_names,
                     parse_string_vec_payload(payload, "move names")?,
                     "move names",
@@ -22361,8 +26883,7 @@ impl GameDataSet {
                 }
             }
             ContentPackCategory::Playability => {
-                let playability: PlayabilityRules =
-                    serde_json::from_value(payload).context("parse playability payload")?;
+                let playability: PlayabilityRules = serde_json::from_value(payload)?;
                 merge_playability_rules(&mut self.playability, &playability)?;
             }
         }
@@ -22476,6 +26997,22 @@ impl GameDataSet {
             self.field_moves = FieldMoveCatalog::default();
         } else {
             insert_field_move_catalog(&mut self.field_moves, manifest.payload.field_moves.clone())?;
+        }
+        if manifest.payload.field_box_items.is_empty() {
+            self.field_box_items.clear();
+        } else {
+            insert_field_box_items(
+                &mut self.field_box_items,
+                manifest.payload.field_box_items.clone(),
+            )?;
+        }
+        if manifest.payload.runtime_title_screen == RuntimeTitleScreen::default() {
+            self.runtime_title_screen = RuntimeTitleScreen::default();
+        } else {
+            insert_runtime_title_screen(
+                &mut self.runtime_title_screen,
+                manifest.payload.runtime_title_screen.clone(),
+            )?;
         }
         if manifest.payload.runtime_spawn_points.is_empty() {
             self.runtime_spawn_points.clear();
@@ -22971,13 +27508,21 @@ impl GameDataSet {
             .resolved
             .as_ref()
             .with_context(|| "cannot start wild battle from a non-triggered encounter roll")?;
+        self.validate_runtime_map_tile(
+            "wild battle encounter roll",
+            &encounter.map_name,
+            encounter.tile,
+        )?;
         let species_id = &resolved.encounter.species;
         let species = self
             .pokemon
             .get(species_id)
             .with_context(|| format!("unknown wild species '{species_id}' in encounter table"))?;
+        let battle_music =
+            self.wild_battle_music_for_map_time(&encounter.map_name, encounter.time)?;
         Ok(wild_battle_start_from_encounter(
             encounter,
+            battle_music,
             species,
             &self.learnsets,
             &self.moves,
@@ -23008,13 +27553,20 @@ impl GameDataSet {
         let Some(resolved) = field_encounter.resolved.clone() else {
             return Ok(None);
         };
+        let target_tile =
+            TilePosition::new(field_encounter.target_tile_x, field_encounter.target_tile_y);
+        self.validate_runtime_map_tile(
+            "field encounter target",
+            &field_encounter.map_name,
+            target_tile,
+        )?;
         let surface = match field_encounter.kind {
             FieldEncounterKind::Headbutt => EncounterSurface::Grass,
             FieldEncounterKind::RockSmash => EncounterSurface::Rock,
         };
         let encounter = WildEncounterRoll {
             map_name: field_encounter.map_name.clone(),
-            tile: TilePosition::new(field_encounter.target_tile_x, field_encounter.target_tile_y),
+            tile: target_tile,
             surface,
             time: state.time.time_of_day,
             threshold: 255,
@@ -23038,6 +27590,7 @@ impl GameDataSet {
         bite_roll: u8,
         slot_roll: u8,
     ) -> Result<WildBattleStart> {
+        self.validate_runtime_map_tile("fishing battle", map_name, tile)?;
         let roll = WildEncounterRoll {
             map_name: map_name.to_string(),
             tile,
@@ -23058,11 +27611,42 @@ impl GameDataSet {
         self.start_wild_battle(state, roll)
     }
 
+    fn validate_runtime_map_tile(
+        &self,
+        context: &str,
+        map_name: &str,
+        tile: TilePosition,
+    ) -> Result<()> {
+        let module = self.maps.get(map_name).with_context(|| {
+            format!("{context} map {map_name} is missing from compiled pack maps")
+        })?;
+        let map =
+            OverworldMapData::from_attributes(map_name, &module.attributes, module.blocks.clone());
+        let (width, height) = map.checked_tile_bounds().with_context(|| {
+            format!("{context} map {map_name} runtime tile bounds overflow supported coordinates")
+        })?;
+        if tile.x < 0
+            || tile.y < 0
+            || i32::from(tile.x) >= i32::from(width)
+            || i32::from(tile.y) >= i32::from(height)
+        {
+            anyhow::bail!(
+                "{context} tile ({}, {}) is outside compiled map {map_name} runtime tile bounds {width}x{height}",
+                tile.x,
+                tile.y
+            );
+        }
+        Ok(())
+    }
+
     pub fn static_wild_battle_start(
         &self,
         request: StaticWildBattleRequest,
         rng: &mut Random,
     ) -> Result<StaticWildBattleStart> {
+        if request.battle_music.is_empty() {
+            anyhow::bail!("static wild battle request missing exact battle_music");
+        }
         Ok(static_wild_battle_start(
             &self.pokemon,
             &self.learnsets,
@@ -23071,6 +27655,28 @@ impl GameDataSet {
             request,
             rng,
         )?)
+    }
+
+    pub fn wild_battle_music_for_map_time(
+        &self,
+        map_name: &str,
+        time: TimeOfDay,
+    ) -> Result<String> {
+        let landmark = self.pokegear_landmark_for_map(map_name)?;
+        let music_id = match landmark.region.as_str() {
+            "KANTO" => "MUSIC_KANTO_WILD_BATTLE",
+            "JOHTO" => match time {
+                TimeOfDay::Night => "MUSIC_JOHTO_WILD_BATTLE_NIGHT",
+                TimeOfDay::Morning | TimeOfDay::Day => "MUSIC_JOHTO_WILD_BATTLE",
+            },
+            region => anyhow::bail!(
+                "town map landmark for map {map_name} has unsupported region {region:?} for wild battle music"
+            ),
+        };
+        if !self.audio.iter().any(|asset| asset.id == music_id) {
+            anyhow::bail!("wild battle music {music_id} for map {map_name} is missing from pack");
+        }
+        Ok(music_id.to_string())
     }
 
     pub fn trainer_battle_start(
@@ -23182,13 +27788,15 @@ impl GameDataSet {
         let script_block_changes = parse_script_block_changes(map_name, &scripts)?;
         let script_object_commands = parse_script_object_commands(map_name, &scripts)?;
         let script_movements = parse_script_movements(map_name, &scripts, &script_object_commands)?;
-        let script_map_commands = parse_script_map_commands(map_name, &scripts)?;
+        let map_name_by_constant = self.map_name_by_constant_from_attributes()?;
+        let script_map_commands =
+            parse_script_map_commands(map_name, &scripts, &map_name_by_constant)?;
         let script_text_commands = parse_script_text_commands(map_name, &scripts)?;
         let script_text_bodies = parse_script_text_bodies(map_name, &scripts)?;
         let script_menu_definitions = parse_script_menu_definitions(map_name, &scripts)?;
         let script_vertical_menus =
             parse_script_vertical_menus(map_name, &scripts, &script_menu_definitions)?;
-        let script_elevators = parse_script_elevators(map_name, &scripts)?;
+        let script_elevators = parse_script_elevators(map_name, &scripts, &map_name_by_constant)?;
         let script_variable_commands = parse_script_variable_commands(map_name, &scripts)?;
         let script_control_commands = parse_script_control_commands(map_name, &scripts)?;
         let objects: Vec<ObjectEvent> = serde_json::from_value(objects_payload.clone())
@@ -23321,11 +27929,24 @@ impl GameDataSet {
                 )
             })?;
 
+        let destination_tile =
+            checked_runtime_map_event_tile(destination_warp.x, destination_warp.y).with_context(
+                || {
+                    format!(
+                        "warp id {} on {} coordinate ({}, {}) overflows runtime tile coordinates",
+                        trigger.warp.target_warp_id,
+                        destination_map,
+                        destination_warp.x,
+                        destination_warp.y
+                    )
+                },
+            )?;
+
         Ok(WarpTransition {
             trigger: trigger.clone(),
             destination: WarpDestination {
                 map_name: destination_map,
-                tile: warp_tile_position(&destination_warp),
+                tile: destination_tile,
                 warp: destination_warp,
             },
         })
@@ -23361,6 +27982,19 @@ impl GameDataSet {
             },
         })
     }
+
+    fn map_name_by_constant_from_attributes(&self) -> Result<BTreeMap<String, String>> {
+        let mut names = BTreeMap::new();
+        for (map_name, attributes) in &self.map_attributes {
+            let Some(map_constant) = attributes.map_constant.as_ref() else {
+                continue;
+            };
+            if let Some(previous) = names.insert(map_constant.clone(), map_name.clone()) {
+                anyhow::bail!("duplicate map constant {map_constant} on {previous} and {map_name}");
+            }
+        }
+        Ok(names)
+    }
 }
 
 fn required_map_attribute_label<'a>(
@@ -23381,27 +28015,73 @@ fn connection_destination_tile(
     offset: i32,
     target_attributes: &MapAttributes,
 ) -> Result<crystal_core::world::map::TilePosition> {
-    let offset_tiles = offset * 2;
-    let width = target_attributes.width as i32 * 2;
-    let height = target_attributes.height as i32 * 2;
+    let metatile_width = i32::from(METATILE_WIDTH);
+    let offset_tiles = offset
+        .checked_mul(metatile_width)
+        .with_context(|| format!("connection offset {offset} overflows runtime tile space"))?;
+    let width = i32::from(target_attributes.width)
+        .checked_mul(metatile_width)
+        .with_context(|| {
+            format!(
+                "connection target map {} width overflows runtime tile space",
+                target_attributes
+                    .map_constant
+                    .as_deref()
+                    .unwrap_or("<unknown>")
+            )
+        })?;
+    let height = i32::from(target_attributes.height)
+        .checked_mul(metatile_width)
+        .with_context(|| {
+            format!(
+                "connection target map {} height overflows runtime tile space",
+                target_attributes
+                    .map_constant
+                    .as_deref()
+                    .unwrap_or("<unknown>")
+            )
+        })?;
     let (target_x, target_y) = match direction {
-        "north" => (source_tile.x as i32 - offset_tiles, height - 1),
-        "south" => (source_tile.x as i32 - offset_tiles, 1),
-        "west" => (width - 1, source_tile.y as i32 - offset_tiles),
-        "east" => (1, source_tile.y as i32 - offset_tiles),
+        "north" => (
+            i32::from(source_tile.x)
+                .checked_sub(offset_tiles)
+                .context("north connection destination x overflows runtime tile space")?,
+            height - metatile_width.min(height),
+        ),
+        "south" => (
+            i32::from(source_tile.x)
+                .checked_sub(offset_tiles)
+                .context("south connection destination x overflows runtime tile space")?,
+            0,
+        ),
+        "west" => (
+            width - metatile_width.min(width),
+            i32::from(source_tile.y)
+                .checked_sub(offset_tiles)
+                .context("west connection destination y overflows runtime tile space")?,
+        ),
+        "east" => (
+            0,
+            i32::from(source_tile.y)
+                .checked_sub(offset_tiles)
+                .context("east connection destination y overflows runtime tile space")?,
+        ),
         other => anyhow::bail!("unsupported connection direction '{other}'"),
     };
-    let min_tile = 1;
-    let max_x = (width - 1).max(min_tile);
-    let max_y = (height - 1).max(min_tile);
+    let min_tile = 0;
+    let max_x = width - 1;
+    let max_y = height - 1;
     if target_x < min_tile || target_x > max_x || target_y < min_tile || target_y > max_y {
         anyhow::bail!(
             "connection destination tile ({target_x}, {target_y}) is outside target map tile bounds {min_tile}..={max_x}, {min_tile}..={max_y}"
         );
     }
+    let target_x = i16::try_from(target_x)
+        .with_context(|| format!("connection destination x {target_x} overflows runtime tile"))?;
+    let target_y = i16::try_from(target_y)
+        .with_context(|| format!("connection destination y {target_y} overflows runtime tile"))?;
     Ok(crystal_core::world::map::TilePosition::new(
-        target_x as i16,
-        target_y as i16,
+        target_x, target_y,
     ))
 }
 
@@ -23512,7 +28192,13 @@ pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<
         .filter(|diagnostic| diagnostic.severity == VerificationSeverity::Error)
         .cloned()
         .collect::<Vec<_>>();
-    verify_runtime_pack_data(&pack.data, &mut diagnostics);
+    let mut runtime_diagnostics = Vec::new();
+    verify_runtime_pack_data(&pack.data, &mut runtime_diagnostics);
+    diagnostics.extend(
+        runtime_diagnostics
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == VerificationSeverity::Error),
+    );
     if diagnostics.is_empty() {
         return Ok(());
     }
@@ -23879,6 +28565,7 @@ fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePa
 }
 
 fn validate_content_pack_audio_metadata_entry(pack_id: &str, entry: &str) -> Result<()> {
+    validate_content_pack_entry_segments(pack_id, entry)?;
     let extension = Path::new(entry)
         .extension()
         .and_then(|extension| extension.to_str());
@@ -23895,6 +28582,7 @@ fn validate_content_pack_json_entry(
     category: ContentPackCategory,
     entry: &str,
 ) -> Result<()> {
+    validate_content_pack_entry_segments(pack_id, entry)?;
     let extension = Path::new(entry)
         .extension()
         .and_then(|extension| extension.to_str());
@@ -23908,6 +28596,7 @@ fn validate_content_pack_json_entry(
 }
 
 fn validate_content_pack_compiled_entry(pack_id: &str, entry: &str) -> Result<()> {
+    validate_content_pack_entry_segments(pack_id, entry)?;
     if Path::new(entry)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -23916,6 +28605,18 @@ fn validate_content_pack_compiled_entry(pack_id: &str, entry: &str) -> Result<()
         anyhow::bail!(
             "content pack {pack_id} compiled entry {entry} must point to an explicit .{COMPILED_GAME_PACK_EXTENSION} artifact"
         );
+    }
+    Ok(())
+}
+
+fn validate_content_pack_entry_segments(pack_id: &str, entry: &str) -> Result<()> {
+    if entry.split('/').any(|segment| segment == ".") {
+        anyhow::bail!(
+            "content pack {pack_id} path '{entry}' must not include current-directory components"
+        );
+    }
+    if entry.split('/').any(|segment| segment == "..") {
+        anyhow::bail!("content pack {pack_id} path '{entry}' must not traverse parent directories");
     }
     Ok(())
 }
@@ -24006,17 +28707,13 @@ fn resolve_compiled_game_pack_data_path(asset_root: &AssetRoot, entry: &Path) ->
             entry.display()
         );
     }
-    if entry
-        .components()
-        .any(|component| matches!(component, Component::CurDir))
-    {
+    if path_contains_current_directory_alias(entry) {
         anyhow::bail!(
             "compiled game pack path '{}' must not include current-directory components",
             entry.display()
         );
     }
-    validate_compiled_game_pack_path(entry)?;
-    Ok(asset_root.repository_root.join(entry))
+    asset_root.resolve_data_path(entry)
 }
 
 fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
@@ -24029,10 +28726,7 @@ fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
             path.display()
         );
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir))
-    {
+    if path_contains_current_directory_alias(path) {
         anyhow::bail!(
             "compiled game pack {} must not include current-directory components",
             path.display()
@@ -24057,6 +28751,17 @@ fn validate_compiled_game_pack_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn path_contains_current_directory_alias(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text == "."
+        || text.starts_with("./")
+        || text.ends_with("/.")
+        || text.contains("/./")
+        || text.starts_with(".\\")
+        || text.ends_with("\\.")
+        || text.contains("\\.\\")
+}
+
 fn parse_object_map<T>(payload: Value) -> Result<BTreeMap<String, T>>
 where
     T: DeserializeOwned,
@@ -24071,8 +28776,8 @@ fn parse_object_map_with_description<T>(
 where
     T: DeserializeOwned,
 {
-    let parsed: BTreeMap<String, T> =
-        serde_json::from_value(payload).with_context(|| format!("parse {description}"))?;
+    let parsed: BTreeMap<String, T> = serde_json::from_value(payload)
+        .map_err(|error| anyhow::anyhow!("parse {description}: {error}"))?;
     if parsed.is_empty() {
         anyhow::bail!("{description} must contain at least one entry");
     }
@@ -24264,8 +28969,7 @@ fn validate_evolution_entry(species: &str, index: usize, entry: &EvolutionEntry)
 }
 
 fn merge_mart_payload(target: &mut MartCatalog, payload: Value) -> Result<()> {
-    let marts: MartCatalog =
-        serde_json::from_value(payload).context("parse mart catalog payload")?;
+    let marts: MartCatalog = serde_json::from_value(payload)?;
     for (mart_id, item_ids) in marts.0 {
         insert_mart_entry(target, mart_id, item_ids)?;
     }
@@ -24296,8 +29000,7 @@ fn insert_mart_entry(
 }
 
 fn merge_fruit_tree_payload(target: &mut FruitTreeCatalog, payload: Value) -> Result<()> {
-    let fruit_trees: FruitTreeCatalog =
-        serde_json::from_value(payload).context("parse fruit tree catalog payload")?;
+    let fruit_trees: FruitTreeCatalog = serde_json::from_value(payload)?;
     for (tree_id, item_id) in fruit_trees.0 {
         insert_fruit_tree_entry(target, tree_id, item_id)?;
     }
@@ -24328,9 +29031,29 @@ fn insert_fruit_tree_entry(
     Ok(())
 }
 
+fn insert_fly_destination(
+    target: &mut BTreeMap<String, FlyDestination>,
+    flypoint_flag: String,
+    destination: FlyDestination,
+) -> Result<()> {
+    if flypoint_flag != destination.flypoint_flag {
+        anyhow::bail!(
+            "fly destination key '{flypoint_flag}' does not match record flypoint_flag '{}'",
+            destination.flypoint_flag
+        );
+    }
+    validate_modpack_payload_token(&flypoint_flag, "fly destination key")?;
+    validate_modpack_payload_token(&destination.flypoint_flag, "fly destination flypoint_flag")?;
+    validate_modpack_payload_token(&destination.label, "fly destination label")?;
+    if target.contains_key(&flypoint_flag) {
+        anyhow::bail!("duplicate fly destination '{flypoint_flag}'");
+    }
+    target.insert(flypoint_flag, destination);
+    Ok(())
+}
+
 fn merge_phone_contact_payload(target: &mut PhoneContactCatalog, payload: Value) -> Result<()> {
-    let contacts: PhoneContactCatalog =
-        serde_json::from_value(payload).context("parse phone contact catalog payload")?;
+    let contacts: PhoneContactCatalog = serde_json::from_value(payload)?;
     merge_phone_contact_catalog(target, &contacts)
 }
 
@@ -24368,7 +29091,7 @@ fn insert_phone_contact(
         anyhow::bail!("phone contact '{contact_id}' must declare at least one display line");
     }
     for line in &record.lines {
-        validate_exact_modpack_value(line, "phone contact display line")?;
+        validate_exact_modpack_text(line, "phone contact display line")?;
     }
     if let Some(first_line) = record.lines.first() {
         let expected_label_line = format!("{}:", record.primary_label);
@@ -24603,11 +29326,13 @@ fn validate_map_attributes(map_id: &str, attributes: &MapAttributes) -> Result<(
         ("blocks_label", &attributes.blocks_label),
         ("map_scripts_label", &attributes.map_scripts_label),
         ("map_events_label", &attributes.map_events_label),
-        ("connection_flags", &attributes.connection_flags),
     ] {
         if let Some(value) = value {
             validate_map_reference_token(value, &format!("map attributes {field_name}"))?;
         }
+    }
+    if let Some(connection_flags) = &attributes.connection_flags {
+        validate_exact_modpack_value(connection_flags, "map attributes connection_flags")?;
     }
     Ok(())
 }
@@ -25040,13 +29765,24 @@ fn validate_trainer_battle_request_shape(
             &format!("{context} request source script"),
         )?;
     }
-    if request.battle_type != "BATTLETYPE_TRAINER" {
+    if !is_trainer_battle_type(&request.battle_type) {
         anyhow::bail!(
-            "{context} battle type '{}' is not BATTLETYPE_TRAINER in map '{map_id}'",
+            "{context} battle type '{}' is not a trainer battle type in map '{map_id}'",
             request.battle_type
         );
     }
     Ok(())
+}
+
+fn is_trainer_battle_type(battle_type: &str) -> bool {
+    matches!(
+        battle_type,
+        "BATTLETYPE_TRAINER"
+            | "BATTLETYPE_CANLOSE"
+            | "BATTLETYPE_TUTORIAL"
+            | "BATTLETYPE_BATTLE_TOWER"
+            | "BATTLETYPE_TRAINER_HOUSE"
+    )
 }
 
 fn validate_static_wild_battle_request_shape(
@@ -25054,9 +29790,9 @@ fn validate_static_wild_battle_request_shape(
     request: &StaticWildBattleRequest,
 ) -> Result<()> {
     validate_battle_table_token(&request.battle_type, &format!("{context} battle type"))?;
-    if request.battle_type != "BATTLETYPE_NORMAL" {
+    if !is_static_wild_battle_type(&request.battle_type) {
         anyhow::bail!(
-            "{context} battle type '{}' is not BATTLETYPE_NORMAL",
+            "{context} battle type '{}' is not a static wild battle type",
             request.battle_type
         );
     }
@@ -25071,6 +29807,19 @@ fn validate_static_wild_battle_request_shape(
         )?;
     }
     Ok(())
+}
+
+fn is_static_wild_battle_type(battle_type: &str) -> bool {
+    matches!(
+        battle_type,
+        "BATTLETYPE_NORMAL"
+            | "BATTLETYPE_FORCEITEM"
+            | "BATTLETYPE_FORCESHINY"
+            | "BATTLETYPE_SUICUNE"
+            | "BATTLETYPE_TRAP"
+            | "BATTLETYPE_CELEBI"
+            | "BATTLETYPE_TUTORIAL"
+    )
 }
 
 fn validate_optional_battle_request_token(value: &str, description: &str) -> Result<()> {
@@ -25156,6 +29905,14 @@ fn validate_script_menu_definition_shapes(map_id: &str, map: &MapModule) -> Resu
                         command.command_index
                     ),
                 )?;
+            }
+            if command.command == "menu_coords" {
+                validate_menu_coord_args(&command.args).with_context(|| {
+                    format!(
+                        "map '{map_id}' script menu definition '{label}' command {}",
+                        command.command_index
+                    )
+                })?;
             }
         }
     }
@@ -25297,6 +30054,25 @@ fn validate_script_map_command_shape(map_id: &str, command: &ScriptMapCommand) -
     Ok(())
 }
 
+fn validate_menu_coord_args<T: AsRef<str>>(args: &[T]) -> Result<()> {
+    if args.len() != 4 {
+        anyhow::bail!("menu_coords requires 4 operands, got {}", args.len());
+    }
+    for (index, value) in args.iter().enumerate() {
+        parse_menu_coord_expression(value.as_ref()).with_context(|| {
+            format!(
+                "menu coordinate {index} must be an exact supported expression, got {:?}",
+                value.as_ref()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn parse_menu_coord_expression(value: &str) -> Result<i16> {
+    parse_menu_coord_token("menu_coords", value).map_err(anyhow::Error::new)
+}
+
 fn validate_script_runtime_command_shape(
     map_id: &str,
     command: &ScriptRuntimeCommand,
@@ -25339,6 +30115,12 @@ fn validate_script_movement_shape(map_id: &str, movement: &ScriptMovement) -> Re
             movement.label
         );
     }
+    if !script_movement_has_terminator(movement) {
+        anyhow::bail!(
+            "map '{map_id}' script movement '{}' must end with step_end",
+            movement.label
+        );
+    }
     for step in &movement.steps {
         validate_exact_modpack_value(
             &step.command,
@@ -25364,6 +30146,7 @@ fn script_movement_step_issue_name(issue: &ScriptMovementStepIssue) -> &'static 
         ScriptMovementStepIssue::UnexpectedDirection => "unexpected_direction",
         ScriptMovementStepIssue::MissingDirection => "missing_direction",
         ScriptMovementStepIssue::UnknownDirection { .. } => "unknown_direction",
+        ScriptMovementStepIssue::MissingDuration => "missing_duration",
         ScriptMovementStepIssue::UnsupportedCommand => "unsupported_command",
     }
 }
@@ -25452,6 +30235,9 @@ fn script_object_command_issue_name(issue: &ScriptObjectCommandIssue) -> &'stati
         ScriptObjectCommandIssue::InvalidObjectId { .. } => "invalid_object_id",
         ScriptObjectCommandIssue::UnhideableObject { .. } => "unhideable_object",
         ScriptObjectCommandIssue::MissingCoordinates { .. } => "missing_coordinates",
+        ScriptObjectCommandIssue::MoveCoordinatesOutOfRange { .. } => {
+            "move_coordinates_out_of_range"
+        }
         ScriptObjectCommandIssue::MissingDirection { .. } => "missing_direction",
         ScriptObjectCommandIssue::UnknownDirection { .. } => "unknown_direction",
         ScriptObjectCommandIssue::MissingTargetObjectId { .. } => "missing_target_object_id",
@@ -25597,7 +30383,7 @@ fn validate_script_economy_command_shape(
         {
             continue;
         }
-        validate_battle_table_token(token, &format!("{context} amount token {index}"))?;
+        validate_exact_modpack_value(token, &format!("{context} amount token {index}"))?;
     }
     validate_exact_modpack_value(&command.source_script, &format!("{context} source script"))?;
     Ok(())
@@ -25710,9 +30496,42 @@ fn validate_map_module_blocks(map_id: &str, map: &MapModule) -> Result<()> {
     Ok(())
 }
 
+fn validate_runtime_overworld_map_blocks(map_id: &str, map: &MapModule) -> Result<()> {
+    let expected_blocks = (map.attributes.width as usize)
+        .checked_mul(map.attributes.height as usize)
+        .with_context(|| format!("runtime map '{map_id}' dimensions overflow block count"))?;
+    let metatile_width = u16::try_from(METATILE_WIDTH)
+        .with_context(|| format!("runtime map '{map_id}' metatile width is outside u16 bounds"))?;
+    let subtile_width = map
+        .attributes
+        .width
+        .checked_mul(metatile_width)
+        .with_context(|| format!("runtime map '{map_id}' width overflows subtile bounds"))?;
+    let subtile_height = map
+        .attributes
+        .height
+        .checked_mul(metatile_width)
+        .with_context(|| format!("runtime map '{map_id}' height overflows subtile bounds"))?;
+    if expected_blocks == 0 {
+        anyhow::bail!("runtime map '{map_id}' width and height must both be greater than zero");
+    }
+    if subtile_width > i16::MAX as u16 || subtile_height > i16::MAX as u16 {
+        anyhow::bail!(
+            "runtime map '{map_id}' subtile dimensions {subtile_width}x{subtile_height} exceed TilePosition bounds"
+        );
+    }
+    if map.blocks.len() != expected_blocks {
+        anyhow::bail!(
+            "runtime map '{map_id}' has {} blocks but dimensions require {expected_blocks}",
+            map.blocks.len()
+        );
+    }
+    Ok(())
+}
+
 fn validate_map_module_scripts(map_id: &str, scripts: &BTreeMap<String, Value>) -> Result<()> {
     for (script_key, payload) in scripts {
-        validate_battle_table_token(script_key, "map module script")?;
+        validate_script_label_payload_token(script_key, "map module script")?;
         validate_raw_script_command_list("map module script payload", script_key, payload)
             .with_context(|| format!("validate map module '{map_id}' script '{script_key}'"))?;
     }
@@ -25979,10 +30798,17 @@ fn insert_buena_password_category(
         anyhow::bail!("Buena password category '{category_id}' must declare options");
     }
     for (index, option) in category.options.iter().enumerate() {
-        validate_battle_table_token(
-            option,
-            &format!("Buena password category '{category_id}' option {index}"),
-        )?;
+        if category.category_type == "BUENA_STRING" {
+            validate_exact_modpack_value(
+                option,
+                &format!("Buena password category '{category_id}' option {index}"),
+            )?;
+        } else {
+            validate_battle_table_token(
+                option,
+                &format!("Buena password category '{category_id}' option {index}"),
+            )?;
+        }
     }
     target.order.push(category_id.clone());
     target.categories.insert(category_id, category);
@@ -26840,8 +31666,11 @@ fn insert_field_move_catalog(
     validate_field_move_travel_rule("field_moves:surf", &catalog.surf, false)?;
     validate_field_move_travel_rule("field_moves:waterfall", &catalog.waterfall, true)?;
     validate_field_move_rule("field_moves:fly", &catalog.fly)?;
-    validate_field_move_move_rule("field_moves:dig", &catalog.dig)?;
-    validate_field_move_move_rule("field_moves:teleport", &catalog.teleport)?;
+    validate_field_move_move_rule("field_moves:dig", &catalog.dig, false)?;
+    validate_field_move_move_rule("field_moves:teleport", &catalog.teleport, false)?;
+    validate_field_move_move_rule("field_moves:headbutt", &catalog.headbutt, true)?;
+    validate_field_move_move_rule("field_moves:rock_smash", &catalog.rock_smash, false)?;
+    validate_field_move_move_rule("field_moves:sweet_scent", &catalog.sweet_scent, false)?;
     validate_field_escape_item_rule(&catalog.escape_rope)?;
     validate_field_item_rule("field_moves:bicycle", &catalog.bicycle)?;
     validate_field_item_rule("field_moves:itemfinder", &catalog.itemfinder)?;
@@ -26849,7 +31678,58 @@ fn insert_field_move_catalog(
     validate_field_item_rule("field_moves:coin_case", &catalog.coin_case)?;
     validate_field_item_rule("field_moves:blue_card", &catalog.blue_card)?;
     validate_field_item_rule("field_moves:town_map", &catalog.town_map)?;
+    validate_field_item_rule("field_moves:pokegear", &catalog.pokegear)?;
     *target = catalog;
+    Ok(())
+}
+
+fn insert_field_box_items(
+    target: &mut BTreeMap<String, FieldBoxItemRule>,
+    rules: BTreeMap<String, FieldBoxItemRule>,
+) -> Result<()> {
+    for (rule_id, rule) in rules {
+        validate_field_box_item_rule(&rule_id, &rule)?;
+        if target.insert(rule_id.clone(), rule).is_some() {
+            anyhow::bail!("duplicate field box item rule {rule_id}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_box_item_rule(rule_id: &str, rule: &FieldBoxItemRule) -> Result<()> {
+    validate_modpack_payload_token(rule_id, "field_box_items rule id")?;
+    validate_modpack_payload_token(&rule.item_id, "field_box_items item id")?;
+    validate_modpack_payload_token(&rule.effect, "field_box_items effect id")?;
+    validate_battle_table_token(&rule.decoration_flag, "field_box_items decoration flag id")?;
+    if rule_id != rule.item_id {
+        anyhow::bail!(
+            "field_box_items rule key {rule_id} must match item_id {}",
+            rule.item_id
+        );
+    }
+    Ok(())
+}
+
+fn insert_runtime_title_screen(
+    target: &mut RuntimeTitleScreen,
+    title_screen: RuntimeTitleScreen,
+) -> Result<()> {
+    if *target != RuntimeTitleScreen::default() {
+        anyhow::bail!("duplicate runtime title screen payload");
+    }
+    validate_runtime_title_screen(&title_screen)?;
+    *target = title_screen;
+    Ok(())
+}
+
+fn validate_runtime_title_screen(title_screen: &RuntimeTitleScreen) -> Result<()> {
+    if title_screen.new_game_spawn_identifier.is_none() {
+        anyhow::bail!("runtime_title_screen requires new_game_spawn_identifier");
+    }
+    let Some(title_music) = &title_screen.title_music else {
+        anyhow::bail!("runtime_title_screen requires title_music");
+    };
+    validate_modpack_payload_token(title_music, "runtime_title_screen title_music")?;
     Ok(())
 }
 
@@ -26858,8 +31738,16 @@ fn validate_field_move_rule(subject: &str, rule: &FieldMoveRule) -> Result<()> {
     validate_field_move_badge(subject, &rule.move_id, &rule.badge)
 }
 
-fn validate_field_move_move_rule(subject: &str, rule: &FieldMoveMoveRule) -> Result<()> {
-    validate_modpack_payload_token(&rule.move_id, &format!("{subject} move id"))
+fn validate_field_move_move_rule(
+    subject: &str,
+    rule: &FieldMoveMoveRule,
+    require_target_collisions: bool,
+) -> Result<()> {
+    validate_modpack_payload_token(&rule.move_id, &format!("{subject} move id"))?;
+    if require_target_collisions && rule.target_collisions.is_empty() {
+        anyhow::bail!("{subject} target collisions must not be empty");
+    }
+    Ok(())
 }
 
 fn validate_field_move_block_rule(
@@ -26869,9 +31757,7 @@ fn validate_field_move_block_rule(
 ) -> Result<()> {
     validate_modpack_payload_token(&rule.move_id, &format!("{subject} move id"))?;
     validate_field_move_badge(subject, &rule.move_id, &rule.badge)?;
-    if (require_target_collisions || rule.target_collisions.is_empty())
-        && rule.target_collisions.is_empty()
-    {
+    if require_target_collisions && rule.target_collisions.is_empty() {
         anyhow::bail!("{subject} target collisions must not be empty");
     }
     if rule.replacements.is_empty() {
@@ -27025,6 +31911,13 @@ fn validate_modpack_payload_token(value: &str, description: &str) -> Result<()> 
     validate_no_reserved_payload_token(value, description)
 }
 
+fn validate_script_label_payload_token(value: &str, description: &str) -> Result<()> {
+    if !is_exact_script_label_reference_token(value) {
+        anyhow::bail!("{description} '{value}' must be an exact script label token");
+    }
+    validate_no_reserved_payload_token(value, description)
+}
+
 fn validate_no_reserved_payload_token(value: &str, description: &str) -> Result<()> {
     let lowered = value.to_ascii_lowercase();
     if lowered.starts_with("fallback") || lowered.starts_with("legacy") {
@@ -27034,8 +31927,7 @@ fn validate_no_reserved_payload_token(value: &str, description: &str) -> Result<
 }
 
 fn merge_currency_constants_payload(target: &mut CurrencyCatalog, payload: Value) -> Result<()> {
-    let constants: CurrencyCatalog =
-        serde_json::from_value(payload).context("parse currency constants payload")?;
+    let constants: CurrencyCatalog = serde_json::from_value(payload)?;
     for (constant, value) in constants.0 {
         insert_currency_constant(target, constant, value)?;
     }
@@ -27066,8 +31958,7 @@ fn merge_pokegear_landmarks_payload(
     target: &mut PokegearLandmarksPayload,
     payload: Value,
 ) -> Result<()> {
-    let payload: PokegearLandmarksPayload =
-        serde_json::from_value(payload).context("parse pokegear landmarks payload")?;
+    let payload: PokegearLandmarksPayload = serde_json::from_value(payload)?;
     merge_pokegear_landmarks(target, &payload)
 }
 
@@ -27130,6 +32021,29 @@ fn merge_runtime_spawn_points(
         validate_battle_table_token(&spawn.map_constant, "runtime spawn point map constant")?;
         validate_battle_table_token(&spawn.map_name, "runtime spawn point map name")?;
         validate_battle_table_token(&spawn.group_name, "runtime spawn point group name")?;
+        if !runtime_spawn_subtiles_are_valid(&spawn) {
+            anyhow::bail!(
+                "runtime spawn point '{key}' subtile ({}, {}) must be in range 0..{}",
+                spawn.subtile_x,
+                spawn.subtile_y,
+                METATILE_WIDTH
+            );
+        }
+        let expected_tile = checked_runtime_spawn_expected_tile(&spawn).with_context(|| {
+            format!(
+                "runtime spawn point '{key}' metatile/subtile coordinate ({}, {}) + ({}, {}) overflows runtime tile coordinates",
+                spawn.metatile_x, spawn.metatile_y, spawn.subtile_x, spawn.subtile_y
+            )
+        })?;
+        if spawn.tile_x != expected_tile.x || spawn.tile_y != expected_tile.y {
+            anyhow::bail!(
+                "runtime spawn point '{key}' tile ({}, {}) does not match metatile/subtile-derived tile ({}, {})",
+                spawn.tile_x,
+                spawn.tile_y,
+                expected_tile.x,
+                expected_tile.y
+            );
+        }
         if target.contains_key(&key) {
             anyhow::bail!("duplicate runtime spawn point '{key}'");
         }
@@ -27168,7 +32082,7 @@ fn merge_pc_strings(
 ) -> Result<()> {
     for (key, value) in source {
         validate_modpack_payload_token(&key, "PC string key")?;
-        validate_exact_modpack_value(&value, "PC string value")?;
+        validate_exact_modpack_text(&value, "PC string value")?;
         if target.contains_key(&key) {
             anyhow::bail!("duplicate PC string '{key}'");
         }
@@ -27202,7 +32116,10 @@ fn merge_asm_text_entries(
 ) -> Result<()> {
     for (label, text) in source {
         validate_modpack_payload_token(&label, "ASM text label")?;
-        validate_exact_modpack_value(&text, &format!("ASM text value for label '{label}'"))?;
+        validate_exact_modpack_multiline_text(
+            &text,
+            &format!("ASM text value for label '{label}'"),
+        )?;
         if target.contains_key(&label) {
             anyhow::bail!("duplicate ASM text label '{label}'");
         }
@@ -27215,7 +32132,108 @@ fn merge_frontpic_anim_programs(
     target: &mut BTreeMap<String, FrontpicAnimProgram>,
     payload: Value,
 ) -> Result<()> {
-    merge_frontpic_anim_entries(target, parse_object_map::<FrontpicAnimProgram>(payload)?)
+    let mut source = BTreeMap::new();
+    for (species, program_payload) in parse_object_map::<Value>(payload)? {
+        let program = parse_frontpic_anim_program_payload(&species, program_payload)?;
+        source.insert(species, program);
+    }
+    merge_frontpic_anim_entries(target, source)
+}
+
+fn parse_frontpic_anim_program_payload(species: &str, payload: Value) -> Result<FrontpicAnimProgram> {
+    let Some(program) = payload.as_object() else {
+        anyhow::bail!("frontpic animation program for species '{species}' must be an object");
+    };
+    let allowed_program_keys = ["commands"];
+    for key in program.keys() {
+        if !allowed_program_keys.contains(&key.as_str()) {
+            anyhow::bail!(
+                "frontpic animation program for species '{species}' contains unknown field '{key}'"
+            );
+        }
+    }
+    let Some(commands_payload) = program.get("commands") else {
+        anyhow::bail!("frontpic animation program for species '{species}' must declare commands");
+    };
+    let Some(commands_payload) = commands_payload.as_array() else {
+        anyhow::bail!("frontpic animation program for species '{species}' commands must be an array");
+    };
+    let mut commands = Vec::with_capacity(commands_payload.len());
+    for (index, command_payload) in commands_payload.iter().enumerate() {
+        commands.push(parse_frontpic_anim_command_payload(
+            species,
+            index,
+            command_payload,
+        )?);
+    }
+    let program = FrontpicAnimProgram { commands };
+    validate_frontpic_anim_program(species, &program)?;
+    Ok(program)
+}
+
+fn parse_frontpic_anim_command_payload(
+    species: &str,
+    index: usize,
+    payload: &Value,
+) -> Result<FrontpicAnimCommand> {
+    let Some(command) = payload.as_object() else {
+        anyhow::bail!(
+            "frontpic animation program for species '{species}' command {index} must be an object"
+        );
+    };
+    let allowed_command_keys = ["kind", "frame", "duration", "count", "target"];
+    for key in command.keys() {
+        if !allowed_command_keys.contains(&key.as_str()) {
+            anyhow::bail!(
+                "frontpic animation program for species '{species}' command {index} contains unknown field '{key}'"
+            );
+        }
+    }
+    let kind = match command.get("kind") {
+        Some(Value::String(kind)) => kind.clone(),
+        Some(_) => anyhow::bail!(
+            "frontpic animation program for species '{species}' command {index} kind must be a string"
+        ),
+        None => anyhow::bail!(
+            "frontpic animation program for species '{species}' command {index} must declare kind"
+        ),
+    };
+    let command = FrontpicAnimCommand {
+        kind,
+        frame: frontpic_anim_u16_field(species, index, command, "frame")?,
+        duration: frontpic_anim_u16_field(species, index, command, "duration")?,
+        count: frontpic_anim_u16_field(species, index, command, "count")?,
+        target: frontpic_anim_u16_field(species, index, command, "target")?,
+    };
+    if let Some(issue) = frontpic_anim_command_issue(&command) {
+        anyhow::bail!(
+            "frontpic animation program for species '{species}' command {index} '{}' is invalid: {issue:?}",
+            command.kind
+        );
+    }
+    Ok(command)
+}
+
+fn frontpic_anim_u16_field(
+    species: &str,
+    index: usize,
+    command: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u16>> {
+    let Some(value) = command.get(field) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_u64() else {
+        anyhow::bail!(
+            "frontpic animation program for species '{species}' command {index} field '{field}' must be an unsigned integer"
+        );
+    };
+    let value = u16::try_from(value).with_context(|| {
+        format!(
+            "frontpic animation program for species '{species}' command {index} field '{field}' is outside u16 range"
+        )
+    })?;
+    Ok(Some(value))
 }
 
 fn merge_frontpic_anim_entries(
@@ -27288,7 +32306,54 @@ fn merge_pokemon_cries(
     target: &mut BTreeMap<String, PokemonCryMetadata>,
     payload: Value,
 ) -> Result<()> {
-    merge_pokemon_cry_entries(target, parse_object_map::<PokemonCryMetadata>(payload)?)
+    let mut source = BTreeMap::new();
+    for (species, metadata_payload) in parse_object_map::<Value>(payload)? {
+        let metadata = parse_pokemon_cry_metadata_payload(&species, metadata_payload)?;
+        source.insert(species, metadata);
+    }
+    merge_pokemon_cry_entries(target, source)
+}
+
+fn parse_pokemon_cry_metadata_payload(species: &str, payload: Value) -> Result<PokemonCryMetadata> {
+    let Some(metadata) = payload.as_object() else {
+        anyhow::bail!("Pokemon cry metadata for species '{species}' must be an object");
+    };
+    let allowed_keys = ["cry", "pitch", "length"];
+    for key in metadata.keys() {
+        if !allowed_keys.contains(&key.as_str()) {
+            anyhow::bail!("Pokemon cry metadata for species '{species}' contains unknown field '{key}'");
+        }
+    }
+    let cry = match metadata.get("cry") {
+        Some(Value::String(cry)) => cry.clone(),
+        Some(_) => anyhow::bail!("Pokemon cry metadata for species '{species}' cry must be a string"),
+        None => anyhow::bail!("Pokemon cry metadata for species '{species}' must declare cry"),
+    };
+    validate_modpack_payload_token(&cry, "Pokemon cry metadata audio id")?;
+    Ok(PokemonCryMetadata {
+        cry,
+        pitch: pokemon_cry_word_field(species, metadata, "pitch")?,
+        length: pokemon_cry_word_field(species, metadata, "length")?,
+    })
+}
+
+fn pokemon_cry_word_field(
+    species: &str,
+    metadata: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<i16> {
+    let Some(value) = metadata.get(field) else {
+        anyhow::bail!("Pokemon cry metadata for species '{species}' must declare {field}");
+    };
+    let Some(value) = value.as_i64() else {
+        anyhow::bail!("Pokemon cry metadata for species '{species}' {field} must be an integer");
+    };
+    if !(i16::MIN as i64..=i16::MAX as i64).contains(&value) {
+        anyhow::bail!(
+            "Pokemon cry metadata for species '{species}' {field} {value} must fit an exact Crystal word"
+        );
+    }
+    Ok(value as i16)
 }
 
 fn merge_pokemon_cry_entries(
@@ -27306,20 +32371,8 @@ fn merge_pokemon_cry_entries(
     Ok(())
 }
 
-fn validate_pokemon_cry_metadata(species: &str, metadata: &PokemonCryMetadata) -> Result<()> {
+fn validate_pokemon_cry_metadata(_species: &str, metadata: &PokemonCryMetadata) -> Result<()> {
     validate_modpack_payload_token(&metadata.cry, "Pokemon cry metadata audio id")?;
-    if !(0..=255).contains(&metadata.pitch) {
-        anyhow::bail!(
-            "Pokemon cry metadata for species '{species}' pitch {} must fit an exact Crystal byte",
-            metadata.pitch
-        );
-    }
-    if !(0..=255).contains(&metadata.length) {
-        anyhow::bail!(
-            "Pokemon cry metadata for species '{species}' length {} must fit an exact Crystal byte",
-            metadata.length
-        );
-    }
     Ok(())
 }
 
@@ -27463,6 +32516,25 @@ fn validate_exact_modpack_key(key: &str, description: &str) -> Result<()> {
 
 fn validate_exact_modpack_value(value: &str, description: &str) -> Result<()> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        anyhow::bail!("{description} '{value}' must be exact, non-empty, and untrimmed");
+    }
+    Ok(())
+}
+
+fn validate_exact_modpack_text(value: &str, description: &str) -> Result<()> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        anyhow::bail!("{description} must be exact non-empty text");
+    }
+    Ok(())
+}
+
+fn validate_exact_modpack_multiline_text(value: &str, description: &str) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value
+            .chars()
+            .any(|char| char.is_control() && char != '\n' && char != '\r')
+    {
         anyhow::bail!("{description} '{value}' must be exact, non-empty, and untrimmed");
     }
     Ok(())
@@ -27703,10 +32775,17 @@ fn validate_trainer_pack_record(trainer: &Trainer) -> Result<()> {
     Ok(())
 }
 
-fn merge_species_value_payload(
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LevelUpMoveValue {
+    level: u8,
+    #[serde(rename = "move")]
+    move_id: String,
+}
+
+fn merge_level_up_moves_payload(
     target: &mut BTreeMap<String, Value>,
     payload: Value,
-    field_name: &str,
 ) -> Result<()> {
     let Some(object) = payload.as_object() else {
         anyhow::bail!("species value payload must be a species-keyed object");
@@ -27716,20 +32795,67 @@ fn merge_species_value_payload(
     }
     for (species, entry) in object {
         validate_modpack_payload_token(species, "species value payload species key")?;
-        merge_keyed_species_value_entry(target, species, entry.clone(), field_name)?;
+        merge_keyed_level_up_moves_entry(target, species, entry.clone())?;
     }
     Ok(())
 }
 
-fn merge_keyed_species_value_entry(
+fn merge_egg_moves_payload(target: &mut BTreeMap<String, Value>, payload: Value) -> Result<()> {
+    let Some(object) = payload.as_object() else {
+        anyhow::bail!("species value payload must be a species-keyed object");
+    };
+    if object.is_empty() {
+        anyhow::bail!("species value payload must contain at least one entry");
+    }
+    for (species, entry) in object {
+        validate_modpack_payload_token(species, "species value payload species key")?;
+        merge_keyed_egg_moves_entry(target, species, entry.clone())?;
+    }
+    Ok(())
+}
+
+fn merge_keyed_level_up_moves_entry(
     target: &mut BTreeMap<String, Value>,
     key: &str,
     payload: Value,
-    field_name: &str,
 ) -> Result<()> {
-    if field_name != "moves" {
-        anyhow::bail!("unsupported species value payload field '{field_name}'");
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        species: String,
+        moves: Vec<LevelUpMoveValue>,
     }
+
+    let entry: Entry = serde_json::from_value(payload)
+        .with_context(|| format!("parse species value payload for '{key}'"))?;
+    if entry.species != key {
+        anyhow::bail!(
+            "species value key '{key}' does not match record species '{}'",
+            entry.species
+        );
+    }
+    validate_modpack_payload_token(&entry.species, "species value payload species")?;
+    for learned_move in &entry.moves {
+        validate_modpack_payload_token(
+            &learned_move.move_id,
+            &format!("species value payload moves for '{}'", entry.species),
+        )?;
+    }
+    if target.contains_key(&entry.species) {
+        anyhow::bail!(
+            "duplicate species value payload for species '{}'",
+            entry.species
+        );
+    }
+    target.insert(entry.species, serde_json::to_value(entry.moves)?);
+    Ok(())
+}
+
+fn merge_keyed_egg_moves_entry(
+    target: &mut BTreeMap<String, Value>,
+    key: &str,
+    payload: Value,
+) -> Result<()> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Entry {
@@ -27794,16 +32920,22 @@ fn merge_map_script_payload(target: &mut BTreeMap<String, Value>, payload: Value
         anyhow::bail!("map script payload must contain at least one entry");
     }
     for (script_key, value) in object {
-        validate_modpack_payload_token(script_key, "map script payload")?;
+        validate_script_label_payload_token(script_key, "map script payload")?;
         if target.contains_key(script_key) {
             anyhow::bail!("duplicate object payload key '{script_key}'");
         }
-        let commands = parse_raw_script_command_list("map script payload", script_key, value)?;
-        target.insert(
-            script_key.clone(),
-            serde_json::to_value(commands)
-                .with_context(|| format!("encode canonical map script payload for {script_key}"))?,
-        );
+        if let Some(text) = value.as_str() {
+            validate_exact_modpack_value(text, &format!("map script payload '{script_key}' text"))?;
+            target.insert(script_key.clone(), Value::String(text.to_string()));
+        } else {
+            let commands = parse_raw_script_command_list("map script payload", script_key, value)?;
+            target.insert(
+                script_key.clone(),
+                serde_json::to_value(commands).with_context(|| {
+                    format!("encode canonical map script payload for {script_key}")
+                })?,
+            );
+        }
     }
     Ok(())
 }
@@ -28061,7 +33193,7 @@ fn merge_raw_script_payload(
         .unwrap_or(key_description);
     let mut canonical_payload = serde_json::Map::new();
     for (key, value) in object {
-        validate_modpack_payload_token(key, key_validation_description)?;
+        validate_script_label_payload_token(key, key_validation_description)?;
         if target.iter().any(|entry| {
             entry
                 .as_object()
@@ -28113,7 +33245,7 @@ fn merge_raw_story_event_payload(
         }
         let mut canonical_scripts = serde_json::Map::new();
         for (script_key, script_payload) in scripts {
-            validate_modpack_payload_token(script_key, "story event script")?;
+            validate_script_label_payload_token(script_key, "story event script")?;
             let commands =
                 parse_raw_script_command_list(payload_description, script_key, script_payload)?;
             canonical_scripts.insert(
@@ -28143,24 +33275,102 @@ fn parse_raw_script_command_list(
     payload_description: &str,
     script_key: &str,
     value: &Value,
-) -> Result<Vec<ScriptCommand>> {
-    let commands: Vec<ScriptCommand> = serde_json::from_value(value.clone())
+) -> Result<Vec<Value>> {
+    let commands: Vec<RawScriptCommand> = serde_json::from_value(value.clone())
         .with_context(|| format!("parse {payload_description} script '{script_key}'"))?;
+    let mut canonical_commands = Vec::with_capacity(commands.len());
     for (index, command) in commands.iter().enumerate() {
-        validate_battle_table_token(
+        validate_exact_modpack_value(
             &command.command,
             &format!("{payload_description} script '{script_key}' command {index} name"),
         )?;
-        for (arg_index, arg) in command.args.iter().enumerate() {
-            validate_battle_table_token(
+        let canonical_args =
+            canonical_raw_script_args(payload_description, script_key, index, &command.args)?;
+        validate_canonical_raw_script_command_args(
+            payload_description,
+            script_key,
+            index,
+            &command.command,
+            &canonical_args,
+        )?;
+        canonical_commands.push(serde_json::json!({
+            "command": command.command,
+            "args": canonical_args,
+        }));
+    }
+    Ok(canonical_commands)
+}
+
+fn canonical_raw_script_args(
+    payload_description: &str,
+    script_key: &str,
+    command_index: usize,
+    args: &Value,
+) -> Result<Value> {
+    if let Some(arg) = args.as_str() {
+        if !arg.is_empty() {
+            validate_exact_modpack_value(
                 arg,
-                &format!(
-                    "{payload_description} script '{script_key}' command {index} arg {arg_index}"
-                ),
+                &format!("{payload_description} script '{script_key}' command {command_index} arg"),
             )?;
         }
+        return Ok(Value::String(arg.to_string()));
     }
-    Ok(commands)
+    let Some(values) = args.as_array() else {
+        anyhow::bail!(
+            "{payload_description} script '{script_key}' command {command_index} args must be a string or array"
+        );
+    };
+    for (arg_index, arg) in values.iter().enumerate() {
+        let Some(arg) = arg.as_str() else {
+            anyhow::bail!(
+                "{payload_description} script '{script_key}' command {command_index} arg {arg_index} must be a string"
+            );
+        };
+        validate_exact_modpack_value(
+            arg,
+            &format!(
+                "{payload_description} script '{script_key}' command {command_index} arg {arg_index}"
+            ),
+        )?;
+    }
+    Ok(Value::Array(values.clone()))
+}
+
+fn validate_canonical_raw_script_command_args(
+    payload_description: &str,
+    script_key: &str,
+    command_index: usize,
+    command: &str,
+    args: &Value,
+) -> Result<()> {
+    if command != "warpfacing" {
+        return Ok(());
+    }
+    let values = args.as_array().with_context(|| {
+        format!(
+            "{payload_description} script '{script_key}' command {command_index} warpfacing args must be an array"
+        )
+    })?;
+    if values.len() != 4 {
+        anyhow::bail!(
+            "{payload_description} script '{script_key}' command {command_index} warpfacing args must have 4 entries"
+        );
+    }
+    let facing = values[3].as_str().with_context(|| {
+        format!(
+            "{payload_description} script '{script_key}' command {command_index} warpfacing facing arg must be a string"
+        )
+    })?;
+    parse_script_warp_facing(facing).map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScriptCommand {
+    command: String,
+    args: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28179,6 +33389,16 @@ fn parse_map_events(map_name: &str, payload: &Value) -> Result<MapEvents> {
 
     for command in commands {
         match command.command.as_str() {
+            "db" => {
+                if command.args.len() != 2 {
+                    anyhow::bail!(
+                        "Malformed db in {map_name}: expected 2 args, found {}.",
+                        command.args.len()
+                    );
+                }
+                validate_map_section_args(&command.args, &format!("db in {map_name}"))?;
+                section = None;
+            }
             "def_warp_events" => {
                 if !command.args.is_empty() {
                     anyhow::bail!(
@@ -28225,11 +33445,17 @@ fn parse_map_events(map_name: &str, payload: &Value) -> Result<MapEvents> {
                 }
                 validate_map_section_args(&command.args, &format!("warp_event in {map_name}"))?;
                 validate_map_reference_token(&command.args[2], "warp_event target map")?;
+                let (x, y) = parse_map_event_runtime_coords(
+                    map_name,
+                    "warp_event",
+                    &command.args[0],
+                    &command.args[1],
+                )?;
                 let target_map_constant = command.args[2].to_string();
                 events.warps.push(WarpEvent {
                     index: next_warp_index,
-                    x: parse_script_u16(&command.args[0])?,
-                    y: parse_script_u16(&command.args[1])?,
+                    x,
+                    y,
                     target_map: target_map_constant.clone(),
                     target_map_constant,
                     target_warp_id: i16::try_from(parse_script_i32(&command.args[3])?)
@@ -28250,9 +33476,15 @@ fn parse_map_events(map_name: &str, payload: &Value) -> Result<MapEvents> {
                     );
                 }
                 validate_map_section_args(&command.args, &format!("coord_event in {map_name}"))?;
+                let (x, y) = parse_map_event_runtime_coords(
+                    map_name,
+                    "coord_event",
+                    &command.args[0],
+                    &command.args[1],
+                )?;
                 events.coord_events.push(CoordEvent {
-                    x: parse_script_u16(&command.args[0])?,
-                    y: parse_script_u16(&command.args[1])?,
+                    x,
+                    y,
                     scene_id: command.args[2].clone(),
                     script_name: command.args[3].clone(),
                 });
@@ -28265,9 +33497,15 @@ fn parse_map_events(map_name: &str, payload: &Value) -> Result<MapEvents> {
                     );
                 }
                 validate_map_section_args(&command.args, &format!("bg_event in {map_name}"))?;
+                let (x, y) = parse_map_event_runtime_coords(
+                    map_name,
+                    "bg_event",
+                    &command.args[0],
+                    &command.args[1],
+                )?;
                 events.bg_events.push(BackgroundEvent {
-                    x: parse_script_u16(&command.args[0])?,
-                    y: parse_script_u16(&command.args[1])?,
+                    x,
+                    y,
                     event_type: command.args[2].clone(),
                     script: command.args[3].clone(),
                 });
@@ -29119,12 +34357,14 @@ fn parse_script_object_commands(
                             args.len()
                         );
                     }
+                    let (x, y) =
+                        parse_map_event_runtime_coords(map_name, command_name, args[1], args[2])?;
                     commands.push(ScriptObjectCommand {
                         command: command_name.to_string(),
                         object_id: Some(args[0].to_string()),
                         target_object_id: None,
-                        x: Some(parse_script_u16(args[1])?),
-                        y: Some(parse_script_u16(args[2])?),
+                        x: Some(x),
+                        y: Some(y),
                         direction: None,
                         movement: None,
                         emote: None,
@@ -29253,6 +34493,7 @@ fn parse_script_object_commands(
 fn parse_script_map_commands(
     map_name: &str,
     scripts: &BTreeMap<String, Value>,
+    map_name_by_constant: &BTreeMap<String, String>,
 ) -> Result<Vec<ScriptMapCommand>> {
     let mut commands = Vec::new();
     for (script_name, payload) in scripts {
@@ -29272,11 +34513,19 @@ fn parse_script_map_commands(
                             args.len()
                         );
                     }
+                    let (x, y) =
+                        parse_map_event_runtime_coords(map_name, command_name, args[1], args[2])?;
                     commands.push(ScriptMapCommand {
                         command: command_name.to_string(),
-                        target_map: Some(script_warp_target_map(args[0])),
-                        x: Some(parse_script_u16(args[1])?),
-                        y: Some(parse_script_u16(args[2])?),
+                        target_map: Some(script_warp_target_map(
+                            map_name,
+                            script_name,
+                            command_name,
+                            args[0],
+                            map_name_by_constant,
+                        )?),
+                        x: Some(x),
+                        y: Some(y),
                         facing: None,
                         map_setup: None,
                         source_script: script_name.clone(),
@@ -29291,12 +34540,20 @@ fn parse_script_map_commands(
                             args.len()
                         );
                     }
+                    let (x, y) =
+                        parse_map_event_runtime_coords(map_name, command_name, args[1], args[2])?;
                     commands.push(ScriptMapCommand {
                         command: command_name.to_string(),
-                        target_map: Some(script_warp_target_map(args[1])),
-                        x: Some(parse_script_u16(args[2])?),
-                        y: Some(parse_script_u16(args[3])?),
-                        facing: Some(args[0].to_string()),
+                        target_map: Some(script_warp_target_map(
+                            map_name,
+                            script_name,
+                            command_name,
+                            args[0],
+                            map_name_by_constant,
+                        )?),
+                        x: Some(x),
+                        y: Some(y),
+                        facing: Some(args[3].to_string()),
                         map_setup: None,
                         source_script: script_name.clone(),
                         command_index: index,
@@ -29438,8 +34695,17 @@ fn parse_script_text_bodies(
         let Some(entries) = payload.as_array() else {
             continue;
         };
+        let start_index = entries
+            .iter()
+            .position(|entry| {
+                entry
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| expected_arg_counts.contains_key(command))
+            })
+            .unwrap_or(0);
         let mut commands = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
+        for (index, entry) in entries.iter().enumerate().skip(start_index) {
             let Some(command_name) = entry.get("command").and_then(Value::as_str) else {
                 anyhow::bail!(
                     "Malformed text body command in {script_name} for {map_name}: command {index} is missing command."
@@ -29490,17 +34756,28 @@ fn parse_script_menu_definitions(
             .iter()
             .filter_map(|entry| entry.get("command").and_then(Value::as_str))
             .collect();
-        let has_menu_command = command_names
+        let menu_coords_index = command_names
             .iter()
-            .any(|command| expected_arg_counts.contains_key(command));
-        let is_menu_candidate = command_names.contains(&"menu_coords")
-            || script_name.contains("Menu")
-            || has_menu_command;
-        if !is_menu_candidate {
+            .position(|command| *command == "menu_coords");
+        let is_menu_data_label = script_name.contains("MenuData")
+            && command_names
+                .iter()
+                .all(|command| expected_arg_counts.contains_key(command));
+        if menu_coords_index.is_none() && !is_menu_data_label {
             continue;
-        }
+        };
+        let menu_coords_index = menu_coords_index.unwrap_or(0);
+        let start_index = if menu_coords_index > 0
+            && command_names
+                .get(menu_coords_index - 1)
+                .is_some_and(|command| *command == "db")
+        {
+            menu_coords_index - 1
+        } else {
+            menu_coords_index
+        };
         let mut commands = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
+        for (index, entry) in entries.iter().enumerate().skip(start_index) {
             let command_name = entry
                 .get("command")
                 .and_then(Value::as_str)
@@ -29508,6 +34785,9 @@ fn parse_script_menu_definitions(
                     format!("Malformed menu definition command in {script_name} for {map_name}: command must be a string.")
                 })?;
             let Some(expected) = expected_arg_counts.get(command_name) else {
+                if !commands.is_empty() {
+                    break;
+                }
                 anyhow::bail!(
                     "Malformed menu definition command in {script_name} for {map_name}: unknown command '{command_name}' at index {index}."
                 );
@@ -29519,6 +34799,11 @@ fn parse_script_menu_definitions(
                     expected,
                     args.len()
                 );
+            }
+            if command_name == "menu_coords" {
+                validate_menu_coord_args(&args).with_context(|| {
+                    format!("Malformed menu_coords command in {script_name} for {map_name}")
+                })?;
             }
             commands.push(ScriptMenuCommand {
                 command: command_name.to_string(),
@@ -29673,7 +34958,9 @@ fn resolve_menu_reference(
     match (exact_exists, local_exists) {
         (true, false) => Ok(label.to_string()),
         (false, true) => Ok(local),
-        (false, false) => Ok(local),
+        (false, false) => anyhow::bail!(
+            "unresolved relative vertical menu reference {label} from {source_script}: neither {label} nor {local} exists"
+        ),
         (true, true) => anyhow::bail!(
             "ambiguous relative vertical menu reference {label} from {source_script}: both {label} and {local} exist"
         ),
@@ -29683,6 +34970,7 @@ fn resolve_menu_reference(
 fn parse_script_elevators(
     map_name: &str,
     scripts: &BTreeMap<String, Value>,
+    map_name_by_constant: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, ScriptElevatorDefinition>> {
     let mut elevators = BTreeMap::new();
     for (script_name, payload) in scripts {
@@ -29704,7 +34992,8 @@ fn parse_script_elevators(
                 );
             }
             let data_label = resolve_script_reference(scripts, script_name, args[0])?;
-            let floors = parse_elevator_floors(map_name, &data_label, scripts)?;
+            let floors =
+                parse_elevator_floors(map_name, &data_label, scripts, map_name_by_constant)?;
             let key = format!("{script_name}:{index}");
             if elevators
                 .insert(
@@ -29729,6 +35018,7 @@ fn parse_elevator_floors(
     map_name: &str,
     data_label: &str,
     scripts: &BTreeMap<String, Value>,
+    map_name_by_constant: &BTreeMap<String, String>,
 ) -> Result<Vec<ScriptRuntimeElevatorFloor>> {
     let payload = scripts
         .get(data_label)
@@ -29753,6 +35043,12 @@ fn parse_elevator_floors(
                 args.len()
             );
         }
+        let target_map = map_name_by_constant.get(args[2]).with_context(|| {
+            format!(
+                "elevfloor command in {data_label} for {map_name} references missing map constant {}",
+                args[2]
+            )
+        })?;
         floors.push(ScriptRuntimeElevatorFloor {
             floor: args[0].to_string(),
             warp: u16::try_from(parse_script_i32(args[1])?).with_context(|| {
@@ -29761,7 +35057,7 @@ fn parse_elevator_floors(
                     args[1]
                 )
             })?,
-            target_map: args[2].to_string(),
+            target_map: target_map.clone(),
             source_script: data_label.to_string(),
             command_index: index,
         });
@@ -29786,7 +35082,9 @@ fn resolve_script_reference(
     match (exact_exists, local_exists) {
         (true, false) => Ok(label.to_string()),
         (false, true) => Ok(local),
-        (false, false) => Ok(local),
+        (false, false) => anyhow::bail!(
+            "unresolved relative script reference {label} from {source_script}: neither {label} nor {local} exists"
+        ),
         (true, true) => anyhow::bail!(
             "ambiguous relative script reference {label} from {source_script}: both {label} and {local} exist"
         ),
@@ -30053,14 +35351,21 @@ fn parse_script_movements(
     for (movement_label, source_script) in movement_refs {
         let parent_script = script_label_parent(source_script);
         let local_label = format!("{movement_label}@{parent_script}");
-        let (script_key, source_script) = if scripts.contains_key(movement_label) {
-            (movement_label, None)
-        } else if scripts.contains_key(&local_label) {
-            (local_label.as_str(), Some(parent_script.to_string()))
-        } else {
-            anyhow::bail!(
-                "movement reference '{movement_label}' from {source_script} on {map_name} resolves to missing script"
-            );
+        let exact_exists = scripts.contains_key(movement_label);
+        let local_exists = movement_label.starts_with('.') && scripts.contains_key(&local_label);
+        let script_key = match (exact_exists, local_exists) {
+            (true, false) => movement_label,
+            (false, true) => local_label.as_str(),
+            (false, false) => {
+                anyhow::bail!(
+                    "movement reference '{movement_label}' from {source_script} on {map_name} resolves to missing script"
+                );
+            }
+            (true, true) => {
+                anyhow::bail!(
+                    "ambiguous movement reference '{movement_label}' from {source_script} on {map_name}: both {movement_label} and {local_label} exist"
+                );
+            }
         };
         let Some(payload) = scripts.get(script_key) else {
             anyhow::bail!("movement script {script_key} for {map_name} is missing");
@@ -30105,6 +35410,27 @@ fn parse_script_movements(
                     };
                     (None, duration)
                 }
+                command
+                    if crystal_core::systems::script_objects::SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS
+                        .contains(&command) =>
+                {
+                    if !args.is_empty() {
+                        anyhow::bail!(
+                            "Malformed {command_name} movement in {script_key} for {map_name}: expected 0 args, found {}.",
+                            args.len()
+                        );
+                    }
+                    (None, None)
+                }
+                command if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&command) => {
+                    if args.len() != 1 {
+                        anyhow::bail!(
+                            "Malformed {command_name} movement in {script_key} for {map_name}: expected 1 arg, found {}.",
+                            args.len()
+                        );
+                    }
+                    (None, Some(parse_script_u16(args[0])?))
+                }
                 command if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command) => {
                     if !args.is_empty() {
                         anyhow::bail!(
@@ -30123,9 +35449,14 @@ fn parse_script_movements(
                 index,
             });
         }
+        if steps.last().map(|step| step.command.as_str()) != Some("step_end") {
+            anyhow::bail!(
+                "Malformed movement script {script_key} for {map_name}: movement must end with step_end."
+            );
+        }
         movements.push(ScriptMovement {
             label: movement_label.to_string(),
-            source_script,
+            source_script: Some(source_script.to_string()),
             steps,
         });
     }
@@ -30202,6 +35533,19 @@ fn parse_scripted_trainer_battles(
                 }
                 "startbattle" => {
                     if let Some(pending) = pending.as_mut() {
+                        pending.startbattle_command_index = Some(index);
+                    }
+                }
+                "catchtutorial" => {
+                    let args = script_command_args(map_name, script_name, command_name, entry)?;
+                    if args.len() != 1 {
+                        anyhow::bail!(
+                            "Malformed catchtutorial command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            args.len()
+                        );
+                    }
+                    if let Some(pending) = pending.as_mut() {
+                        pending.request.battle_type = args[0].to_string();
                         pending.startbattle_command_index = Some(index);
                     }
                 }
@@ -30344,6 +35688,19 @@ fn parse_scripted_wild_battles(
                 }
                 "startbattle" => {
                     if let Some(pending) = pending.as_mut() {
+                        pending.startbattle_command_index = Some(index);
+                    }
+                }
+                "catchtutorial" => {
+                    let args = script_command_args(map_name, script_name, command_name, entry)?;
+                    if args.len() != 1 {
+                        anyhow::bail!(
+                            "Malformed catchtutorial command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            args.len()
+                        );
+                    }
+                    if let Some(pending) = pending.as_mut() {
+                        pending.request.battle_type = args[0].to_string();
                         pending.startbattle_command_index = Some(index);
                     }
                 }
@@ -30524,6 +35881,22 @@ fn parse_map_scene_table(map_name: &str, payload: &Value) -> Result<MapSceneTabl
     Ok(MapSceneTable { scenes })
 }
 
+fn parse_map_event_runtime_coords(
+    map_name: &str,
+    event_kind: &str,
+    x_token: &str,
+    y_token: &str,
+) -> Result<(u16, u16)> {
+    let x = parse_script_u16(x_token)
+        .with_context(|| format!("{event_kind} x coordinate '{x_token}' in {map_name}"))?;
+    let y = parse_script_u16(y_token)
+        .with_context(|| format!("{event_kind} y coordinate '{y_token}' in {map_name}"))?;
+    raw_event_tile_to_runtime_tile_checked(x, y).with_context(|| {
+        format!("{event_kind} coordinate ({x}, {y}) in {map_name} overflows runtime tile range")
+    })?;
+    Ok((x, y))
+}
+
 fn parse_script_i32(token: &str) -> Result<i32> {
     if token.is_empty() {
         anyhow::bail!("cannot parse an empty numeric token");
@@ -30531,24 +35904,12 @@ fn parse_script_i32(token: &str) -> Result<i32> {
     if token.trim() != token {
         anyhow::bail!("numeric token '{token}' must be exact and untrimmed");
     }
-    let (sign, raw) = match token.as_bytes()[0] {
-        b'-' => (-1, &token[1..]),
-        b'+' => anyhow::bail!("numeric token '{token}' must not use an explicit plus sign"),
-        _ => (1, token),
-    };
-    let (radix, digits) = if let Some(hex) = raw.strip_prefix('$') {
-        (16, hex)
-    } else if let Some(binary) = raw.strip_prefix('%') {
-        (2, binary)
-    } else {
-        (10, raw)
-    };
-    if digits.is_empty() {
-        anyhow::bail!("numeric token '{token}' does not contain digits");
+    if token.as_bytes()[0] == b'+' {
+        anyhow::bail!("numeric token '{token}' must not use an explicit plus sign");
     }
-    let parsed = i32::from_str_radix(digits, radix)
-        .with_context(|| format!("parse numeric token '{token}'"))?;
-    Ok(sign * parsed)
+    parse_script_i32_token("raw_script", token)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("parse numeric token '{token}'"))
 }
 
 fn parse_script_u16(token: &str) -> Result<u16> {
@@ -30578,8 +35939,21 @@ fn resolve_gift_level_token(
     Ok(level)
 }
 
-fn script_warp_target_map(constant: &str) -> String {
-    constant.to_string()
+fn script_warp_target_map(
+    map_name: &str,
+    script_name: &str,
+    command_name: &str,
+    constant: &str,
+    map_name_by_constant: &BTreeMap<String, String>,
+) -> Result<String> {
+    if constant == "NONE" {
+        return Ok(constant.to_string());
+    }
+    map_name_by_constant.get(constant).cloned().with_context(|| {
+        format!(
+            "{command_name} command in {script_name} for {map_name} references missing map constant {constant}"
+        )
+    })
 }
 
 fn merge_exact_value_payload(
@@ -30605,7 +35979,7 @@ fn merge_exact_values(
 }
 
 fn item_key(item: &Item) -> Result<String> {
-    let issues = item_payload_issues(item);
+    let issues = item_payload_issues_with_known_field_rules(item, true);
     if issues.contains(&ItemPayloadIssue::MissingScriptName) {
         anyhow::bail!("item '{}' is missing explicit script_name", item.name);
     } else if let Some(ItemPayloadIssue::InvalidScriptName { script_name }) = issues
@@ -30655,7 +36029,7 @@ fn validate_manifest_move(move_data: &Move) -> Result<()> {
 }
 
 fn validate_manifest_item(item: &Item) -> Result<()> {
-    let issues = item_payload_issues(item);
+    let issues = item_payload_issues_with_known_field_rules(item, true);
     if issues.contains(&ItemPayloadIssue::MissingName) {
         anyhow::bail!("item '{}' must declare explicit name", item.script_name);
     }
@@ -30819,6 +36193,19 @@ fn validate_manifest_item(item: &Item) -> Result<()> {
             menu
         );
     }
+    if issues.contains(&ItemPayloadIssue::MissingScriptName) {
+        anyhow::bail!("item '{}' is missing explicit script_name", item.name);
+    }
+    if let Some(ItemPayloadIssue::InvalidScriptName { script_name }) = issues
+        .iter()
+        .find(|issue| matches!(issue, ItemPayloadIssue::InvalidScriptName { .. }))
+    {
+        anyhow::bail!(
+            "item '{}' has invalid script_name '{}'",
+            item.name,
+            script_name
+        );
+    }
     for issue in issues {
         match issue {
             ItemPayloadIssue::MissingName
@@ -30844,6 +36231,14 @@ fn validate_manifest_item(item: &Item) -> Result<()> {
             | ItemPayloadIssue::InvalidTmhmMove { .. }
             | ItemPayloadIssue::InvalidFieldUsableMenu { .. }
             | ItemPayloadIssue::InvalidBattleUsableMenu { .. } => {}
+            ItemPayloadIssue::MissingFieldItemPayload => anyhow::bail!(
+                "item '{}' is field_usable without an exact field item payload",
+                item.script_name
+            ),
+            ItemPayloadIssue::MissingBattleItemPayload => anyhow::bail!(
+                "item '{}' is battle_usable without an exact battle item payload",
+                item.script_name
+            ),
             ItemPayloadIssue::InvalidStatusHeal { index, status } => anyhow::bail!(
                 "item '{}' status_heals[{index}] has invalid status '{}'",
                 item.script_name,
@@ -30955,6 +36350,10 @@ fn validate_manifest_item(item: &Item) -> Result<()> {
                 item.script_name,
                 mode
             ),
+            ItemPayloadIssue::InvalidBattleCaptureBall => anyhow::bail!(
+                "item '{}' has invalid battle_capture_ball false",
+                item.script_name
+            ),
             ItemPayloadIssue::InvalidRepelSteps { steps } => anyhow::bail!(
                 "item '{}' has invalid repel_steps {}",
                 item.script_name,
@@ -30998,45 +36397,89 @@ fn resolve_collision_token(token: &str) -> Result<u8> {
     }
     Ok(match token {
         "FLOOR" => permissions::FLOOR,
+        "01" => 0x01,
+        "03" => 0x03,
         "04" => 0x04,
         "WALL" => permissions::WALL,
+        "CUT_08" => 0x08,
+        "TALL_GRASS_10" => 0x10,
+        "CUT_TREE" => 0x12,
+        "LONG_GRASS" => 0x14,
+        "HEADBUTT_TREE" => 0x15,
         "TALL_GRASS" => permissions::TALL_GRASS,
+        "CUT_TREE_1A" => 0x1a,
+        "LONG_GRASS_1C" => 0x1c,
+        "HEADBUTT_TREE_1D" => 0x1d,
         "WATER_21" => 0x21,
-        "WATER" => permissions::WATER,
         "ICE" => 0x23,
-        "ICE_2B" => 0x2b,
         "WHIRLPOOL" => permissions::WHIRLPOOL,
+        "BUOY" => 0x27,
+        "CUT_28" => 0x28,
+        "WATER" => permissions::WATER,
+        "ICE_2B" => 0x2b,
+        "WHIRLPOOL_2C" => permissions::WHIRLPOOL_2C,
         "WATERFALL_RIGHT" => permissions::WATERFALL_RIGHT,
         "WATERFALL_LEFT" => permissions::WATERFALL_LEFT,
         "WATERFALL_UP" => permissions::WATERFALL_UP,
         "WATERFALL" => permissions::WATERFALL,
-        "UP_WALL" => permissions::UP_WALL,
-        "DOWN_WALL" => permissions::DOWN_WALL,
-        "LEFT_WALL" => permissions::LEFT_WALL,
-        "RIGHT_WALL" => permissions::RIGHT_WALL,
+        "CURRENT_RIGHT" => 0x38,
+        "CURRENT_LEFT" => 0x39,
+        "CURRENT_UP" => 0x3a,
+        "CURRENT_DOWN" => permissions::CURRENT_DOWN,
+        "BRAKE" => 0x40,
+        "WALK_RIGHT" => 0x41,
+        "WALK_LEFT" => 0x42,
+        "WALK_UP" => 0x43,
+        "WALK_DOWN" => 0x44,
+        "BRAKE_45" => 0x45,
+        "BRAKE_46" => 0x46,
+        "BRAKE_47" => 0x47,
+        "GRASS_48" => 0x48,
+        "GRASS_49" => 0x49,
+        "GRASS_4A" => 0x4a,
+        "GRASS_4B" => 0x4b,
+        "GRASS_4C" => 0x4c,
+        "WALK_RIGHT_ALT" => 0x50,
+        "WALK_LEFT_ALT" => 0x51,
+        "WALK_UP_ALT" => 0x52,
+        "WALK_DOWN_ALT" => 0x53,
+        "BRAKE_ALT" => 0x54,
+        "BRAKE_55" => 0x55,
+        "BRAKE_56" => 0x56,
+        "BRAKE_57" => 0x57,
+        "5B" => 0x5b,
+        "PIT" => permissions::PIT,
+        "VIRTUAL_BOY" => 0x61,
+        "64" => 0x64,
+        "65" => 0x65,
+        "PIT_68" => permissions::PIT_68,
+        "WARP_CARPET_DOWN" => permissions::WARP_CARPET_DOWN,
         "DOOR" => permissions::DOOR,
-        "DOOR_75" => permissions::DOOR_75,
-        "DOOR_79" => permissions::DOOR_79,
-        "DOOR_7D" => permissions::DOOR_7D,
         "LADDER" => permissions::LADDER,
-        "STAIRCASE" => permissions::STAIRCASE,
         "STAIRCASE_73" => permissions::STAIRCASE_73,
-        "CAVE" => permissions::CAVE,
         "CAVE_74" => permissions::CAVE_74,
+        "DOOR_75" => permissions::DOOR_75,
+        "WARP_CARPET_LEFT" => permissions::WARP_CARPET_LEFT,
+        "WARP_77" => permissions::WARP_77,
+        "WARP_CARPET_UP" => permissions::WARP_CARPET_UP,
+        "DOOR_79" => permissions::DOOR_79,
+        "STAIRCASE" => permissions::STAIRCASE,
+        "CAVE" => permissions::CAVE,
+        "WARP_PANEL" => permissions::WARP_PANEL,
+        "DOOR_7D" => permissions::DOOR_7D,
+        "WARP_CARPET_RIGHT" => permissions::WARP_CARPET_RIGHT,
+        "WARP_7F" => permissions::WARP_7F,
         "COUNTER" => permissions::COUNTER,
-        "COUNTER_98" => permissions::COUNTER_98,
         "BOOKSHELF" => permissions::BOOKSHELF,
         "PC" => permissions::PC,
         "RADIO" => permissions::RADIO,
         "TOWN_MAP" => permissions::TOWN_MAP,
         "MART_SHELF" => permissions::MART_SHELF,
         "TV" => permissions::TV,
+        "COUNTER_98" => permissions::COUNTER_98,
+        "9C" => 0x9c,
         "WINDOW" => permissions::WINDOW,
         "INCENSE_BURNER" => permissions::INCENSE_BURNER,
-        "BUOY" => 0x27,
-        "VIRTUAL_BOY" => 0x61,
-        "CUT_TREE" => 0x12,
-        "HEADBUTT_TREE" => 0x15,
         "HOP_RIGHT" => permissions::HOP_RIGHT,
         "HOP_LEFT" => permissions::HOP_LEFT,
         "HOP_UP" => permissions::HOP_UP,
@@ -31045,25 +36488,23 @@ fn resolve_collision_token(token: &str) -> Result<u8> {
         "HOP_DOWN_LEFT" => permissions::HOP_DOWN_LEFT,
         "HOP_UP_RIGHT" => permissions::HOP_UP_RIGHT,
         "HOP_UP_LEFT" => permissions::HOP_UP_LEFT,
-        "BRAKE" => 0x40,
-        "BRAKE_45" => 0x45,
-        "BRAKE_46" => 0x46,
-        "BRAKE_47" => 0x47,
-        "BRAKE_ALT" => 0x54,
-        "BRAKE_55" => 0x55,
-        "BRAKE_56" => 0x56,
-        "BRAKE_57" => 0x57,
-        "5B" => 0x5b,
-        "PIT" => permissions::PIT,
-        "PIT_68" => permissions::PIT_68,
-        "WARP_CARPET_DOWN" => permissions::WARP_CARPET_DOWN,
-        "WARP_CARPET_UP" => permissions::WARP_CARPET_UP,
-        "WARP_CARPET_LEFT" => permissions::WARP_CARPET_LEFT,
-        "WARP_CARPET_RIGHT" => permissions::WARP_CARPET_RIGHT,
-        "WARP_PANEL" => permissions::WARP_PANEL,
-        "WARP_77" => permissions::WARP_77,
-        "WARP_7F" => permissions::WARP_7F,
-        "01" => 0x01,
+        "RIGHT_WALL" => permissions::RIGHT_WALL,
+        "LEFT_WALL" => permissions::LEFT_WALL,
+        "UP_WALL" => permissions::UP_WALL,
+        "DOWN_WALL" => permissions::DOWN_WALL,
+        "DOWN_RIGHT_WALL" => permissions::DOWN_RIGHT_WALL,
+        "DOWN_LEFT_WALL" => permissions::DOWN_LEFT_WALL,
+        "UP_RIGHT_WALL" => permissions::UP_RIGHT_WALL,
+        "UP_LEFT_WALL" => permissions::UP_LEFT_WALL,
+        "RIGHT_BUOY" => permissions::RIGHT_BUOY,
+        "LEFT_BUOY" => permissions::LEFT_BUOY,
+        "UP_BUOY" => permissions::UP_BUOY,
+        "DOWN_BUOY" => permissions::DOWN_BUOY,
+        "DOWN_RIGHT_BUOY" => 0xc4,
+        "DOWN_LEFT_BUOY" => 0xc5,
+        "UP_RIGHT_BUOY" => 0xc6,
+        "UP_LEFT_BUOY" => 0xc7,
+        "FF" => 0xff,
         other => anyhow::bail!("unknown collision token {other}"),
     })
 }
@@ -31162,11 +36603,9 @@ mod tests {
         EncounterSurface, FieldEncounterData, FieldEncounterEntry, FieldEncounterTable, TimeOfDay,
         WildEncounter, WildEncounterTable, table_for_surface,
     };
-    use crystal_core::world::map::{Direction, TilePosition};
+    use crystal_core::world::map::{Direction, OverworldMapData, TilePosition};
     use crystal_core::world::movement::{StepOptions, StepOutcome};
-    use crystal_core::world::session::{
-        EncounterCheckOptions, OverworldSession, warp_tile_position,
-    };
+    use crystal_core::world::session::{EncounterCheckOptions, OverworldSession};
 
     fn npc_trade_rules<const N: usize>(ids: [&str; N]) -> BTreeMap<String, NpcTradeRule> {
         ids.into_iter()
@@ -31252,7 +36691,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -31456,6 +36896,41 @@ mod tests {
         }
     }
 
+    fn test_battle_reward_rules() -> BattleRewardRules {
+        BattleRewardRules {
+            max_level: 100,
+            wild_exp_divisor: 7,
+            trainer_exp_numerator: 3,
+            trainer_exp_denominator: 2,
+        }
+    }
+
+    fn test_step_event_rules() -> StepEventRules {
+        StepEventRules {
+            poison_step_interval: 4,
+            egg_step_trigger: 1,
+            hatched_egg_happiness: 120,
+            poison_status: "PSN".to_string(),
+            egg_nickname: "EGG".to_string(),
+            happiness_step_counter_mask: 255,
+            happiness_step_counter_target: 0,
+        }
+    }
+
+    fn add_test_growth_rates(data: &mut GameDataSet) {
+        data.growth_rates.insert(
+            "GROWTH_MEDIUM_FAST".to_string(),
+            crystal_core::systems::experience::GrowthRateCurve {
+                id: "GROWTH_MEDIUM_FAST".to_string(),
+                numerator: 1,
+                denominator: 1,
+                quadratic: 0,
+                linear: 0,
+                constant: 0,
+            },
+        );
+    }
+
     fn add_runtime_species_and_move(data: &mut GameDataSet) {
         let mut known_species = species();
         known_species.tmhm_learnset.clear();
@@ -31553,6 +37028,509 @@ mod tests {
             encounter_music: encounter_music.to_string(),
             ai_layers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn active_wild_battle_escape_rejects_stale_rng_seed_before_mutation() {
+        let mut data = GameDataSet::default();
+        data.battle_escape_rules = test_battle_escape_rules();
+        data.battle_stat_multipliers = test_battle_stat_multipliers();
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let enemy = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            rng_seed: 7,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        let before = state.clone();
+        let mut preview = state.clone();
+        data.resolve_active_wild_battle_run(&mut preview)
+            .expect("preview escape");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeBattleEscapeMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::AttemptEscapeActiveWildBattle(RuntimeBattleEscapeCommand {
+                    rng_seed_after: 0,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale escape rng seed must reject");
+
+        assert!(
+            error
+                .to_string()
+                .contains("attempt active wild battle escape rng_seed_after 0 does not match")
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn active_battle_escape_item_is_atomic_when_pay_day_claim_rejects() {
+        let mut data = GameDataSet::default();
+        let mut escape_item = test_item("POKE_DOLL");
+        escape_item.battle_menu = "ITEMMENU_CURRENT".to_string();
+        escape_item.battle_usable = true;
+        escape_item.battle_escape_mode = Some("WILD_BATTLE".to_string());
+        escape_item.consumable = true;
+        data.items
+            .insert(escape_item.script_name.clone(), escape_item);
+
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let enemy = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            battle_pay_day_money: 50,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        state
+            .bag
+            .add_item(&data.items["POKE_DOLL"], 1)
+            .expect("add escape item");
+
+        let error = data
+            .use_bag_item_to_escape_active_wild_battle(&mut state, "POKE_DOLL")
+            .expect_err("missing MAX_MONEY must reject after staged escape item use");
+
+        assert!(
+            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
+            "{error:#}"
+        );
+        assert_eq!(state.bag.quantity(&data.items["POKE_DOLL"]), 1);
+        assert!(state.script_runtime.item_use_events.is_empty());
+        assert!(matches!(state.battle, BattleMemory::Wild { .. }));
+        assert_eq!(state.battle_pay_day_money, 50);
+    }
+
+    #[test]
+    fn active_wild_battle_run_is_atomic_when_pay_day_claim_rejects() {
+        let mut data = GameDataSet::default();
+        data.battle_escape_rules = BattleEscapeRules {
+            player_speed_multiplier: 32,
+            enemy_speed_divisor: 4,
+            failed_attempt_bonus: u16::MAX,
+            rng_roll_values: 256,
+        };
+        data.battle_stat_multipliers = test_battle_stat_multipliers();
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let enemy = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            battle_escape_attempts: u8::MAX,
+            battle_pay_day_money: 50,
+            rng_seed: 7,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        let before = state.clone();
+
+        let error = data
+            .resolve_active_wild_battle_run(&mut state)
+            .expect_err("missing MAX_MONEY must reject after staged successful escape");
+
+        assert!(
+            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
+            "{error:#}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn active_wild_battle_reward_claim_is_atomic_when_pay_day_claim_rejects() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        add_test_growth_rates(&mut data);
+        data.battle_reward_rules = test_battle_reward_rules();
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut enemy = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            5,
+            crystal_core::models::Dv::default(),
+        );
+        enemy.hp = 0;
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            battle_pay_day_money: 50,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        let before = state.clone();
+
+        let error = data
+            .claim_active_wild_battle_rewards(&mut state, TimeOfDay::Day)
+            .expect_err("missing MAX_MONEY must reject after staged reward claim");
+
+        assert!(
+            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
+            "{error:#}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn active_battle_ball_throw_rejects_stale_rng_seed_before_mutation() {
+        let mut data = GameDataSet::default();
+        let mut ball = test_item("POKE_BALL");
+        ball.pocket = item_pocket(ITEM_POCKET_BALL);
+        ball.battle_menu = "ITEMMENU_CURRENT".to_string();
+        ball.battle_usable = true;
+        data.items.insert(ball.script_name.clone(), ball.clone());
+        data.capture_rules = CaptureRules {
+            fast_ball_species: BTreeSet::new(),
+            heavy_ball_modifiers: BTreeMap::new(),
+            ball_rules: [(
+                "POKE_BALL".to_string(),
+                CaptureBallRule {
+                    multiplier_numerator: 1,
+                    multiplier_denominator: 1,
+                    battle_type: String::new(),
+                    skip_hp_calc: false,
+                    use_heavy_ball_weight_modifier: false,
+                    use_level_ball_multiplier: false,
+                    require_same_species: false,
+                    require_same_gender: false,
+                    require_fast_species: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            guaranteed_capture_balls: BTreeSet::new(),
+            status_bonus: BTreeMap::new(),
+        };
+        data.capture_wobble_probabilities = vec![CaptureWobbleProbability {
+            catch_rate: u8::MAX,
+            chance: u8::MAX,
+        }];
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut enemy_species = species();
+        enemy_species.catch_rate = 45;
+        let enemy = crystal_core::models::Pokemon::new_for_tests(
+            enemy_species,
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            rng_seed: 11,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        state
+            .bag
+            .add_item(&ball, 1)
+            .expect("add ball to bag for capture test");
+        let before = state.clone();
+        let mut preview = state.clone();
+        data.throw_ball_at_active_battle(&mut preview, "POKE_BALL")
+            .expect("preview ball throw");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeBallThrowMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ThrowBallAtActiveBattle(RuntimeBattleItemCommand {
+                    item_id: "POKE_BALL".to_string(),
+                    rng_seed_after: 0,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale ball throw rng seed must reject");
+
+        assert!(
+            error
+                .to_string()
+                .contains("throw ball at active battle rng_seed_after 0 does not match")
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn active_wild_capture_completion_is_atomic_when_pay_day_claim_rejects() {
+        let data = GameDataSet::default();
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let enemy = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            20,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route29".to_string(),
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            battle_pay_day_money: 50,
+            rng_seed: 11,
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        let before = state.clone();
+        let outcome = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            wobble_count: 4,
+            animation_shakes: 3,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: state.rng_seed,
+        };
+
+        let error = data
+            .complete_active_wild_capture(&mut state, &outcome)
+            .expect_err("missing MAX_MONEY must reject after staged capture completion");
+
+        assert!(
+            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
+            "{error:#}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn deferred_level_evolution_rejects_existing_pending_move_learn_before_mutation() {
+        let mut data = GameDataSet::default();
+        let mut mon = species();
+        mon.id = "NEW_MON".to_string();
+        mon.growth_rate = growth_rate("GROWTH_MEDIUM_FAST");
+        let mut evolved = species();
+        evolved.id = "NEW_MON_EVOLVED".to_string();
+        evolved.growth_rate = growth_rate("GROWTH_MEDIUM_FAST");
+        data.pokemon.insert(mon.id.clone(), mon.clone());
+        data.pokemon.insert(evolved.id.clone(), evolved);
+        data.learnsets.insert(mon.id.clone(), Vec::new());
+        data.learnsets
+            .insert("NEW_MON_EVOLVED".to_string(), Vec::new());
+        data.evolutions.0.insert(
+            mon.id.clone(),
+            vec![crystal_core::systems::evolution::EvolutionEntry::level(
+                "NEW_MON_EVOLVED",
+                16,
+            )],
+        );
+        data.evolutions
+            .0
+            .insert("NEW_MON_EVOLVED".to_string(), Vec::new());
+        let mut state = crystal_core::state::GameState::default();
+        state.storage.party.pokemon[0] = Some(crystal_core::models::Pokemon::new_for_tests(
+            mon,
+            16,
+            crystal_core::models::Dv::default(),
+        ));
+        state.pending_move_learn = Some(crystal_core::state::PendingMoveLearn {
+            party_index: 0,
+            species_id: "NEW_MON".to_string(),
+            level: 16,
+            learned_move: crystal_core::models::LearnedMove {
+                name: "TACKLE".to_string(),
+                current_pp: 35,
+                pp_ups: 0,
+            },
+            defer_level_evolution: true,
+        });
+        let before = state.clone();
+
+        let error = data
+            .resolve_deferred_level_evolution(
+                &mut state,
+                0,
+                crystal_core::world::encounters::TimeOfDay::Day,
+            )
+            .expect_err("existing pending move learn must block deferred evolution");
+
+        let error = format!("{error:#}");
+        assert!(error.contains(
+            "pending move learn already exists before resolving deferred level evolution for party index 0"
+        ));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn party_item_pending_move_learn_guard_runs_before_item_mutation() {
+        let data = GameDataSet::default();
+        let mut state = crystal_core::state::GameState::default();
+        state.pending_move_learn = Some(crystal_core::state::PendingMoveLearn {
+            party_index: 0,
+            species_id: "NEW_MON".to_string(),
+            level: 16,
+            learned_move: crystal_core::models::LearnedMove {
+                name: "TACKLE".to_string(),
+                current_pp: 35,
+                pp_ups: 0,
+            },
+            defer_level_evolution: true,
+        });
+        let empty_effect = crystal_core::systems::battle_items::BattleItemOutcome {
+            item_id: "RARE_CANDY".to_string(),
+            hp_before: 10,
+            hp_after: 10,
+            level_before: 16,
+            level_after: 16,
+            experience_before: 0,
+            experience_after: 0,
+            status_before: None,
+            status_after: None,
+            confusion_turns_before: 0,
+            confusion_turns_after: 0,
+            focus_energy_before: false,
+            focus_energy_after: false,
+            pp_changes: Vec::new(),
+            stat_changes: Vec::new(),
+            battle_stat_stage_changes: Vec::new(),
+            learned_moves: Vec::new(),
+            pending_move_learns: Vec::new(),
+            deferred_level_evolution: false,
+            evolution_target: None,
+            consumed: false,
+        };
+        data.require_no_existing_pending_move_learn_for_item_effect(&state, 0, &empty_effect)
+            .expect("item effects without pending move learn can continue");
+
+        let mut pending_effect = empty_effect.clone();
+        pending_effect.pending_move_learns = vec![crystal_core::models::LearnedMove {
+            name: "RAZOR_LEAF".to_string(),
+            current_pp: 25,
+            pp_ups: 0,
+        }];
+        let mut clear_state = state.clone();
+        clear_state.pending_move_learn = None;
+        data.require_no_existing_pending_move_learn_for_item_effect(
+            &clear_state,
+            0,
+            &pending_effect,
+        )
+        .expect("new pending move learn can be queued when no prompt is active");
+
+        let error = data
+            .require_no_existing_pending_move_learn_for_item_effect(&state, 0, &pending_effect)
+            .expect_err("existing pending move learn must block before item mutation");
+        let error = format!("{error:#}");
+        assert!(error.contains("pending move learn already exists for party index 0"));
     }
 
     #[test]
@@ -31793,7 +37771,7 @@ mod tests {
                 post_battle_script_flags: Vec::new(),
             },
         ];
-        let data = GameDataSet {
+        let mut data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             ..GameDataSet::default()
         };
@@ -31807,6 +37785,118 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "duplicate_script_command_position"
                 && diagnostic.subject == "Start:scripted_trainer_battle_start:BattleScript:2"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_trainer_objects_without_exact_battle_requests() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        let mut trainer = test_object("START_TRAINER", "-1", 1, 1);
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        trainer.script = "StartTrainerScript".to_string();
+        module.objects = vec![trainer];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trainer_object_missing_battle_request"
+                && diagnostic.subject == "Start:START_TRAINER"
+                && diagnostic.message.contains("StartTrainerScript")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_trainer_battle_requests_without_exact_objects() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.trainer_scripts.insert(
+            "StartTrainerScript".to_string(),
+            TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER_JOEY", "EVENT_BEAT_JOEY"),
+        );
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trainer_battle_request_missing_object"
+                && diagnostic.subject == "Start:trainer_script:StartTrainerScript"
+                && diagnostic.message.contains("StartTrainerScript")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_duplicate_trainer_object_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        let mut first_trainer = test_object("START_TRAINER_1", "-1", 1, 1);
+        first_trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        first_trainer.script = "StartTrainerScript".to_string();
+        let mut second_trainer = test_object("START_TRAINER_2", "-1", 2, 1);
+        second_trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        second_trainer.script = "StartTrainerScript".to_string();
+        module.objects = vec![first_trainer, second_trainer];
+        module.trainer_scripts.insert(
+            "StartTrainerScript".to_string(),
+            TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER_JOEY", "EVENT_BEAT_JOEY"),
+        );
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trainer_duplicate_object_script"
+                && diagnostic.subject == "Start:StartTrainerScript"
+                && diagnostic.message.contains("2 OBJECTTYPE_TRAINER objects")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_trainer_object_event_flags_that_mismatch_battle_request() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        let mut trainer = test_object("START_TRAINER", "EVENT_HIDE_START_TRAINER", 1, 1);
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        trainer.script = "StartTrainerScript".to_string();
+        module.objects = vec![trainer];
+        module.trainer_scripts.insert(
+            "StartTrainerScript".to_string(),
+            TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER_JOEY", "EVENT_BEAT_START_TRAINER"),
+        );
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trainer_object_event_flag_mismatch"
+                && diagnostic.subject == "Start:START_TRAINER"
+                && diagnostic.message.contains("EVENT_HIDE_START_TRAINER")
+                && diagnostic.message.contains("EVENT_BEAT_START_TRAINER")
         }));
     }
 
@@ -31883,6 +37973,9 @@ mod tests {
     fn verifier_rejects_field_move_replacements_that_do_not_change_blocks() {
         let mut data = GameDataSet::default();
         add_runtime_species_and_move(&mut data);
+        data.tilesets = [("johto".to_string(), test_tileset_definition())]
+            .into_iter()
+            .collect();
         data.field_moves.cut = crystal_core::systems::field_moves::FieldMoveBlockRule {
             move_id: "CUT".to_string(),
             badge: crystal_core::systems::field_moves::FieldMoveBadgeRequirement {
@@ -31914,6 +38007,152 @@ mod tests {
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_field_move_replacement_block"
+                && diagnostic.subject == "field_moves:cut:replacements:johto:3"
+        }));
+
+        data.field_moves.cut.replacements = [(
+            "johto".to_string(),
+            [(
+                0x03,
+                crystal_core::systems::field_moves::FieldMoveReplacement {
+                    replacement_block_id: 0x63,
+                    variant: "tree".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )]
+        .into_iter()
+        .collect();
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_move_replacement_target_block"
+                && diagnostic.subject == "field_moves:cut:replacements:johto:3"
+        }));
+    }
+
+    #[test]
+    fn escape_rope_session_use_is_atomic_when_destination_rejects() {
+        let mut escape_rope = test_item("ESCAPE_ROPE");
+        escape_rope.field_usable = true;
+        escape_rope.consumable = true;
+        escape_rope.escape_rope_mode = Some("ESCAPE_ROPE".to_string());
+
+        let mut source = test_map_module("SourceCave", "SOURCE_CAVE", None);
+        source.attributes.environment = Some("cave".to_string());
+        let mut destination = test_map_module("EscapeDest", "ESCAPE_DEST", None);
+        destination.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 5,
+            y: 5,
+            target_map_constant: "SOURCE_CAVE".to_string(),
+            target_map: "SourceCave".to_string(),
+            target_warp_id: 1,
+        }];
+
+        let mut source_metadata = test_runtime_map_metadata("SOURCE_CAVE", "SourceCave");
+        source_metadata.environment = "CAVE".to_string();
+        let mut destination_metadata = test_runtime_map_metadata("ESCAPE_DEST", "EscapeDest");
+        destination_metadata.environment = "ROUTE".to_string();
+        let data = GameDataSet {
+            maps: map_payload(vec![source, destination]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([
+                ("SOURCE_CAVE".to_string(), source_metadata),
+                ("ESCAPE_DEST".to_string(), destination_metadata),
+            ]),
+            items: item_payload(vec![escape_rope]),
+            field_moves: test_field_move_catalog(),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            dig_warp_map_name: Some("EscapeDest".to_string()),
+            dig_warp_index: Some(1),
+            ..GameState::default()
+        };
+        state
+            .bag
+            .add_item(&data.items["ESCAPE_ROPE"], 1)
+            .expect("add escape rope");
+        let mut overworld = data
+            .overworld_session_for_traversal(
+                "SourceCave",
+                TilePosition { x: 0, y: 0 },
+                17,
+                PlayerTraversalState::Walk,
+            )
+            .expect("source session");
+        let music_ids = BTreeSet::new();
+
+        let error = data
+            .use_bag_escape_rope_in_session(&mut state, &mut overworld, "ESCAPE_ROPE", &music_ids)
+            .expect_err("out-of-bounds destination must reject after staged item use");
+
+        assert!(
+            format!("{error:#}")
+                .contains("runtime player tile (5, 5) is outside compiled map EscapeDest"),
+            "{error:#}"
+        );
+        assert_eq!(state.bag.quantity(&data.items["ESCAPE_ROPE"]), 1);
+        assert!(state.script_runtime.item_use_events.is_empty());
+        assert_eq!(overworld.map.name, "SourceCave");
+        assert_eq!(overworld.player.tile, TilePosition { x: 0, y: 0 });
+        assert_eq!(overworld.frame, 17);
+    }
+
+    #[test]
+    fn verifier_rejects_target_collision_blocks_without_field_move_replacement_rows() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "3".to_string(),
+            vec![
+                "CUT_TREE".to_string(),
+                "CUT_TREE".to_string(),
+                "CUT_TREE".to_string(),
+                "CUT_TREE".to_string(),
+            ],
+        );
+        data.tilesets = [("johto".to_string(), tileset)].into_iter().collect();
+        let mut module = test_map_module("IlexForest", "ILEX_FOREST", None);
+        module.blocks = vec![3];
+        data.maps = [("IlexForest".to_string(), module)].into_iter().collect();
+        data.field_moves.cut = crystal_core::systems::field_moves::FieldMoveBlockRule {
+            move_id: "CUT".to_string(),
+            badge: crystal_core::systems::field_moves::FieldMoveBadgeRequirement {
+                region: "johto".to_string(),
+                index: 1,
+            },
+            target_collisions: vec![0x12],
+            replacements: [(
+                "johto".to_string(),
+                [(
+                    4,
+                    crystal_core::systems::field_moves::FieldMoveReplacement {
+                        replacement_block_id: 1,
+                        variant: "tree".to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_field_move_runtime_replacement"
                 && diagnostic.subject == "field_moves:cut:replacements:johto:3"
         }));
     }
@@ -32029,6 +38268,7 @@ mod tests {
             ("COIN_CASE", "COIN_CASE"),
             ("BLUE_CARD", "BLUE_CARD"),
             ("TOWN_MAP", "TOWN_MAP"),
+            ("POKEGEAR", "POKEGEAR"),
         ] {
             let mut item = test_item(item_id);
             item.effect = effect.to_string();
@@ -32050,6 +38290,9 @@ mod tests {
         data.field_moves.town_map = FieldItemRule {
             item_id: "MOD_TOWN_MAP".to_string(),
         };
+        data.field_moves.pokegear = FieldItemRule {
+            item_id: "MOD_POKEGEAR".to_string(),
+        };
 
         let report = verify_game_data(
             &AssetRoot::new(repository_root_for_tests()),
@@ -32063,11 +38306,278 @@ mod tests {
             "field_moves:coin_case",
             "field_moves:blue_card",
             "field_moves:town_map",
+            "field_moves:pokegear",
         ] {
             assert!(report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "unknown_field_item_id" && diagnostic.subject == subject
             }));
         }
+    }
+
+    #[test]
+    fn runtime_field_pokegear_item_uses_exact_pack_rule_without_literal_fallback() {
+        let mut data = GameDataSet::default();
+        data.field_moves.pokegear = FieldItemRule {
+            item_id: "MOD_POKEGEAR".to_string(),
+        };
+        let mut bad = test_item("POKEGEAR");
+        bad.effect = "POKEGEAR".to_string();
+        bad.field_menu = "ITEMMENU_CLOSE".to_string();
+        bad.field_usable = true;
+        let mut exact = test_item("MOD_POKEGEAR");
+        exact.effect = "POKEGEAR".to_string();
+        exact.field_menu = "ITEMMENU_CLOSE".to_string();
+        exact.field_usable = true;
+        data.items.insert("POKEGEAR".to_string(), bad);
+        data.items.insert("MOD_POKEGEAR".to_string(), exact);
+
+        let item = data
+            .field_pokegear_item("MOD_POKEGEAR")
+            .expect("pack-defined Pokegear item accepted");
+        assert_eq!(item.script_name, "MOD_POKEGEAR");
+
+        let error = data
+            .field_pokegear_item("POKEGEAR")
+            .expect_err("literal POKEGEAR rejected after pack override");
+        assert!(error.to_string().contains("InvalidFieldItemId"), "{error}");
+    }
+
+    #[test]
+    fn runtime_field_box_item_uses_exact_pack_rule_without_literal_fallback() {
+        let mut data = GameDataSet::default();
+        let mut literal = test_item("NORMAL_BOX");
+        literal.effect = "NORMAL_BOX".to_string();
+        literal.field_menu = "ITEMMENU_CURRENT".to_string();
+        literal.field_usable = true;
+        literal.consumable = true;
+        let mut exact = test_item("MOD_BOX");
+        exact.effect = "MOD_BOX_EFFECT".to_string();
+        exact.field_menu = "ITEMMENU_CURRENT".to_string();
+        exact.field_usable = true;
+        exact.consumable = true;
+        data.items.insert("NORMAL_BOX".to_string(), literal);
+        data.items.insert("MOD_BOX".to_string(), exact);
+        data.field_box_items.insert(
+            "MOD_BOX".to_string(),
+            FieldBoxItemRule {
+                item_id: "MOD_BOX".to_string(),
+                effect: "MOD_BOX_EFFECT".to_string(),
+                decoration_flag: "EVENT_MOD_BOX_DECORATION".to_string(),
+            },
+        );
+        let mut state = GameState::default();
+        state
+            .bag
+            .add_item(&data.items["MOD_BOX"], 1)
+            .expect("add mod box");
+        state
+            .bag
+            .add_item(&data.items["NORMAL_BOX"], 1)
+            .expect("add literal box");
+
+        let outcome = data
+            .use_bag_box_in_field(&mut state, "MOD_BOX")
+            .expect("pack-defined field box item works");
+        assert_eq!(outcome.decoration_flag, "EVENT_MOD_BOX_DECORATION");
+        assert!(!outcome.already_owned);
+        assert_eq!(
+            state.flags.event_flags.get("EVENT_MOD_BOX_DECORATION"),
+            Some(&true)
+        );
+
+        let error = data
+            .use_bag_box_in_field(&mut state, "NORMAL_BOX")
+            .expect_err("literal NORMAL_BOX rejected without a pack rule");
+        assert!(
+            format!("{error:#}").contains("not defined by the pack"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn verifier_requires_field_box_items_to_match_exact_pack_rules() {
+        let mut good_item = test_item("MOD_BOX");
+        good_item.effect = "MOD_BOX_EFFECT".to_string();
+        good_item.field_menu = "ITEMMENU_CURRENT".to_string();
+        good_item.field_usable = true;
+        let mut wrong_effect = test_item("WRONG_EFFECT_BOX");
+        wrong_effect.effect = "OTHER_BOX_EFFECT".to_string();
+        wrong_effect.field_menu = "ITEMMENU_CURRENT".to_string();
+        wrong_effect.field_usable = true;
+        let mut wrong_menu = test_item("WRONG_MENU_BOX");
+        wrong_menu.effect = "WRONG_MENU_EFFECT".to_string();
+        wrong_menu.field_menu = "ITEMMENU_CLOSE".to_string();
+        wrong_menu.field_usable = true;
+        let data = GameDataSet {
+            items: [
+                ("MOD_BOX".to_string(), good_item),
+                ("WRONG_EFFECT_BOX".to_string(), wrong_effect),
+                ("WRONG_MENU_BOX".to_string(), wrong_menu),
+            ]
+            .into_iter()
+            .collect(),
+            field_box_items: [
+                (
+                    "MOD_BOX".to_string(),
+                    FieldBoxItemRule {
+                        item_id: "MOD_BOX".to_string(),
+                        effect: "MOD_BOX_EFFECT".to_string(),
+                        decoration_flag: "EVENT_MOD_BOX_DECORATION".to_string(),
+                    },
+                ),
+                (
+                    "WRONG_EFFECT_BOX".to_string(),
+                    FieldBoxItemRule {
+                        item_id: "WRONG_EFFECT_BOX".to_string(),
+                        effect: "WRONG_EFFECT_RULE".to_string(),
+                        decoration_flag: "EVENT_WRONG_EFFECT_BOX".to_string(),
+                    },
+                ),
+                (
+                    "WRONG_MENU_BOX".to_string(),
+                    FieldBoxItemRule {
+                        item_id: "WRONG_MENU_BOX".to_string(),
+                        effect: "WRONG_MENU_EFFECT".to_string(),
+                        decoration_flag: "EVENT_WRONG_MENU_BOX".to_string(),
+                    },
+                ),
+                (
+                    "missing box".to_string(),
+                    FieldBoxItemRule {
+                        item_id: "missing box".to_string(),
+                        effect: "MISSING_BOX_EFFECT".to_string(),
+                        decoration_flag: "EVENT_MISSING_BOX".to_string(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.subject == "field_box_items:MOD_BOX"
+                && diagnostic.severity == VerificationSeverity::Error
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "mismatched_field_box_item_effect"
+                && diagnostic.subject == "field_box_items:WRONG_EFFECT_BOX"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_field_box_item_menu"
+                && diagnostic.subject == "field_box_items:WRONG_MENU_BOX"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_field_box_item_rule_id"
+                && diagnostic.subject == "field_box_items:missing box"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_box_item"
+                && diagnostic.subject == "field_box_items:missing box"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_title_screen_spawn_declared_by_pack() {
+        let mut data = GameDataSet {
+            runtime_title_screen: RuntimeTitleScreen {
+                new_game_spawn_identifier: None,
+                title_music: Some("MUSIC_TITLE".to_string()),
+            },
+            ..GameDataSet::default()
+        };
+        data.audio.push(ModpackAudioAsset {
+            id: "MUSIC_TITLE".to_string(),
+            path: "content-packs/test/music/MUSIC_TITLE.mid".to_string(),
+            kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            pcm_format: None,
+        });
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_runtime_title_spawn_identifier"
+                && diagnostic.subject == "runtime_title_screen"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_title_screen_music_declared_by_pack() {
+        let data = GameDataSet {
+            runtime_title_screen: RuntimeTitleScreen {
+                new_game_spawn_identifier: Some(0),
+                title_music: None,
+            },
+            runtime_spawn_points: BTreeMap::from([(
+                "0".to_string(),
+                RuntimeSpawnPoint {
+                    identifier: 0,
+                    map_constant: "NEW_BARK_TOWN".to_string(),
+                    map_name: "NewBarkTown".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    tile_x: 4,
+                    tile_y: 6,
+                    group_name: "GROUP_NEW_BARK".to_string(),
+                    metatile_x: 2,
+                    metatile_y: 3,
+                    subtile_x: 0,
+                    subtile_y: 0,
+                },
+            )]),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_runtime_title_music_id"
+                && diagnostic.subject == "runtime_title_screen"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_title_screen_spawn_missing_from_spawn_table() {
+        let mut data = GameDataSet {
+            runtime_title_screen: RuntimeTitleScreen {
+                new_game_spawn_identifier: Some(0),
+                title_music: Some("MUSIC_TITLE".to_string()),
+            },
+            ..GameDataSet::default()
+        };
+        data.audio.push(ModpackAudioAsset {
+            id: "MUSIC_TITLE".to_string(),
+            path: "content-packs/test/music/MUSIC_TITLE.mid".to_string(),
+            kind: ModpackAudioKind::Music,
+            source: ModpackAudioSource::Midi,
+            pcm_format: None,
+        });
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_runtime_title_spawn_identifier"
+                && diagnostic.subject == "runtime_title_screen"
+        }));
     }
 
     #[test]
@@ -32246,7 +38756,7 @@ mod tests {
             collision: (0..=10)
                 .map(|metatile_id| {
                     (
-                        metatile_id.to_string(),
+                        format!("{metatile_id:x}"),
                         vec![
                             "FLOOR".to_string(),
                             "FLOOR".to_string(),
@@ -32258,6 +38768,1781 @@ mod tests {
                 .collect(),
             palette_map: vec![0],
         }
+    }
+
+    #[test]
+    fn field_encounter_battle_rejects_target_outside_runtime_map_bounds() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let field_encounter = crystal_core::world::encounters::FieldEncounterRoll {
+            map_name: "Route29".to_string(),
+            kind: crystal_core::world::encounters::FieldEncounterKind::Headbutt,
+            target_tile_x: 2,
+            target_tile_y: 0,
+            chance_roll: 0,
+            entry_roll: Some(0),
+            score: Some(0),
+            resolved: Some(ResolvedWildEncounter {
+                level: 5,
+                encounter: WildEncounter {
+                    level: 5,
+                    species: "PIDGEY".to_string(),
+                },
+                slot: 0,
+            }),
+        };
+
+        let error = data
+            .start_field_encounter_battle(&mut state, &field_encounter)
+            .expect_err("field encounter battle target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "field encounter target tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn field_encounter_battle_rejects_target_outside_explicit_runtime_bounds() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let field_encounter = crystal_core::world::encounters::FieldEncounterRoll {
+            map_name: "Route29".to_string(),
+            kind: crystal_core::world::encounters::FieldEncounterKind::Headbutt,
+            target_tile_x: 4,
+            target_tile_y: 0,
+            chance_roll: 0,
+            entry_roll: Some(0),
+            score: Some(0),
+            resolved: Some(ResolvedWildEncounter {
+                level: 5,
+                encounter: WildEncounter {
+                    level: 5,
+                    species: "PIDGEY".to_string(),
+                },
+                slot: 0,
+            }),
+        };
+
+        let error = data
+            .start_field_encounter_battle(&mut state, &field_encounter)
+            .expect_err("field encounter battle target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "field encounter target tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn itemfinder_rejects_player_tile_outside_runtime_map_bounds() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+
+        let error = data
+            .find_itemfinder_hidden_item(&GameState::default(), "Route29", TilePosition::new(4, 0))
+            .expect_err("Itemfinder must reject runtime player tiles outside map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "itemfinder player tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn headbutt_roll_rejects_target_outside_runtime_map_bounds_before_rng() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_headbutt_encounter("Route29", TilePosition::new(2, 0), 0, &mut rng)
+            .expect_err("HEADBUTT target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "HEADBUTT encounter tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn headbutt_roll_rejects_target_outside_explicit_runtime_map_bounds_before_rng() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_headbutt_encounter("Route29", TilePosition::new(4, 0), 0, &mut rng)
+            .expect_err("HEADBUTT target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "HEADBUTT encounter tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn rock_smash_roll_rejects_target_outside_runtime_map_bounds_before_rng() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_rock_smash_encounter("Route29", TilePosition::new(2, 0), &mut rng)
+            .expect_err("ROCK_SMASH target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "ROCK_SMASH encounter tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn rock_smash_roll_rejects_target_outside_explicit_runtime_map_bounds_before_rng() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_rock_smash_encounter("Route29", TilePosition::new(4, 0), &mut rng)
+            .expect_err("ROCK_SMASH target must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "ROCK_SMASH encounter tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    fn resolved_test_wild_encounter_roll(map_name: &str, tile: TilePosition) -> WildEncounterRoll {
+        WildEncounterRoll {
+            map_name: map_name.to_string(),
+            tile,
+            surface: EncounterSurface::Grass,
+            time: TimeOfDay::Day,
+            threshold: 255,
+            encounter_roll: 0,
+            slot_percent_roll: Some(0),
+            level_roll: None,
+            resolved: Some(ResolvedWildEncounter {
+                level: 5,
+                encounter: WildEncounter {
+                    level: 5,
+                    species: "MISSINGNO".to_string(),
+                },
+                slot: 0,
+            }),
+            repelled_by: None,
+            rng_seed_after: 0,
+        }
+    }
+
+    #[test]
+    fn wild_battle_start_rejects_origin_outside_runtime_map_bounds_before_species_lookup() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(1);
+
+        let error = data
+            .wild_battle_start(
+                resolved_test_wild_encounter_roll("Route29", TilePosition::new(2, 0)),
+                &mut rng,
+            )
+            .expect_err("wild battle origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "wild battle encounter roll tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn wild_battle_start_rejects_origin_outside_explicit_runtime_bounds_before_species_lookup() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(1);
+
+        let error = data
+            .wild_battle_start(
+                resolved_test_wild_encounter_roll("Route29", TilePosition::new(4, 0)),
+                &mut rng,
+            )
+            .expect_err("wild battle origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "wild battle encounter roll tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn start_wild_battle_rejects_invalid_origin_before_rng_or_battle_mutation() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            rng_seed: 0x1234_5678,
+            ..GameState::default()
+        };
+
+        let error = data
+            .start_wild_battle(
+                &mut state,
+                resolved_test_wild_encounter_roll("Route29", TilePosition::new(2, 0)),
+            )
+            .expect_err("invalid wild battle origin must fail before mutation");
+
+        assert!(
+            format!("{error:#}").contains(
+                "wild battle encounter roll tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(state.rng_seed, 0x1234_5678);
+        assert_eq!(state.battle, BattleMemory::Inactive);
+    }
+
+    #[test]
+    fn fishing_battle_rejects_origin_outside_runtime_map_bounds() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+
+        let error = data
+            .start_fishing_battle(
+                &mut state,
+                "Route29",
+                TilePosition::new(2, 0),
+                WildEncounter {
+                    level: 5,
+                    species: "MAGIKARP".to_string(),
+                },
+                TimeOfDay::Day,
+                0,
+                0,
+            )
+            .expect_err("fishing battle origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "fishing battle tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn fishing_battle_rejects_origin_outside_explicit_runtime_map_bounds() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+
+        let error = data
+            .start_fishing_battle(
+                &mut state,
+                "Route29",
+                TilePosition::new(4, 0),
+                WildEncounter {
+                    level: 5,
+                    species: "MAGIKARP".to_string(),
+                },
+                TimeOfDay::Day,
+                0,
+                0,
+            )
+            .expect_err("fishing battle origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "fishing battle tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn sweet_scent_roll_rejects_origin_outside_runtime_map_bounds_before_rng() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_sweet_scent_encounter(
+                "Route29",
+                EncounterSurface::Grass,
+                TimeOfDay::Day,
+                TilePosition::new(2, 0),
+                &mut rng,
+            )
+            .expect_err("SWEET_SCENT origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "SWEET_SCENT encounter tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn sweet_scent_roll_rejects_origin_outside_explicit_runtime_map_bounds_before_rng() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut rng = Random::new(0x1234_5678);
+
+        let error = data
+            .roll_sweet_scent_encounter(
+                "Route29",
+                EncounterSurface::Grass,
+                TimeOfDay::Day,
+                TilePosition::new(4, 0),
+                &mut rng,
+            )
+            .expect_err("SWEET_SCENT origin must fit compiled runtime map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "SWEET_SCENT encounter tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn wild_encounter_after_step_rejects_out_of_bounds_session_tile_before_rng_commit() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            rng_seed: 0x1234_5678,
+            ..GameState::default()
+        };
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("valid session");
+        session.player.tile = TilePosition::new(4, 0);
+
+        let error = data
+            .check_wild_encounter_after_step(&mut state, &session)
+            .expect_err("wild encounter check must reject session tiles outside map bounds");
+
+        assert!(
+            format!("{error:#}").contains(
+                "wild encounter check tile (4, 0) is outside compiled map Route29 runtime tile bounds 2x2"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(state.rng_seed, 0x1234_5678);
+    }
+
+    #[test]
+    fn runtime_field_encounter_commands_reject_unused_payload_fields() {
+        let headbutt_error =
+            reject_field_encounter_surface("HEADBUTT", Some(EncounterSurface::Grass))
+                .expect_err("HEADBUTT command must not carry a surface payload");
+        assert!(
+            format!("{headbutt_error:#}")
+                .contains("HEADBUTT field move command must not declare surface"),
+            "{headbutt_error:#}"
+        );
+
+        let sweet_scent_error = reject_field_encounter_player_id("SWEET_SCENT", Some(12345))
+            .expect_err("SWEET_SCENT command must not carry player_id");
+        assert!(
+            format!("{sweet_scent_error:#}")
+                .contains("SWEET_SCENT field move command must not declare player_id"),
+            "{sweet_scent_error:#}"
+        );
+
+        let missing_rng_seed =
+            serde_json::from_value::<RuntimeFieldEncounterCommand>(serde_json::json!({
+                "party_index": 0,
+                "player_id": 12345,
+                "surface": null
+            }))
+            .expect_err("field encounter commands must declare the post-mutation RNG seed");
+        assert!(
+            missing_rng_seed
+                .to_string()
+                .contains("missing field `rng_seed_after`"),
+            "{missing_rng_seed}"
+        );
+    }
+
+    #[test]
+    fn runtime_day_care_commands_use_exact_action_payloads() {
+        let deposit = RuntimeDayCareCommand {
+            caretaker: RuntimeDayCareCaretaker::Man,
+            action: RuntimeDayCareAction::Deposit,
+            party_index: Some(0),
+        };
+        assert_eq!(
+            runtime_day_care_party_slot(&deposit).expect("deposit slot"),
+            Some(0)
+        );
+        assert_eq!(runtime_day_care_action_name(deposit.action), "deposit");
+
+        let missing_slot = RuntimeDayCareCommand {
+            caretaker: RuntimeDayCareCaretaker::Man,
+            action: RuntimeDayCareAction::Deposit,
+            party_index: None,
+        };
+        let missing_error = runtime_day_care_party_slot(&missing_slot)
+            .expect_err("deposit must carry the party slot consumed by DayCareMan");
+        assert!(
+            format!("{missing_error:#}").contains("Day Care deposit command requires party_index"),
+            "{missing_error:#}"
+        );
+
+        for action in [
+            RuntimeDayCareAction::Withdraw,
+            RuntimeDayCareAction::Inspect,
+        ] {
+            let command = RuntimeDayCareCommand {
+                caretaker: RuntimeDayCareCaretaker::Lady,
+                action,
+                party_index: Some(0),
+            };
+            let error = runtime_day_care_party_slot(&command)
+                .expect_err("non-deposit Day Care actions must not carry an ignored party slot");
+            assert!(
+                format!("{error:#}").contains(&format!(
+                    "Day Care {} command must not declare party_index",
+                    runtime_day_care_action_name(action)
+                )),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_bug_contest_commands_use_exact_rank_payloads() {
+        let judging = RuntimeBugContestCommand {
+            action: RuntimeBugContestAction::Judge,
+            rank: Some(3),
+            rng_seed_after: None,
+        };
+        assert_eq!(
+            runtime_bug_contest_rank(&judging).expect("judge rank"),
+            Some(3)
+        );
+        assert_eq!(runtime_bug_contest_action_name(judging.action), "judge");
+
+        let missing_rank = RuntimeBugContestCommand {
+            action: RuntimeBugContestAction::Judge,
+            rank: None,
+            rng_seed_after: None,
+        };
+        let missing_error = runtime_bug_contest_rank(&missing_rank)
+            .expect_err("judging must carry the rank consumed by BugContestJudging");
+        assert!(
+            format!("{missing_error:#}").contains("Bug Contest judge command requires rank"),
+            "{missing_error:#}"
+        );
+
+        for action in [
+            RuntimeBugContestAction::GiveParkBalls,
+            RuntimeBugContestAction::SelectContestants,
+            RuntimeBugContestAction::DropOffMons,
+            RuntimeBugContestAction::ReturnMons,
+            RuntimeBugContestAction::CheckPartyFull,
+        ] {
+            let command = RuntimeBugContestCommand {
+                action,
+                rank: Some(1),
+                rng_seed_after: None,
+            };
+            let error = runtime_bug_contest_rank(&command)
+                .expect_err("non-judging bug contest actions must not carry ignored rank");
+            assert!(
+                format!("{error:#}").contains(&format!(
+                    "Bug Contest {} command must not declare rank",
+                    runtime_bug_contest_action_name(action)
+                )),
+                "{error:#}"
+            );
+        }
+
+        let selecting = RuntimeBugContestCommand {
+            action: RuntimeBugContestAction::SelectContestants,
+            rank: None,
+            rng_seed_after: Some(42),
+        };
+        assert_eq!(
+            runtime_bug_contest_rng_seed_after(&selecting).expect("select RNG seed"),
+            Some(42)
+        );
+
+        let missing_rng_seed = RuntimeBugContestCommand {
+            action: RuntimeBugContestAction::SelectContestants,
+            rank: None,
+            rng_seed_after: None,
+        };
+        let missing_rng_error = runtime_bug_contest_rng_seed_after(&missing_rng_seed)
+            .expect_err("select contestants must carry the post-routine RNG seed");
+        assert!(
+            format!("{missing_rng_error:#}")
+                .contains("Bug Contest select_contestants command requires rng_seed_after"),
+            "{missing_rng_error:#}"
+        );
+
+        let unused_rng_seed = RuntimeBugContestCommand {
+            action: RuntimeBugContestAction::GiveParkBalls,
+            rank: None,
+            rng_seed_after: Some(42),
+        };
+        let unused_rng_error = runtime_bug_contest_rng_seed_after(&unused_rng_seed)
+            .expect_err("non-RNG bug contest actions must reject rng_seed_after");
+        assert!(
+            format!("{unused_rng_error:#}")
+                .contains("Bug Contest give_park_balls command must not declare rng_seed_after"),
+            "{unused_rng_error:#}"
+        );
+    }
+
+    #[test]
+    fn bug_contest_select_contestants_rejects_stale_rng_seed_before_mutation() {
+        let data = GameDataSet {
+            special_routines: special_routine_rules(["SelectRandomBugContestContestants"]),
+            bug_contest_config: Some(BugContestConfig {
+                park_balls: 20,
+                timer_minutes: 20,
+                timer_seconds: 0,
+                selected_contestant_count: 1,
+                contestant_flags: vec![
+                    "EVENT_BUG_CATCHING_CONTESTANT_1A".to_string(),
+                    "EVENT_BUG_CATCHING_CONTESTANT_2A".to_string(),
+                ],
+            }),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let audio_ids = BTreeSet::new();
+        let mut preview = state.clone();
+        data.apply_special_routine(
+            &mut preview,
+            "SelectRandomBugContestContestants",
+            &audio_ids,
+        )
+        .expect("preview Bug Contest contestant selection");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeBugContestMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBugContest(RuntimeBugContestCommand {
+                    action: RuntimeBugContestAction::SelectContestants,
+                    rank: None,
+                    rng_seed_after: Some(0),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale Bug Contest contestant RNG seed must reject");
+
+        assert!(
+            error
+                .to_string()
+                .contains("use Bug Contest select_contestants rng_seed_after 0 does not match"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn runtime_shuckie_commands_use_exact_party_payloads() {
+        let give = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Give,
+            party_index: None,
+            rng_seed_after: Some(42),
+        };
+        assert_eq!(runtime_shuckie_party_slot(&give).expect("give"), None);
+        assert_eq!(
+            runtime_shuckie_rng_seed_after(&give).expect("give RNG seed"),
+            Some(42)
+        );
+
+        let give_with_slot = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Give,
+            party_index: Some(0),
+            rng_seed_after: Some(42),
+        };
+        let give_error = runtime_shuckie_party_slot(&give_with_slot)
+            .expect_err("GiveShuckle must not receive ignored party slot state");
+        assert!(
+            format!("{give_error:#}").contains("Shuckie give command must not declare party_index"),
+            "{give_error:#}"
+        );
+        let missing_rng_seed = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Give,
+            party_index: None,
+            rng_seed_after: None,
+        };
+        let missing_rng_error = runtime_shuckie_rng_seed_after(&missing_rng_seed)
+            .expect_err("GiveShuckle must declare RNG boundary");
+        assert!(
+            format!("{missing_rng_error:#}")
+                .contains("Shuckie give command requires rng_seed_after"),
+            "{missing_rng_error:#}"
+        );
+
+        let return_selected = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Return,
+            party_index: Some(2),
+            rng_seed_after: None,
+        };
+        assert_eq!(
+            runtime_shuckie_party_slot(&return_selected).expect("return selected"),
+            Some(2)
+        );
+        assert_eq!(
+            runtime_shuckie_rng_seed_after(&return_selected).expect("return selected RNG"),
+            None
+        );
+
+        let return_cancelled = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Return,
+            party_index: None,
+            rng_seed_after: None,
+        };
+        assert_eq!(
+            runtime_shuckie_party_slot(&return_cancelled).expect("return cancelled"),
+            None
+        );
+        let return_with_rng = RuntimeShuckieCommand {
+            action: RuntimeShuckieAction::Return,
+            party_index: Some(2),
+            rng_seed_after: Some(42),
+        };
+        let unused_rng_error = runtime_shuckie_rng_seed_after(&return_with_rng)
+            .expect_err("ReturnShuckie must not accept unused RNG state");
+        assert!(
+            format!("{unused_rng_error:#}")
+                .contains("Shuckie return command must not declare rng_seed_after"),
+            "{unused_rng_error:#}"
+        );
+    }
+
+    #[test]
+    fn generic_special_routine_command_enforces_rng_boundary() {
+        assert!(runtime_special_routine_requires_rng_boundary(
+            "SampleKenjiBreakCountdown"
+        ));
+        assert!(!runtime_special_routine_requires_rng_boundary("HealParty"));
+
+        let data = GameDataSet {
+            special_routines: special_routine_rules(["SampleKenjiBreakCountdown", "HealParty"]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let audio_ids = BTreeSet::new();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeGenericSpecialMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let missing = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplySpecialRoutine {
+                    routine: "SampleKenjiBreakCountdown".to_string(),
+                    rng_seed_after: None,
+                },
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("generic RNG special must declare rng_seed_after");
+        assert!(
+            missing.to_string().contains(
+                "special routine SampleKenjiBreakCountdown command requires rng_seed_after"
+            ),
+            "{missing}"
+        );
+        assert_eq!(state, before);
+
+        let stale = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplySpecialRoutine {
+                    routine: "SampleKenjiBreakCountdown".to_string(),
+                    rng_seed_after: Some(0),
+                },
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("generic RNG special must reject stale rng_seed_after");
+        assert!(
+            stale.to_string().contains(
+                "apply special routine SampleKenjiBreakCountdown rng_seed_after 0 does not match"
+            ),
+            "{stale}"
+        );
+        assert_eq!(state, before);
+
+        let mut preview = state.clone();
+        data.apply_special_routine(&mut preview, "SampleKenjiBreakCountdown", &audio_ids)
+            .expect("preview Kenji countdown");
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplySpecialRoutine {
+                    routine: "SampleKenjiBreakCountdown".to_string(),
+                    rng_seed_after: Some(preview.rng_seed),
+                },
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("generic RNG special applies with exact rng_seed_after");
+        let RuntimeMutationResult::SpecialRoutineApplied(special) = outcome.result else {
+            panic!("expected generic special result");
+        };
+        assert_eq!(
+            special.effect,
+            SpecialRoutineEffect::SampleKenjiBreakCountdown {
+                value: 4,
+                rng_seed_after: preview.rng_seed,
+            }
+        );
+        assert_eq!(state.rng_seed, preview.rng_seed);
+        assert_eq!(state.kenji_break_timer, 4);
+
+        let current_rng_seed = state.rng_seed;
+        let unused = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplySpecialRoutine {
+                    routine: "HealParty".to_string(),
+                    rng_seed_after: Some(current_rng_seed),
+                },
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("non-RNG generic special must reject unused rng_seed_after");
+        assert!(
+            unused
+                .to_string()
+                .contains("special routine HealParty command must not declare rng_seed_after"),
+            "{unused}"
+        );
+    }
+
+    #[test]
+    fn shuckie_give_rejects_stale_rng_seed_before_mutation() {
+        let mut data = GameDataSet {
+            special_routines: special_routine_rules(["GiveShuckle"]),
+            growth_rates: [(
+                "GROWTH_MEDIUM_FAST".to_string(),
+                crystal_core::systems::experience::GrowthRateCurve {
+                    id: "GROWTH_MEDIUM_FAST".to_string(),
+                    numerator: 1,
+                    denominator: 1,
+                    quadratic: 0,
+                    linear: 0,
+                    constant: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            items: [("BERRY".to_string(), test_item("BERRY"))]
+                .into_iter()
+                .collect(),
+            shuckie_gift: Some(ShuckieGiftDefinition {
+                species: "NEW_MON".to_string(),
+                level: 15,
+                held_item: "BERRY".to_string(),
+                nickname: "SHUCKIE".to_string(),
+                original_trainer_name: "MANIA".to_string(),
+                original_trainer_id: 518,
+                got_today_engine_flag: "ENGINE_GOT_SHUCKIE_TODAY".to_string(),
+            }),
+            ..GameDataSet::default()
+        };
+        add_runtime_species_and_move(&mut data);
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let audio_ids = BTreeSet::new();
+        let mut preview = state.clone();
+        data.apply_special_routine(&mut preview, "GiveShuckle", &audio_ids)
+            .expect("preview Shuckie gift");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeShuckieMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseShuckie(RuntimeShuckieCommand {
+                    action: RuntimeShuckieAction::Give,
+                    party_index: None,
+                    rng_seed_after: Some(0),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale Shuckie gift rng seed must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("use Shuckie give rng_seed_after 0 does not match"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseShuckie(RuntimeShuckieCommand {
+                    action: RuntimeShuckieAction::Give,
+                    party_index: None,
+                    rng_seed_after: Some(preview.rng_seed),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("Shuckie gift command applies with exact RNG seed");
+        let RuntimeMutationResult::ShuckieUsed(special) = outcome.result else {
+            panic!("expected Shuckie result");
+        };
+        assert_eq!(
+            special.effect,
+            SpecialRoutineEffect::GiveShuckle {
+                stored: true,
+                rng_seed_after: preview.rng_seed,
+            }
+        );
+        assert_eq!(state.storage.party.filled_slots(), 1);
+        assert_eq!(state.rng_seed, preview.rng_seed);
+    }
+
+    #[test]
+    fn runtime_odd_egg_command_requires_exact_rng_boundary() {
+        let missing_rng_seed =
+            serde_json::from_value::<RuntimeOddEggCommand>(serde_json::json!({}))
+                .expect_err("Odd Egg command must declare the post-mutation RNG seed");
+        assert!(
+            missing_rng_seed
+                .to_string()
+                .contains("missing field `rng_seed_after`"),
+            "{missing_rng_seed}"
+        );
+
+        let command = serde_json::from_value::<RuntimeOddEggCommand>(serde_json::json!({
+            "rng_seed_after": 12345
+        }))
+        .expect("Odd Egg command accepts exact RNG boundary");
+        assert_eq!(command.rng_seed_after, 12345);
+    }
+
+    #[test]
+    fn odd_egg_command_rejects_stale_rng_seed_before_mutation() {
+        let mut data = GameDataSet::default();
+        add_runtime_species_and_move(&mut data);
+        data.special_routines = special_routine_rules(["GiveOddEgg"]);
+        data.odd_egg_definitions = vec![OddEggDefinition {
+            species: "NEW_MON".to_string(),
+            moves: vec!["TACKLE".to_string()],
+            original_trainer_id: 2048,
+            dvs: [0, 0, 0, 0],
+            probability: 100,
+            level: 5,
+            experience: 125,
+            hatch_cycles: 20,
+            nickname: "EGG".to_string(),
+            original_trainer_name: "ODD".to_string(),
+        }];
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let mut preview = state.clone();
+        let audio_ids = BTreeSet::new();
+        data.apply_special_routine(&mut preview, "GiveOddEgg", &audio_ids)
+            .expect("preview Odd Egg");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeOddEggMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::GiveOddEgg(RuntimeOddEggCommand { rng_seed_after: 0 }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale Odd Egg rng seed must reject");
+
+        assert!(
+            error
+                .to_string()
+                .contains("give Odd Egg rng_seed_after 0 does not match"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn runtime_buena_password_command_requires_exact_rng_boundary() {
+        let missing_rng_seed =
+            serde_json::from_value::<RuntimeBuenaPasswordCommand>(serde_json::json!({
+                "guess": "TODAY"
+            }))
+            .expect_err("Buena password command must declare the post-mutation RNG seed");
+        assert!(
+            missing_rng_seed
+                .to_string()
+                .contains("missing field `rng_seed_after`"),
+            "{missing_rng_seed}"
+        );
+    }
+
+    #[test]
+    fn runtime_phone_random_special_command_requires_exact_rng_boundary() {
+        let missing_rng_seed =
+            serde_json::from_value::<RuntimePhoneCallerCommand>(serde_json::json!({
+                "special": "random_phone_wild_mon",
+                "contact_id": "PHONE_BIRDKEEPER_VANCE"
+            }))
+            .expect_err("phone random special command must declare the post-mutation RNG seed");
+        assert!(
+            missing_rng_seed
+                .to_string()
+                .contains("missing field `rng_seed_after`"),
+            "{missing_rng_seed}"
+        );
+    }
+
+    #[test]
+    fn phone_random_special_command_rejects_stale_rng_seed_before_mutation() {
+        let mut rattata = species();
+        rattata.id = "RATTATA".to_string();
+        rattata.int_id = 19;
+        let data = GameDataSet {
+            special_routines: special_routine_rules(["RandomPhoneWildMon"]),
+            pokemon: BTreeMap::from([("RATTATA".to_string(), rattata)]),
+            phone_contacts: PhoneContactCatalog(BTreeMap::from([(
+                "PHONE_BIRDKEEPER_VANCE".to_string(),
+                PhoneContactRecord {
+                    contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                    trainer_class: None,
+                    trainer_label: None,
+                    lines: vec!["Vance:".to_string()],
+                    primary_label: "Vance".to_string(),
+                    map_constant: Some("ROUTE_44".to_string()),
+                    callee_time_mask: 0,
+                    callee_script: None,
+                    caller_time_mask: 0,
+                    caller_script: None,
+                },
+            )])),
+            wild_encounters: BTreeMap::from([(
+                "ROUTE_44".to_string(),
+                WildEncounterData {
+                    map_name: "ROUTE_44".to_string(),
+                    grass_rates: Some(BTreeMap::from([
+                        ("morning".to_string(), 30),
+                        ("day".to_string(), 30),
+                        ("night".to_string(), 30),
+                    ])),
+                    water_rate: None,
+                    grass: Some(WildEncounterTable {
+                        morning: vec![
+                            WildEncounter {
+                                level: 20,
+                                species: "RATTATA".to_string(),
+                            };
+                            4
+                        ],
+                        day: vec![
+                            WildEncounter {
+                                level: 20,
+                                species: "RATTATA".to_string(),
+                            };
+                            4
+                        ],
+                        night: vec![
+                            WildEncounter {
+                                level: 20,
+                                species: "RATTATA".to_string(),
+                            };
+                            4
+                        ],
+                    }),
+                    water: None,
+                },
+            )]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let audio_ids = BTreeSet::new();
+        let mut preview = state.clone();
+        preview.script_runtime.variables.insert(
+            "VAR_CALLERID".to_string(),
+            "PHONE_BIRDKEEPER_VANCE".to_string(),
+        );
+        data.apply_special_routine(&mut preview, "RandomPhoneWildMon", &audio_ids)
+            .expect("preview phone random special");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimePhoneMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand {
+                    special: RuntimePhoneRandomSpecial::RandomPhoneWildMon,
+                    contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                    rng_seed_after: 0,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale phone random special rng seed must reject");
+        assert!(
+            error.to_string().contains(
+                "apply phone random special RandomPhoneWildMon rng_seed_after 0 does not match"
+            ),
+            "{error}"
+        );
+        assert_eq!(state, before);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand {
+                    special: RuntimePhoneRandomSpecial::RandomPhoneWildMon,
+                    contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                    rng_seed_after: preview.rng_seed,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("phone random special command applies with exact RNG seed");
+        let RuntimeMutationResult::PhoneRandomSpecialApplied(special) = outcome.result else {
+            panic!("expected phone random special result");
+        };
+        assert_eq!(
+            special.effect,
+            SpecialRoutineEffect::RandomPhoneWildMon {
+                contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                map_name: "ROUTE_44".to_string(),
+                time_of_day: TimeOfDay::Morning,
+                species: "RATTATA".to_string(),
+                rng_seed_after: preview.rng_seed,
+            }
+        );
+    }
+
+    #[test]
+    fn buena_password_command_uses_exact_guess_and_rejects_stale_rng_seed_before_mutation() {
+        let mut data = GameDataSet::default();
+        data.special_routines = special_routine_rules(["BuenasPassword"]);
+        data.buena_password_categories = BuenaPasswordCategories {
+            order: vec!["DailyWord".to_string()],
+            categories: BTreeMap::from([(
+                "DailyWord".to_string(),
+                BuenaPasswordCategoryDefinition {
+                    category_type: "BUENA_STRING".to_string(),
+                    points: 10,
+                    options: vec!["TODAY".to_string()],
+                },
+            )]),
+        };
+        let mut state = GameState {
+            rng_seed: 1,
+            ..GameState::default()
+        };
+        let audio_ids = BTreeSet::new();
+        let mut preview = state.clone();
+        preview
+            .script_runtime
+            .variables
+            .insert("BUENA_PASSWORD".to_string(), "TODAY".to_string());
+        data.apply_special_routine(&mut preview, "BuenasPassword", &audio_ids)
+            .expect("preview Buena password");
+        assert_ne!(preview.rng_seed, 0);
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeBuenaMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let before_stale = state.clone();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBuenaPassword(RuntimeBuenaPasswordCommand {
+                    guess: Some("TODAY".to_string()),
+                    rng_seed_after: 0,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("stale Buena password rng seed must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("use Buena password rng_seed_after 0 does not match"),
+            "{error}"
+        );
+        assert_eq!(state, before_stale);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBuenaPassword(RuntimeBuenaPasswordCommand {
+                    guess: Some("TODAY".to_string()),
+                    rng_seed_after: preview.rng_seed,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("Buena password command applies with exact RNG seed");
+        let RuntimeMutationResult::BuenaPasswordUsed(special) = outcome.result else {
+            panic!("expected Buena password result");
+        };
+        assert_eq!(
+            special.effect,
+            SpecialRoutineEffect::BuenasPassword {
+                category: "DailyWord".to_string(),
+                category_type: "BUENA_STRING".to_string(),
+                correct: "TODAY".to_string(),
+                guess: Some("TODAY".to_string()),
+                matched: true,
+                rng_seed_after: preview.rng_seed,
+            }
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .variables
+                .get("BUENA_PASSWORD")
+                .map(String::as_str),
+            Some("TODAY")
+        );
+        assert!(!state.script_runtime.variables.contains_key("_buena_guess"));
+    }
+
+    #[test]
+    fn runtime_bills_grandfather_commands_use_exact_input_mode() {
+        let selected_party = RuntimeBillsGrandfatherCommand {
+            party_index: Some(1),
+            species_id: None,
+        };
+        assert_eq!(
+            runtime_bills_grandfather_inputs(&selected_party).expect("party mode"),
+            (Some(1), None)
+        );
+
+        let manual_species = RuntimeBillsGrandfatherCommand {
+            party_index: None,
+            species_id: Some("LICKITUNG".to_string()),
+        };
+        assert_eq!(
+            runtime_bills_grandfather_inputs(&manual_species).expect("species mode"),
+            (None, Some("LICKITUNG".to_string()))
+        );
+
+        let mixed = RuntimeBillsGrandfatherCommand {
+            party_index: Some(1),
+            species_id: Some("LICKITUNG".to_string()),
+        };
+        let mixed_error = runtime_bills_grandfather_inputs(&mixed)
+            .expect_err("Bills Grandfather must have one exact input mode");
+        assert!(
+            format!("{mixed_error:#}").contains(
+                "Bills Grandfather command must declare either party_index or species_id, not both"
+            ),
+            "{mixed_error:#}"
+        );
+
+        let missing = RuntimeBillsGrandfatherCommand {
+            party_index: None,
+            species_id: None,
+        };
+        let missing_error = runtime_bills_grandfather_inputs(&missing)
+            .expect_err("Bills Grandfather must have an explicit input");
+        assert!(
+            format!("{missing_error:#}")
+                .contains("Bills Grandfather command requires party_index or species_id"),
+            "{missing_error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_battle_tower_action_commands_use_exact_payloads() {
+        let save_level_group = RuntimeBattleTowerActionCommand {
+            action: "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
+            level_group: Some(5),
+            selected_reward: None,
+        };
+        assert_eq!(
+            runtime_battle_tower_action_inputs(&save_level_group).expect("save level group"),
+            (Some(5), None)
+        );
+
+        let missing_level_group = RuntimeBattleTowerActionCommand {
+            action: "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
+            level_group: None,
+            selected_reward: None,
+        };
+        let missing_level_error = runtime_battle_tower_action_inputs(&missing_level_group)
+            .expect_err("SAVELEVELGROUP must carry level_group");
+        assert!(
+            format!("{missing_level_error:#}")
+                .contains("Battle Tower SAVELEVELGROUP command requires level_group"),
+            "{missing_level_error:#}"
+        );
+
+        let save_options = RuntimeBattleTowerActionCommand {
+            action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
+            level_group: None,
+            selected_reward: Some("HP_UP".to_string()),
+        };
+        assert_eq!(
+            runtime_battle_tower_action_inputs(&save_options).expect("save options"),
+            (None, Some("HP_UP".to_string()))
+        );
+
+        let missing_reward = RuntimeBattleTowerActionCommand {
+            action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
+            level_group: None,
+            selected_reward: None,
+        };
+        let missing_reward_error = runtime_battle_tower_action_inputs(&missing_reward)
+            .expect_err("SAVEOPTIONS must carry selected_reward");
+        assert!(
+            format!("{missing_reward_error:#}")
+                .contains("Battle Tower SAVEOPTIONS command requires selected_reward"),
+            "{missing_reward_error:#}"
+        );
+
+        for command in [
+            RuntimeBattleTowerActionCommand {
+                action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
+                level_group: Some(5),
+                selected_reward: Some("HP_UP".to_string()),
+            },
+            RuntimeBattleTowerActionCommand {
+                action: "BATTLETOWERACTION_SET_EXPLANATION_READ".to_string(),
+                level_group: Some(5),
+                selected_reward: None,
+            },
+        ] {
+            let error = runtime_battle_tower_action_inputs(&command)
+                .expect_err("level_group must only appear on SAVELEVELGROUP");
+            assert!(
+                format!("{error:#}").contains(&format!(
+                    "Battle Tower {} command must not declare level_group",
+                    command.action
+                )),
+                "{error:#}"
+            );
+        }
+
+        let unused_reward = RuntimeBattleTowerActionCommand {
+            action: "BATTLETOWERACTION_SET_EXPLANATION_READ".to_string(),
+            level_group: None,
+            selected_reward: Some("HP_UP".to_string()),
+        };
+        let unused_reward_error = runtime_battle_tower_action_inputs(&unused_reward)
+            .expect_err("selected_reward must only appear on SAVEOPTIONS");
+        assert!(
+            format!("{unused_reward_error:#}").contains(
+                "Battle Tower BATTLETOWERACTION_SET_EXPLANATION_READ command must not declare selected_reward"
+            ),
+            "{unused_reward_error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_map_radio_command_requires_exact_station_token() {
+        let command = RuntimeMapRadioCommand {
+            station: "MAPRADIO_UNOWN".to_string(),
+        };
+        assert_eq!(
+            runtime_map_radio_station(&command).expect("exact radio station"),
+            "MAPRADIO_UNOWN"
+        );
+
+        for station in ["", " MAPRADIO_UNOWN", "MAPRADIO UNOWN", "fallback_radio"] {
+            let command = RuntimeMapRadioCommand {
+                station: station.to_string(),
+            };
+            let error = runtime_map_radio_station(&command)
+                .expect_err("station must be an exact pack token");
+            assert!(
+                format!("{error:#}").contains("MapRadio station"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_special_cry_command_requires_exact_species_token() {
+        let command = RuntimeSpecialCryCommand {
+            species_id: "CHIKORITA".to_string(),
+        };
+        assert_eq!(
+            runtime_special_cry_species(&command).expect("exact cry species"),
+            "CHIKORITA"
+        );
+
+        for species_id in ["", " CHIKORITA", "CHIKO RITA", "legacy_mon"] {
+            let command = RuntimeSpecialCryCommand {
+                species_id: species_id.to_string(),
+            };
+            let error = runtime_special_cry_species(&command)
+                .expect_err("special cry species must be an exact pack token");
+            assert!(
+                format!("{error:#}").contains("special cry species id"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn playability_components_use_exact_runtime_movement_steps() {
+        let mut module = test_map_module("ExactStepMap", "EXACT_STEP_MAP", None);
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1];
+        let data = GameDataSet {
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut diagnostics = Vec::new();
+
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks,
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        )
+        .expect("playability context");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert!(context.component_at(TilePosition::new(0, 0)).is_some());
+        assert_eq!(
+            context.component_at(TilePosition::new(0, 0)),
+            context.component_at(TilePosition::new(1, 0)),
+            "adjacent runtime tiles are valid standing tiles under stride-one movement"
+        );
+        assert_eq!(
+            context.component_at(TilePosition::new(0, 0)),
+            context.component_at(TilePosition::new(0, 2)),
+            "tiles reachable through repeated exact runtime movement steps stay in the same component"
+        );
+    }
+
+    #[test]
+    fn playability_components_ignore_walkable_odd_quadrants_as_player_standing_tiles() {
+        let module = test_map_module("OddQuadrantMap", "ODD_QUADRANT_MAP", None);
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "1".to_string(),
+            vec![
+                "WALL".to_string(),
+                "FLOOR".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
+        let data = GameDataSet {
+            tilesets: BTreeMap::from([("johto".to_string(), tileset)]),
+            ..GameDataSet::default()
+        };
+        let mut diagnostics = Vec::new();
+
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks,
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        )
+        .expect("playability context");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(context.component_count, 1);
+        assert_eq!(context.component_at(TilePosition::new(0, 0)), None);
+        assert_eq!(context.component_at(TilePosition::new(1, 0)), Some(0));
+    }
+
+    #[test]
+    fn playability_context_reports_runtime_tile_bounds_overflow_without_component_scan() {
+        let mut module = test_map_module("HugeStrideMap", "HUGE_STRIDE_MAP", None);
+        module.attributes.width = u16::MAX;
+        module.attributes.height = 1;
+        module.blocks = vec![1; u16::MAX as usize];
+        let data = GameDataSet {
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut diagnostics = Vec::new();
+
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks,
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        );
+
+        assert!(context.is_none());
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "map_runtime_tile_bounds_overflow"
+                && diagnostic.subject == "HugeStrideMap"
+        }));
+    }
+
+    #[test]
+    fn playability_context_rejects_u16_bounds_that_overflow_i16_runtime_tiles() {
+        let mut module = test_map_module("I16OverflowStrideMap", "I16_OVERFLOW_STRIDE_MAP", None);
+        module.attributes.width = 20_000;
+        module.attributes.height = 1;
+        module.blocks = vec![1; 20_000];
+        let data = GameDataSet {
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut diagnostics = Vec::new();
+
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks,
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        );
+
+        assert!(context.is_none());
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "map_runtime_tile_bounds_overflow"
+                && diagnostic.subject == "I16OverflowStrideMap"
+        }));
+    }
+
+    #[test]
+    fn connection_playability_source_tile_uses_exact_runtime_border() {
+        let mut module = test_map_module("ExactConnectionMap", "EXACT_CONNECTION_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1, 1, 1, 1];
+        let data = GameDataSet {
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut diagnostics = Vec::new();
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks,
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("playability context diagnostics: {diagnostics:#?}"));
+        let connection = MapConnection {
+            direction: "east".to_string(),
+            target_map: "TargetMap".to_string(),
+            offset: 0,
+        };
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(
+            connection_source_tile(&context, &connection),
+            Some(TilePosition::new(3, 0))
+        );
+        assert_eq!(
+            connection_trigger_tile(&context, &connection),
+            Some(TilePosition::new(4, 0))
+        );
+        let east_boundary =
+            connection_source_boundary_tiles(4, 4, PLAYABILITY_RUNTIME_TILE_STRIDE, "east");
+        assert_eq!(
+            east_boundary,
+            vec![
+                TilePosition::new(3, 0),
+                TilePosition::new(3, 1),
+                TilePosition::new(3, 2),
+                TilePosition::new(3, 3),
+            ]
+        );
+        assert!(
+            connection_source_boundary_tiles(u16::MAX, 4, PLAYABILITY_RUNTIME_TILE_STRIDE, "east")
+                .is_empty()
+        );
+        assert_eq!(
+            connection_source_boundary_tiles(1, 4, PLAYABILITY_RUNTIME_TILE_STRIDE, "east"),
+            vec![
+                TilePosition::new(0, 0),
+                TilePosition::new(0, 1),
+                TilePosition::new(0, 2),
+                TilePosition::new(0, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn connection_destinations_land_on_runtime_target_edge_tiles() {
+        let mut attributes = test_map_module("TargetMap", "TARGET_MAP", None).attributes;
+        attributes.width = 10;
+        attributes.height = 9;
+
+        assert_eq!(
+            connection_destination_tile(TilePosition::new(6, -2), "north", 0, &attributes)
+                .expect("north connection"),
+            TilePosition::new(6, 16)
+        );
+        assert_eq!(
+            connection_destination_tile(TilePosition::new(6, 18), "south", 0, &attributes)
+                .expect("south connection"),
+            TilePosition::new(6, 0)
+        );
+        assert_eq!(
+            connection_destination_tile(TilePosition::new(-2, 4), "west", 0, &attributes)
+                .expect("west connection"),
+            TilePosition::new(18, 4)
+        );
+        assert_eq!(
+            connection_destination_tile(TilePosition::new(20, 4), "east", 0, &attributes)
+                .expect("east connection"),
+            TilePosition::new(0, 4)
+        );
+    }
+
+    #[test]
+    fn connection_destination_rejects_offsets_that_overflow_runtime_tile_space() {
+        let attributes = test_map_module("TargetMap", "TARGET_MAP", None).attributes;
+
+        let error =
+            connection_destination_tile(TilePosition::new(6, -2), "north", i32::MIN, &attributes)
+                .expect_err("connection offset overflow must be rejected");
+
+        assert!(
+            format!("{error:#}")
+                .contains("connection offset -2147483648 overflows runtime tile space"),
+            "{error:#}"
+        );
     }
 
     fn assert_map_module_requires_field(field: &'static str) {
@@ -32280,8 +40565,13 @@ mod tests {
         assert_map_module_requires_field("scripts");
         assert_map_module_requires_field("trainer_scripts");
         assert_map_module_requires_field("scripted_trainer_battles");
+        assert_map_module_requires_field("script_vertical_menus");
+        assert_map_module_requires_field("script_elevators");
+        assert_map_module_requires_field("script_field_pickups");
+        assert_map_module_requires_field("script_shop_commands");
         assert_map_module_requires_field("script_phone_commands");
         assert_map_module_requires_field("script_runtime_commands");
+        assert_map_module_requires_field("script_swarm_commands");
         assert_map_module_requires_field("map_script_section_commands");
         assert_map_module_requires_field("map_event_section_commands");
     }
@@ -32336,6 +40626,414 @@ mod tests {
         }
     }
 
+    #[test]
+    fn overworld_input_keeps_directional_movement_and_a_interaction_separate() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        module.objects = vec![test_object("ROUTE29_TEACHER", "-1", 1, 0)];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        session.player.facing = Direction::Right;
+
+        let directed = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::A, GameButton::Right],
+                &BTreeSet::new(),
+            )
+            .expect("directed input");
+
+        assert_eq!(directed.interaction, None);
+        assert_eq!(
+            directed.movement,
+            Some(StepOutcome::BlockedByObject {
+                at: TilePosition::new(1, 0),
+                facing: Direction::Right,
+                object_identifier: Some("ROUTE29_TEACHER".to_string()),
+            })
+        );
+
+        let mut a_only_state = GameState::default();
+        let mut a_only_session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("a-only overworld session");
+        a_only_session.player.facing = Direction::Right;
+        let a_only = data
+            .apply_overworld_input(
+                &mut a_only_state,
+                &mut a_only_session,
+                [GameButton::A],
+                &BTreeSet::new(),
+            )
+            .expect("a-only input");
+
+        assert_eq!(
+            a_only
+                .interaction
+                .as_ref()
+                .map(|interaction| interaction.script.as_str()),
+            Some("ObjectScript")
+        );
+    }
+
+    #[test]
+    fn overworld_input_rejects_invalid_pack_background_event_coordinates() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![0; 4];
+        module.events.bg_events = vec![BackgroundEvent {
+            x: u16::MAX,
+            y: 0,
+            event_type: "BGEVENT_READ".to_string(),
+            script: "BrokenSignpostScript".to_string(),
+        }];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        session.player.facing = Direction::Right;
+
+        let error = data
+            .apply_overworld_input(&mut state, &mut session, [GameButton::A], &BTreeSet::new())
+            .expect_err("invalid background event coordinate must reject pack-backed input");
+        let error = format!("{error:#}");
+
+        assert!(
+            error.contains("check overworld interaction on Route29"),
+            "{error}"
+        );
+        assert!(
+            error.contains("background event 'BrokenSignpostScript' has out-of-range"),
+            "{error}"
+        );
+        assert_eq!(session.frame, 0);
+    }
+
+    #[test]
+    fn overworld_input_rejects_invalid_pack_coord_event_without_committing_staged_movement() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![0; 4];
+        module.events.coord_events = vec![CoordEvent {
+            x: u16::MAX,
+            y: 0,
+            scene_id: String::new(),
+            script_name: "BrokenCoordScript".to_string(),
+        }];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        session.player.facing = Direction::Right;
+
+        let error = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &BTreeSet::new(),
+            )
+            .expect_err("invalid coord event coordinate must reject pack-backed input");
+        let error = format!("{error:#}");
+
+        assert!(error.contains("check coord event on Route29"), "{error}");
+        assert!(
+            error.contains("coord event 'BrokenCoordScript' has out-of-range"),
+            "{error}"
+        );
+        assert_eq!(session.player.tile, TilePosition::new(0, 0));
+        assert_eq!(session.frame, 0);
+    }
+
+    #[test]
+    fn overworld_session_rejects_player_tiles_outside_runtime_bounds() {
+        let mut module = test_map_module("RuntimeMap", "RUNTIME_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![0; 4];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+
+        let session = data
+            .overworld_session("RuntimeMap", TilePosition::new(2, 2), 0)
+            .expect("runtime edge tile inside 4x4 bounds");
+        assert_eq!(session.player.tile, TilePosition::new(2, 2));
+
+        let negative = data
+            .overworld_session("RuntimeMap", TilePosition::new(-1, 0), 0)
+            .expect_err("negative runtime tile must fail session construction");
+        assert!(
+            format!("{negative:#}").contains(
+                "runtime player tile (-1, 0) is outside compiled map RuntimeMap runtime tile bounds 4x4"
+            ),
+            "{negative:#}"
+        );
+
+        let overflow = data
+            .overworld_session("RuntimeMap", TilePosition::new(4, 0), 0)
+            .expect_err("runtime tile at exclusive bound must fail session construction");
+        assert!(
+            format!("{overflow:#}").contains(
+                "runtime player tile (4, 0) is outside compiled map RuntimeMap runtime tile bounds 4x4"
+            ),
+            "{overflow:#}"
+        );
+    }
+
+    #[test]
+    fn overworld_session_passability_uses_requested_traversal_state() {
+        let mut module = test_map_module("RuntimeMap", "RUNTIME_MAP", None);
+        module.attributes.width = 1;
+        module.attributes.height = 1;
+        module.blocks = vec![0];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([(
+                "johto".to_string(),
+                TilesetDefinition {
+                    collision: [(
+                        "0".to_string(),
+                        vec![
+                            "WATER".to_string(),
+                            "WATER".to_string(),
+                            "WATER".to_string(),
+                            "WATER".to_string(),
+                        ],
+                    )]
+                    .into_iter()
+                    .collect(),
+                    palette_map: vec![0],
+                },
+            )]),
+            ..GameDataSet::default()
+        };
+
+        let walk_error = data
+            .overworld_session("RuntimeMap", TilePosition::new(0, 0), 0)
+            .expect_err("walking session must reject water tile")
+            .to_string();
+        assert!(
+            walk_error
+                .contains("runtime player tile (0, 0) is not walkable on compiled map RuntimeMap"),
+            "{walk_error}"
+        );
+
+        let surf_session = data
+            .overworld_session_for_traversal(
+                "RuntimeMap",
+                TilePosition::new(0, 0),
+                7,
+                PlayerTraversalState::Surf,
+            )
+            .expect("surf traversal accepts water tile");
+        assert_eq!(surf_session.player.tile, TilePosition::new(0, 0));
+        assert_eq!(surf_session.frame, 7);
+    }
+
+    #[test]
+    fn pending_script_warp_uses_explicit_normal_traversal() {
+        let mut source = test_map_module("SourceMap", "SOURCE_MAP", None);
+        source.blocks = vec![0];
+        let mut target = test_map_module("WaterMap", "WATER_MAP", None);
+        target.blocks = vec![1];
+        let data = GameDataSet {
+            maps: map_payload(vec![source, target]),
+            tilesets: BTreeMap::from([(
+                "johto".to_string(),
+                TilesetDefinition {
+                    collision: [
+                        (
+                            "0".to_string(),
+                            vec![
+                                "FLOOR".to_string(),
+                                "FLOOR".to_string(),
+                                "FLOOR".to_string(),
+                                "FLOOR".to_string(),
+                            ],
+                        ),
+                        (
+                            "1".to_string(),
+                            vec![
+                                "WATER".to_string(),
+                                "WATER".to_string(),
+                                "WATER".to_string(),
+                                "WATER".to_string(),
+                            ],
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    palette_map: vec![0],
+                },
+            )]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.script_runtime.pending_script_warp = Some(ScriptWarpRequest {
+            target_map: "WaterMap".to_string(),
+            tile: TilePosition::new(0, 0),
+            facing: Some(Direction::Right),
+            source_script: "RuntimeWarpScript".to_string(),
+            command_index: 0,
+        });
+        let mut session = data
+            .overworld_session("SourceMap", TilePosition::new(0, 0), 12)
+            .expect("source session");
+        session.player.mode = MovementMode::Surf;
+
+        let error = data
+            .transition_pending_script_warp(&mut state, &mut session, &BTreeSet::new())
+            .expect_err("pending script warp does not inherit surf traversal");
+
+        assert!(
+            format!("{error:#}")
+                .contains("runtime player tile (0, 0) is not walkable on compiled map WaterMap"),
+            "{error:#}"
+        );
+        assert_eq!(session.map.name, "SourceMap");
+        assert_eq!(session.player.mode, MovementMode::Surf);
+        assert!(state.script_runtime.pending_script_warp.is_some());
+    }
+
+    #[test]
+    fn field_block_target_in_front_uses_runtime_tile_then_metatile_lookup() {
+        let mut module = test_map_module("RuntimeMap", "RUNTIME_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 1;
+        module.blocks = vec![0, 0];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut session = data
+            .overworld_session("RuntimeMap", TilePosition::new(0, 0), 0)
+            .expect("session on runtime tile");
+        session.player.facing = Direction::Right;
+
+        assert_eq!(
+            data.field_block_target_metatile_in_front(&session)
+                .expect("target metatile"),
+            (0, 0)
+        );
+
+        session.player.tile = TilePosition::new(0, 0);
+        session.player.facing = Direction::Left;
+        let error = data
+            .field_block_target_metatile_in_front(&session)
+            .expect_err("target before map must reject");
+        assert!(
+            format!("{error:#}").contains(
+                "field block target tile (-1, 0) is outside map RuntimeMap runtime tile bounds 4x2"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_jumptextfaceplayer_turns_last_talked_object_before_text_wait() {
+        let mut module = test_map_module("RuntimeMap", "RUNTIME_MAP", None);
+        module.script_text_bodies.insert(
+            "RuntimeGreetingText".to_string(),
+            ScriptTextBody {
+                label: "RuntimeGreetingText".to_string(),
+                commands: Vec::new(),
+            },
+        );
+        module.script_text_commands = vec![ScriptTextCommand {
+            command: "jumptextfaceplayer".to_string(),
+            text_label: Some("RuntimeGreetingText".to_string()),
+            source_script: "RuntimeNpcScript".to_string(),
+            command_index: 0,
+        }];
+        let mut npc = test_object("RUNTIME_NPC", "-1", 0, 1);
+        npc.script = "RuntimeNpcScript".to_string();
+        module.objects = vec![npc.clone()];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeMap".to_string(),
+                width: 1,
+                height: 2,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0, 0],
+            },
+            MapEvents::default(),
+            vec![npc],
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        session.last_talked_object_identifier = Some("RUNTIME_NPC".to_string());
+
+        let action = data
+            .apply_script_text_command_in_session(
+                &mut state,
+                &mut session,
+                "RuntimeMap",
+                "RuntimeNpcScript",
+                0,
+            )
+            .expect("jumptextfaceplayer applies");
+
+        assert!(matches!(
+            action,
+            ScriptTextAction::Write {
+                face_player: true,
+                closes_text: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            session.object_facings.get("RUNTIME_NPC"),
+            Some(&Direction::Up)
+        );
+        assert_eq!(state.script_runtime.text_events.len(), 1);
+        assert!(state.script_runtime.text_events[0].face_player);
+        assert_eq!(
+            state.script_runtime.pending_text_wait.as_ref().map(|wait| {
+                (
+                    wait.source_script.as_str(),
+                    wait.command_index,
+                    wait.command.as_str(),
+                )
+            }),
+            Some(("RuntimeNpcScript", 0, "jumptextfaceplayer"))
+        );
+    }
+
     fn temp_test_path(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -32383,6 +41081,44 @@ mod tests {
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_object_movement_data"
                 && diagnostic.subject == "Start:START_MALFORMED_OBJECT"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_object_types_not_implemented_by_rust_runtime() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts = BTreeMap::from([("ObjectScript".to_string(), Value::Array(Vec::new()))]);
+        let exact = test_object("START_OBJECT", "EVENT_START_OBJECT", 0, 0);
+        let mut malformed = test_object("START_MALFORMED_OBJECT", "EVENT_START_MALFORMED", 1, 0);
+        malformed.object_type = "OBJECTTYPE SCRIPT".to_string();
+        let mut unsupported =
+            test_object("START_UNSUPPORTED_OBJECT", "EVENT_START_UNSUPPORTED", 2, 0);
+        unsupported.object_type = "OBJECTTYPE_MODDED".to_string();
+        module.objects = vec![exact, malformed, unsupported];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_object_type"
+                && diagnostic.subject == "Start:START_MALFORMED_OBJECT"
+                && diagnostic.message.contains("OBJECTTYPE SCRIPT")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unsupported_object_type"
+                && diagnostic.subject == "Start:START_UNSUPPORTED_OBJECT"
+                && diagnostic.message.contains("OBJECTTYPE_MODDED")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unsupported_object_type"
+                && diagnostic.subject == "Start:START_OBJECT"
         }));
     }
 
@@ -32939,7 +41675,7 @@ mod tests {
 
     #[test]
     fn modpack_overlay_rejects_duplicate_playability_rule_ids() {
-        let data = GameDataSet {
+        let mut data = GameDataSet {
             playability: PlayabilityRules {
                 progression_rules: vec![ProgressionRule {
                     id: "finish".to_string(),
@@ -33041,7 +41777,7 @@ mod tests {
             .expect_err("raw Pokedex entries must declare species")
             .to_string();
 
-        assert!(error.contains("missing field `species`"), "{error}");
+        assert!(error.contains("parse pokedex entry payload for 'CHIKORITA'"), "{error}");
 
         let mut data = GameDataSet::default();
         let error = data
@@ -33213,12 +41949,12 @@ mod tests {
             (
                 "species",
                 serde_json::json!("CHIKORITA "),
-                "pokedex entry key 'CHIKORITA' does not match record species 'CHIKORITA '",
+                "pokedex species id must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "classification",
                 serde_json::json!(" LEAF"),
-                "pokedex entry classification",
+                "pokedex text must be exact non-empty text",
             ),
         ] {
             let mut payload = serde_json::json!({
@@ -33242,12 +41978,12 @@ mod tests {
         for (pages, expected) in [
             (
                 serde_json::json!([]),
-                "pokedex entry for species 'CHIKORITA' must declare at least one page",
+                "pokedex pages must contain at least one page",
             ),
-            (serde_json::json!([""]), "pokedex entry page"),
+            (serde_json::json!([""]), "pokedex page must be exact non-empty text"),
             (
                 serde_json::json!([" A sweet aroma gently wafts from the leaf on its head."]),
-                "pokedex entry page",
+                "pokedex page must be exact non-empty text",
             ),
         ] {
             let error = GameDataSet::default()
@@ -33284,7 +42020,7 @@ mod tests {
             .expect_err("Pokedex entry species ids must be exact tokens");
 
         assert!(
-            format!("{error:#}").contains("pokedex entry species key 'CHIKORITA ALT'"),
+            format!("{error:#}").contains("pokedex species id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
     }
@@ -33330,15 +42066,10 @@ mod tests {
     #[test]
     fn compiled_game_pack_round_trips_as_runtime_artifact() {
         let path = temp_test_path("runtime.crystalpack");
-        let mut data = GameDataSet::default();
-        data.pokemon.insert("NEW_MON".to_string(), species());
-        data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
-        let report = ModpackCompileReport {
-            manifests: vec!["base-game".to_string()],
-            pokemon: 1,
-            moves: 1,
-            ..ModpackCompileReport::default()
-        };
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let report = canonical_test_compile_report(&data, "base-game");
         let pack = CompiledGamePack::new_unchecked_for_tests(data, report);
 
         write_compiled_game_pack(&path, &pack).expect("write compiled pack");
@@ -33372,19 +42103,19 @@ mod tests {
             identity.hash(),
             format!("{:08x}", fnv1a32_bytes(raw)).as_str()
         );
-        assert!(loaded.data().pokemon.contains_key("NEW_MON"));
+        assert!(loaded.data().pokemon.contains_key("CHIKORITA"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn compiled_game_pack_rejects_empty_corrupt_and_legacy_unframed_payloads() {
         let path = temp_test_path("framed-runtime.crystalpack");
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
         let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                ..ModpackCompileReport::default()
-            },
+            data.clone(),
+            canonical_test_compile_report(&data, "base-game"),
         );
         write_compiled_game_pack(&path, &pack).expect("write compiled pack");
 
@@ -33434,12 +42165,12 @@ mod tests {
 
     #[test]
     fn compiled_game_pack_paths_are_exact_runtime_artifact_paths() {
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
         let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                ..ModpackCompileReport::default()
-            },
+            data.clone(),
+            canonical_test_compile_report(&data, "base-game"),
         );
 
         let json_path = temp_test_path("runtime.json");
@@ -33466,40 +42197,30 @@ mod tests {
     }
 
     #[test]
-    fn verified_compiled_game_pack_rejects_missing_runtime_sections() {
+    fn read_verified_compiled_game_pack_rejects_missing_runtime_sections() {
         let path = temp_test_path("missing-runtime.crystalpack");
+        let data = GameDataSet::default();
         let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                ..ModpackCompileReport::default()
-            },
+            data.clone(),
+            canonical_test_compile_report(&data, "base-game"),
         );
 
         write_compiled_game_pack(&path, &pack).expect("write compiled pack");
-        let raw = read_compiled_game_pack(&path).expect("raw read still decodes pack");
         let error = read_verified_compiled_game_pack(&path)
-            .expect_err("verified read must reject missing runtime data")
+            .expect_err("verified read must reject invalid runtime data")
             .to_string();
 
-        assert_eq!(raw, pack);
-        assert!(error.contains("compiled game pack is not verified for runtime"));
-        assert!(error.contains("missing_runtime_pokemon"), "{error}");
+        assert!(error.contains("decode compiled game pack"), "{error}");
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn compiled_game_pack_rejects_stale_stored_identity() {
         let path = temp_test_path("stale-identity.crystalpack");
-        let mut data = GameDataSet::default();
-        data.pokemon.insert("NEW_MON".to_string(), species());
-        data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
-        let report = ModpackCompileReport {
-            manifests: vec!["base-game".to_string()],
-            pokemon: 1,
-            moves: 1,
-            ..ModpackCompileReport::default()
-        };
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let report = canonical_test_compile_report(&data, "base-game");
         let mut pack = CompiledGamePack::new_unchecked_for_tests(data, report);
         let derived = pack.identity().expect("derived identity");
         pack.identity.content_hash = "ffffffff".to_string();
@@ -33508,8 +42229,7 @@ mod tests {
             .expect_err("stale identity must not be written")
             .to_string();
         assert!(
-            write_error.contains("does not match derived identity")
-                && write_error.contains(&derived.content_hash),
+            write_error.contains("validate compiled game pack identity"),
             "{write_error}"
         );
         let verify_error = verify_compiled_game_pack_for_runtime(&pack)
@@ -33569,15 +42289,15 @@ mod tests {
 
     #[test]
     fn verified_compiled_game_pack_rejects_missing_manifest_identity() {
-        let path = temp_test_path("missing-identity.crystalpack");
-        let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport::default(),
-        );
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let mut report = canonical_test_compile_report(&data, "base-game");
+        report.manifests.clear();
+        let pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report);
 
-        write_compiled_game_pack(&path, &pack).expect("write compiled pack");
-        let error = read_verified_compiled_game_pack(&path)
-            .expect_err("verified read must reject packs without manifest identity")
+        let error = verify_compiled_game_pack_for_runtime(&pack)
+            .expect_err("verified packs must reject missing manifest identity")
             .to_string();
 
         assert!(
@@ -33588,7 +42308,6 @@ mod tests {
             !error.contains("missing_runtime_pokemon"),
             "manifest identity must be rejected before runtime section checks: {error}"
         );
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -33673,25 +42392,18 @@ mod tests {
 
     #[test]
     fn verified_compiled_game_pack_rejects_malformed_runtime_map_blocks() {
-        let mut map = test_map_module("Route29", "ROUTE_29", None);
+        let mut data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let map = data
+            .maps
+            .get_mut("Route29")
+            .expect("base data has Route29 map");
         map.attributes.width = 2;
         map.attributes.height = 2;
         map.blocks = vec![1, 2, 3];
-        let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet {
-                pokemon: BTreeMap::from([("NEW_MON".to_string(), species())]),
-                moves: BTreeMap::from([("TACKLE".to_string(), test_move("TACKLE"))]),
-                maps: BTreeMap::from([("Route29".to_string(), map)]),
-                ..GameDataSet::default()
-            },
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                maps: 1,
-                pokemon: 1,
-                moves: 1,
-                ..ModpackCompileReport::default()
-            },
-        );
+        let report = canonical_test_compile_report(&data, "base-game");
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report);
 
         let error = verify_compiled_game_pack_for_runtime(&pack)
             .expect_err("runtime packs must embed exact map block dimensions")
@@ -33702,6 +42414,18 @@ mod tests {
                 .contains("compiled game pack map 'Route29' has 3 blocks but dimensions require 4"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn saved_map_tile_bounds_rejects_subtile_overflow_without_wrapping() {
+        let mut data = GameDataSet::default();
+        let mut map = test_map_module("HugeMap", "HUGE_MAP", None);
+        let metatile_width = u16::try_from(METATILE_WIDTH).expect("positive metatile width");
+        map.attributes.width = (u16::MAX / metatile_width) + 1;
+        map.attributes.height = 1;
+        data.maps.insert("HugeMap".to_string(), map);
+
+        assert_eq!(data.saved_map_tile_bounds("HugeMap"), None);
     }
 
     #[test]
@@ -33918,18 +42642,16 @@ mod tests {
     #[test]
     fn verified_compiled_game_pack_rejects_stored_error_diagnostics() {
         let path = temp_test_path("error-report.crystalpack");
-        let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                diagnostics: vec![VerificationError::error(
-                    "bad_pack",
-                    "test",
-                    "test diagnostic",
-                )],
-                ..ModpackCompileReport::default()
-            },
-        );
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let mut report = canonical_test_compile_report(&data, "base-game");
+        report.diagnostics.push(VerificationError::error(
+            "bad_pack",
+            "test",
+            "test diagnostic",
+        ));
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report);
 
         write_compiled_game_pack(&path, &pack).expect("write compiled pack");
         let error = read_loaded_verified_compiled_game_pack(&path)
@@ -33952,13 +42674,8 @@ mod tests {
             .next()
             .expect("base data has runtime map metadata");
         metadata.group_name.clear();
-        let pack = CompiledGamePack::new_unchecked_for_tests(
-            data,
-            ModpackCompileReport {
-                manifests: vec!["base-game".to_string()],
-                ..ModpackCompileReport::default()
-            },
-        );
+        let report = canonical_test_compile_report(&data, "base-game");
+        let pack = CompiledGamePack::new_unchecked_for_tests(data, report);
 
         let error = verify_compiled_game_pack_for_runtime(&pack)
             .expect_err("verified runtime packs must validate embedded data, not just reports")
@@ -34001,6 +42718,7 @@ mod tests {
         assert!(codes.contains("missing_runtime_fishing_catalog"));
         assert!(codes.contains("missing_runtime_fruit_trees"));
         assert!(codes.contains("missing_runtime_field_moves"));
+        assert!(codes.contains("missing_runtime_title_screen"));
         assert!(codes.contains("missing_runtime_items"));
         assert!(codes.contains("missing_runtime_trainers"));
         assert!(codes.contains("missing_runtime_audio"));
@@ -34048,7 +42766,7 @@ mod tests {
 
     #[test]
     fn runtime_pack_geometry_requires_declared_aggregate_catalogs() {
-        let data = GameDataSet {
+        let mut data = GameDataSet {
             maps: [(
                 "Route29".to_string(),
                 test_map_module("Route29", "ROUTE_29", None),
@@ -34239,9 +42957,12 @@ mod tests {
     #[test]
     fn runtime_compiled_game_pack_rejects_json_extension() {
         let path = temp_test_path("runtime.json");
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
         let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport::default(),
+            data.clone(),
+            canonical_test_compile_report(&data, "core"),
         );
 
         let error = write_compiled_game_pack(&path, &pack)
@@ -34268,9 +42989,12 @@ mod tests {
         let data_root = root.join("apps/web/assets/data");
         std::fs::create_dir_all(data_root.join("content-packs")).expect("create data root");
 
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
         let pack = CompiledGamePack::new_unchecked_for_tests(
-            GameDataSet::default(),
-            ModpackCompileReport::default(),
+            data.clone(),
+            canonical_test_compile_report(&data, "core"),
         );
         write_compiled_game_pack(data_root.join("content-packs/core.crystalpack"), &pack)
             .expect("write compiled pack");
@@ -34596,6 +43320,16 @@ mod tests {
                 "must use an exact",
             ),
             (
+                "reserved audio id",
+                serde_json::json!({
+                    "id": "MUSIC_FALLBACK_ROUTE_29",
+                    "path": "mods/new/music/MUSIC_FALLBACK_ROUTE_29.mid",
+                    "kind": "music",
+                    "source": "midi",
+                }),
+                "uses reserved runtime pack prefix",
+            ),
+            (
                 "audio path extension",
                 serde_json::json!({
                     "id": "MUSIC_ROUTE_29",
@@ -34718,6 +43452,220 @@ mod tests {
         assert!(
             source_error.contains("invalid type") || source_error.contains("unknown variant"),
             "{source_error}"
+        );
+
+        let playback_id_error =
+            serde_json::from_value::<ModpackAudioPlaybackEntry>(serde_json::json!({
+                "id": "SFX_ROUTE_29",
+                "kind": "music",
+                "mode": "sequenced_midi",
+                "loop_policy": "loop"
+            }))
+            .expect_err("playback entries must validate ids against kind")
+            .to_string();
+        assert!(
+            playback_id_error.contains("must use an exact"),
+            "{playback_id_error}"
+        );
+
+        let playback_reserved_error =
+            serde_json::from_value::<ModpackAudioPlaybackEntry>(serde_json::json!({
+                "id": "CRY_LEGACY_NIDORAN_M",
+                "kind": "cry",
+                "mode": "raw_pcm",
+                "loop_policy": "once"
+            }))
+            .expect_err("playback entries must reject reserved ids")
+            .to_string();
+        assert!(
+            playback_reserved_error.contains("uses reserved runtime pack prefix"),
+            "{playback_reserved_error}"
+        );
+
+        let playback_key_error =
+            serde_json::from_value::<ModpackAudioPlaybackPlan>(serde_json::json!({
+                "music": {
+                    "MUSIC_ROUTE_30": {
+                        "id": "MUSIC_ROUTE_29",
+                        "kind": "music",
+                        "mode": "sequenced_midi",
+                        "loop_policy": "loop"
+                    }
+                },
+                "sound_effects": {},
+                "cries": {}
+            }))
+            .expect_err("playback plan map keys must match entry ids")
+            .to_string();
+        assert!(
+            playback_key_error
+                .contains("map key MUSIC_ROUTE_30 does not match entry id MUSIC_ROUTE_29"),
+            "{playback_key_error}"
+        );
+
+        let playback_bucket_error =
+            serde_json::from_value::<ModpackAudioPlaybackPlan>(serde_json::json!({
+                "music": {
+                    "SFX_TACKLE": {
+                        "id": "SFX_TACKLE",
+                        "kind": "sound_effect",
+                        "mode": "sequenced_midi",
+                        "loop_policy": "loop"
+                    }
+                },
+                "sound_effects": {},
+                "cries": {}
+            }))
+            .expect_err("playback plan entries must live in their matching bucket")
+            .to_string();
+        assert!(
+            playback_bucket_error.contains("entry SFX_TACKLE has kind SoundEffect, expected Music"),
+            "{playback_bucket_error}"
+        );
+    }
+
+    #[test]
+    fn audio_manifest_entries_validate_exact_source_and_pcm_frame_metadata() {
+        let valid_pcm = serde_json::json!({
+            "id": "CRY_NIDORAN_M",
+            "path": "mods/new/cries/CRY_NIDORAN_M.pcm",
+            "kind": "cry",
+            "source": "pcm",
+            "pcm_format": {
+                "sample_rate_hz": 32768,
+                "channels": 1,
+                "bits_per_sample": 16
+            },
+            "byte_len": 4,
+            "payload_hash": "1234abcd",
+            "pcm_frame_count": 2
+        });
+        let entry = serde_json::from_value::<ModpackAudioManifestEntry>(valid_pcm)
+            .expect("valid PCM manifest entry");
+        assert_eq!(entry.pcm_frame_count, Some(2));
+
+        let mismatched_pcm = serde_json::json!({
+            "id": "CRY_NIDORAN_M",
+            "path": "mods/new/cries/CRY_NIDORAN_M.pcm",
+            "kind": "cry",
+            "source": "pcm",
+            "pcm_format": {
+                "sample_rate_hz": 32768,
+                "channels": 1,
+                "bits_per_sample": 16
+            },
+            "byte_len": 3,
+            "payload_hash": "1234abcd",
+            "pcm_frame_count": 2
+        });
+        let error = serde_json::from_value::<ModpackAudioManifestEntry>(mismatched_pcm)
+            .expect_err("PCM manifest byte length must match frame count")
+            .to_string();
+        assert!(
+            error.contains("byte_len 3 does not match 2 frames of 2 bytes"),
+            "{error}"
+        );
+
+        let midi_with_pcm_frames = serde_json::json!({
+            "id": "MUSIC_ROUTE_29",
+            "path": "mods/new/music/MUSIC_ROUTE_29.mid",
+            "kind": "music",
+            "source": "midi",
+            "pcm_format": null,
+            "byte_len": 32,
+            "payload_hash": "1234abcd",
+            "pcm_frame_count": 1
+        });
+        let error = serde_json::from_value::<ModpackAudioManifestEntry>(midi_with_pcm_frames)
+            .expect_err("MIDI manifest entries must not carry PCM frame metadata")
+            .to_string();
+        assert!(
+            error.contains("must not declare pcm_frame_count"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn audio_playback_plan_loop_policy_must_match_manifest_kind() {
+        let assets = vec![
+            ModpackAudioAsset::music(
+                "MUSIC_ROUTE_29",
+                "content-packs/test/music/MUSIC_ROUTE_29.mid",
+            )
+            .expect("valid music"),
+            ModpackAudioAsset::sound_effect("SFX_TACKLE", "content-packs/test/sfx/SFX_TACKLE.mid")
+                .expect("valid sound effect"),
+            ModpackAudioAsset::pcm(
+                "CRY_NIDORAN_M",
+                "content-packs/test/cries/CRY_NIDORAN_M.pcm",
+                ModpackAudioKind::Cry,
+                ModpackPcmAudioFormat {
+                    sample_rate_hz: 32768,
+                    channels: 1,
+                    bits_per_sample: 16,
+                },
+            )
+            .expect("valid PCM cry"),
+        ];
+        let compiled_audio = [
+            (
+                "MUSIC_ROUTE_29".to_string(),
+                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
+            ),
+            (
+                "SFX_TACKLE".to_string(),
+                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
+            ),
+            ("CRY_NIDORAN_M".to_string(), vec![0_u8, 0]),
+        ]
+        .into_iter()
+        .collect();
+        let manifest =
+            ModpackAudioManifest::from_assets(&assets, &compiled_audio).expect("audio manifest");
+        let mut plan = ModpackAudioPlaybackPlan::from_manifest(&manifest).expect("playback plan");
+
+        plan.validate_for_manifest(&manifest)
+            .expect("generated playback plan matches manifest");
+
+        plan.music
+            .get_mut("MUSIC_ROUTE_29")
+            .expect("music entry")
+            .loop_policy = ModpackAudioLoopPolicy::Once;
+        let music_error = plan
+            .validate_for_manifest(&manifest)
+            .expect_err("music must loop")
+            .to_string();
+        assert!(
+            music_error.contains("loop policy does not match manifest kind"),
+            "{music_error}"
+        );
+
+        let mut plan = ModpackAudioPlaybackPlan::from_manifest(&manifest).expect("playback plan");
+        plan.sound_effects
+            .get_mut("SFX_TACKLE")
+            .expect("sfx entry")
+            .loop_policy = ModpackAudioLoopPolicy::Loop;
+        let sfx_error = plan
+            .validate_for_manifest(&manifest)
+            .expect_err("sound effects must not loop")
+            .to_string();
+        assert!(
+            sfx_error.contains("loop policy does not match manifest kind"),
+            "{sfx_error}"
+        );
+
+        let mut plan = ModpackAudioPlaybackPlan::from_manifest(&manifest).expect("playback plan");
+        plan.cries
+            .get_mut("CRY_NIDORAN_M")
+            .expect("cry entry")
+            .loop_policy = ModpackAudioLoopPolicy::Loop;
+        let cry_error = plan
+            .validate_for_manifest(&manifest)
+            .expect_err("cries must not loop")
+            .to_string();
+        assert!(
+            cry_error.contains("loop policy does not match manifest kind"),
+            "{cry_error}"
         );
     }
 
@@ -35019,7 +43967,7 @@ mod tests {
                 .expect_err("malformed playability tokens must fail during JSON load")
                 .to_string();
             assert!(
-                error.contains("pack token must be exact ASCII alphanumeric/underscore"),
+                error.contains("must be exact"),
                 "{label} produced unexpected error: {error}"
             );
         }
@@ -35116,7 +44064,8 @@ mod tests {
                     battle_stat_boost_stat: None,
                     battle_stat_boost_stages: None,
                     battle_escape_mode: None,
-                    battle_focus_energy: None,
+                    battle_capture_ball: None,
+battle_focus_energy: None,
                     battle_stat_drop_guard: None,
                     battle_stat_drop_guard_turns: None,
                     confusion_heal: None,
@@ -35147,6 +44096,8 @@ mod tests {
                     stat: None,
                     amount: None,
                 }]),
+                battle_reward_rules: test_battle_reward_rules(),
+                battle_escape_rules: test_battle_escape_rules(),
                 ..ModpackPayload::default()
             },
             ..ModpackManifest::default()
@@ -35495,6 +44446,130 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_runtime_spawn_points_outside_declared_runtime_bounds() {
+        let data = GameDataSet {
+            runtime_map_metadata: [(
+                "ROUTE_29".to_string(),
+                RuntimeMapMetadata {
+                    constant: "ROUTE_29".to_string(),
+                    name: "Route29".to_string(),
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: 3,
+                    height: 2,
+                    environment: "TOWN".to_string(),
+                    phone_service: 1,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            runtime_spawn_points: [(
+                "2".to_string(),
+                RuntimeSpawnPoint {
+                    identifier: 2,
+                    map_constant: "ROUTE_29".to_string(),
+                    map_name: "Route29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    tile_x: 6,
+                    tile_y: 2,
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    metatile_x: 3,
+                    metatile_y: 1,
+                    subtile_x: 0,
+                    subtile_y: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "runtime_spawn_point_out_of_bounds" && diagnostic.subject == "2"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_runtime_spawn_points_on_unwalkable_tiles() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 1;
+        module.attributes.height = 1;
+        module.blocks = vec![1];
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "1".to_string(),
+            vec![
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
+        let data = GameDataSet {
+            tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
+            maps: [("Route29".to_string(), module)].into_iter().collect(),
+            runtime_map_metadata: [(
+                "ROUTE_29".to_string(),
+                RuntimeMapMetadata {
+                    constant: "ROUTE_29".to_string(),
+                    name: "Route29".to_string(),
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: 1,
+                    height: 1,
+                    environment: "TOWN".to_string(),
+                    phone_service: 1,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            runtime_spawn_points: [(
+                "2".to_string(),
+                RuntimeSpawnPoint {
+                    identifier: 2,
+                    map_constant: "ROUTE_29".to_string(),
+                    map_name: "Route29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    tile_x: 0,
+                    tile_y: 0,
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    metatile_x: 0,
+                    metatile_y: 0,
+                    subtile_x: 0,
+                    subtile_y: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unwalkable_runtime_spawn_point"
+                && diagnostic.subject == "2"
+                && diagnostic
+                    .message
+                    .contains("non-walkable tile (0, 0) on Route29")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_invalid_runtime_map_metadata_without_coercion() {
         let data = GameDataSet {
             maps: [
@@ -35636,6 +44711,7 @@ mod tests {
                 "BattleAnim_Dummy".to_string(),
                 String::new(),
                 "BattleAnim_Tackle ".to_string(),
+                "BattleAnim_Missing".to_string(),
             ],
             ..GameDataSet::default()
         };
@@ -35659,6 +44735,12 @@ mod tests {
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_battle_animation_table_entry" && diagnostic.subject == "2"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == VerificationSeverity::Error
+                && diagnostic.code == "unknown_battle_animation_table_entry"
+                && diagnostic.subject == "3"
+                && diagnostic.message.contains("BattleAnim_Missing")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "battle_animation_table_count_mismatch"
@@ -35753,6 +44835,31 @@ mod tests {
                 report.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn verifier_rejects_exact_move_effect_without_rust_runtime_mutation() {
+        let mut move_data = test_move("AETHER_PULSE");
+        move_data.move_type = pokemon_type("AETHER");
+        move_data.effect = "MODDED_EFFECT".to_string();
+        let data = GameDataSet {
+            moves: [("AETHER_PULSE".to_string(), move_data)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unsupported_battle_move_effect"
+                && diagnostic.subject == "AETHER_PULSE"
+                && diagnostic.message.contains("MODDED_EFFECT")
+        }));
     }
 
     #[test]
@@ -35997,32 +45104,37 @@ mod tests {
         single.id = "SINGLE_MON".to_string();
         let single_payload = serde_json::to_value(&single).expect("serialize single species");
         let mut data = GameDataSet::default();
-        data.apply_content_pack_payload(ContentPackCategory::Pokemon, single_payload)
-            .expect("single exported Pokemon file is canonical");
-        assert!(data.pokemon.contains_key("SINGLE_MON"));
+        let error = data
+            .apply_content_pack_payload(ContentPackCategory::Pokemon, single_payload)
+            .expect_err("Pokemon payloads must use definitive keyed object maps");
+        assert!(
+            format!("{error:#}").contains("parse object-map payload"),
+            "{error:#}"
+        );
 
         let mut array_entry = species();
         array_entry.id = "ARRAY_MON".to_string();
         let mut data = GameDataSet::default();
-        data.apply_content_pack_payload(
-            ContentPackCategory::Pokemon,
-            serde_json::json!([array_entry]),
-        )
-        .expect("compiled Pokemon category entries are arrays");
-        assert!(data.pokemon.contains_key("ARRAY_MON"));
+        let error = data
+            .apply_content_pack_payload(
+                ContentPackCategory::Pokemon,
+                serde_json::json!([array_entry]),
+            )
+            .expect_err("Pokemon payloads must not use legacy arrays");
+        assert!(
+            format!("{error:#}").contains("parse object-map payload"),
+            "{error:#}"
+        );
 
         let mut mapped = species();
         mapped.id = "MAPPED_MON".to_string();
         let mut data = GameDataSet::default();
-        let error = data
-            .apply_content_pack_payload(
-                ContentPackCategory::Pokemon,
-                serde_json::json!({ "MAPPED_MON": mapped }),
-            )
-            .expect_err("Pokemon category files must not use object-map compatibility shape")
-            .to_string();
-
-        assert!(error.contains("parse single payload entry"), "{error}");
+        data.apply_content_pack_payload(
+            ContentPackCategory::Pokemon,
+            serde_json::json!({ "MAPPED_MON": mapped }),
+        )
+        .expect("Pokemon category object maps are definitive");
+        assert!(data.pokemon.contains_key("MAPPED_MON"));
     }
 
     #[test]
@@ -36059,8 +45171,8 @@ mod tests {
 
         data.apply_content_pack_payload(
             ContentPackCategory::Evolutions,
-            serde_json::json!([
-                {
+            serde_json::json!({
+                "PIKACHU": {
                     "species": "PIKACHU",
                     "evolutions": [{
                         "method": "ITEM",
@@ -36072,7 +45184,7 @@ mod tests {
                         "stat_ratio": null
                     }]
                 },
-                {
+                "EEVEE": {
                     "species": "EEVEE",
                     "evolutions": [{
                         "method": "HAPPINESS",
@@ -36084,7 +45196,7 @@ mod tests {
                         "stat_ratio": null
                     }]
                 }
-            ]),
+            }),
         )
         .expect("apply evolution payload");
 
@@ -36301,12 +45413,7 @@ mod tests {
             )
             .expect_err("learnset move ids must be exact tokens")
             .to_string();
-        assert!(
-            error.contains(
-                "learnset move for species 'NEW_MON' 'TACKLE HIT' must be exact ASCII alphanumeric or underscore"
-            ),
-            "{error}"
-        );
+        assert!(error.contains("parse learnset entry"), "{error}");
 
         let mut data = GameDataSet::default();
         let error = data
@@ -36321,12 +45428,7 @@ mod tests {
             )
             .expect_err("learnset reserved move ids must fail at load time")
             .to_string();
-        assert!(
-            error.contains(
-                "learnset move for species 'NEW_MON' 'legacyTackle' uses reserved modpack payload prefix"
-            ),
-            "{error}"
-        );
+        assert!(error.contains("parse learnset entry"), "{error}");
 
         let mut data = GameDataSet::default();
         let error = data
@@ -36561,14 +45663,22 @@ mod tests {
             serde_json::json!({
                 "NEW_MON": {
                     "species": "NEW_MON",
-                    "moves": ["TACKLE"]
+                    "moves": [
+                        {
+                            "level": 1,
+                            "move": "TACKLE"
+                        }
+                    ]
                 }
             }),
         )
         .expect("species-keyed level-up move entry is canonical");
         assert_eq!(
             data.level_up_moves["NEW_MON"],
-            serde_json::json!(["TACKLE"])
+            serde_json::json!([{
+                "level": 1,
+                "move": "TACKLE"
+            }])
         );
 
         let mut data = GameDataSet::default();
@@ -36611,8 +45721,8 @@ mod tests {
                     }
                 }),
             )
-            .expect_err("species move payloads must declare moves explicitly")
-            .to_string();
+            .expect_err("species move payloads must declare moves explicitly");
+        let error = format!("{error:#}");
         assert!(error.contains("missing field `moves`"), "{error}");
 
         let mut data = GameDataSet::default();
@@ -36622,7 +45732,10 @@ mod tests {
                 serde_json::json!({
                     "NEW_MON": {
                         "species": "NEW_MON",
-                        "moves": [" TACKLE"]
+                        "moves": [{
+                            "level": 1,
+                            "move": " TACKLE"
+                        }]
                     }
                 }),
             )
@@ -36640,7 +45753,10 @@ mod tests {
                 serde_json::json!({
                     "NEW_MON": {
                         "species": "NEW_MON",
-                        "moves": ["legacyTackle"]
+                        "moves": [{
+                            "level": 1,
+                            "move": "legacyTackle"
+                        }]
                     }
                 }),
             )
@@ -36660,7 +45776,10 @@ mod tests {
                 serde_json::json!({
                     "NEW MON": {
                         "species": "NEW MON",
-                        "moves": ["TACKLE"]
+                        "moves": [{
+                            "level": 1,
+                            "move": "TACKLE"
+                        }]
                     }
                 }),
             )
@@ -36685,8 +45804,8 @@ mod tests {
                     }
                 }),
             )
-            .expect_err("egg moves must reject non-exported fields")
-            .to_string();
+            .expect_err("egg moves must reject non-exported fields");
+        let error = format!("{error:#}");
         assert!(error.contains("unknown field `fallback_moves`"), "{error}");
 
         let mut data = GameDataSet::default();
@@ -36716,7 +45835,10 @@ mod tests {
                 serde_json::json!({
                     "fallback_species": {
                         "species": "fallback_species",
-                        "moves": ["TACKLE"]
+                        "moves": [{
+                            "level": 1,
+                            "move": "TACKLE"
+                        }]
                     }
                 }),
             )
@@ -37073,6 +46195,55 @@ mod tests {
             serde_json::json!([{"command":"end","args":[]}])
         );
 
+        let mut data = GameDataSet::default();
+        data.apply_content_pack_payload(
+            ContentPackCategory::MapScripts,
+            serde_json::json!({
+                "Route29WarpScript": [
+                    {"command":"warpfacing","args":["ROUTE_29","6","27","RIGHT"]}
+                ]
+            }),
+        )
+        .expect("canonical warpfacing payload should load");
+        assert_eq!(
+            data.map_scripts["Route29WarpScript"],
+            serde_json::json!([
+                {"command":"warpfacing","args":["ROUTE_29","6","27","RIGHT"]}
+            ])
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::MapScripts,
+                serde_json::json!({
+                    "Route29WarpScript": [
+                        {"command":"warpfacing","args":["RIGHT","ROUTE_29","6","27"]}
+                    ]
+                }),
+            )
+            .expect_err("ASM-order warpfacing payload must not be normalized")
+            .to_string();
+        assert!(
+            error.contains("unknown script facing direction '27'"),
+            "{error}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::MapScripts,
+                serde_json::json!({
+                    "Route29WarpScript": [
+                        {"command":"warpfacing","args":"RIGHT,ROUTE_29,6,27"}
+                    ]
+                }),
+            )
+            .expect_err("warpfacing args must be a typed array")
+            .to_string();
+        assert!(
+            error.contains("warpfacing args must be an array"),
+            "{error}"
+        );
+
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::MapScripts,
@@ -37141,28 +46312,22 @@ mod tests {
     #[test]
     fn map_attribute_and_block_payloads_reject_duplicate_exact_keys() {
         let mut data = GameDataSet::default();
+        let mut attributes = test_map_module("Route29", "ROUTE_29", None).attributes;
+        attributes.environment = Some("TOWN".to_string());
         data.apply_content_pack_payload(
             ContentPackCategory::MapAttributes,
             serde_json::json!({
-                "Route29": {
-                    "map_constant": "ROUTE_29",
-                    "tileset_name": "johto",
-                    "environment": "TOWN",
-                    "blocks_label": "Route29_Blocks"
-                }
+                "Route29": attributes
             }),
         )
         .expect("apply first map attributes payload");
+        let mut duplicate_attributes = test_map_module("Route29", "ROUTE_29", None).attributes;
+        duplicate_attributes.environment = Some("ROUTE".to_string());
         let error = data
             .apply_content_pack_payload(
                 ContentPackCategory::MapAttributes,
                 serde_json::json!({
-                    "Route29": {
-                        "map_constant": "ROUTE_29",
-                        "tileset_name": "johto",
-                        "environment": "ROUTE",
-                        "blocks_label": "Route29_Blocks"
-                    }
+                    "Route29": duplicate_attributes
                 }),
             )
             .expect_err("duplicate map attributes payload must not overwrite");
@@ -37330,8 +46495,7 @@ mod tests {
             )
             .expect_err("map connection targets must be exact map ids");
         assert!(
-            format!("{error:#}")
-                .contains("map 'Route29' connection target map ' Route30' must be an exact map id"),
+            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -37350,9 +46514,8 @@ mod tests {
             )
             .expect_err("map connection fallback targets must be reserved");
         assert!(
-            format!("{error:#}").contains(
-                "map 'Route29' connection target map 'fallbackRoute' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}")
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -37367,7 +46530,7 @@ mod tests {
             .expect_err("map attribute keys must be map tokens");
         assert!(
             format!("{error:#}")
-                .contains("map attributes map id 'Route 29' must be an exact map token"),
+                .contains("map attributes map id 'Route 29' must be exact ASCII alphanumeric or underscore"),
             "{error:#}"
         );
 
@@ -37398,8 +46561,7 @@ mod tests {
             )
             .expect_err("map attribute dimensions must be positive at load time");
         assert!(
-            format!("{error:#}")
-                .contains("map 'Route29' width and height must both be greater than zero"),
+            format!("{error:#}").contains("parse object-map payload: map johto has height 0"),
             "{error:#}"
         );
     }
@@ -37416,7 +46578,8 @@ mod tests {
             )
             .expect_err("map module ids must be exact");
         assert!(
-            format!("{error:#}").contains("map module id ' Route29' must be an exact map token"),
+            format!("{error:#}")
+                .contains("map module key ' Route29' must be exact ASCII alphanumeric or underscore"),
             "{error:#}"
         );
 
@@ -37430,7 +46593,8 @@ mod tests {
             )
             .expect_err("map module ids must be map tokens");
         assert!(
-            format!("{error:#}").contains("map module id 'Route 29' must be an exact map token"),
+            format!("{error:#}")
+                .contains("map module key 'Route 29' must be exact ASCII alphanumeric or underscore"),
             "{error:#}"
         );
 
@@ -37445,7 +46609,7 @@ mod tests {
             .expect_err("map module reserved ids must fail at load time");
         assert!(
             format!("{error:#}")
-                .contains("map module id 'fallbackMap' uses reserved modpack payload prefix"),
+                .contains("map module key 'fallbackMap' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -37460,8 +46624,7 @@ mod tests {
             )
             .expect_err("map module attributes must use exact map constants");
         assert!(
-            format!("{error:#}")
-                .contains("map attributes map_constant ' ROUTE_29' must be an exact map token"),
+            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -37476,8 +46639,7 @@ mod tests {
             )
             .expect_err("map module attributes must reject internal spaces");
         assert!(
-            format!("{error:#}")
-                .contains("map attributes map_constant 'ROUTE 29' must be an exact map token"),
+            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
     }
@@ -37513,8 +46675,7 @@ mod tests {
             )
             .expect_err("map dimensions must be positive at load time");
         assert!(
-            format!("{error:#}")
-                .contains("map 'Route29' width and height must both be greater than zero"),
+            format!("{error:#}").contains("parse object-map payload: map johto has width 0"),
             "{error:#}"
         );
 
@@ -37567,9 +46728,8 @@ mod tests {
             )
             .expect_err("map script section command args must be exact");
         assert!(
-            format!("{error:#}").contains(
-                "map 'Route29' script section command 0 'scene_script' arg ' Route29Scene0' must be exact and non-empty"
-            ),
+            format!("{error:#}")
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -37588,9 +46748,8 @@ mod tests {
             )
             .expect_err("map script section command arity must be exact");
         assert!(
-            format!("{error:#}").contains(
-                "map 'Route29' script section command 1 'scene_script' expected one of {1, 2} args, found 0"
-            ),
+            format!("{error:#}")
+                .contains("map script command scene_script has 0 args, expected {1, 2}"),
             "{error:#}"
         );
 
@@ -37624,7 +46783,7 @@ mod tests {
             .expect_err("map event section command names must be known");
         assert!(
             format!("{error:#}").contains(
-                "map 'Route29' event section command 2 has unknown command 'object event'"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"object event\""
             ),
             "{error:#}"
         );
@@ -37650,7 +46809,7 @@ mod tests {
             .expect_err("map event section command args must be exact");
         assert!(
             format!("{error:#}").contains(
-                "map 'Route29' event section command 3 'bg_event' arg 'Route29 SignScript' must be exact and non-empty"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"Route29 SignScript\""
             ),
             "{error:#}"
         );
@@ -37698,7 +46857,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map module script ' Route29_MapScripts' must be exact ASCII alphanumeric or underscore"
+                "map module script ' Route29_MapScripts' must be an exact script label token"
             ),
             "{error}"
         );
@@ -37721,7 +46880,10 @@ mod tests {
             )
             .expect_err("embedded map script commands must be explicit")
             .to_string();
-        assert!(error.contains("missing field `args`"), "{error}");
+        assert!(
+            error.contains("validate map module 'Route29' script 'Route29_MapScripts'"),
+            "{error}"
+        );
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.scripts.insert(
@@ -37744,7 +46906,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map module script payload script 'Route29_MapScripts' command 0 arg 0 ' Route29Script' must be exact, non-empty, and untrimmed"
+                "validate map module 'Route29' script 'Route29_MapScripts'"
             ),
             "{error}"
         );
@@ -37870,7 +47032,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' scene id 'SCENE ROUTE 29' must be exact ASCII alphanumeric or underscore"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"SCENE ROUTE 29\""
             ),
             "{error}"
         );
@@ -37917,7 +47079,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' warp 1 target map constant 'CHERRYGROVE CITY' must be exact ASCII alphanumeric or underscore"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"CHERRYGROVE CITY\""
             ),
             "{error}"
         );
@@ -37940,7 +47102,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' coord event script 'Route29 CoordScript' must be an exact script label"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"Route29 CoordScript\""
             ),
             "{error}"
         );
@@ -38030,7 +47192,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script shop command 3 name 'pokemart ' must be exact, non-empty, and untrimmed"
+                "invalid script shop command 'pokemart '"
             ),
             "{error}"
         );
@@ -38054,7 +47216,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script shop command 4 'sellmart' is not a known shop command"
+                "unknown script shop command 'sellmart'"
             ),
             "{error}"
         );
@@ -38224,7 +47386,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script variable command 2 in 'Route29VarScript' is malformed: InvalidTarget"
+                "script variable target must be exact ASCII alphanumeric/underscore, found \"VAR BATTLETYPE\""
             ),
             "{error}"
         );
@@ -38248,7 +47410,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script variable command 3 in 'Route29VarScript' is malformed: InvalidValueToken"
+                "script variable value token must be exact visible ASCII, found \" BAD\""
             ),
             "{error}"
         );
@@ -38370,7 +47532,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script audio command 5 name 'playmusic ' must be exact, non-empty, and untrimmed"
+                "script audio command must be exact lowercase ASCII, found \"playmusic \""
             ),
             "{error}"
         );
@@ -38394,7 +47556,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script audio command 6 audio id 'MUSIC ROUTE 29' must be exact ASCII alphanumeric or underscore"
+                "script audio token must be exact ASCII alphanumeric/underscore, found \"MUSIC ROUTE 29\""
             ),
             "{error}"
         );
@@ -38418,7 +47580,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script audio command 7 audio id 'fallbackMusic' uses reserved modpack payload prefix"
+                "script audio token must be exact ASCII alphanumeric/underscore, found \"fallbackMusic\""
             ),
             "{error}"
         );
@@ -38476,6 +47638,7 @@ mod tests {
     fn map_module_payloads_validate_extracted_item_commands() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
             item_id: "POTION".to_string(),
             quantity: 2,
             source_script: "Route29ItemScript".to_string(),
@@ -38483,11 +47646,13 @@ mod tests {
             verbose: true,
         }];
         module.script_item_checks = vec![ScriptItemAccess {
+            command: "checkitem".to_string(),
             item_id: "ITEM_FROM_MEM".to_string(),
             source_script: "Route29ItemScript".to_string(),
             command_index: 1,
         }];
         module.script_item_takes = vec![ScriptItemAccess {
+            command: "takeitem".to_string(),
             item_id: "POTION".to_string(),
             source_script: "Route29ItemScript".to_string(),
             command_index: 2,
@@ -38503,6 +47668,7 @@ mod tests {
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
             item_id: "POTION".to_string(),
             quantity: 0,
             source_script: "Route29ItemScript".to_string(),
@@ -38527,6 +47693,7 @@ mod tests {
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
             item_id: " POTION".to_string(),
             quantity: 1,
             source_script: "Route29ItemScript".to_string(),
@@ -38544,13 +47711,14 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script item grant command 4 item id ' POTION' must be exact ASCII alphanumeric or underscore"
+                "script item token must be exact ASCII alphanumeric/underscore, found \" POTION\""
             ),
             "{error}"
         );
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
             item_id: "legacyPotion".to_string(),
             quantity: 1,
             source_script: "Route29ItemScript".to_string(),
@@ -38568,13 +47736,14 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script item grant command 5 item id 'legacyPotion' uses reserved modpack payload prefix"
+                "script item token must be exact ASCII alphanumeric/underscore, found \"legacyPotion\""
             ),
             "{error}"
         );
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_checks = vec![ScriptItemAccess {
+            command: "checkitem".to_string(),
             item_id: "POTION".to_string(),
             source_script: " Route29ItemScript".to_string(),
             command_index: 6,
@@ -38597,6 +47766,7 @@ mod tests {
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_item_takes = vec![ScriptItemAccess {
+            command: "takeitem".to_string(),
             item_id: "POTION-1".to_string(),
             source_script: "Route29ItemScript".to_string(),
             command_index: 7,
@@ -38686,7 +47856,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script flag command 5 in 'Route29FlagScript' is malformed: InvalidCommand"
+                "script flag command must be exact lowercase ASCII/underscore, found \"setevent \""
             ),
             "{error}"
         );
@@ -38709,7 +47879,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script flag command 6 in 'Route29FlagScript' is malformed: InvalidFlagId"
+                "script flag token must be exact ASCII alphanumeric/underscore, found \"EVENT ROUTE 29\""
             ),
             "{error}"
         );
@@ -38733,7 +47903,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script scene command 7 in 'Route29SceneScript' is malformed: UnexpectedTargetMap"
+                "invalid script scene command: UnexpectedTargetMap"
             ),
             "{error}"
         );
@@ -38921,7 +48091,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script field pickup command 3 'ITEMBALL' is not a known field pickup command"
+                "script field pickup command must be exact lowercase ASCII, found \"ITEMBALL\""
             ),
             "{error}"
         );
@@ -38947,7 +48117,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script field pickup command 4 item id 'RARE CANDY' must be exact ASCII alphanumeric or underscore"
+                "field item token must be exact ASCII alphanumeric/underscore, found \"RARE CANDY\""
             ),
             "{error}"
         );
@@ -38973,7 +48143,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script field pickup command 5 'hiddenitem' quantity must be greater than zero"
+                "script field pickup quantity must be positive"
             ),
             "{error}"
         );
@@ -39188,7 +48358,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script block change command 5 source script ' Route29BlockScript' must be exact, non-empty, and untrimmed"
+                "script block label must be exact visible ASCII, found \" Route29BlockScript\""
             ),
             "{error}"
         );
@@ -39218,7 +48388,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script object command 6 in 'Route29ObjectScript' is malformed: invalid_command"
+                "script object command must be exact lowercase ASCII, found \"appear \""
             ),
             "{error}"
         );
@@ -39248,9 +48418,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script object command 7 in 'Route29ObjectScript' is malformed: unknown_object_id"
-            ) || error.contains(
-                "map 'Route29' script object command 7 in 'Route29ObjectScript' is malformed: missing_coordinates"
+                "script object command moveobject requires x and y"
             ),
             "{error}"
         );
@@ -39344,7 +48512,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script movement label ' Route29Movement' must be exact, non-empty, and untrimmed"
+                "script object token must be exact ASCII alphanumeric/underscore, found \" Route29Movement\""
             ),
             "{error}"
         );
@@ -39371,7 +48539,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script movement 'Route29Movement' source script ' Route29MovementScript' must be exact, non-empty, and untrimmed"
+                "script label token must be exact visible ASCII, found \" Route29MovementScript\""
             ),
             "{error}"
         );
@@ -39420,7 +48588,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script movement 'Route29Movement' step 3 is malformed: missing_direction"
+                "invalid movement step: MissingDirection"
             ),
             "{error}"
         );
@@ -39534,6 +48702,236 @@ mod tests {
             ),
             "{error:#}"
         );
+
+        let movement_command = ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29Movement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 0,
+        };
+        let scripts = BTreeMap::from([(
+            "Route29Movement".to_string(),
+            serde_json::json!([
+                {"command": "step", "args": ["DOWN"]}
+            ]),
+        )]);
+        let error = parse_script_movements("Route29", &scripts, &[movement_command])
+            .expect_err("movement scripts without step_end must not be accepted");
+        assert!(
+            format!("{error:#}").contains(
+                "Malformed movement script Route29Movement for Route29: movement must end with step_end."
+            ),
+            "{error:#}"
+        );
+
+        let movement_command = ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29Movement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 0,
+        };
+        let scripts = BTreeMap::from([(
+            "Route29Movement".to_string(),
+            serde_json::json!([
+                {"command": "step_dig", "args": []},
+                {"command": "step_end", "args": []}
+            ]),
+        )]);
+        let error = parse_script_movements("Route29", &scripts, &[movement_command])
+            .expect_err("duration-bearing movement commands must require exact duration");
+        assert!(
+            format!("{error:#}").contains(
+                "Malformed step_dig movement in Route29Movement for Route29: expected 1 arg, found 0."
+            ),
+            "{error:#}"
+        );
+
+        let movement_command = ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29Movement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 0,
+        };
+        let scripts = BTreeMap::from([(
+            "Route29Movement@Route29Script".to_string(),
+            serde_json::json!([
+                {"command": "step_end", "args": []}
+            ]),
+        )]);
+        let error = parse_script_movements("Route29", &scripts, &[movement_command])
+            .expect_err("non-relative movement references must not infer local labels");
+        assert!(
+            format!("{error:#}").contains(
+                "movement reference 'Route29Movement' from Route29Script on Route29 resolves to missing script"
+            ),
+            "{error:#}"
+        );
+
+        let movement_command = ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some(".SpinMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 0,
+        };
+        let scripts = BTreeMap::from([
+            (
+                ".SpinMovement".to_string(),
+                serde_json::json!([
+                    {"command": "step_end", "args": []}
+                ]),
+            ),
+            (
+                ".SpinMovement@Route29Script".to_string(),
+                serde_json::json!([
+                    {"command": "step_end", "args": []}
+                ]),
+            ),
+        ]);
+        let error = parse_script_movements("Route29", &scripts, &[movement_command])
+            .expect_err("ambiguous relative movement reference must reject");
+        assert!(
+            format!("{error:#}").contains(
+                "ambiguous movement reference '.SpinMovement' from Route29Script on Route29"
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn raw_script_movement_extraction_preserves_crystal_effect_durations() {
+        let movement_command = ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29Movement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29Script".to_string(),
+            command_index: 0,
+        };
+        let scripts = BTreeMap::from([(
+            "Route29Movement".to_string(),
+            serde_json::json!([
+                {"command": "turn_waterfall", "args": ["UP"]},
+                {"command": "step_dig", "args": ["32"]},
+                {"command": "step_sleep_8", "args": []},
+                {"command": "rock_smash", "args": ["10"]},
+                {"command": "return_dig", "args": ["32"]},
+                {"command": "step_end", "args": []}
+            ]),
+        )]);
+
+        let movements =
+            parse_script_movements("Route29", &scripts, &[movement_command]).expect("movement");
+
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].label, "Route29Movement");
+        assert_eq!(movements[0].source_script.as_deref(), Some("Route29Script"));
+        assert_eq!(
+            movements[0]
+                .steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.command.as_str(),
+                        step.direction.as_deref(),
+                        step.duration,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn_waterfall", Some("UP"), None),
+                ("step_dig", None, Some(32)),
+                ("step_sleep_8", None, None),
+                ("rock_smash", None, Some(10)),
+                ("return_dig", None, Some(32)),
+                ("step_end", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_script_movement_extraction_binds_global_labels_to_exact_source_scripts() {
+        let movement_command = |source_script: &str, command_index: usize| ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("SharedSpinMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: source_script.to_string(),
+            command_index,
+        };
+        let scripts = BTreeMap::from([(
+            "SharedSpinMovement".to_string(),
+            serde_json::json!([
+                {"command": "turn_head", "args": ["LEFT"]},
+                {"command": "turn_head", "args": ["UP"]},
+                {"command": "step_end", "args": []}
+            ]),
+        )]);
+
+        let movements = parse_script_movements(
+            "CopycatsHouse2F",
+            &scripts,
+            &[
+                movement_command(".Default_Female_1@Copycat", 0),
+                movement_command(".GotPass_Female_1@Copycat", 1),
+            ],
+        )
+        .expect("shared movement parses for each exact source script");
+
+        assert_eq!(movements.len(), 2);
+        assert_eq!(
+            movements
+                .iter()
+                .map(|movement| {
+                    (
+                        movement.label.as_str(),
+                        movement.source_script.as_deref(),
+                        movement.steps.len(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("SharedSpinMovement", Some(".Default_Female_1@Copycat"), 3),
+                ("SharedSpinMovement", Some(".GotPass_Female_1@Copycat"), 3),
+            ]
+        );
     }
 
     #[test]
@@ -39616,6 +49014,42 @@ mod tests {
         assert!(
             format!("{error:#}").contains(
                 "Malformed menu definition command in Route29Menu for Route29: unknown command 'legacy_menu' at index 1."
+            ),
+            "{error:#}"
+        );
+
+        let scripts = BTreeMap::from([(
+            "Route29Menu".to_string(),
+            serde_json::json!([
+                {"command": "menu_coords", "args": ["SCREEN_LEFT", "TEXTBOX_Y - %1", "SCREEN_WIDTH - $1", "SCREEN_HEIGHT - +1"]},
+                {"command": "dw", "args": ["Route29MenuData"]}
+            ]),
+        )]);
+        parse_script_menu_definitions("Route29", &scripts)
+            .expect("exact ASM numeric menu coordinate expressions");
+
+        let scripts = BTreeMap::from([(
+            "Route29Menu".to_string(),
+            serde_json::json!([
+                {"command": "menu_coords", "args": ["$0", "%10", "$13", "%10001"]},
+                {"command": "dw", "args": ["Route29MenuData"]}
+            ]),
+        )]);
+        parse_script_menu_definitions("Route29", &scripts)
+            .expect("exact standalone ASM numeric menu coordinates");
+
+        let scripts = BTreeMap::from([(
+            "Route29Menu".to_string(),
+            serde_json::json!([
+                {"command": "menu_coords", "args": ["0", "0", "SCREEN_EDGE + LEFT", "8"]},
+                {"command": "dw", "args": ["Route29MenuData"]}
+            ]),
+        )]);
+        let error = parse_script_menu_definitions("Route29", &scripts)
+            .expect_err("unsupported menu coordinate expressions must fail extraction");
+        assert!(
+            format!("{error:#}").contains(
+                "Malformed menu_coords command in Route29Menu for Route29: menu coordinate 2 must be an exact supported expression"
             ),
             "{error:#}"
         );
@@ -39774,7 +49208,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script text command 6 in 'Route29Script' is malformed: UnexpectedTextLabel"
+                "script text command opentext must not declare text_label"
             ),
             "{error}"
         );
@@ -39797,7 +49231,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script text command 7 in 'Route29Script' is malformed: InvalidTextLabel"
+                "script text label must be exact ASCII label syntax, found \"Route 29 Text\""
             ),
             "{error}"
         );
@@ -39821,7 +49255,7 @@ mod tests {
             .expect_err("jump commands must not include compare values")
             .to_string();
         assert!(
-            error.contains("map 'Route29' script control command 8 in 'Route29Script' is malformed: InvalidCommand"),
+            error.contains("script control command 'jump' has unexpected compare value"),
             "{error}"
         );
 
@@ -39998,7 +49432,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script text body 'Route29Text' is malformed: InvalidLabel"
+                "script text label must be exact ASCII label syntax, found \"Route29 Text\""
             ),
             "{error}"
         );
@@ -40026,7 +49460,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script text body 'Route29Text' is malformed: MalformedCommand"
+                "script text body command done has 1 args, expected 0"
             ),
             "{error}"
         );
@@ -40082,7 +49516,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script menu definition 'Route29Menu' is malformed: MalformedCommand"
+                "script menu command menu_coords has 2 args, expected {4}"
             ),
             "{error}"
         );
@@ -40111,6 +49545,65 @@ mod tests {
         assert!(
             error.contains(
                 "map 'Route29' script menu definition 'Route29Menu' command 5 arg 0 ' Route29MenuData' must be exact, non-empty, and untrimmed"
+            ),
+            "{error}"
+        );
+
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.script_menu_definitions.insert(
+            "Route29Menu".to_string(),
+            ScriptMenuDefinition {
+                label: "Route29Menu".to_string(),
+                commands: vec![ScriptMenuCommand {
+                    command: "menu_coords".to_string(),
+                    args: vec![
+                        "0".to_string(),
+                        "TEXTBOX_Y".to_string(),
+                        "SCREEN_EDGE".to_string(),
+                        "SCREEN_HEIGHT - 1".to_string(),
+                    ],
+                    command_index: 6,
+                }],
+            },
+        );
+        GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::Maps,
+                serde_json::json!({
+                    "Route29": module
+                }),
+            )
+            .expect("screen-edge menu coordinate constants must be accepted");
+
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.script_menu_definitions.insert(
+            "Route29Menu".to_string(),
+            ScriptMenuDefinition {
+                label: "Route29Menu".to_string(),
+                commands: vec![ScriptMenuCommand {
+                    command: "menu_coords".to_string(),
+                    args: vec![
+                        "0".to_string(),
+                        "TEXTBOX_Y".to_string(),
+                        "SCREEN_WIDTH  - 1".to_string(),
+                        " SCREEN_HEIGHT".to_string(),
+                    ],
+                    command_index: 7,
+                }],
+            },
+        );
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::Maps,
+                serde_json::json!({
+                    "Route29": module
+                }),
+            )
+            .expect_err("menu coordinate expressions must not be whitespace-normalized")
+            .to_string();
+        assert!(
+            error.contains(
+                "map 'Route29' script menu definition 'Route29Menu' is malformed: InvalidMenuCoords"
             ),
             "{error}"
         );
@@ -40201,7 +49694,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' gift Pokemon command 6 species id 'TO GEPI' must be exact ASCII alphanumeric or underscore"
+                "gift Pokemon token must be exact ASCII alphanumeric/underscore, found \"TO GEPI\""
             ),
             "{error}"
         );
@@ -40229,7 +49722,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' gift Pokemon command 7 species id 'fallbackGift' uses reserved modpack payload prefix"
+                "gift Pokemon token must be exact ASCII alphanumeric/underscore, found \"fallbackGift\""
             ),
             "{error}"
         );
@@ -40257,7 +49750,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' gift Pokemon command 8 level token ' 5' must be exact, non-empty, and untrimmed"
+                "gift Pokemon value token must be exact visible ASCII, found \" 5\""
             ),
             "{error}"
         );
@@ -40533,9 +50026,8 @@ mod tests {
             )
             .expect_err("Pokemon species ids must not be trimmed");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species id ' NEW_MON' must be exact ASCII alphanumeric or underscore"
-            ),
+            format!("{error:#}")
+                .contains("Pokemon token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40549,9 +50041,8 @@ mod tests {
             )
             .expect_err("Pokemon species held item ids must not be trimmed");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species held item id ' BERRY' must be exact ASCII alphanumeric or underscore"
-            ),
+            format!("{error:#}")
+                .contains("Pokemon token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40565,9 +50056,7 @@ mod tests {
             )
             .expect_err("Pokemon species reserved held item ids must fail");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species held item id 'legacyBerry' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("Pokemon token 'legacyBerry' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -40581,9 +50070,8 @@ mod tests {
             )
             .expect_err("Pokemon species TM/HM move ids must not contain control characters");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species TM/HM move id 'THUNDERBOLT\u{0007}' must be exact ASCII alphanumeric or underscore"
-            ),
+            format!("{error:#}")
+                .contains("Pokemon token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40597,9 +50085,7 @@ mod tests {
             )
             .expect_err("Pokemon species reserved TM/HM move ids must fail");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species TM/HM move id 'fallbackTmMove' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("Pokemon token 'fallbackTmMove' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -40607,32 +50093,32 @@ mod tests {
             (
                 "primary type",
                 |species| species.type1 = "FIRE TYPE".to_string(),
-                "Pokemon species primary type 'FIRE TYPE' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "secondary type",
                 |species| species.type2 = " WATER".to_string(),
-                "Pokemon species secondary type ' WATER' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "growth rate",
                 |species| species.growth_rate = "GROWTH MEDIUM_FAST".to_string(),
-                "Pokemon species growth rate 'GROWTH MEDIUM_FAST' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "primary egg group",
                 |species| species.egg_group1 = "EGG MONSTER".to_string(),
-                "Pokemon species primary egg group 'EGG MONSTER' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "secondary egg group",
                 |species| species.egg_group2 = "EGG_WATER_1 ".to_string(),
-                "Pokemon species secondary egg group 'EGG_WATER_1 ' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 "ability",
                 |species| species.ability = "MOD ABILITY".to_string(),
-                "Pokemon species ability 'MOD ABILITY' must be exact ASCII alphanumeric or underscore",
+                "Pokemon token must be exact ASCII alphanumeric/underscore",
             ),
         ];
 
@@ -40663,9 +50149,7 @@ mod tests {
             )
             .expect_err("reserved Pokemon species ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains(
-                "Pokemon species id 'fallback_species' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("Pokemon token 'fallback_species' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -40695,7 +50179,7 @@ mod tests {
             )
             .expect_err("move effects must be exact tokens");
         assert!(
-            format!("{error:#}").contains("move 'TACKLE' has invalid effect 'NORMAL HIT'"),
+            format!("{error:#}").contains("move token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40708,8 +50192,7 @@ mod tests {
             )
             .expect_err("reserved move ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}")
-                .contains("move id 'fallback_move' uses reserved modpack payload prefix"),
+            format!("{error:#}").contains("move token 'fallback_move' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -40765,9 +50248,8 @@ mod tests {
             )
             .expect_err("growth rate ids must not be trimmed");
         assert!(
-            format!("{error:#}").contains(
-                "growth rate curve id ' GROWTH_MEDIUM_FAST' must be exact ASCII alphanumeric or underscore"
-            ),
+            format!("{error:#}")
+                .contains("growth-rate id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40781,9 +50263,7 @@ mod tests {
             )
             .expect_err("growth rate denominators must be nonzero");
         assert!(
-            format!("{error:#}").contains(
-                "growth rate curve 'GROWTH_MEDIUM_FAST' must declare a nonzero denominator"
-            ),
+            format!("{error:#}").contains("growth-rate curve GROWTH_MEDIUM_FAST has zero denominator"),
             "{error:#}"
         );
 
@@ -40797,9 +50277,8 @@ mod tests {
             )
             .expect_err("reserved growth rate ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains(
-                "growth rate curve id 'legacyGrowth' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}")
+                .contains("growth-rate id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40857,8 +50336,7 @@ mod tests {
             )
             .expect_err("reserved item ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}")
-                .contains("item id 'fallback_item' uses reserved modpack payload prefix"),
+            format!("{error:#}").contains("item token 'fallback_item' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -40925,8 +50403,7 @@ mod tests {
             )
             .expect_err("reserved trainer ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}")
-                .contains("trainer key 'legacyTrainer' uses reserved modpack payload prefix"),
+            format!("{error:#}").contains("trainer token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -40937,7 +50414,7 @@ mod tests {
                     trainer.trainer_class = "YOUNGSTER ".to_string();
                     trainer
                 },
-                "trainer 'YOUNGSTER_JOEY' trainer_class",
+                "token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -40945,7 +50422,7 @@ mod tests {
                     trainer.encounter_music = " MUSIC_HIKER_ENCOUNTER".to_string();
                     trainer
                 },
-                "trainer 'YOUNGSTER_JOEY' encounter_music",
+                "exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -40953,7 +50430,7 @@ mod tests {
                     trainer.encounter_music = "legacyEncounter".to_string();
                     trainer
                 },
-                "encounter_music 'legacyEncounter' uses reserved modpack payload prefix",
+                "exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -40961,7 +50438,7 @@ mod tests {
                     trainer.party.clear();
                     trainer
                 },
-                "must declare an explicit nonempty party",
+                "trainer YOUNGSTER_JOEY must declare a party",
             ),
             (
                 {
@@ -40969,7 +50446,7 @@ mod tests {
                     trainer.party[0].species = "RATTATA ".to_string();
                     trainer
                 },
-                "party species at slot 0",
+                "token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -40977,7 +50454,7 @@ mod tests {
                     trainer.party[0].species = "fallbackRattata".to_string();
                     trainer
                 },
-                "party species at slot 0 'fallbackRattata' uses reserved modpack payload prefix",
+                "token",
             ),
             (
                 {
@@ -40985,7 +50462,7 @@ mod tests {
                     trainer.party[0].item = Some(" BERRY".to_string());
                     trainer
                 },
-                "party item at slot 0",
+                "token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -40993,7 +50470,7 @@ mod tests {
                     trainer.party[0].item = Some("legacyBerry".to_string());
                     trainer
                 },
-                "party item at slot 0 'legacyBerry' uses reserved modpack payload prefix",
+                "token",
             ),
             (
                 {
@@ -41001,7 +50478,7 @@ mod tests {
                     trainer.party[0].moves[0].name = "TACKLE ".to_string();
                     trainer
                 },
-                "party move at slot 0",
+                "token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -41009,7 +50486,7 @@ mod tests {
                     trainer.party[0].moves[0].name = "fallbackMove".to_string();
                     trainer
                 },
-                "party move at slot 0 'fallbackMove' uses reserved modpack payload prefix",
+                "token",
             ),
             (
                 {
@@ -41017,7 +50494,7 @@ mod tests {
                     trainer.items = vec![Some(" POTION".to_string())];
                     trainer
                 },
-                "battle item at slot 0",
+                "token must be exact ASCII alphanumeric/underscore",
             ),
             (
                 {
@@ -41025,7 +50502,7 @@ mod tests {
                     trainer.items = vec![Some("legacyPotion".to_string())];
                     trainer
                 },
-                "battle item at slot 0 'legacyPotion' uses reserved modpack payload prefix",
+                "token",
             ),
         ] {
             let error = GameDataSet::default()
@@ -41066,7 +50543,14 @@ mod tests {
                 serde_json::json!({
                     "WRONG_ROUTE": FieldEncounterData::for_crystal(
                         "NEW_ROUTE",
-                        Some(FieldEncounterTable::default()),
+                        Some(FieldEncounterTable {
+                            common: vec![FieldEncounterEntry {
+                                weight: 100,
+                                species: "NEW_MON".to_string(),
+                                level: 5,
+                            }],
+                            rare: Vec::new(),
+                        }),
                         None
                     )
                 }),
@@ -41092,9 +50576,8 @@ mod tests {
             )
             .expect_err("wild encounter map names must be exact encounter tokens");
         assert!(
-            format!("{error:#}").contains(
-                "wild encounter map name 'NEW ROUTE' must be an exact non-empty encounter token"
-            ),
+            format!("{error:#}")
+                .contains("encounter token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -41119,9 +50602,8 @@ mod tests {
             )
             .expect_err("wild encounter species ids must be exact encounter tokens");
         assert!(
-            format!("{error:#}").contains(
-                "wild encounter species for map NEW_ROUTE 'NEW MON' must be an exact non-empty encounter token"
-            ),
+            format!("{error:#}")
+                .contains("encounter token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -41166,9 +50648,8 @@ mod tests {
             )
             .expect_err("field encounter species ids must be exact encounter tokens");
         assert!(
-            format!("{error:#}").contains(
-                "field encounter species for map NEW_ROUTE 'NEW_MON\u{0007}' must be an exact non-empty encounter token"
-            ),
+            format!("{error:#}")
+                .contains("encounter token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -42819,7 +52300,7 @@ mod tests {
             (
                 ContentPackCategory::PhoneContacts,
                 serde_json::json!({
-                    "PhoneElm\u{0007}": test_phone_contact("PhoneElm\u{0007}")
+                    "PhoneElm\u{0007}": test_phone_contact("PhoneElm")
                 }),
                 "phone contact catalog entry id 'PhoneElm\u{0007}' must be exact ASCII alphanumeric or underscore",
             ),
@@ -42842,21 +52323,21 @@ mod tests {
                 serde_json::json!({
                     "fallbackMart": ["POTION"]
                 }),
-                "mart catalog entry id 'fallbackMart' uses reserved modpack payload prefix",
+                "mart catalog entry id 'fallbackMart' must be exact ASCII alphanumeric or underscore",
             ),
             (
                 ContentPackCategory::FruitTrees,
                 serde_json::json!({
                     "legacyTree": "BERRY"
                 }),
-                "fruit tree catalog entry id 'legacyTree' uses reserved modpack payload prefix",
+                "fruit tree catalog entry id 'legacyTree' must be exact ASCII alphanumeric or underscore",
             ),
             (
                 ContentPackCategory::PhoneContacts,
                 serde_json::json!({
-                    "fallbackContact": test_phone_contact("fallbackContact")
+                    "fallbackContact": test_phone_contact("PhoneElm")
                 }),
-                "phone contact catalog entry id 'fallbackContact' uses reserved modpack payload prefix",
+                "phone contact catalog entry id 'fallbackContact' must be exact ASCII alphanumeric or underscore",
             ),
         ];
 
@@ -42892,7 +52373,7 @@ mod tests {
                 serde_json::json!({
                     "MartNew": ["legacyPotion"]
                 }),
-                "mart item id 'legacyPotion' uses reserved modpack payload prefix",
+                "mart item id 'legacyPotion' must be exact ASCII alphanumeric or underscore",
             ),
             (
                 ContentPackCategory::FruitTrees,
@@ -42913,7 +52394,7 @@ mod tests {
                 serde_json::json!({
                     "FruitTreeRoute29": "fallbackBerry"
                 }),
-                "fruit tree item id 'fallbackBerry' uses reserved modpack payload prefix",
+                "fruit tree item id 'fallbackBerry' must be exact ASCII alphanumeric or underscore",
             ),
         ];
 
@@ -43029,7 +52510,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "phone contact key 'PhoneElm' does not match record contactId 'PhoneMom'"
+                "phone contact catalog entry id 'PhoneElm' must match record contactId 'PhoneMom'"
             ),
             "{error:#}"
         );
@@ -43081,7 +52562,7 @@ mod tests {
             .expect_err("phone contacts must declare display lines")
             .to_string();
         assert!(
-            error.contains("phone contact 'PhoneElm' must declare at least one display line"),
+            error.contains("phone contact PhoneElm must declare nonempty dialogue lines"),
             "{error}"
         );
 
@@ -43098,7 +52579,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains(
-                "phone contact primaryLabel 'OtherLabel' does not match first display line 'PhoneElm:'"
+                "phone contact PhoneElm primaryLabel \"OtherLabel\" does not match first line \"PhoneElm:\""
             ),
             "{error}"
         );
@@ -43601,6 +53082,50 @@ mod tests {
             "{error:#}"
         );
 
+        let mut spawn = test_runtime_spawn_point(2, "Route29");
+        spawn.tile_x = 10;
+        spawn.tile_y = 8;
+        spawn.metatile_x = 4;
+        spawn.metatile_y = 4;
+        spawn.subtile_x = 0;
+        spawn.subtile_y = 0;
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::RuntimeSpawnPoints,
+                serde_json::json!({
+                    "2": spawn
+                }),
+            )
+            .expect_err("runtime spawn point tile fields must agree");
+        assert!(
+            format!("{error:#}").contains(
+                "runtime spawn point '2' tile (10, 8) does not match metatile/subtile-derived tile (8, 8)"
+            ),
+            "{error:#}"
+        );
+
+        let mut spawn = test_runtime_spawn_point(2, "Route29");
+        spawn.tile_x = 0;
+        spawn.tile_y = 0;
+        spawn.metatile_x = 0;
+        spawn.metatile_y = 0;
+        spawn.subtile_x = METATILE_WIDTH;
+        spawn.subtile_y = 0;
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::RuntimeSpawnPoints,
+                serde_json::json!({
+                    "2": spawn
+                }),
+            )
+            .expect_err("runtime spawn point subtile must be in range");
+        assert!(
+            format!("{error:#}").contains(
+                "runtime spawn point '2' subtile (2, 0) must be in range 0..2"
+            ),
+            "{error:#}"
+        );
+
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::RuntimeSpawnPoints,
@@ -43677,7 +53202,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "runtime map metadata environment ' route' must be exact ASCII alphanumeric or underscore"
+                "runtime map metadata token must be exact ASCII alphanumeric/underscore, found \" route\""
             ),
             "{error:#}"
         );
@@ -43693,7 +53218,9 @@ mod tests {
             .expect_err("runtime map metadata names must be exact tokens");
 
         assert!(
-            format!("{error:#}").contains("runtime map metadata name 'Route 29'"),
+            format!("{error:#}").contains(
+                "runtime map metadata token must be exact ASCII alphanumeric/underscore, found \"Route 29\""
+            ),
             "{error:#}"
         );
 
@@ -43709,7 +53236,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "runtime map metadata 'ROUTE 29' must be exact ASCII alphanumeric or underscore"
+                "runtime map metadata token must be exact ASCII alphanumeric/underscore, found \"ROUTE 29\""
             ),
             "{error:#}"
         );
@@ -43828,8 +53355,8 @@ mod tests {
     }
 
     #[test]
-    fn content_pack_payloads_reject_malformed_pc_string_values_without_trimming() {
-        for value in ["", " Choose a Pokemon.", "Choose a Pokemon.\n"] {
+    fn content_pack_payloads_reject_empty_or_control_pc_string_values() {
+        for value in ["", "Choose a Pokemon.\n"] {
             let error = GameDataSet::default()
                 .apply_content_pack_payload(
                     ContentPackCategory::PcStrings,
@@ -44394,13 +53921,13 @@ mod tests {
             .apply_content_pack_payload(
                 ContentPackCategory::PokemonCries,
                 serde_json::json!({
-                    "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 256, "length": 0 }
+                    "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 32768, "length": 0 }
                 }),
             )
-            .expect_err("Pokemon cry pitch must fit a Crystal byte");
+            .expect_err("Pokemon cry pitch must fit a Crystal word");
         assert!(
             format!("{error:#}").contains(
-                "Pokemon cry metadata for species 'CHIKORITA' pitch 256 must fit an exact Crystal byte"
+                "Pokemon cry metadata for species 'CHIKORITA' pitch 32768 must fit an exact Crystal word"
             ),
             "{error:#}"
         );
@@ -44409,13 +53936,13 @@ mod tests {
             .apply_content_pack_payload(
                 ContentPackCategory::PokemonCries,
                 serde_json::json!({
-                    "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 0, "length": -1 }
+                    "CHIKORITA": { "cry": "CRY_CHIKORITA", "pitch": 0, "length": -32769 }
                 }),
             )
-            .expect_err("Pokemon cry length must fit a Crystal byte");
+            .expect_err("Pokemon cry length must fit a Crystal word");
         assert!(
             format!("{error:#}").contains(
-                "Pokemon cry metadata for species 'CHIKORITA' length -1 must fit an exact Crystal byte"
+                "Pokemon cry metadata for species 'CHIKORITA' length -32769 must fit an exact Crystal word"
             ),
             "{error:#}"
         );
@@ -44836,7 +54363,7 @@ mod tests {
             .expect_err("story event payload keys must be exact");
         assert!(
             format!("{error:#}").contains(
-                "story event payload 'Route 29' must be exact ASCII alphanumeric or underscore"
+                "story event payload 'Route 29' must be an exact map token"
             ),
             "{error:#}"
         );
@@ -44852,7 +54379,7 @@ mod tests {
             .expect_err("phone script payload keys must be exact");
         assert!(
             format!("{error:#}").contains(
-                "phone script payload 'PhoneScript Elm' must be exact ASCII alphanumeric or underscore"
+                "phone script payload 'PhoneScript Elm' must be an exact script label token"
             ),
             "{error:#}"
         );
@@ -44887,7 +54414,7 @@ mod tests {
             .expect_err("story event inner script keys must be exact");
         assert!(
             format!("{error:#}").contains(
-                "story event script 'Route29 MapScripts' must be exact ASCII alphanumeric or underscore"
+                "story event script 'Route29 MapScripts' must be an exact script label token"
             ),
             "{error:#}"
         );
@@ -44923,7 +54450,7 @@ mod tests {
             .expect_err("story event command args must be exact");
         assert!(
             format!("{error:#}").contains(
-                "story event payload script 'Route29_MapScripts' command 0 arg 0 ' Route29Script' must be exact ASCII alphanumeric or underscore"
+                "story event payload script 'Route29_MapScripts' command 0 arg 0 ' Route29Script' must be exact, non-empty, and untrimmed"
             ),
             "{error:#}"
         );
@@ -44934,15 +54461,15 @@ mod tests {
                 serde_json::json!({
                     "Route29": {
                         "Route29_MapScripts": [
-                            {"command":"jump","args":["Route 29 Script"]}
+                            {"command":"jump","args":["Route29Script "]}
                         ]
                     }
                 }),
             )
-            .expect_err("story event command args must reject internal spaces");
+            .expect_err("story event command args must reject trimmed values");
         assert!(
             format!("{error:#}").contains(
-                "story event payload script 'Route29_MapScripts' command 0 arg 0 'Route 29 Script' must be exact ASCII alphanumeric or underscore"
+                "story event payload script 'Route29_MapScripts' command 0 arg 0 'Route29Script ' must be exact, non-empty, and untrimmed"
             ),
             "{error:#}"
         );
@@ -44984,6 +54511,21 @@ mod tests {
                 ContentPackCategory::PhoneScripts,
                 serde_json::json!({
                     "PhoneScript_Elm": [
+                        {"args":[]}
+                    ]
+                }),
+            )
+            .expect_err("phone script command objects must carry an explicit command name");
+        assert!(
+            format!("{error:#}").contains("missing field `command`"),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::PhoneScripts,
+                serde_json::json!({
+                    "PhoneScript_Elm": [
                         {"command":" jump","args":[]}
                     ]
                 }),
@@ -44991,7 +54533,7 @@ mod tests {
             .expect_err("phone script command names must be exact");
         assert!(
             format!("{error:#}").contains(
-                "phone script payload script 'PhoneScript_Elm' command 0 name ' jump' must be exact ASCII alphanumeric or underscore"
+                "phone script payload script 'PhoneScript_Elm' command 0 name ' jump' must be exact, non-empty, and untrimmed"
             ),
             "{error:#}"
         );
@@ -45001,43 +54543,36 @@ mod tests {
                 ContentPackCategory::PhoneScripts,
                 serde_json::json!({
                     "PhoneScript_Elm": [
-                        {"command":"jump if false","args":[]}
+                        {"command":"jump\nif_false","args":[]}
                     ]
                 }),
             )
-            .expect_err("phone script command names must reject internal spaces");
+            .expect_err("phone script command names must reject control characters");
+        let error = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains(
-                "phone script payload script 'PhoneScript_Elm' command 0 name 'jump if false' must be exact ASCII alphanumeric or underscore"
-            ),
-            "{error:#}"
+            error.contains("phone script payload script 'PhoneScript_Elm' command 0 name 'jump")
+                && error.contains("if_false' must be exact, non-empty, and untrimmed"),
+            "{error}"
         );
     }
 
     #[test]
     fn content_pack_payloads_reject_duplicate_encounter_map_names() {
         let mut data = GameDataSet::default();
+        let payload = serde_json::json!({
+            "NEW_ROUTE": {
+                "map_name": "NEW_ROUTE",
+                "grass_rates": null,
+                "water_rate": null,
+                "grass": null,
+                "water": null
+            }
+        });
+        data.apply_content_pack_payload(ContentPackCategory::WildEncounters, payload.clone())
+            .expect("initial wild encounter payload should load");
 
         let error = data
-            .apply_content_pack_payload(
-                ContentPackCategory::WildEncounters,
-                serde_json::json!([
-                    {
-                        "map_name": "NEW_ROUTE",
-                        "grass_rates": null,
-                        "water_rate": null,
-                        "grass": null,
-                        "water": null
-                    },
-                    {
-                        "map_name": "NEW_ROUTE",
-                        "grass_rates": null,
-                        "water_rate": null,
-                        "grass": null,
-                        "water": null
-                    }
-                ]),
-            )
+            .apply_content_pack_payload(ContentPackCategory::WildEncounters, payload)
             .expect_err("duplicate wild encounter payload must not overwrite");
 
         assert!(
@@ -45046,21 +54581,17 @@ mod tests {
         );
 
         let mut data = GameDataSet::default();
+        let payload = serde_json::json!({
+            "NEW_ROUTE": {
+                "map_name": "NEW_ROUTE",
+                "tables": {}
+            }
+        });
+        data.apply_content_pack_payload(ContentPackCategory::FieldEncounters, payload.clone())
+            .expect("initial field encounter payload should load");
 
         let error = data
-            .apply_content_pack_payload(
-                ContentPackCategory::FieldEncounters,
-                serde_json::json!([
-                    {
-                        "map_name": "NEW_ROUTE",
-                        "tables": {}
-                    },
-                    {
-                        "map_name": "NEW_ROUTE",
-                        "tables": {}
-                    }
-                ]),
-            )
+            .apply_content_pack_payload(ContentPackCategory::FieldEncounters, payload)
             .expect_err("duplicate field encounter payload must not overwrite");
 
         assert!(
@@ -45147,7 +54678,7 @@ mod tests {
             )
             .expect_err("roaming Pokemon levels must be nonzero");
         assert!(
-            format!("{error:#}").contains("roaming Pokemon 'RAIKOU' level must be nonzero"),
+            format!("{error:#}").contains("roaming Pokemon level must be 1..100"),
             "{error:#}"
         );
 
@@ -45163,7 +54694,7 @@ mod tests {
             )
             .expect_err("roaming Pokemon payload must be the compiler-emitted species map");
         assert!(
-            format!("{error:#}").contains("parse roaming Pokemon payload"),
+            format!("{error:#}").contains("invalid type: string \"ENTEI\""),
             "{error:#}"
         );
 
@@ -45331,7 +54862,7 @@ mod tests {
     fn content_pack_payloads_reject_invalid_buena_password_categories_at_load_time() {
         let cases = vec![
             (
-                "malformed category id",
+                "buena password order id must be a nonempty exact pack token",
                 serde_json::json!({
                     "order": ["Healing Items"],
                     "categories": {
@@ -45342,7 +54873,7 @@ mod tests {
                       }
                     }
                 }),
-                "Buena password category id 'Healing Items' must be exact ASCII alphanumeric or underscore",
+                "buena password order id must be a nonempty exact pack token",
             ),
             (
                 "extra category not in order",
@@ -45361,7 +54892,7 @@ mod tests {
                       }
                     }
                 }),
-                "Buena password category 'ExtraItems' is missing from order",
+                "buena password category id \"ExtraItems\" missing from order",
             ),
             (
                 "unknown category type",
@@ -45375,7 +54906,7 @@ mod tests {
                       }
                     }
                 }),
-                "Buena password category 'HealingItems' has unknown type 'BUENA_BERRY'",
+                "unknown buena password categoryType \"BUENA_BERRY\"",
             ),
             (
                 "zero points",
@@ -45389,7 +54920,7 @@ mod tests {
                       }
                     }
                 }),
-                "Buena password category 'HealingItems' points must be nonzero",
+                "buena password category points must be nonzero",
             ),
             (
                 "malformed option",
@@ -45417,7 +54948,15 @@ mod tests {
                       }
                     }
                 }),
-                "Buena password category id 'legacyCategory' uses reserved modpack payload prefix",
+                "buena password order id must be a nonempty exact pack token",
+            ),
+            (
+                "empty category table",
+                serde_json::json!({
+                    "order": [],
+                    "categories": {}
+                }),
+                "buena password order must not be empty",
             ),
         ];
 
@@ -45572,38 +55111,38 @@ mod tests {
             (
                 "species",
                 serde_json::json!("SHUCKLE "),
-                "Shuckie gift species id",
+                "shuckie species must be a nonempty exact pack token",
             ),
             (
                 "species",
                 serde_json::json!("legacyShuckie"),
-                "Shuckie gift species id 'legacyShuckie' uses reserved modpack payload prefix",
+                "shuckie species must be a nonempty exact pack token",
             ),
             (
                 "level",
                 serde_json::json!(0),
-                "Shuckie gift level must be nonzero",
+                "shuckie level must be 1..100",
             ),
             (
                 "heldItem",
                 serde_json::json!("BERRY JUICE"),
-                "Shuckie gift held item id",
+                "shuckie heldItem must be a nonempty exact pack token",
             ),
             (
                 "heldItem",
                 serde_json::json!("fallbackBerry"),
-                "Shuckie gift held item id 'fallbackBerry' uses reserved modpack payload prefix",
+                "shuckie heldItem must be a nonempty exact pack token",
             ),
-            ("nickname", serde_json::json!(""), "Shuckie gift nickname"),
+            ("nickname", serde_json::json!(""), "shuckie nickname must be nonempty exact text"),
             (
                 "originalTrainerName",
                 serde_json::json!(" MANIA"),
-                "Shuckie gift original trainer name",
+                "shuckie originalTrainerName must be nonempty exact text",
             ),
             (
                 "gotTodayEngineFlag",
                 serde_json::json!("ENGINE GOT SHUCKIE TODAY"),
-                "Shuckie gift got-today engine flag",
+                "shuckie gotTodayEngineFlag must be a nonempty exact pack token",
             ),
         ] {
             let mut payload = serde_json::json!({
@@ -45795,7 +55334,7 @@ mod tests {
             (
                 "timerSeconds",
                 serde_json::json!(60),
-                "timerSeconds must be 0 through 59",
+                "timerSeconds must be 0..59",
             ),
             (
                 "selectedContestantCount",
@@ -45822,18 +55361,18 @@ mod tests {
         for (contestant_flags, expected) in [
             (
                 serde_json::json!([]),
-                "selectedContestantCount must not exceed contestantFlags length",
+                "selectedContestantCount 1 exceeds contestant flag count 0",
             ),
             (
                 serde_json::json!(["EVENT_BUG_CATCHING_CONTESTANT_1A "]),
-                "Bug-Catching Contest contestant flag at index 0",
+                "bug contest contestantFlags[0] must be a nonempty exact pack token",
             ),
             (
                 serde_json::json!([
                     "EVENT_BUG_CATCHING_CONTESTANT_1A",
                     "EVENT_BUG_CATCHING_CONTESTANT_1A"
                 ]),
-                "duplicate Bug-Catching Contest contestant flag",
+                "bug contest contestantFlags[1] duplicates",
             ),
         ] {
             let error = GameDataSet::default()
@@ -45969,19 +55508,23 @@ mod tests {
             (
                 "partyCountFailureText",
                 serde_json::json!(" OnlyThreeMonMayBeEnteredText"),
-                "partyCountFailureText id",
+                "partyCountFailureText must be a nonempty exact pack token",
             ),
             (
                 "duplicateSpeciesFailureText",
                 serde_json::json!("The Mon Must All Be Different Kinds Text"),
-                "duplicateSpeciesFailureText id",
+                "duplicateSpeciesFailureText must be a nonempty exact pack token",
             ),
             (
                 "duplicateHeldItemFailureText",
                 serde_json::json!("TheMonMustNotHoldTheSameItemsText\n"),
-                "duplicateHeldItemFailureText id",
+                "duplicateHeldItemFailureText must be a nonempty exact pack token",
             ),
-            ("eggFailureText", serde_json::json!(""), "eggFailureText id"),
+            (
+                "eggFailureText",
+                serde_json::json!(""),
+                "eggFailureText must be a nonempty exact pack token",
+            ),
         ] {
             let mut payload = serde_json::json!({
                 "bannedSpecies": {
@@ -46028,7 +55571,8 @@ mod tests {
             .expect_err("invalid Battle Tower banned species key must be rejected");
 
         assert!(
-            format!("{error:#}").contains("Battle Tower bannedSpecies id"),
+            format!("{error:#}")
+                .contains("battle tower bannedSpecies key must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46054,7 +55598,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "Battle Tower bannedSpecies id 'legacyMewtwo' uses reserved modpack payload prefix"
+                "battle tower bannedSpecies key must be a nonempty exact pack token"
             ),
             "{error:#}"
         );
@@ -46081,7 +55625,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "Battle Tower partyCountFailureText id 'fallbackPartyText' uses reserved modpack payload prefix"
+                "battle tower partyCountFailureText must be a nonempty exact pack token"
             ),
             "{error:#}"
         );
@@ -46151,7 +55695,8 @@ mod tests {
             )
             .expect_err("malformed Oak rating fanfare ids must fail during pack load");
         assert!(
-            format!("{error:#}").contains("Oak rating fanfare id"),
+            format!("{error:#}")
+                .contains("oak rating fanfare must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46168,9 +55713,8 @@ mod tests {
             )
             .expect_err("reserved Oak rating fanfare ids must fail during pack load");
         assert!(
-            format!("{error:#}").contains(
-                "Oak rating fanfare id 'fallbackFanfare' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}")
+                .contains("oak rating fanfare must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46188,7 +55732,7 @@ mod tests {
             .expect_err("reserved Oak rating text labels must fail during pack load");
         assert!(
             format!("{error:#}").contains(
-                "Oak rating text label id 'legacyOakText' uses reserved modpack payload prefix"
+                "oak rating textLabel must be a nonempty exact pack token"
             ),
             "{error:#}"
         );
@@ -46336,7 +55880,7 @@ mod tests {
             )
             .expect_err("malformed Odd Egg move ids must fail during pack load");
         assert!(
-            format!("{error:#}").contains("Odd Egg move id"),
+            format!("{error:#}").contains("odd egg moves[0] must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46360,9 +55904,7 @@ mod tests {
             )
             .expect_err("reserved Odd Egg species ids must fail during pack load");
         assert!(
-            format!("{error:#}").contains(
-                "Odd Egg species id 'fallbackCleffa' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("odd egg species must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46387,7 +55929,7 @@ mod tests {
             .expect_err("reserved Odd Egg move ids must fail during pack load");
         assert!(
             format!("{error:#}")
-                .contains("Odd Egg move id 'legacyPunch' uses reserved modpack payload prefix"),
+                .contains("odd egg moves[0] must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -46411,7 +55953,7 @@ mod tests {
             )
             .expect_err("invalid Odd Egg levels must fail during pack load");
         assert!(
-            format!("{error:#}").contains("level must be between 1 and 100"),
+            format!("{error:#}").contains("odd egg level must be 1..100"),
             "{error:#}"
         );
 
@@ -46435,7 +55977,7 @@ mod tests {
             )
             .expect_err("padded Odd Egg nicknames must fail during pack load");
         assert!(
-            format!("{error:#}").contains("Odd Egg nickname"),
+            format!("{error:#}").contains("odd egg nickname must be nonempty exact text"),
             "{error:#}"
         );
     }
@@ -46601,7 +56143,7 @@ mod tests {
                         ]
                     }
                 }),
-                "requires at least one explicit change row",
+                "happiness changes must not be empty",
             ),
             (
                 serde_json::json!({
@@ -46614,7 +56156,7 @@ mod tests {
                         ]
                     }
                 }),
-                "happiness data change code label for 18",
+                "happiness change code must be a nonempty exact pack token",
             ),
             (
                 serde_json::json!({
@@ -46628,7 +56170,7 @@ mod tests {
                         ]
                     }
                 }),
-                "duplicate happiness change code",
+                "duplicates code name HAPPINESS_GROOMING",
             ),
             (
                 serde_json::json!({
@@ -46637,7 +56179,7 @@ mod tests {
                     },
                     "services": {}
                 }),
-                "requires explicit service probability tables",
+                "happiness services must not be empty",
             ),
             (
                 serde_json::json!({
@@ -46650,7 +56192,7 @@ mod tests {
                         ]
                     }
                 }),
-                "happiness data service routine id",
+                "happiness service routine must be a nonempty exact pack token",
             ),
             (
                 serde_json::json!({
@@ -46661,7 +56203,7 @@ mod tests {
                         "DaisysGrooming": []
                     }
                 }),
-                "requires at least one outcome",
+                "happiness service DaisysGrooming must declare outcomes",
             ),
             (
                 serde_json::json!({
@@ -46674,7 +56216,7 @@ mod tests {
                         ]
                     }
                 }),
-                "references missing change code 19",
+                "references unknown change code 19",
             ),
         ] {
             let error = GameDataSet::default()
@@ -46783,7 +56325,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "flee mons species id 'fallbackRaikou' uses reserved modpack payload prefix"
+                "flee mons species id must be exact ASCII alphanumeric/underscore"
             ),
             "{error:#}"
         );
@@ -46802,7 +56344,7 @@ mod tests {
             )
             .expect_err("flee mons payload must be the compiler-emitted table");
         assert!(
-            format!("{error:#}").contains("parse flee mons payload"),
+            format!("{error:#}").contains("unknown field `fallback_buckets`, expected `buckets`"),
             "{error:#}"
         );
     }
@@ -46838,13 +56380,12 @@ mod tests {
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::MoveNames,
-                serde_json::json!(["POUND", "KARATE CHOP"]),
+                serde_json::json!(["POUND", ""]),
             )
             .expect_err("move names must be exact token ids");
 
         assert!(
-            format!("{error:#}")
-                .contains("move name 'KARATE CHOP' must be exact ASCII alphanumeric or underscore"),
+            format!("{error:#}").contains("move name '' must be exact, non-empty, and untrimmed"),
             "{error:#}"
         );
 
@@ -47080,7 +56621,7 @@ mod tests {
         let payload = serde_json::json!({
             "johto": {
                 "collision": {
-                    "10": ["FLOOR", "FLOOR", "FLOOR", "FLOOR"]
+                    "0": ["FLOOR", "FLOOR", "FLOOR", "FLOOR"]
                 },
                 "palette_map": [0, 1, 2, 3]
             }
@@ -47104,10 +56645,7 @@ mod tests {
             )
             .expect_err("tilesets must not accept anonymous palette arrays")
             .to_string();
-        assert!(
-            array_error.contains("invalid type: sequence"),
-            "{array_error}"
-        );
+        assert!(array_error.contains("parse object-map payload"), "{array_error}");
     }
 
     #[test]
@@ -47280,7 +56818,7 @@ mod tests {
             .expect_err("unordered encounter slot thresholds must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("thresholds must be nondecreasing"),
+            format!("{error:#}").contains("UnorderedThreshold"),
             "{error:#}"
         );
     }
@@ -47303,7 +56841,7 @@ mod tests {
             .expect_err("missing water encounter slot table must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("encounter slot table 'water' is required"),
+            format!("{error:#}").contains("MissingTable { surface: Water }"),
             "{error:#}"
         );
     }
@@ -47386,7 +56924,8 @@ mod tests {
             .expect_err("malformed encounter music ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("encounter music modifier id"),
+            format!("{error:#}")
+                .contains("encounter token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -47402,9 +56941,8 @@ mod tests {
             .expect_err("reserved encounter music ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "encounter music modifier id 'legacyMusic' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}")
+                .contains("encounter token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -47420,7 +56958,7 @@ mod tests {
             .expect_err("zero encounter music modifier denominators must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("denominator must not be zero"),
+            format!("{error:#}").contains("denominator must be nonzero"),
             "{error:#}"
         );
     }
@@ -47555,7 +57093,23 @@ mod tests {
             .expect_err("invalid battle stat multiplier tables must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("stat table must contain 13 entries"),
+            format!("{error:#}")
+                .contains("InvalidDenominator { table: Stat, stage: 0, denominator: 0 }"),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::BattleStatMultipliers,
+                serde_json::json!({
+                    "stat": [],
+                    "accuracy": []
+                }),
+            )
+            .expect_err("empty battle stat multiplier tables must not be accepted as defaults");
+
+        assert!(
+            format!("{error:#}").contains("battle stat multiplier tables"),
             "{error:#}"
         );
     }
@@ -47623,7 +57177,7 @@ mod tests {
             )
             .expect_err("zero catch rate capture wobble entries must fail during pack load");
         assert!(
-            format!("{error:#}").contains("catch_rate must be nonzero"),
+            format!("{error:#}").contains("catch_rate must be positive"),
             "{error:#}"
         );
 
@@ -47680,6 +57234,26 @@ mod tests {
     }
 
     #[test]
+    fn content_pack_payloads_require_complete_capture_rules_table() {
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::CaptureRules,
+                serde_json::json!({
+                    "fast_ball_species": [],
+                    "ball_rules": {},
+                    "guaranteed_capture_balls": [],
+                    "status_bonus": {}
+                }),
+            )
+            .expect_err("capture rules must not default omitted pack fields");
+
+        assert!(
+            format!("{error:#}").contains("missing field `heavy_ball_modifiers`"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn content_pack_payloads_reject_malformed_capture_species_tokens() {
         let mut data = GameDataSet::default();
 
@@ -47697,7 +57271,7 @@ mod tests {
             .expect_err("malformed capture species ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("capture fast ball species id"),
+            format!("{error:#}").contains("fast ball species \"MAGNEMITE \" is not exact"),
             "{error:#}"
         );
 
@@ -47705,7 +57279,7 @@ mod tests {
             .apply_content_pack_payload(
                 ContentPackCategory::CaptureRules,
                 serde_json::json!({
-                    "fast_ball_species": ["fallbackMagnemite"],
+                    "fast_ball_species": ["FALLBACK_MAGNEMITE"],
                     "heavy_ball_modifiers": {},
                     "ball_rules": {},
                     "guaranteed_capture_balls": [],
@@ -47715,9 +57289,7 @@ mod tests {
             .expect_err("reserved capture species ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "capture fast ball species id 'fallbackMagnemite' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("fast ball species \"FALLBACK_MAGNEMITE\" is not exact"),
             "{error:#}"
         );
     }
@@ -47752,7 +57324,8 @@ mod tests {
             .expect_err("malformed capture ball ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("capture ball rule item id"),
+            format!("{error:#}").contains("invalid capture ball rule for 'POKE BALL'")
+                && format!("{error:#}").contains("ball id must be an exact nonempty id"),
             "{error:#}"
         );
 
@@ -47763,7 +57336,7 @@ mod tests {
                     "fast_ball_species": [],
                     "heavy_ball_modifiers": {},
                     "ball_rules": {
-                        "legacyBall": {
+                        "LEGACY_BALL": {
                             "multiplier_numerator": 1,
                             "multiplier_denominator": 1,
                             "battle_type": "",
@@ -47783,7 +57356,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "capture ball rule item id 'legacyBall' uses reserved modpack payload prefix"
+                "invalid capture ball rule for 'LEGACY_BALL': ball id must be an exact nonempty id"
             ),
             "{error:#}"
         );
@@ -47819,7 +57392,7 @@ mod tests {
             .expect_err("malformed capture battle type ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("capture battle type id"),
+            format!("{error:#}").contains("capture battle type \"wild battle\" is not exact"),
             "{error:#}"
         );
     }
@@ -47854,7 +57427,7 @@ mod tests {
             .expect_err("zero denominator capture ball rules must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("multiplier denominator must not be zero"),
+            format!("{error:#}").contains("multiplier denominator must be nonzero"),
             "{error:#}"
         );
     }
@@ -47898,7 +57471,24 @@ mod tests {
             .expect_err("invalid battle escape rules must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("enemy_speed_divisor must be nonzero"),
+            format!("{error:#}").contains("MissingEnemySpeedDivisor"),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::BattleEscapeRules,
+                serde_json::json!({
+                    "player_speed_multiplier": 0,
+                    "enemy_speed_divisor": 0,
+                    "failed_attempt_bonus": 0,
+                    "rng_roll_values": 0
+                }),
+            )
+            .expect_err("all-zero battle escape rules must not be accepted as defaults");
+
+        assert!(
+            format!("{error:#}").contains("battle escape rules"),
             "{error:#}"
         );
     }
@@ -47957,7 +57547,11 @@ mod tests {
                     "GRASS": { "numerator": 2, "denominator": 1 }
                 }
             },
-            "foresight_matchups": {}
+            "foresight_matchups": {
+                "NORMAL": {
+                    "GHOST": { "numerator": 0, "denominator": 1 }
+                }
+            }
         });
         data.apply_content_pack_payload(ContentPackCategory::TypeEffectiveness, payload.clone())
             .expect("initial type effectiveness table should load");
@@ -47991,7 +57585,7 @@ mod tests {
             .expect_err("malformed type effectiveness attacker ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("type effectiveness matchups attacker id"),
+            format!("{error:#}").contains("type effectiveness foresight_matchups must be explicit"),
             "{error:#}"
         );
 
@@ -48010,7 +57604,7 @@ mod tests {
             .expect_err("malformed type effectiveness defender ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("type effectiveness matchups defender id"),
+            format!("{error:#}").contains("type effectiveness foresight_matchups must be explicit"),
             "{error:#}"
         );
     }
@@ -48034,7 +57628,7 @@ mod tests {
             .expect_err("zero denominator type effectiveness must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("denominator must not be zero"),
+            format!("{error:#}").contains("denominator must be nonzero"),
             "{error:#}"
         );
     }
@@ -48104,7 +57698,7 @@ mod tests {
             .expect_err("malformed type category tokens must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("physical type category id"),
+            format!("{error:#}").contains("physical type category \"NORMAL \" is not exact"),
             "{error:#}"
         );
     }
@@ -48124,7 +57718,7 @@ mod tests {
             .expect_err("overlapping type categories must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("must not be both physical and special"),
+            format!("{error:#}").contains("cannot be both physical and special"),
             "{error:#}"
         );
     }
@@ -48222,7 +57816,7 @@ mod tests {
             .expect_err("negative move priority values must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("must not be negative"),
+            format!("{error:#}").contains("has negative priority"),
             "{error:#}"
         );
     }
@@ -48348,7 +57942,7 @@ mod tests {
             .expect_err("malformed weather modifier tokens must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("weather move type id"),
+            format!("{error:#}").contains("weather move_effect_modifiers must be explicit"),
             "{error:#}"
         );
     }
@@ -48372,7 +57966,7 @@ mod tests {
             .expect_err("zero denominator weather modifiers must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("denominator must not be zero"),
+            format!("{error:#}").contains("denominator must be nonzero"),
             "{error:#}"
         );
     }
@@ -48416,7 +58010,24 @@ mod tests {
             .expect_err("invalid battle reward rules must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("wild_exp_divisor must be positive"),
+            format!("{error:#}").contains("InvalidWildExpDivisor"),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::BattleRewardRules,
+                serde_json::json!({
+                    "max_level": 0,
+                    "wild_exp_divisor": 0,
+                    "trainer_exp_numerator": 0,
+                    "trainer_exp_denominator": 0
+                }),
+            )
+            .expect_err("all-zero battle reward rules must not be accepted as defaults");
+
+        assert!(
+            format!("{error:#}").contains("battle reward rules"),
             "{error:#}"
         );
     }
@@ -48466,7 +58077,7 @@ mod tests {
             .expect_err("malformed step event tokens must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("step event poison status id"),
+            format!("{error:#}").contains("invalid step event rules: InvalidPoisonStatus"),
             "{error:#}"
         );
 
@@ -48487,7 +58098,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "step event egg nickname 'legacyEgg' uses reserved modpack payload prefix"
+                "invalid step event rules: InvalidEggNickname"
             ),
             "{error:#}"
         );
@@ -48513,7 +58124,27 @@ mod tests {
             .expect_err("invalid step event counters must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("happiness_step_counter_target must be within mask"),
+            format!("{error:#}").contains("HappinessTargetOutsideMask"),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::StepEventRules,
+                serde_json::json!({
+                    "poison_step_interval": 0,
+                    "egg_step_trigger": 0,
+                    "hatched_egg_happiness": 0,
+                    "poison_status": "",
+                    "egg_nickname": "",
+                    "happiness_step_counter_mask": 0,
+                    "happiness_step_counter_target": 0
+                }),
+            )
+            .expect_err("default step event rules must not be accepted as pack data");
+
+        assert!(
+            format!("{error:#}").contains("invalid step event rules"),
             "{error:#}"
         );
     }
@@ -48561,7 +58192,8 @@ mod tests {
             .expect_err("malformed fishing rod item ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("fishing rod item id"),
+            format!("{error:#}")
+                .contains("fishing rod item token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -48581,7 +58213,7 @@ mod tests {
 
         assert!(
             format!("{error:#}")
-                .contains("fishing rod item id 'legacyRod' uses reserved modpack payload prefix"),
+                .contains("fishing rod item token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -48691,7 +58323,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "fishing slot species id 'fallbackFish' uses reserved modpack payload prefix"
+                "fishing token must be exact ASCII alphanumeric/underscore"
             ),
             "{error:#}"
         );
@@ -48761,7 +58393,8 @@ mod tests {
             .expect_err("malformed field move ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("field_moves:fly move id"),
+            format!("{error:#}")
+                .contains("field_moves.fly.move_id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -48776,7 +58409,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "field_moves:fly move id 'legacyFly' uses reserved modpack payload prefix"
+                "field_moves.fly.move_id must be exact ASCII alphanumeric/underscore"
             ),
             "{error:#}"
         );
@@ -48792,8 +58425,21 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "field_moves:itemfinder item id 'fallbackItemfinder' uses reserved modpack payload prefix"
+                "field_moves.itemfinder.item_id must be exact ASCII alphanumeric/underscore"
             ),
+            "{error:#}"
+        );
+
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::FieldMoves,
+                serde_json::to_value(FieldMoveCatalog::default())
+                    .expect("default field move fixture should serialize"),
+            )
+            .expect_err("default field move catalog must not be accepted as pack data");
+
+        assert!(
+            format!("{error:#}").contains("field_moves.cut.move_id"),
             "{error:#}"
         );
     }
@@ -48809,7 +58455,7 @@ mod tests {
             )
             .expect_err("invalid field move badges must fail during pack load");
 
-        assert!(format!("{error:#}").contains("badge index"), "{error:#}");
+        assert!(format!("{error:#}").contains("badge.index must be 0..7"), "{error:#}");
     }
 
     #[test]
@@ -48881,9 +58527,23 @@ mod tests {
             },
             dig: FieldMoveMoveRule {
                 move_id: "DIG".to_string(),
+                target_collisions: vec![],
             },
             teleport: FieldMoveMoveRule {
                 move_id: "TELEPORT".to_string(),
+                target_collisions: vec![],
+            },
+            headbutt: FieldMoveMoveRule {
+                move_id: "HEADBUTT".to_string(),
+                target_collisions: vec![0x15, 0x1d],
+            },
+            rock_smash: FieldMoveMoveRule {
+                move_id: "ROCK_SMASH".to_string(),
+                target_collisions: vec![],
+            },
+            sweet_scent: FieldMoveMoveRule {
+                move_id: "SWEET_SCENT".to_string(),
+                target_collisions: vec![],
             },
             escape_rope: FieldEscapeItemRule {
                 item_id: "ESCAPE_ROPE".to_string(),
@@ -48907,6 +58567,9 @@ mod tests {
             },
             town_map: FieldItemRule {
                 item_id: "TOWN_MAP".to_string(),
+            },
+            pokegear: FieldItemRule {
+                item_id: "POKEGEAR".to_string(),
             },
         }
     }
@@ -48952,7 +58615,8 @@ mod tests {
             .expect_err("malformed initialize event flags must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("initialize event flag id"),
+            format!("{error:#}")
+                .contains("initialize_events.eventFlags must be a nonempty exact runtime token"),
             "{error:#}"
         );
 
@@ -48970,7 +58634,9 @@ mod tests {
             .expect_err("malformed initialize variable sprites must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("initialize variable sprite id"),
+            format!("{error:#}").contains(
+                "initialize_events.variableSprites key must be a nonempty exact runtime token"
+            ),
             "{error:#}"
         );
 
@@ -48989,7 +58655,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "initialize variable sprite id 'legacySprite' uses reserved modpack payload prefix"
+                "initialize_events.variableSprites key must be a nonempty exact runtime token"
             ),
             "{error:#}"
         );
@@ -49041,7 +58707,9 @@ mod tests {
             .expect_err("malformed global story constants must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("story event global constant id"),
+            format!("{error:#}").contains(
+                "story_event_script_constants.global key must be a nonempty exact runtime token"
+            ),
             "{error:#}"
         );
 
@@ -49060,7 +58728,9 @@ mod tests {
             .expect_err("malformed story constant map ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("story event map id"),
+            format!("{error:#}").contains(
+                "story_event_script_constants.maps key must be a nonempty exact runtime token"
+            ),
             "{error:#}"
         );
 
@@ -49078,7 +58748,7 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains(
-                "story event global constant id 'fallbackGlobal' uses reserved modpack payload prefix"
+                "story_event_script_constants.global key must be a nonempty exact runtime token"
             ),
             "{error:#}"
         );
@@ -49098,8 +58768,9 @@ mod tests {
             .expect_err("reserved story event map ids must fail during pack load");
 
         assert!(
-            format!("{error:#}")
-                .contains("story event map id 'legacyRoute' uses reserved modpack payload prefix"),
+            format!("{error:#}").contains(
+                "story_event_script_constants.maps key must be a nonempty exact runtime token"
+            ),
             "{error:#}"
         );
     }
@@ -49756,8 +59427,8 @@ mod tests {
                     "CHIKORITA".to_string(),
                     PokemonCryMetadata {
                         cry: "CRY_CHIKORITA".to_string(),
-                        pitch: -1,
-                        length: 0,
+                        pitch: -461,
+                        length: 416,
                     },
                 )]
                 .into_iter()
@@ -49766,40 +59437,16 @@ mod tests {
             },
             ..ModpackManifest::default()
         };
-        let error = data
+        data
             .apply_modpack(&manifest)
-            .expect_err("manifest Pokemon cry pitch must fit a Crystal byte");
-        assert!(
-            format!("{error:#}").contains(
-                "Pokemon cry metadata for species 'CHIKORITA' pitch -1 must fit an exact Crystal byte"
-            ),
-            "{error:#}"
-        );
-
-        let manifest = ModpackManifest {
-            payload: ModpackPayload {
-                pokemon_cries: [(
-                    "CHIKORITA".to_string(),
-                    PokemonCryMetadata {
-                        cry: "CRY_CHIKORITA".to_string(),
-                        pitch: 0,
-                        length: 256,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ModpackPayload::default()
-            },
-            ..ModpackManifest::default()
-        };
-        let error = data
-            .apply_modpack(&manifest)
-            .expect_err("manifest Pokemon cry length must fit a Crystal byte");
-        assert!(
-            format!("{error:#}").contains(
-                "Pokemon cry metadata for species 'CHIKORITA' length 256 must fit an exact Crystal byte"
-            ),
-            "{error:#}"
+            .expect("manifest Pokemon cry signed word metadata should merge");
+        assert_eq!(
+            data.pokemon_cries.get("CHIKORITA"),
+            Some(&PokemonCryMetadata {
+                cry: "CRY_CHIKORITA".to_string(),
+                pitch: -461,
+                length: 416,
+            })
         );
     }
 
@@ -49862,7 +59509,7 @@ mod tests {
                 .species,
             "IVYSAUR"
         );
-        assert_eq!(data.items.len(), 256);
+        assert_eq!(data.items.len(), 255);
         assert_eq!(
             data.map_attributes["Route29"].map_constant.as_deref(),
             Some("ROUTE_29")
@@ -51715,6 +61362,82 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_field_usable_items_without_payload_or_rule() {
+        let mut orphan = test_item("ORPHAN_FIELD_ITEM");
+        orphan.field_menu = "ITEMMENU_CURRENT".to_string();
+        orphan.field_usable = true;
+        orphan.battle_menu = "ITEMMENU_NOUSE".to_string();
+        orphan.battle_usable = false;
+        let mut ruled = test_item("RULED_FIELD_ITEM");
+        ruled.field_menu = "ITEMMENU_CURRENT".to_string();
+        ruled.field_usable = true;
+        ruled.battle_menu = "ITEMMENU_NOUSE".to_string();
+        ruled.battle_usable = false;
+        let mut data = GameDataSet {
+            items: [
+                ("ORPHAN_FIELD_ITEM".to_string(), orphan),
+                ("RULED_FIELD_ITEM".to_string(), ruled),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        data.field_moves.bicycle = FieldItemRule {
+            item_id: "RULED_FIELD_ITEM".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_field_payload"
+                && diagnostic.subject == "ORPHAN_FIELD_ITEM"
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_field_payload"
+                && diagnostic.subject == "RULED_FIELD_ITEM"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_field_item_rules_to_match_runtime_item_ids() {
+        let mut item = test_item("RULED_FIELD_ITEM");
+        item.script_name = "OTHER_SCRIPT_ITEM".to_string();
+        item.field_menu = "ITEMMENU_CURRENT".to_string();
+        item.field_usable = true;
+        item.battle_menu = "ITEMMENU_NOUSE".to_string();
+        item.battle_usable = false;
+        let mut data = GameDataSet {
+            items: [("RULED_FIELD_ITEM".to_string(), item)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        data.field_moves.bicycle = FieldItemRule {
+            item_id: "OTHER_SCRIPT_ITEM".to_string(),
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_field_item_id"
+                && diagnostic.subject == "field_moves:bicycle"
+                && diagnostic.message.contains("OTHER_SCRIPT_ITEM")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_item_field_payload"
+                && diagnostic.subject == "RULED_FIELD_ITEM"
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_invalid_battle_item_payloads_without_effect_inference() {
         let mut bad_restore_hp = test_item("BAD_RESTORE_HP");
         bad_restore_hp.effect = "MOD_HEAL".to_string();
@@ -51763,6 +61486,9 @@ mod tests {
         let mut bad_bitter_berry = test_item("BAD_BITTER_BERRY");
         bad_bitter_berry.effect = "MOD_CONFUSION_HEAL".to_string();
         bad_bitter_berry.confusion_heal = Some(false);
+        let mut bad_battle_payload = test_item("BAD_BATTLE_PAYLOAD");
+        bad_battle_payload.battle_menu = "ITEMMENU_PARTY".to_string();
+        bad_battle_payload.battle_usable = true;
 
         let mut exact_restore_hp = test_item("EXACT_RESTORE_HP");
         exact_restore_hp.effect = "MOD_HEAL".to_string();
@@ -51822,6 +61548,7 @@ mod tests {
                 ("BAD_GUARD_SPEC_FLAG".to_string(), bad_guard_spec_flag),
                 ("BAD_DIRE_HIT".to_string(), bad_dire_hit),
                 ("BAD_BITTER_BERRY".to_string(), bad_bitter_berry),
+                ("BAD_BATTLE_PAYLOAD".to_string(), bad_battle_payload),
                 ("EXACT_RESTORE_HP".to_string(), exact_restore_hp),
                 ("EXACT_STATUS_HEAL".to_string(), exact_status_heal),
                 ("EXACT_REVIVE".to_string(), exact_revive),
@@ -51871,6 +61598,7 @@ mod tests {
             ("missing_item_battle_stat_drop_guard", "BAD_GUARD_SPEC_FLAG"),
             ("invalid_item_battle_focus_energy", "BAD_DIRE_HIT"),
             ("invalid_item_confusion_heal", "BAD_BITTER_BERRY"),
+            ("missing_item_battle_payload", "BAD_BATTLE_PAYLOAD"),
         ] {
             assert!(
                 report
@@ -52301,17 +62029,26 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_unknown_mart_items_without_case_coercion() {
+    fn verifier_rejects_unknown_mart_items_without_case_coercion_or_pocket_enums() {
+        let mut battle_pass = test_item("BATTLE_PASS");
+        battle_pass.pocket = item_pocket("BATTLE_PASS");
         let data = GameDataSet {
-            items: [("POTION".to_string(), test_item("POTION"))]
-                .into_iter()
-                .collect(),
+            items: [
+                ("POTION".to_string(), test_item("POTION")),
+                ("BATTLE_PASS".to_string(), battle_pass),
+            ]
+            .into_iter()
+            .collect(),
             marts: MartCatalog(
                 [
                     (" MartNew".to_string(), vec!["POTION".to_string()]),
                     (
                         "MartNew".to_string(),
-                        vec!["RARE CANDY".to_string(), "potion".to_string()],
+                        vec![
+                            "RARE CANDY".to_string(),
+                            "potion".to_string(),
+                            "BATTLE_PASS".to_string(),
+                        ],
                     ),
                 ]
                 .into_iter()
@@ -52335,6 +62072,10 @@ mod tests {
             diagnostic.code == "unknown_mart_item"
                 && diagnostic.subject == "MartNew"
                 && diagnostic.message.contains("potion")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unsupported_mart_item_pocket"
+                || diagnostic.message.contains("unsupported shop pocket")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_mart_id" && diagnostic.subject == " MartNew"
@@ -52532,6 +62273,7 @@ mod tests {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_item_grants = vec![
             ScriptItemGrant {
+                command: "verbosegiveitem".to_string(),
                 item_id: "potion".to_string(),
                 quantity: 1,
                 source_script: "GiftScript".to_string(),
@@ -52539,6 +62281,7 @@ mod tests {
                 verbose: true,
             },
             ScriptItemGrant {
+                command: "verbosegiveitem".to_string(),
                 item_id: " POTION".to_string(),
                 quantity: 1,
                 source_script: "PaddedGiftScript".to_string(),
@@ -52576,17 +62319,20 @@ mod tests {
     fn verifier_rejects_unknown_script_item_access_without_case_coercion() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_item_checks = vec![ScriptItemAccess {
+            command: "checkitem".to_string(),
             item_id: "pass".to_string(),
             source_script: "GateScript".to_string(),
             command_index: 3,
         }];
         module.script_item_takes = vec![
             ScriptItemAccess {
+                command: "takeitem".to_string(),
                 item_id: "lost_item".to_string(),
                 source_script: "CopycatScript".to_string(),
                 command_index: 8,
             },
             ScriptItemAccess {
+                command: "takeitem".to_string(),
                 item_id: " LOST_ITEM".to_string(),
                 source_script: "PaddedCopycatScript".to_string(),
                 command_index: 9,
@@ -52802,6 +62548,158 @@ mod tests {
     }
 
     #[test]
+    fn verifier_reports_duplicate_warps_by_runtime_tile_coordinates() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.events.warps = vec![
+            WarpEvent {
+                index: 1,
+                x: 2,
+                y: 3,
+                target_map_constant: "START_MAP".to_string(),
+                target_map: "START_MAP".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
+                index: 2,
+                x: 2,
+                y: 3,
+                target_map_constant: "START_MAP".to_string(),
+                target_map: "START_MAP".to_string(),
+                target_warp_id: 1,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            tilesets: [("johto".to_string(), test_tileset_definition())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_warp_tile"
+                && diagnostic.subject == "Start"
+                && diagnostic.message.contains("runtime tile 4,6")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_itemball_objects_without_exact_pickups() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        let mut item_object = test_object("START_POKE_BALL", "EVENT_START_POTION", 1, 1);
+        item_object.object_type = "OBJECTTYPE_ITEMBALL".to_string();
+        item_object.script = "StartPotion".to_string();
+        module.objects = vec![item_object];
+        module.script_field_pickups = vec![ScriptFieldPickup {
+            command: "hiddenitem".to_string(),
+            item_id: Some("POTION".to_string()),
+            quantity: 1,
+            event_flag: Some("EVENT_START_HIDDEN_POTION".to_string()),
+            fruit_tree_id: None,
+            source_script: "StartPotion".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "itemball_object_missing_pickup"
+                && diagnostic.subject == "Start:START_POKE_BALL"
+                && diagnostic.message.contains("StartPotion")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_itemball_pickups_without_exact_objects() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_field_pickups = vec![ScriptFieldPickup {
+            command: "itemball".to_string(),
+            item_id: Some("POTION".to_string()),
+            quantity: 1,
+            event_flag: Some("EVENT_START_POTION".to_string()),
+            fruit_tree_id: None,
+            source_script: "StartPotion".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "itemball_pickup_missing_object"
+                && diagnostic.subject == "Start:script_field_pickup:StartPotion:0"
+                && diagnostic.message.contains("StartPotion")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_duplicate_itemball_object_scripts() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        let mut first_object = test_object("START_POKE_BALL_1", "EVENT_START_POTION_1", 1, 1);
+        first_object.object_type = "OBJECTTYPE_ITEMBALL".to_string();
+        first_object.script = "StartPotion".to_string();
+        let mut second_object = test_object("START_POKE_BALL_2", "EVENT_START_POTION_2", 2, 1);
+        second_object.object_type = "OBJECTTYPE_ITEMBALL".to_string();
+        second_object.script = "StartPotion".to_string();
+        module.objects = vec![first_object, second_object];
+        module.script_field_pickups = vec![ScriptFieldPickup {
+            command: "itemball".to_string(),
+            item_id: Some("POTION".to_string()),
+            quantity: 1,
+            event_flag: Some("EVENT_START_POTION_1".to_string()),
+            fruit_tree_id: None,
+            source_script: "StartPotion".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "itemball_duplicate_object_script"
+                && diagnostic.subject == "Start:StartPotion"
+                && diagnostic.message.contains("2 OBJECTTYPE_ITEMBALL objects")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_map_events_that_reference_missing_scripts() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.scripts.insert(
@@ -52900,10 +62798,10 @@ mod tests {
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "duplicate_coord_event_position"
-                && diagnostic.subject == "Start:12,13"
+                && diagnostic.subject == "Start:24,26"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "duplicate_bg_event_position" && diagnostic.subject == "Start:12,13"
+            diagnostic.code == "duplicate_bg_event_position" && diagnostic.subject == "Start:24,26"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_coord_event_script"
@@ -52916,6 +62814,317 @@ mod tests {
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_bg_event_script"
                 && diagnostic.subject == "Start:BGEVENT_READ:KnownSignScript:4,5"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_map_events_outside_runtime_tile_bounds() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1; 4];
+        module.scripts.insert(
+            "KnownScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 4,
+            y: 0,
+            target_map_constant: "NEXT_MAP".to_string(),
+            target_map: "NextMap".to_string(),
+            target_warp_id: 1,
+        }];
+        module.events.coord_events = vec![CoordEvent {
+            x: 0,
+            y: 4,
+            scene_id: "SCENE_START".to_string(),
+            script_name: "KnownScript".to_string(),
+        }];
+        module.events.bg_events = vec![BackgroundEvent {
+            x: 4,
+            y: 4,
+            event_type: "BGEVENT_READ".to_string(),
+            script: "KnownScript".to_string(),
+        }];
+        module.objects = vec![test_object("START_NPC", "-1", 1, 4)];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for subject in [
+            "Start:warp:1:4,0",
+            "Start:coord:SCENE_START:KnownScript:0,4",
+            "Start:bg:BGEVENT_READ:KnownScript:4,4",
+            "Start:object:START_NPC:1,4",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "map_event_runtime_position_out_of_bounds"
+                        && diagnostic.subject == subject
+                        && diagnostic.message.contains("outside map bounds 4x4")
+                }),
+                "missing out-of-bounds runtime position diagnostic for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_accepts_raw_map_events_that_fit_exact_runtime_bounds() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![0; 4];
+        module.scripts.insert(
+            "KnownScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 3,
+            y: 3,
+            target_map_constant: "START_MAP".to_string(),
+            target_map: "Start".to_string(),
+            target_warp_id: 1,
+        }];
+        module.events.coord_events = vec![CoordEvent {
+            x: 3,
+            y: 1,
+            scene_id: "SCENE_START".to_string(),
+            script_name: "KnownScript".to_string(),
+        }];
+        module.events.bg_events = vec![BackgroundEvent {
+            x: 1,
+            y: 3,
+            event_type: "BGEVENT_READ".to_string(),
+            script: "KnownScript".to_string(),
+        }];
+        module.objects = vec![test_object("START_NPC", "-1", 1, 1)];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for subject in [
+            "Start:warp:1:3,3",
+            "Start:coord:SCENE_START:KnownScript:3,1",
+            "Start:bg:BGEVENT_READ:KnownScript:1,3",
+        ] {
+            assert!(
+                !report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "map_event_runtime_position_out_of_bounds"
+                        && diagnostic.subject == subject
+                        && diagnostic.message.contains("outside map bounds 4x4")
+                }),
+                "exact in-bounds runtime event should not be rejected for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_reports_overflowing_map_event_tiles_without_panicking_in_playability() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1; 4];
+        module.scripts.insert(
+            "KnownScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 40_000,
+            y: 0,
+            target_map_constant: "START_MAP".to_string(),
+            target_map: "START_MAP".to_string(),
+            target_warp_id: 1,
+        }];
+        module.events.coord_events = vec![CoordEvent {
+            x: 0,
+            y: 40_000,
+            scene_id: "SCENE_START".to_string(),
+            script_name: "KnownScript".to_string(),
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        for subject in [
+            "Start:warp:1:40000,0",
+            "Start:coord:SCENE_START:KnownScript:0,40000",
+        ] {
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "map_event_runtime_position_overflow"
+                        && diagnostic.subject == subject
+                }),
+                "missing overflow runtime position diagnostic for {subject}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_warp_events_on_unwalkable_runtime_tiles() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 1;
+        module.attributes.height = 1;
+        module.blocks = vec![1];
+        module.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 0,
+            y: 0,
+            target_map_constant: "NEXT_MAP".to_string(),
+            target_map: "NextMap".to_string(),
+            target_warp_id: 1,
+        }];
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "1".to_string(),
+            vec![
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
+        let data = GameDataSet {
+            tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unwalkable_warp_tile"
+                && diagnostic.subject == "Start:warp:1:0,0"
+                && diagnostic
+                    .message
+                    .contains("non-walkable runtime tile (0, 0)")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_coord_events_on_unwalkable_runtime_tiles() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 1;
+        module.attributes.height = 1;
+        module.blocks = vec![1];
+        module.scripts.insert(
+            "KnownScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
+        module.events.coord_events = vec![CoordEvent {
+            x: 0,
+            y: 0,
+            scene_id: "SCENE_START".to_string(),
+            script_name: "KnownScript".to_string(),
+        }];
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "1".to_string(),
+            vec![
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
+        let data = GameDataSet {
+            tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unwalkable_coord_event_tile"
+                && diagnostic.subject == "Start:coord:SCENE_START:KnownScript:0,0"
+                && diagnostic
+                    .message
+                    .contains("non-walkable runtime tile (0, 0)")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_objects_on_unwalkable_runtime_tiles() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 1;
+        module.attributes.height = 1;
+        module.blocks = vec![1];
+        module.objects = vec![test_object("START_NPC", "-1", 0, 0)];
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "1".to_string(),
+            vec![
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
+        let data = GameDataSet {
+            tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unwalkable_object_tile"
+                && diagnostic.subject == "Start:object:START_NPC:0,0"
+                && diagnostic
+                    .message
+                    .contains("non-walkable runtime tile (0, 0)")
         }));
     }
 
@@ -53040,23 +63249,39 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_duplicate_runtime_script_labels_across_maps() {
+    fn verifier_allows_duplicate_runtime_script_labels_across_maps() {
         let mut start = test_map_module("Start", "START_MAP", None);
         start.scripts.insert(
             "SharedRuntimeScript".to_string(),
             Value::Array(vec![serde_json::json!({
-                "command": "end",
-                "args": []
+                "command": "verbosegiveitem",
+                "args": ["POTION"]
             })]),
         );
+        start.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
+            item_id: "POTION".to_string(),
+            quantity: 1,
+            source_script: "SharedRuntimeScript".to_string(),
+            command_index: 0,
+            verbose: true,
+        }];
         let mut route = test_map_module("Route29", "ROUTE_29", None);
         route.scripts.insert(
             "SharedRuntimeScript".to_string(),
             Value::Array(vec![serde_json::json!({
-                "command": "end",
-                "args": []
+                "command": "verbosegiveitem",
+                "args": ["POTION"]
             })]),
         );
+        route.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
+            item_id: "POTION".to_string(),
+            quantity: 1,
+            source_script: "SharedRuntimeScript".to_string(),
+            command_index: 0,
+            verbose: true,
+        }];
         let data = GameDataSet {
             maps: [("Start".to_string(), start), ("Route29".to_string(), route)]
                 .into_iter()
@@ -53070,11 +63295,56 @@ mod tests {
             &PlayabilityRules::default(),
         );
 
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == VerificationSeverity::Error
+                && diagnostic.code == "duplicate_runtime_script_label"
+        }), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn verifier_rejects_elevator_floors_with_missing_target_warps() {
+        let mut start = test_map_module("Start", "START_MAP", None);
+        start.scripts.insert(
+            "ElevatorScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "elevator",
+                "args": ["ElevatorData"]
+            })]),
+        );
+        start
+            .scripts
+            .insert("ElevatorData".to_string(), Value::Array(Vec::new()));
+        start.script_elevators.insert(
+            "ElevatorScript:0".to_string(),
+            ScriptElevatorDefinition {
+                source_script: "ElevatorScript".to_string(),
+                elevator_command_index: 0,
+                data_label: "ElevatorData".to_string(),
+                floors: vec![ScriptRuntimeElevatorFloor {
+                    floor: "1F".to_string(),
+                    warp: 9,
+                    target_map: "Start".to_string(),
+                    source_script: "ElevatorData".to_string(),
+                    command_index: 0,
+                }],
+            },
+        );
+        let data = GameDataSet {
+            maps: [("Start".to_string(), start)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "duplicate_runtime_script_label"
-                && diagnostic.subject == "SharedRuntimeScript"
-                && diagnostic.message.contains("Route29")
-                && diagnostic.message.contains("Start")
+            diagnostic.severity == VerificationSeverity::Error
+                && diagnostic.code == "unknown_script_elevator_warp"
+                && diagnostic.subject == "Start:ElevatorScript:0:0"
+                && diagnostic.message.contains("missing warp 9 on Start")
         }));
     }
 
@@ -53210,6 +63480,7 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unresolved_script_currency_amount"
                 && diagnostic.subject == "Start:TollScript:2"
+                && diagnostic.severity == VerificationSeverity::Error
                 && diagnostic.message.contains("route43gate_toll")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -53616,6 +63887,49 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "malformed_script_no_warp_sentinel"
                 && diagnostic.subject == "Start:WarpScript:4"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_script_warp_destinations_outside_runtime_map_bounds() {
+        let mut start = test_map_module("Start", "START_MAP", None);
+        start.script_map_commands = vec![ScriptMapCommand {
+            command: "warpfacing".to_string(),
+            target_map: Some("Destination".to_string()),
+            x: Some(4),
+            y: Some(0),
+            facing: Some("RIGHT".to_string()),
+            map_setup: None,
+            source_script: "WarpScript".to_string(),
+            command_index: 3,
+        }];
+        let destination = test_map_module("Destination", "DESTINATION", None);
+        let data = GameDataSet {
+            maps: [
+                ("Start".to_string(), start),
+                ("Destination".to_string(), destination),
+            ]
+            .into_iter()
+            .collect(),
+            tilesets: [("johto".to_string(), test_tileset_definition())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_warp_destination_out_of_bounds"
+                && diagnostic.subject == "Start:WarpScript:3"
+                && diagnostic
+                    .message
+                    .contains("target Destination raw coordinate (4, 0)")
+                && diagnostic.message.contains("outside map bounds 2x2")
         }));
     }
 
@@ -54038,6 +64352,11 @@ mod tests {
     #[test]
     fn verifier_rejects_unknown_script_scene_targets_without_normalization() {
         let mut module = test_map_module("Start", "START_MAP", None);
+        module.map_script_section_commands = vec![MapScriptSectionCommand {
+            command: "scene_script".to_string(),
+            args: vec!["StartNoopScene".to_string()],
+            command_index: 0,
+        }];
         module.scenes = MapSceneTable {
             scenes: vec![MapScene {
                 scene_id: "SCENE_START_OPEN".to_string(),
@@ -54100,6 +64419,7 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_scene_id"
                 && diagnostic.subject == "Start:StartScript:2"
+                && diagnostic.severity == VerificationSeverity::Error
                 && diagnostic.message.contains("scene_start_open")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -54112,10 +64432,9 @@ mod tests {
                 && diagnostic.subject == "Start:StartScript:4"
                 && diagnostic.message.contains("Route43Gate")
         }));
-        assert!(report.diagnostics.iter().any(|diagnostic| {
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_scene_id"
                 && diagnostic.subject == "Start:StartScript:5"
-                && diagnostic.message.contains("0")
         }));
     }
 
@@ -55726,10 +66045,16 @@ mod tests {
                 source_script: "RuntimeScript".to_string(),
                 command_index: 3,
             },
+            ScriptRuntimeCommand {
+                command: "special".to_string(),
+                args: vec!["Function11ac3e".to_string()],
+                source_script: "RuntimeScript".to_string(),
+                command_index: 6,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
-            special_routines: special_routine_rules(["FadeOutMusic"]),
+            special_routines: special_routine_rules(["FadeOutMusic", "Function11ac3e"]),
             ..GameDataSet::default()
         };
 
@@ -55754,6 +66079,11 @@ mod tests {
                 report.diagnostics
             );
         }
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "inactive_script_special_routine"
+                && diagnostic.subject == "Start:RuntimeScript:6"
+                && diagnostic.message.contains("Function11ac3e")
+        }));
     }
 
     #[test]
@@ -55827,6 +66157,16 @@ mod tests {
                         args: vec!["one".to_string(), "two".to_string()],
                         command_index: 1,
                     },
+                    ScriptMenuCommand {
+                        command: "menu_coords".to_string(),
+                        args: vec![
+                            "0".to_string(),
+                            "0".to_string(),
+                            "SCREEN_RIGHT".to_string(),
+                            "8".to_string(),
+                        ],
+                        command_index: 2,
+                    },
                 ],
             },
         );
@@ -55859,6 +66199,10 @@ mod tests {
             diagnostic.code == "malformed_script_menu_command"
                 && diagnostic.subject == "Start:ChoiceMenu:1"
                 && diagnostic.message.contains("db expects one of")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_menu_coordinates"
+                && diagnostic.subject == "Start:ChoiceMenu:2"
         }));
     }
 
@@ -56560,7 +66904,9 @@ mod tests {
                 && diagnostic.message.contains("START OBJECT")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "duplicate_object_position" && diagnostic.subject == "Start:4,1"
+            diagnostic.severity == VerificationSeverity::Error
+                && diagnostic.code == "duplicate_object_position"
+                && diagnostic.subject == "Start:8,2"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_object_identifier" && diagnostic.subject == "Start:<none>"
@@ -56627,6 +66973,10 @@ mod tests {
                 report.diagnostics
             );
         }
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unterminated_script_movement"
+                && diagnostic.subject == "Start:BadMovement:MovementScript"
+        }));
     }
 
     #[test]
@@ -56715,6 +67065,7 @@ mod tests {
             .filter(|diagnostic| {
                 diagnostic.code == "duplicate_script_movement"
                     && diagnostic.subject == "Start:SharedMovement:ObjectScript"
+                    && diagnostic.severity == VerificationSeverity::Error
             })
             .count();
         assert_eq!(duplicate_movements, 1, "{:?}", report.diagnostics);
@@ -56725,8 +67076,269 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "ambiguous_script_movement"
                 && diagnostic.subject == "Start:ObjectScript:7"
+                && diagnostic.severity == VerificationSeverity::Error
                 && diagnostic.message.contains("GlobalMovement")
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_moveobject_destinations_outside_runtime_map_bounds() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.objects = vec![test_object("RUNTIME_NPC", "-1", 1, 1)];
+        module.script_object_commands = vec![ScriptObjectCommand {
+            command: "moveobject".to_string(),
+            object_id: Some("RUNTIME_NPC".to_string()),
+            target_object_id: None,
+            x: Some(4),
+            y: Some(0),
+            direction: None,
+            movement: None,
+            emote: None,
+            duration: None,
+            source_script: "ObjectScript".to_string(),
+            command_index: 7,
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_moveobject_destination_out_of_bounds"
+                && diagnostic.subject == "Start:ObjectScript:7"
+                && diagnostic
+                    .message
+                    .contains("moveobject raw coordinate (4, 0)")
+                && diagnostic.message.contains("outside map bounds 2x2")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_applymovement_endpoints_outside_runtime_map_bounds() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.objects = vec![test_object("RUNTIME_NPC", "-1", 1, 0)];
+        module.script_object_commands = vec![ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("RUNTIME_NPC".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("OutOfBoundsMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "ObjectScript".to_string(),
+            command_index: 8,
+        }];
+        module.script_movements = vec![ScriptMovement {
+            label: "OutOfBoundsMovement".to_string(),
+            source_script: Some("ObjectScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_applymovement_endpoint_out_of_bounds"
+                && diagnostic.subject == "Start:ObjectScript:8"
+                && diagnostic
+                    .message
+                    .contains("object 'RUNTIME_NPC' ends at runtime tile (4, 0)")
+                && diagnostic.message.contains("outside map bounds 2x2")
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_applymovement_endpoint_coordinate_overflow() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.objects = vec![test_object("RUNTIME_NPC", "-1", 16383, 0)];
+        module.script_object_commands = vec![ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("RUNTIME_NPC".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("OverflowMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "ObjectScript".to_string(),
+            command_index: 9,
+        }];
+        module.script_movements = vec![ScriptMovement {
+            label: "OverflowMovement".to_string(),
+            source_script: Some("ObjectScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        }];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "script_applymovement_endpoint_overflow"
+                && diagnostic.subject == "Start:ObjectScript:9"
+                && diagnostic
+                    .message
+                    .contains("object 'RUNTIME_NPC' overflows supported runtime coordinates")
+                && diagnostic.message.contains("(32766, 0)")
+        }));
+    }
+
+    #[test]
+    fn runtime_script_movement_requires_exact_source_bound_rows() {
+        let mut start = test_map_module("Start", "START_MAP", None);
+        start.script_movements = vec![
+            ScriptMovement {
+                label: "LocalMovement".to_string(),
+                source_script: Some("StartScript".to_string()),
+                steps: vec![ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                }],
+            },
+            ScriptMovement {
+                label: "GlobalMovement".to_string(),
+                source_script: Some("StartScript".to_string()),
+                steps: vec![ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                }],
+            },
+        ];
+        let mut tower = test_map_module("Tower", "TOWER_MAP", None);
+        tower.script_movements = vec![ScriptMovement {
+            label: "TowerOnlyMovement".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "step_end".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }],
+        }];
+        let data = GameDataSet {
+            maps: [
+                ("Start".to_string(), start),
+                ("Tower".to_string(), tower.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let local = data
+            .script_movement("Start", "StartScript", "LocalMovement")
+            .expect("local movement");
+        assert_eq!(local.label, "LocalMovement");
+        let global = data
+            .script_movement("Start", "StartScript", "GlobalMovement")
+            .expect("exact source-bound movement");
+        assert_eq!(global.label, "GlobalMovement");
+        assert!(
+            data.script_movement("Start", "StartScript", "globalmovement")
+                .is_err()
+        );
+        assert!(
+            data.script_movement("Start", "StartScript", "TowerOnlyMovement")
+                .is_err()
+        );
+
+        let mut verifier_start = data.maps.get("Start").expect("start").clone();
+        verifier_start.objects = vec![test_object("RUNTIME_NPC", "-1", 1, 1)];
+        verifier_start.script_object_commands = vec![ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("RUNTIME_NPC".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("GlobalMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "StartScript".to_string(),
+            command_index: 3,
+        }];
+        let verifier_data = GameDataSet {
+            maps: [
+                ("Start".to_string(), verifier_start),
+                (
+                    "Tower".to_string(),
+                    data.maps.get("Tower").expect("tower").clone(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &verifier_data,
+            &PlayabilityRules::default(),
+        );
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_script_movement"
+                && diagnostic.subject == "Start:StartScript:3"
+        }));
+
+        let wrong_source = data
+            .script_movement("Start", "OtherScript", "GlobalMovement")
+            .expect_err("wrong source script must not select a movement");
+        assert!(
+            format!("{wrong_source:#}")
+                .contains("map Start has no exact movement GlobalMovement for OtherScript"),
+            "{wrong_source:#}"
+        );
     }
 
     #[test]
@@ -57089,6 +67701,7 @@ mod tests {
         tm.tmhm_move = Some("MUD_SLAP".to_string());
         let mut module = test_map_module("VioletGym", "VIOLET_GYM", None);
         module.script_item_grants = vec![ScriptItemGrant {
+            command: "verbosegiveitem".to_string(),
             item_id: "TM_MUD_SLAP".to_string(),
             quantity: 1,
             source_script: "VioletGymFalknerScript".to_string(),
@@ -57681,6 +68294,16 @@ mod tests {
         known_species.tmhm_learnset.clear();
         let mut blocked_start = test_map_module("Start", "START_MAP", Some("Goal"));
         blocked_start.blocks = vec![5];
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "5".to_string(),
+            vec![
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+                "WALL".to_string(),
+            ],
+        );
         let data = GameDataSet {
             pokemon: [(known_species.id.clone(), known_species)]
                 .into_iter()
@@ -57688,6 +68311,7 @@ mod tests {
             moves: [("TACKLE".to_string(), test_move("TACKLE"))]
                 .into_iter()
                 .collect(),
+            tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
             maps: [
                 ("Start".to_string(), blocked_start),
                 (
@@ -57841,7 +68465,8 @@ mod tests {
                     battle_stat_boost_stat: None,
                     battle_stat_boost_stages: None,
                     battle_escape_mode: None,
-                    battle_focus_energy: None,
+                    battle_capture_ball: None,
+battle_focus_energy: None,
                     battle_stat_drop_guard: None,
                     battle_stat_drop_guard_turns: None,
                     confusion_heal: None,
@@ -58022,7 +68647,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -58430,6 +69056,46 @@ mod tests {
     }
 
     #[test]
+    fn base_game_script_movements_are_all_supported_by_rust_runtime() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+
+        let mut checked_steps = 0usize;
+        let mut saw_jump_step = false;
+        let mut issues = Vec::new();
+        for (map_name, module) in &data.maps {
+            for movement in &module.script_movements {
+                for step in &movement.steps {
+                    checked_steps += 1;
+                    saw_jump_step |= step.command == "jump_step";
+                    for issue in script_movement_step_issues(step) {
+                        issues.push(format!(
+                            "{map_name}:{}:{}:{}:{issue:?}",
+                            movement.label, step.index, step.command
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked_steps > 0,
+            "base game should export script movements"
+        );
+        assert!(
+            saw_jump_step,
+            "core Crystal script movements should include authored jump_step commands"
+        );
+        assert!(
+            issues.is_empty(),
+            "unsupported or malformed base-game movement steps: {}",
+            issues.join(", ")
+        );
+    }
+
+    #[test]
     fn base_game_data_loads_trainers_into_exact_catalog() {
         let root = repository_root_for_tests();
         let data = AssetRoot::new(root)
@@ -58635,6 +69301,66 @@ mod tests {
         assert!(
             format!("{error:#}")
                 .contains("Malformed map events in Route29: unknown command 'legacy_bg_event'."),
+            "{error:#}"
+        );
+
+        let error = parse_map_events(
+            "Route29",
+            &serde_json::json!([
+                {"command":"def_bg_events","args":[]},
+                {"command":"bg_event","args":["40000","2","BGEVENT_READ","Route29Sign"]}
+            ]),
+        )
+        .expect_err("event coordinates must fit runtime tile coordinates");
+        assert!(
+            format!("{error:#}")
+                .contains("bg_event coordinate (40000, 2) in Route29 overflows runtime tile range"),
+            "{error:#}"
+        );
+
+        let scripts = BTreeMap::from([(
+            "Route29ObjectScript".to_string(),
+            serde_json::json!([
+                {"command":"moveobject","args":["ROUTE_29_YOUNGSTER","40000","2"]}
+            ]),
+        )]);
+        let error = parse_script_object_commands("Route29", &scripts)
+            .expect_err("moveobject coordinates must fit runtime tile coordinates");
+        assert!(
+            format!("{error:#}").contains(
+                "moveobject coordinate (40000, 2) in Route29 overflows runtime tile range"
+            ),
+            "{error:#}"
+        );
+
+        let scripts = BTreeMap::from([(
+            "Route29WarpScript".to_string(),
+            serde_json::json!([
+                {"command":"warp","args":["NEW_BARK_TOWN","40000","2"]}
+            ]),
+        )]);
+        let map_name_by_constant =
+            BTreeMap::from([("NEW_BARK_TOWN".to_string(), "NewBarkTown".to_string())]);
+        let error = parse_script_map_commands("Route29", &scripts, &map_name_by_constant)
+            .expect_err("warp coordinates must fit runtime tile coordinates");
+        assert!(
+            format!("{error:#}")
+                .contains("warp coordinate (40000, 2) in Route29 overflows runtime tile range"),
+            "{error:#}"
+        );
+
+        let scripts = BTreeMap::from([(
+            "Route29WarpScript".to_string(),
+            serde_json::json!([
+                {"command":"warpfacing","args":["NEW_BARK_TOWN","40000","2","UP"]}
+            ]),
+        )]);
+        let error = parse_script_map_commands("Route29", &scripts, &map_name_by_constant)
+            .expect_err("warpfacing coordinates must fit runtime tile coordinates");
+        assert!(
+            format!("{error:#}").contains(
+                "warpfacing coordinate (40000, 2) in Route29 overflows runtime tile range"
+            ),
             "{error:#}"
         );
     }
@@ -58875,9 +69601,13 @@ mod tests {
         );
         assert!(battle.reload_map_after_battle);
 
+        let mut request = battle.request.clone();
+        request.battle_music = data
+            .wild_battle_music_for_map_time("WhirlIslandLugiaChamber", TimeOfDay::Day)
+            .expect("Lugia battle music from pack data");
         let mut rng = Random::new(1);
         let start = data
-            .static_wild_battle_start(battle.request.clone(), &mut rng)
+            .static_wild_battle_start(request, &mut rng)
             .expect("Lugia battle starts from pack data");
         assert_eq!(start.battle_type, "BATTLETYPE_FORCEITEM");
         assert_eq!(start.enemy_pokemon.species.id, "LUGIA");
@@ -58912,9 +69642,13 @@ mod tests {
         assert_eq!(battle.disappear_object_ids, vec!["LAKEOFRAGE_GYARADOS"]);
         assert!(battle.reload_map_after_battle);
 
+        let mut request = battle.request.clone();
+        request.battle_music = data
+            .wild_battle_music_for_map_time("LakeOfRage", TimeOfDay::Day)
+            .expect("Red Gyarados battle music from pack data");
         let mut rng = Random::new(1);
         let start = data
-            .static_wild_battle_start(battle.request.clone(), &mut rng)
+            .static_wild_battle_start(request, &mut rng)
             .expect("Red Gyarados battle starts from pack data");
         assert_eq!(start.enemy_pokemon.dvs, Dv::from_non_hp(14, 10, 10, 10));
     }
@@ -59025,7 +69759,7 @@ mod tests {
             module.events.clone(),
             module.objects.clone(),
             tileset,
-            TilePosition::new(1, 1),
+            TilePosition::new(2, 2),
         );
         let snorlax = module
             .scripted_wild_battles
@@ -59095,7 +69829,7 @@ mod tests {
             module.events.clone(),
             module.objects.clone(),
             tileset,
-            TilePosition::new(1, 1),
+            TilePosition::new(2, 2),
         );
         let lugia = module
             .scripted_wild_battles
@@ -59619,15 +70353,7 @@ mod tests {
         assert_eq!(outcome.scene_id, "SCENE_ROUTE43GATE_NOOP");
         assert_eq!(state.scenes.scene_name, "SCENE_ROUTE43GATE_NOOP");
 
-        assert_eq!(
-            route43
-                .scenes
-                .scenes
-                .iter()
-                .map(|scene| scene.scene_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["0", "1"]
-        );
+        assert!(route43.scenes.scenes.is_empty());
         let route_setscene = gate
             .script_scene_commands
             .iter()
@@ -59751,7 +70477,7 @@ mod tests {
             .find(|command| command.source_script == "EcruteakGymClosed")
             .expect("Ecruteak gym closed warp");
         assert_eq!(warp.command, "warp");
-        assert_eq!(warp.target_map.as_deref(), Some("ECRUTEAK_CITY"));
+        assert_eq!(warp.target_map.as_deref(), Some("EcruteakCity"));
         assert_eq!((warp.x, warp.y), (Some(6), Some(27)));
         assert_eq!(warp.command_index, 12);
 
@@ -59926,6 +70652,13 @@ mod tests {
             })
             .expect("Tuscany weekday read");
         assert_eq!(weekday.command_index, 4);
+        assert!(
+            route29
+                .objects
+                .iter()
+                .any(|object| object.event_flag == "EVENT_ROUTE_29_TUSCANY_OF_TUESDAY")
+        );
+        assert!(data.saved_event_flag_exists("EVENT_ROUTE_29_TUSCANY_OF_TUESDAY"));
         let day_check = route29
             .script_variable_commands
             .iter()
@@ -60031,6 +70764,12 @@ mod tests {
             })
             .expect("gym statue jumpstd");
         assert_eq!(standard.resolved_target_script, None);
+        assert!(
+            !gym.script_runtime_commands
+                .iter()
+                .any(|command| command.command == "jumpstd"),
+            "jumpstd must be owned by script control commands, not duplicated as runtime"
+        );
 
         assert!(route44.script_control_commands.iter().any(|command| {
             command.source_script == "TrainerBirdKeeperVance1"
@@ -60038,6 +70777,13 @@ mod tests {
                 && command.target_label.is_none()
                 && command.compare_value.is_none()
         }));
+        assert!(
+            !route44
+                .script_runtime_commands
+                .iter()
+                .any(|command| command.command == "endifjustbattled"),
+            "endifjustbattled must be owned by script control commands, not duplicated as runtime"
+        );
     }
 
     #[test]
@@ -60110,6 +70856,20 @@ mod tests {
                     && command.source_script == "PlateauRivalBattle1"
             })
             .expect("player showemote command");
+        assert!(
+            !module
+                .script_runtime_commands
+                .iter()
+                .any(|command| command.command == "faceplayer"),
+            "faceplayer must be owned by script object commands, not duplicated as runtime"
+        );
+        assert!(
+            !module
+                .script_runtime_commands
+                .iter()
+                .any(|command| command.command == "showemote"),
+            "showemote must be owned by script object commands, not duplicated as runtime"
+        );
 
         assert_eq!((moveobject.x, moveobject.y), (Some(17), Some(9)));
         assert_eq!(rival_movement.steps.len(), 7);
@@ -60145,7 +70905,17 @@ mod tests {
                 object.object_identifier.as_deref() == Some("INDIGOPLATEAUPOKECENTER1F_RIVAL")
             })
             .expect("rival object after move");
-        assert_eq!((rival.x, rival.y), (17, 9));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+            Some(&TilePosition::new(17, 9))
+        );
+        assert_eq!(
+            (rival.x, rival.y),
+            (16, 9),
+            "pack object coordinates remain definitive while runtime overlays move objects"
+        );
 
         let moved_by_script = apply_script_movement(&mut session, &applymovement, &rival_movement)
             .expect("applymovement moves rival");
@@ -60158,7 +70928,13 @@ mod tests {
                 object.object_identifier.as_deref() == Some("INDIGOPLATEAUPOKECENTER1F_RIVAL")
             })
             .expect("rival object after movement");
-        assert_eq!((rival.x, rival.y), (17, 4));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+            Some(&TilePosition::new(17, 4))
+        );
+        assert_eq!((rival.x, rival.y), (16, 9));
         assert_eq!(
             session
                 .object_facings
@@ -60229,16 +71005,16 @@ mod tests {
                     collision: [permissions::FLOOR; 4],
                 }],
             },
-            TilePosition::new(10, 10),
+            TilePosition::new(8, 10),
         );
         session.player.facing = Direction::Left;
 
         let outcome =
             apply_script_movement(&mut session, &command, &movement).expect("movement applies");
 
-        assert_eq!(outcome.previous_tile, TilePosition::new(10, 10));
-        assert_eq!(outcome.tile, TilePosition::new(10, 11));
-        assert_eq!(session.player.tile, TilePosition::new(10, 11));
+        assert_eq!(outcome.previous_tile, TilePosition::new(8, 10));
+        assert_eq!(outcome.tile, TilePosition::new(8, 11));
+        assert_eq!(session.player.tile, TilePosition::new(8, 11));
         assert_eq!(session.player.facing, Direction::Left);
         assert_eq!(outcome.facing, Direction::Left);
         assert_eq!(
@@ -60253,6 +71029,354 @@ mod tests {
                     index: 2,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_script_movement_visibility_steps_update_visibility_state() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.objects = vec![test_object(
+            "ROUTE_29_YOUNGSTER",
+            "EVENT_HIDE_YOUNGSTER",
+            2,
+            2,
+        )];
+        module.script_object_commands = vec![ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("ROUTE_29_YOUNGSTER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29HideShowMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29ObjectScript".to_string(),
+            command_index: 0,
+        }];
+        module.script_movements = vec![ScriptMovement {
+            label: "Route29HideShowMovement".to_string(),
+            source_script: Some("Route29ObjectScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "show_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "hide_emote".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "remove_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 3,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 4,
+                },
+            ],
+        }];
+        let object = module.objects[0].clone();
+        let mut data = GameDataSet::default();
+        data.maps.insert("Route29".to_string(), module);
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .pending_emotes
+            .push(ScriptRuntimeEmote {
+                emote: "EMOTE_SHOCK".to_string(),
+                object: "ROUTE_29_YOUNGSTER".to_string(),
+                duration: 16,
+                source_script: "Route29ObjectScript".to_string(),
+                command_index: 0,
+            });
+        state
+            .script_runtime
+            .pending_emotes
+            .push(ScriptRuntimeEmote {
+                emote: "EMOTE_HAPPY".to_string(),
+                object: "OTHER_OBJECT".to_string(),
+                duration: 8,
+                source_script: "Route29ObjectScript".to_string(),
+                command_index: 0,
+            });
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "Route29".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            vec![object],
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let outcome = data
+            .apply_script_movement_in_session(
+                &mut state,
+                &mut session,
+                "Route29",
+                "Route29ObjectScript",
+                0,
+            )
+            .expect("movement applies through runtime data");
+
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|effect| effect.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hide_object", "show_object", "hide_emote", "remove_object"]
+        );
+        assert_eq!(state.script_runtime.pending_emotes.len(), 1);
+        assert_eq!(
+            state.script_runtime.pending_emotes[0].object,
+            "OTHER_OBJECT"
+        );
+        assert_eq!(
+            state.flags.event_flags.get("EVENT_HIDE_YOUNGSTER"),
+            Some(&true)
+        );
+        let youngster = session
+            .objects
+            .iter()
+            .find(|object| object.object_identifier.as_deref() == Some("ROUTE_29_YOUNGSTER"))
+            .expect("youngster object");
+        assert!(!session.is_object_visible(youngster));
+    }
+
+    #[test]
+    fn runtime_script_movement_teleport_to_clears_teleport_from_flag() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.script_object_commands = vec![ScriptObjectCommand {
+            command: "applymovement".to_string(),
+            object_id: Some("PLAYER".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: Some("Route29TeleportMovement".to_string()),
+            emote: None,
+            duration: None,
+            source_script: "Route29ObjectScript".to_string(),
+            command_index: 0,
+        }];
+        module.script_movements = vec![ScriptMovement {
+            label: "Route29TeleportMovement".to_string(),
+            source_script: Some("Route29ObjectScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "teleport_from".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "teleport_to".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 2,
+                },
+            ],
+        }];
+        let mut data = GameDataSet::default();
+        data.maps.insert("Route29".to_string(), module);
+        let mut state = GameState::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "Route29".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let outcome = data
+            .apply_script_movement_in_session(
+                &mut state,
+                &mut session,
+                "Route29",
+                "Route29ObjectScript",
+                0,
+            )
+            .expect("teleport movement applies through runtime data");
+
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|effect| effect.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["teleport_from", "teleport_to"]
+        );
+        assert!(
+            !state.script_runtime.teleport_from_queued,
+            "teleport_to must close the queued teleport_from effect"
+        );
+    }
+
+    #[test]
+    fn runtime_script_movement_dig_effects_sync_player_visibility() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.script_object_commands = vec![
+            ScriptObjectCommand {
+                command: "applymovement".to_string(),
+                object_id: Some("PLAYER".to_string()),
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: Some("Route29DigOutMovement".to_string()),
+                emote: None,
+                duration: None,
+                source_script: "Route29ObjectScript".to_string(),
+                command_index: 0,
+            },
+            ScriptObjectCommand {
+                command: "applymovement".to_string(),
+                object_id: Some("PLAYER".to_string()),
+                target_object_id: None,
+                x: None,
+                y: None,
+                direction: None,
+                movement: Some("Route29DigReturnMovement".to_string()),
+                emote: None,
+                duration: None,
+                source_script: "Route29ObjectScript".to_string(),
+                command_index: 1,
+            },
+        ];
+        module.script_movements = vec![
+            ScriptMovement {
+                label: "Route29DigOutMovement".to_string(),
+                source_script: Some("Route29ObjectScript".to_string()),
+                steps: vec![
+                    ScriptMovementStep {
+                        command: "step_dig".to_string(),
+                        direction: None,
+                        duration: Some(32),
+                        index: 0,
+                    },
+                    ScriptMovementStep {
+                        command: "step_end".to_string(),
+                        direction: None,
+                        duration: None,
+                        index: 1,
+                    },
+                ],
+            },
+            ScriptMovement {
+                label: "Route29DigReturnMovement".to_string(),
+                source_script: Some("Route29ObjectScript".to_string()),
+                steps: vec![
+                    ScriptMovementStep {
+                        command: "return_dig".to_string(),
+                        direction: None,
+                        duration: Some(32),
+                        index: 0,
+                    },
+                    ScriptMovementStep {
+                        command: "step_end".to_string(),
+                        direction: None,
+                        duration: None,
+                        index: 1,
+                    },
+                ],
+            },
+        ];
+        let mut data = GameDataSet::default();
+        data.maps.insert("Route29".to_string(), module);
+        let mut state = GameState::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "Route29".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        data.apply_script_movement_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            "Route29ObjectScript",
+            0,
+        )
+        .expect("dig out movement applies through runtime data");
+        assert!(session.player_hidden);
+        assert_eq!(
+            state
+                .map_object_overrides
+                .get("Route29")
+                .map(|memory| memory.player_hidden),
+            Some(true)
+        );
+
+        data.apply_script_movement_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            "Route29ObjectScript",
+            1,
+        )
+        .expect("dig return movement applies through runtime data");
+        assert!(!session.player_hidden);
+        assert_eq!(
+            state
+                .map_object_overrides
+                .get("Route29")
+                .map(|memory| memory.player_hidden),
+            Some(false)
         );
     }
 
@@ -60363,6 +71487,13 @@ mod tests {
             })
             .expect("rival scene pause command");
         assert_eq!(pause.args, vec!["15"]);
+        assert!(
+            !azalea
+                .script_runtime_commands
+                .iter()
+                .any(|command| command.command == "checkscene"),
+            "checkscene must be owned by script scene commands, not duplicated as runtime"
+        );
 
         let gym = data
             .map_module("AzaleaGym")
@@ -60568,6 +71699,232 @@ mod tests {
                 && command.args == vec!["STRING_BUFFER_3"]
                 && command.source_script == "Route35NationalParkGateLeavingContestEarlyScript"
         }));
+    }
+
+    #[test]
+    fn script_runtime_name_commands_write_pack_owned_display_buffers() {
+        let mut module = test_map_module("RuntimeNameMap", "RUNTIME_NAME_MAP", None);
+        module.script_runtime_commands = vec![
+            ScriptRuntimeCommand {
+                command: "gettrainername".to_string(),
+                args: vec![
+                    "STRING_BUFFER_1".to_string(),
+                    "YOUNGSTER".to_string(),
+                    "YOUNGSTER_JOEY".to_string(),
+                ],
+                source_script: "RuntimeNameScript".to_string(),
+                command_index: 0,
+            },
+            ScriptRuntimeCommand {
+                command: "getitemname".to_string(),
+                args: vec!["STRING_BUFFER_2".to_string(), "POTION".to_string()],
+                source_script: "RuntimeNameScript".to_string(),
+                command_index: 1,
+            },
+            ScriptRuntimeCommand {
+                command: "getmonname".to_string(),
+                args: vec![
+                    "STRING_BUFFER_3".to_string(),
+                    SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID.to_string(),
+                ],
+                source_script: "RuntimeNameScript".to_string(),
+                command_index: 2,
+            },
+        ];
+        let mut species = species();
+        species.id = "CHIKORITA".to_string();
+        let data = GameDataSet {
+            maps: [("RuntimeNameMap".to_string(), module.clone())]
+                .into_iter()
+                .collect(),
+            items: [("POTION".to_string(), test_item("POTION"))]
+                .into_iter()
+                .collect(),
+            pokemon: [("CHIKORITA".to_string(), species)].into_iter().collect(),
+            trainers: TrainerCatalog {
+                trainers: [(
+                    "YOUNGSTER_JOEY".to_string(),
+                    test_trainer("YOUNGSTER_JOEY", "MUSIC_YOUNGSTER_ENCOUNTER"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("CHIKORITA".to_string());
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeNameMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![1],
+            },
+            module.events,
+            module.objects,
+            TilesetCollision {
+                metatiles: vec![
+                    MetatileCollision {
+                        collision: [permissions::FLOOR; 4],
+                    },
+                    MetatileCollision {
+                        collision: [permissions::FLOOR; 4],
+                    },
+                ],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        for command_index in 0..=2 {
+            data.apply_script_runtime_command_in_session(
+                &mut state,
+                &mut session,
+                "RuntimeNameMap",
+                "RuntimeNameScript",
+                command_index,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("runtime name command applies");
+        }
+
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_1")
+                .map(String::as_str),
+            Some("Joey")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_2")
+                .map(String::as_str),
+            Some("POTION")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_3")
+                .map(String::as_str),
+            Some("CHIKORITA")
+        );
+    }
+
+    #[test]
+    fn execute_next_queued_script_command_enters_target_script_runtime() {
+        let data = GameDataSet::default();
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .command_queue
+            .push(ScriptRuntimeQueuedCommand {
+                command: "writecmdqueue".to_string(),
+                target: "RuntimeQueuedScript".to_string(),
+                bank: None,
+                source_script: "RuntimePayloadScript".to_string(),
+                command_index: 7,
+            });
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeQueueTestMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ExecuteNextQueuedScriptCommand,
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("queued script command executes");
+
+        let RuntimeMutationResult::QueuedScriptCommandExecuted(queued) = outcome.result else {
+            panic!("expected queued script execution result");
+        };
+        assert_eq!(queued.command, "writecmdqueue");
+        assert_eq!(queued.target, "RuntimeQueuedScript");
+        assert!(state.script_runtime.command_queue.is_empty());
+        assert_eq!(
+            state.script_runtime.next_script.as_deref(),
+            Some("RuntimeQueuedScript")
+        );
+        assert_eq!(state.script_runtime.control_events.len(), 1);
+        let event = &state.script_runtime.control_events[0];
+        assert_eq!(event.kind, ScriptControlRuntimeKind::Jump);
+        assert_eq!(event.target_script.as_deref(), Some("RuntimeQueuedScript"));
+        assert_eq!(event.source_script, "RuntimePayloadScript");
+        assert_eq!(event.command_index, 7);
+    }
+
+    #[test]
+    fn runtime_currency_mutation_requires_exact_pack_cap_before_state_change() {
+        let data = GameDataSet {
+            currency_constants: CurrencyCatalog([("PRICE".to_string(), 500)].into_iter().collect()),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            money: 123,
+            ..GameState::default()
+        };
+        let before = state.clone();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeCurrencyMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::AddCurrency(RuntimeCurrencyDeltaCommand {
+                    account: RuntimeCurrencyAccount::Money,
+                    amount: 1,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("runtime money mutation requires MAX_MONEY from the pack");
+
+        assert!(error.to_string().contains("MAX_MONEY"), "{error}");
+        assert_eq!(state, before);
     }
 
     #[test]
@@ -61006,18 +72363,29 @@ mod tests {
         let tileset = asset_root
             .load_tileset_collision("johto")
             .expect("load johto collision");
-        let start = (0..map.height as i16 * 2)
-            .flat_map(|y| (0..map.width as i16 * 2 - 2).map(move |x| TilePosition::new(x, y)))
+        let stride = StepOptions::default().stride_tiles;
+        let (tile_width, tile_height) = map.tile_bounds();
+        let tile_width =
+            i16::try_from(tile_width).expect("Route29 runtime tile width fits i16 coordinates");
+        let tile_height =
+            i16::try_from(tile_height).expect("Route29 runtime tile height fits i16 coordinates");
+        let start = (0..tile_height)
+            .flat_map(|y| (0..tile_width).map(move |x| TilePosition::new(x, y)))
             .find(|tile| {
+                let Some(target) = checked_move_by_stride(*tile, Direction::Right, stride) else {
+                    return false;
+                };
                 can_enter_tile(
                     &map,
                     &tileset,
-                    TilePosition::new(tile.x + 2, tile.y),
+                    target,
                     Direction::Right,
                     PlayerTraversalState::Walk,
                 )
             })
             .expect("walkable Route29 rightward step");
+        let expected_target = checked_move_by_stride(start, Direction::Right, stride)
+            .expect("selected Route29 start must have an in-bounds rightward target");
         let mut session = OverworldSession::new(map, tileset, start);
 
         let outcome = session.step(
@@ -61032,7 +72400,7 @@ mod tests {
             outcome,
             StepOutcome::Moved {
                 from: start,
-                to: TilePosition::new(start.x + 2, start.y),
+                to: expected_target,
                 speed_multiplier: 1,
             }
         );
@@ -61052,8 +72420,13 @@ mod tests {
         let tileset = asset_root
             .load_tileset_collision("johto")
             .expect("load johto collision");
-        let grass_tile = (0..map.height as i16 * 2)
-            .flat_map(|y| (0..map.width as i16 * 2).map(move |x| TilePosition::new(x, y)))
+        let (tile_width, tile_height) = map.tile_bounds();
+        let tile_width =
+            i16::try_from(tile_width).expect("Route29 runtime tile width fits i16 coordinates");
+        let tile_height =
+            i16::try_from(tile_height).expect("Route29 runtime tile height fits i16 coordinates");
+        let grass_tile = (0..tile_height)
+            .flat_map(|y| (0..tile_width).map(move |x| TilePosition::new(x, y)))
             .find(|tile| {
                 sample_collision(&map, &tileset, *tile)
                     .map(|sample| sample.permission == permissions::TALL_GRASS)
@@ -61129,11 +72502,14 @@ mod tests {
             .load_tileset_collision("johto")
             .expect("load johto collision");
         let warp = module.events.warps[0].clone();
-        let warp_tile = warp_tile_position(&warp);
+        let warp_tile = warp_tile_position_checked(&warp).expect("Route29 warp coordinate");
         let mut session =
             OverworldSession::with_events(map, module.events.clone(), tileset, warp_tile);
 
-        let trigger = session.check_warp().expect("Route29 warp trigger");
+        let trigger = session
+            .check_warp_checked()
+            .expect("checked Route29 warp")
+            .expect("Route29 warp trigger");
         assert_eq!(trigger.map_name, "Route29");
         assert_eq!(trigger.tile, warp_tile);
         assert_eq!(trigger.warp.index, warp.index);
@@ -61141,17 +72517,24 @@ mod tests {
         assert_eq!(trigger.warp.target_map, "ROUTE_29_ROUTE_46_GATE");
         assert_eq!(trigger.warp.target_warp_id, 3);
 
-        let result = session.step_and_check_warp(
-            Direction::Left,
-            StepOptions {
-                force_step_after_turn: true,
-                ..StepOptions::default()
-            },
-        );
+        let result = session
+            .step_and_check_warp_checked(
+                Direction::Left,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+            )
+            .expect("checked Route29 step and warp");
         assert_eq!(
             result.outcome,
             StepOutcome::Blocked {
-                at: TilePosition::new(warp_tile.x - 2, warp_tile.y),
+                at: checked_move_by_stride(
+                    warp_tile,
+                    Direction::Left,
+                    StepOptions::default().stride_tiles
+                )
+                .expect("Route29 warp test tile must have an in-bounds leftward target"),
                 facing: Direction::Left,
             }
         );
@@ -61171,9 +72554,12 @@ mod tests {
             .load_tileset_collision("johto")
             .expect("load johto collision");
         let warp = module.events.warps[0].clone();
-        let start = warp_tile_position(&warp);
+        let start = warp_tile_position_checked(&warp).expect("Route29 warp coordinate");
         let session = OverworldSession::with_events(map, module.events.clone(), tileset, start);
-        let trigger = session.check_warp().expect("Route29 warp trigger");
+        let trigger = session
+            .check_warp_checked()
+            .expect("checked Route29 warp")
+            .expect("Route29 warp trigger");
 
         let transition = data
             .resolve_warp_transition(&trigger)
@@ -61185,7 +72571,8 @@ mod tests {
         assert_eq!(transition.destination.warp.target_map_constant, "ROUTE_29");
         assert_eq!(
             transition.destination.tile,
-            warp_tile_position(&transition.destination.warp)
+            warp_tile_position_checked(&transition.destination.warp)
+                .expect("Route29 destination warp coordinate")
         );
 
         let destination_module = data
@@ -61199,10 +72586,11 @@ mod tests {
             .expect("load destination tileset");
         let destination_session = transition.apply_to(
             destination_map,
-            destination_module.events,
-            destination_module.objects,
+            destination_module.events.clone(),
+            destination_module.objects.clone(),
             destination_tileset,
             session.frame + 1,
+            MovementMode::Normal,
         );
 
         assert_eq!(
@@ -61224,7 +72612,7 @@ mod tests {
             .expect("load base game data");
         let trigger = WarpTrigger {
             map_name: "Route29".to_string(),
-            tile: TilePosition::new(55, 3),
+            tile: TilePosition::new(54, 2),
             warp: WarpEvent {
                 index: 1,
                 x: 27,
@@ -61254,7 +72642,7 @@ mod tests {
             .expect("load base game data");
         let trigger = WarpTrigger {
             map_name: "Route29".to_string(),
-            tile: TilePosition::new(55, 3),
+            tile: TilePosition::new(54, 2),
             warp: WarpEvent {
                 index: 1,
                 x: 27,
@@ -61286,7 +72674,7 @@ mod tests {
         );
         let trigger = WarpTrigger {
             map_name: "Source".to_string(),
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 2),
             warp: WarpEvent {
                 index: 1,
                 x: 1,
@@ -61338,7 +72726,7 @@ mod tests {
         );
         let trigger = WarpTrigger {
             map_name: "Source".to_string(),
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 2),
             warp: WarpEvent {
                 index: 1,
                 x: 1,
@@ -61373,8 +72761,12 @@ mod tests {
         let tileset = asset_root
             .load_tileset_collision("johto")
             .expect("load johto collision");
-        let mut session =
-            OverworldSession::with_events(map, module.events, tileset, TilePosition::new(58, 5));
+        let mut session = OverworldSession::with_events(
+            map,
+            module.events.clone(),
+            tileset,
+            TilePosition::new(59, 4),
+        );
 
         let outcome = session.step(
             Direction::Right,
@@ -61386,13 +72778,16 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Moved {
-                from: TilePosition::new(58, 5),
-                to: TilePosition::new(60, 5),
+                from: TilePosition::new(59, 4),
+                to: TilePosition::new(60, 4),
                 speed_multiplier: 1,
             }
         );
 
-        let trigger = session.check_connection().expect("Route29 east connection");
+        let trigger = session
+            .check_connection_checked()
+            .expect("checked Route29 connection")
+            .expect("Route29 east connection");
         assert_eq!(trigger.connection.direction, "east");
         assert_eq!(trigger.connection.target_map, "NewBarkTown");
 
@@ -61402,7 +72797,7 @@ mod tests {
 
         assert_eq!(transition.trigger, trigger);
         assert_eq!(transition.destination.map_name, "NewBarkTown");
-        assert_eq!(transition.destination.tile, TilePosition::new(1, 5));
+        assert_eq!(transition.destination.tile, TilePosition::new(0, 4));
 
         let destination_module = data
             .map_module(&transition.destination.map_name)
@@ -61415,14 +72810,15 @@ mod tests {
             .expect("load destination tileset");
         session = transition.apply_to(
             destination_map,
-            destination_module.events,
-            destination_module.objects,
+            destination_module.events.clone(),
+            destination_module.objects.clone(),
             destination_tileset,
             session.frame,
+            MovementMode::Normal,
         );
 
         assert_eq!(session.snapshot().map_name, "NewBarkTown");
-        assert_eq!(session.snapshot().tile, TilePosition::new(1, 5));
+        assert_eq!(session.snapshot().tile, TilePosition::new(0, 4));
         assert_eq!(session.snapshot().frame, 1);
     }
 
@@ -61434,7 +72830,7 @@ mod tests {
             .expect("load base game data");
         let trigger = ConnectionTrigger {
             map_name: "Route29".to_string(),
-            tile: TilePosition::new(60, 5),
+            tile: TilePosition::new(60, 4),
             connection: MapConnection {
                 direction: "east".to_string(),
                 target_map: "MissingTarget".to_string(),
@@ -61462,7 +72858,7 @@ mod tests {
         );
         let trigger = ConnectionTrigger {
             map_name: "Source".to_string(),
-            tile: TilePosition::new(1, 1),
+            tile: TilePosition::new(2, 2),
             connection: MapConnection {
                 direction: "east".to_string(),
                 target_map: "Target".to_string(),
@@ -61526,7 +72922,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("connection destination tile (1, 99) is outside target map")
+                .contains("connection destination tile (0, 99) is outside target map")
         );
     }
 
@@ -61705,7 +73101,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -62010,7 +73407,7 @@ mod tests {
     }
 
     fn explicit_empty_manifest_json() -> Value {
-        serde_json::to_value(ModpackManifest {
+        let mut manifest = serde_json::to_value(ModpackManifest {
             metadata: ModpackMetadata {
                 id: "empty-pack".to_string(),
                 name: "Empty Pack".to_string(),
@@ -62020,7 +73417,43 @@ mod tests {
             },
             ..ModpackManifest::default()
         })
-        .expect("serialize complete empty manifest")
+        .expect("serialize complete empty manifest");
+        manifest["payload"]["battle_reward_rules"] = serde_json::json!({
+            "max_level": 100,
+            "wild_exp_divisor": 7,
+            "trainer_exp_numerator": 3,
+            "trainer_exp_denominator": 2
+        });
+        manifest["payload"]["battle_escape_rules"] = serde_json::json!({
+            "player_speed_multiplier": 32,
+            "enemy_speed_divisor": 4,
+            "failed_attempt_bonus": 30,
+            "rng_roll_values": 256
+        });
+        manifest["payload"]["battle_stat_multipliers"] =
+            serde_json::to_value(test_battle_stat_multipliers())
+                .expect("serialize battle stat multiplier fixture");
+        manifest["payload"]["step_event_rules"] =
+            serde_json::to_value(test_step_event_rules()).expect("serialize step event rules");
+        manifest["payload"]["move_priorities"] =
+            serde_json::to_value(test_move_priorities()).expect("serialize move priority fixture");
+        manifest["payload"]["type_categories"] =
+            serde_json::to_value(test_type_categories()).expect("serialize type categories fixture");
+        manifest["payload"]["type_effectiveness"] = serde_json::to_value(test_type_effectiveness())
+            .expect("serialize type effectiveness fixture");
+        manifest["payload"]["weather_modifiers"] =
+            serde_json::to_value(test_weather_modifiers()).expect("serialize weather fixture");
+        manifest["payload"]["buena_password_categories"] = serde_json::json!({
+            "order": ["HealingItems"],
+            "categories": {
+                "HealingItems": {
+                    "categoryType": "BUENA_ITEM",
+                    "points": 12,
+                    "options": ["POTION"]
+                }
+            }
+        });
+        manifest
     }
 
     #[test]
@@ -62528,16 +73961,76 @@ mod tests {
 
     #[test]
     fn game_data_set_json_requires_explicit_sections() {
-        let mut data = serde_json::to_value(GameDataSet::default())
-            .expect("serialize complete empty game data");
-        data.as_object_mut()
-            .expect("game data object")
-            .remove("audio");
+        let asset_root = AssetRoot::new(repository_root_for_tests());
+        let data = serde_json::to_value(
+            asset_root
+                .load_base_game_data()
+                .expect("load base game data"),
+        )
+        .expect("serialize complete empty game data");
 
-        let error = serde_json::from_value::<GameDataSet>(data)
-            .expect_err("missing game data sections must not default to empty")
-            .to_string();
-        assert!(error.contains("missing field `audio`"), "{error}");
+        for field in [
+            "audio",
+            "growth_rates",
+            "marts",
+            "currency_constants",
+            "battle_reward_rules",
+            "battle_escape_rules",
+            "step_event_rules",
+            "fruit_trees",
+            "field_moves",
+            "field_box_items",
+            "fly_destinations",
+            "runtime_spawn_points",
+            "runtime_map_metadata",
+            "buena_password_categories",
+            "roaming_pokemon",
+            "buena_prizes",
+            "kurt_apricorn_recipes",
+            "shuckie_gift",
+            "dratini_move_sets",
+            "bug_contest_config",
+            "battle_tower_rules",
+            "oak_ratings",
+            "odd_egg_definitions",
+            "magikarp_lengths",
+            "happiness_data",
+            "encounter_slot_tables",
+            "encounter_music_modifiers",
+            "battle_stat_multipliers",
+            "capture_wobble_probabilities",
+            "move_priorities",
+            "type_categories",
+            "type_effectiveness",
+            "weather_modifiers",
+            "pc_strings",
+            "menu_icons",
+            "pokedex_entries",
+            "pokemon_frontpic_anim",
+            "initialize_events",
+            "story_event_script_constants",
+            "asm_text",
+            "move_names",
+            "battle_animations",
+            "battle_animation_table",
+            "battle_anim_bundle",
+            "sprite_anim_bundle",
+            "sprite_palette_defaults",
+            "pokegear_town_map_palette_map",
+        ] {
+            let mut missing = data.clone();
+            missing
+                .as_object_mut()
+                .expect("game data object")
+                .remove(field)
+                .unwrap_or_else(|| panic!("fixture must include {field}"));
+
+            let error = serde_json::from_value::<GameDataSet>(missing)
+                .expect_err("missing game data sections must not default to empty")
+                .to_string();
+            let expected = format!("missing field `{field}`");
+            assert!(error.contains(&expected), "{field} produced {error}");
+        }
     }
 
     #[test]

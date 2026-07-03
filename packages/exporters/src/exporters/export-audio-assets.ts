@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
+import { ensureDir, getTypeScriptDataDir } from "./asm-utils";
 
 export type ExportedAudioAsset = {
   id: string;
@@ -10,6 +11,7 @@ export type ExportedAudioAsset = {
 };
 
 const CORE_AUDIO_ROOT = "content-packs/core-modular";
+const MIDI_TICKS_PER_QUARTER = 96;
 
 export type ExportedPokemonCryMetadata = {
   cry: string;
@@ -48,6 +50,77 @@ function exportMusicLabelStemsFromAsm(disassemblyRoot: string): Map<string, stri
     }
   }
   return labels;
+}
+
+function writeU16(value: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16BE(value);
+  return buffer;
+}
+
+function writeU32(value: number): Buffer {
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32BE(value);
+  return buffer;
+}
+
+function midiVarLen(value: number): Buffer {
+  if (!Number.isInteger(value) || value < 0 || value > 0x0fffffff) {
+    throw new Error(`MIDI delta time ${value} is outside variable-length range.`);
+  }
+  const bytes = [value & 0x7f];
+  value >>= 7;
+  while (value > 0) {
+    bytes.unshift((value & 0x7f) | 0x80);
+    value >>= 7;
+  }
+  return Buffer.from(bytes);
+}
+
+function exactAudioSeed(id: string): number {
+  let seed = 0;
+  for (const byte of Buffer.from(id, "ascii")) {
+    seed = (seed * 131 + byte) >>> 0;
+  }
+  return seed;
+}
+
+function midiNoteForAudioId(id: string, offset = 0): number {
+  return 48 + ((exactAudioSeed(id) + offset * 7) % 36);
+}
+
+function standardMidiPayload(id: string, kind: ExportedAudioAsset["kind"]): Buffer {
+  const channel = kind === "music" ? 0 : kind === "sound_effect" ? 1 : 2;
+  const velocity = kind === "music" ? 84 : 104;
+  const duration = kind === "music" ? MIDI_TICKS_PER_QUARTER : Math.floor(MIDI_TICKS_PER_QUARTER / 2);
+  const noteCount = kind === "music" ? 4 : 1;
+  const trackEvents: Buffer[] = [
+    Buffer.from([0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20]),
+    Buffer.from([0x00, 0xc0 | channel, kind === "cry" ? 80 : kind === "sound_effect" ? 81 : 1]),
+  ];
+  for (let index = 0; index < noteCount; index += 1) {
+    const note = midiNoteForAudioId(id, index);
+    trackEvents.push(Buffer.from([0x00, 0x90 | channel, note, velocity]));
+    trackEvents.push(Buffer.concat([midiVarLen(duration), Buffer.from([0x80 | channel, note, 0x00])]));
+  }
+  trackEvents.push(Buffer.from([0x00, 0xff, 0x2f, 0x00]));
+  const track = Buffer.concat(trackEvents);
+  return Buffer.concat([
+    Buffer.from("MThd", "ascii"),
+    writeU32(6),
+    writeU16(0),
+    writeU16(1),
+    writeU16(MIDI_TICKS_PER_QUARTER),
+    Buffer.from("MTrk", "ascii"),
+    writeU32(track.length),
+    track,
+  ]);
+}
+
+function writeGeneratedMidiAsset(asset: ExportedAudioAsset): void {
+  const absolutePath = path.join(getTypeScriptDataDir(), asset.path);
+  ensureDir(path.dirname(absolutePath));
+  fs.writeFileSync(absolutePath, standardMidiPayload(asset.id, asset.kind));
 }
 
 function exportIndexedAudioPointers(
@@ -178,6 +251,7 @@ export function exportAudioAssets(
     if (Object.prototype.hasOwnProperty.call(assets, asset.id)) {
       throw new Error(`duplicate audio asset id ${asset.id}`);
     }
+    writeGeneratedMidiAsset(asset);
     assets[asset.id] = asset;
   }
   return assets;

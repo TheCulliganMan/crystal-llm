@@ -12,7 +12,7 @@ describe("export-playability", () => {
             { command: "verbosegiveitem", args: ["POTION", "1"] },
             { command: "giveitem", args: ["NOT_EXPORTED", "1"] },
             { command: "warp", args: ["NONE", "0", "0"] },
-            { command: "warpfacing", args: ["UP", "HALL_OF_FAME", "4", "13"] },
+            { command: "warpfacing", args: ["HALL_OF_FAME", "4", "13", "UP"] },
             { command: "halloffame", args: [] },
           ],
           EmptyScript: [{ command: "checkevent", args: ["EVENT_ONLY_CHECKED"] }],

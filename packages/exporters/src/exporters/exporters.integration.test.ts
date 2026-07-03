@@ -113,7 +113,7 @@ describe("core exporters integration", () => {
       description?: string;
       tmhm_index: number | null;
     }>;
-    expect(items).toHaveLength(256);
+    expect(items).toHaveLength(255);
     expect(items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -132,14 +132,14 @@ describe("core exporters integration", () => {
           script_name: "TM_THUNDERPUNCH",
           effect: "NONE",
           pocket: "TM_HM",
-          tmhm_index: 40,
+          tmhm_index: 41,
         }),
         expect.objectContaining({
           name: "HM03",
           script_name: "HM_SURF",
           effect: "NONE",
           pocket: "TM_HM",
-          tmhm_index: 52,
+          tmhm_index: 53,
         }),
       ])
     );
@@ -321,7 +321,12 @@ describe("core exporters integration", () => {
         enabled: true,
         priority: -100,
         files: expect.objectContaining({
-          maps: expect.arrayContaining(["content-packs/core-modular/maps/Route29.json"]),
+          map_scripts: expect.arrayContaining([
+            "content-packs/core-modular/map_scripts/Route29.json",
+          ]),
+          map_blocks: expect.arrayContaining([
+            "content-packs/core-modular/map_blocks/Route29_Blocks.json",
+          ]),
           map_attributes: expect.arrayContaining([
             "content-packs/core-modular/map_attributes/Route29.json",
           ]),
@@ -339,7 +344,8 @@ describe("core exporters integration", () => {
       expect.objectContaining({
         enabled: false,
         files: expect.objectContaining({
-          maps: ["content-packs/core-modular/maps/Route29.json"],
+          map_scripts: ["content-packs/core-modular/map_scripts/Route29.json"],
+          map_blocks: ["content-packs/core-modular/map_blocks/Route29_Blocks.json"],
           map_attributes: ["content-packs/core-modular/map_attributes/Route29.json"],
         }),
       })
@@ -349,7 +355,7 @@ describe("core exporters integration", () => {
     )).toBe(true);
 
     const route29Map = JSON.parse(
-      fs.readFileSync(path.join(dataDir, "content-packs", "core-modular", "maps", "Route29.json"), "utf8")
+      fs.readFileSync(path.join(dataDir, "content-packs", "core-modular", "map_scripts", "Route29.json"), "utf8")
     ) as Record<string, unknown>;
     expect(Array.isArray(route29Map)).toBe(false);
     expect(route29Map.Route29_MapScripts).toEqual(expect.any(Array));
@@ -368,7 +374,7 @@ describe("core exporters integration", () => {
       "level_up_moves",
       "egg_moves",
       "evolutions",
-      "maps",
+      "map_scripts",
       "map_blocks",
       "map_attributes",
       "map_dimensions",
@@ -392,8 +398,14 @@ describe("core exporters integration", () => {
           : path.join(dataDir, relativePath);
         expect(fs.existsSync(targetPath)).toBe(true);
         if (category === "audio") {
-          const bytes = fs.readFileSync(targetPath);
-          expect(relativePath.endsWith(".mid")).toBe(true);
+          expect(relativePath.endsWith(".json")).toBe(true);
+          const metadata = JSON.parse(fs.readFileSync(targetPath, "utf8")) as Record<
+            string,
+            { path: string }
+          >;
+          const [entry] = Object.values(metadata);
+          expect(entry.path.endsWith(".mid")).toBe(true);
+          const bytes = fs.readFileSync(path.join(dataDir, entry.path));
           expect(bytes.subarray(0, 4).toString("ascii")).toBe("MThd");
           continue;
         }
@@ -401,17 +413,18 @@ describe("core exporters integration", () => {
           expect(fs.readFileSync(targetPath, "utf8").trim()).not.toBe("");
         }
         const payload = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+        const firstPayloadEntry = () => Object.values(payload)[0] as Record<string, unknown>;
         if (category === "pokemon") {
-          expect(payload).toEqual(expect.objectContaining({ id: expect.any(String) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ id: expect.any(String) }));
         } else if (category === "moves") {
-          expect(payload).toEqual(expect.objectContaining({ name: expect.any(String) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ name: expect.any(String) }));
         } else if (category === "learnsets") {
-          expect(payload).toEqual(expect.objectContaining({ species: expect.any(String), learnset: expect.any(Array) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ species: expect.any(String), learnset: expect.any(Array) }));
         } else if (category === "level_up_moves" || category === "egg_moves") {
-          expect(payload).toEqual(expect.objectContaining({ species: expect.any(String), moves: expect.any(Array) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ species: expect.any(String), moves: expect.any(Array) }));
         } else if (category === "evolutions") {
-          expect(payload).toEqual(expect.objectContaining({ species: expect.any(String) }));
-        } else if (category === "maps") {
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ species: expect.any(String) }));
+        } else if (category === "map_scripts") {
           expect(payload && typeof payload === "object" && !Array.isArray(payload)).toBe(true);
           expect(Object.keys(payload).some((key) => key.endsWith("_MapScripts"))).toBe(true);
           expect(Object.keys(payload).some((key) => key.endsWith("_MapEvents"))).toBe(true);
@@ -432,7 +445,7 @@ describe("core exporters integration", () => {
             expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) })
           );
         } else if (category === "wild_encounters") {
-          expect(payload).toEqual(expect.objectContaining({ map_name: expect.any(String) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ map_name: expect.any(String) }));
         } else if (category === "npcs") {
           expect(payload && typeof payload === "object" && !Array.isArray(payload)).toBe(true);
           expect(Object.values(payload).every((value) => Array.isArray(value))).toBe(true);
@@ -444,13 +457,13 @@ describe("core exporters integration", () => {
             })
           );
         } else if (category === "items") {
-          expect(payload).toEqual(expect.objectContaining({ name: expect.any(String) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ name: expect.any(String) }));
         } else if (category === "trainers") {
-          expect(payload).toEqual(
+          expect(firstPayloadEntry()).toEqual(
             expect.objectContaining({ trainer_id: expect.any(String), party: expect.any(Array) })
           );
         } else if (category === "pokedex") {
-          expect(payload).toEqual(expect.objectContaining({ species: expect.any(String) }));
+          expect(firstPayloadEntry()).toEqual(expect.objectContaining({ species: expect.any(String) }));
         } else if (category === "phone_scripts") {
           expect(payload && typeof payload === "object" && !Array.isArray(payload)).toBe(true);
           expect(Object.values(payload).every((value) => Array.isArray(value))).toBe(true);

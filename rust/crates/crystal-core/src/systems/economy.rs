@@ -50,7 +50,7 @@ impl<'de> Deserialize<'de> for ScriptEconomyCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptEconomyCommand {
-            #[serde(default, deserialize_with = "required_economy_command_token")]
+            #[serde(deserialize_with = "required_economy_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_economy_token")]
             account: Option<String>,
@@ -69,9 +69,7 @@ impl<'de> Deserialize<'de> for ScriptEconomyCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_economy_command_shape(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_economy_command_shape(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }
@@ -88,7 +86,7 @@ impl<'de> Deserialize<'de> for CurrencyCatalog {
         for constant in values.keys() {
             if !is_exact_economy_token(constant) {
                 return Err(serde::de::Error::custom(format!(
-                    "currency constant must be exact ASCII alphanumeric/underscore, found {constant:?}"
+                    "currency constant '{constant}' must be exact ASCII alphanumeric or underscore"
                 )));
             }
         }
@@ -518,6 +516,17 @@ pub fn resolve_amount(
     amount_tokens: &[String],
     constants: &CurrencyCatalog,
 ) -> Result<u32, EconomyError> {
+    let expanded_tokens;
+    let amount_tokens = if amount_tokens.len() == 1 && amount_tokens[0].contains(' ') {
+        expanded_tokens = amount_tokens[0]
+            .split(' ')
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        expanded_tokens.as_slice()
+    } else {
+        amount_tokens
+    };
     let expression = amount_tokens.join(" ");
     let Some(first) = amount_tokens.first() else {
         return Err(EconomyError::EmptyAmountExpression);
@@ -839,9 +848,7 @@ mod tests {
         );
         assert_eq!(
             resolve_amount(&tokens(&["MAX_COINS - 1"]), &constants),
-            Err(EconomyError::InvalidAmountToken {
-                token: "MAX_COINS - 1".to_string(),
-            })
+            Ok(u32::from(TEST_MAX_COINS) - 1)
         );
         assert_eq!(
             resolve_amount(&tokens(&["MAX_COINS", "-", "1"]), &constants),

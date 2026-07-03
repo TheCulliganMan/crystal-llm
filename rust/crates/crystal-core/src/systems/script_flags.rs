@@ -22,7 +22,7 @@ impl<'de> Deserialize<'de> for ScriptFlagCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptFlagCommand {
-            #[serde(default, deserialize_with = "required_script_flag_command_token")]
+            #[serde(deserialize_with = "required_script_flag_command_token")]
             command: String,
             #[serde(deserialize_with = "required_script_flag_token")]
             flag_id: String,
@@ -38,10 +38,8 @@ impl<'de> Deserialize<'de> for ScriptFlagCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_flag_command(&command)
-                .map_err(|error| D::Error::custom(format!("{error:?}")))?;
-        }
+        validate_script_flag_command(&command)
+            .map_err(|error| D::Error::custom(format!("{error:?}")))?;
         Ok(command)
     }
 }

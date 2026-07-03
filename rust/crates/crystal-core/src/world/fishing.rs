@@ -33,11 +33,9 @@ impl<'de> Deserialize<'de> for FishingCatalog {
         #[serde(deny_unknown_fields)]
         struct RawFishingCatalog {
             groups: BTreeMap<String, FishingGroup>,
-            #[serde(default, deserialize_with = "required_fishing_time_groups")]
+            #[serde(deserialize_with = "required_fishing_time_groups")]
             time_groups: BTreeMap<String, TimeFishEntry>,
-            #[serde(default)]
             swarm_rules: BTreeMap<String, FishingSwarmRule>,
-            #[serde(default)]
             rod_items: BTreeMap<String, String>,
         }
 
@@ -135,20 +133,7 @@ fn required_fishing_time_groups<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Map(BTreeMap<String, TimeFishEntry>),
-        List(Vec<TimeFishEntry>),
-    }
-
-    match Raw::deserialize(deserializer)? {
-        Raw::Map(map) => Ok(map),
-        Raw::List(entries) if entries.is_empty() => Ok(BTreeMap::new()),
-        Raw::List(_) => Err(serde::de::Error::custom(
-            "legacy fishing time_groups sequence must be empty",
-        )),
-    }
+    BTreeMap::<String, TimeFishEntry>::deserialize(deserializer)
 }
 
 fn required_fishing_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -1107,7 +1092,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -1840,6 +1826,39 @@ mod tests {
     fn fishing_catalog_json_rejects_malformed_pack_tokens_at_deserialization() {
         let cases = [
             (
+                "missing time groups",
+                serde_json::json!({
+                    "groups": {},
+                    "swarm_rules": {},
+                    "rod_items": {}
+                }),
+            ),
+            (
+                "missing swarm rules",
+                serde_json::json!({
+                    "groups": {},
+                    "time_groups": {},
+                    "rod_items": {}
+                }),
+            ),
+            (
+                "missing rod items",
+                serde_json::json!({
+                    "groups": {},
+                    "time_groups": {},
+                    "swarm_rules": {}
+                }),
+            ),
+            (
+                "legacy time group list",
+                serde_json::json!({
+                    "groups": {},
+                    "time_groups": [],
+                    "swarm_rules": {},
+                    "rod_items": {}
+                }),
+            ),
+            (
                 "group key",
                 serde_json::json!({
                     "groups": {
@@ -1975,8 +1994,10 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("fishing")
-                    && error.contains("token must be exact ASCII alphanumeric/underscore"),
+                (error.contains("fishing")
+                    && error.contains("token must be exact ASCII alphanumeric/underscore"))
+                    || error.contains("missing field")
+                    || error.contains("invalid type"),
                 "{label} produced unexpected error: {error}"
             );
         }

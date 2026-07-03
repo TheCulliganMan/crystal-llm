@@ -118,6 +118,10 @@ export type HappinessServiceOutcome = {
 };
 
 export type EncounterSlotTables = {
+  tables: EncounterSlotTableMap;
+};
+
+export type EncounterSlotTableMap = {
   grass: EncounterSlotChance[];
   water: EncounterSlotChance[];
 };
@@ -136,6 +140,8 @@ export type BattleStatMultiplier = {
   numerator: number;
   denominator: number;
 };
+
+export type TypeMultiplier = BattleStatMultiplier;
 
 export type CaptureWobbleProbability = {
   catch_rate: number;
@@ -616,7 +622,7 @@ const parseDexEntryFile = (
   }
   const heightDigits = Number.parseInt(sizeMatch[1], 10);
   const weightDigits = Number.parseInt(sizeMatch[2], 10);
-  if (heightDigits > 999 || weightDigits > 9999) {
+  if (heightDigits > 99999 || weightDigits > 99999) {
     throw new Error(
       `Pokedex entry for ${species} in ${filePath} has size digits outside supported display range.`,
     );
@@ -2465,17 +2471,17 @@ export const exportHappinessData = (): HappinessData => {
 };
 
 export const exportEncounterSlotTables = (): EncounterSlotTables => {
-  const labelToKey: Record<string, keyof EncounterSlotTables> = {
+  const labelToKey: Record<string, keyof EncounterSlotTableMap> = {
     GrassMonProbTable: "grass",
     WaterMonProbTable: "water",
   };
-  const tables: EncounterSlotTables = { grass: [], water: [] };
-  let current: keyof EncounterSlotTables | null = null;
-  const lastThresholds: Record<keyof EncounterSlotTables, number> = {
+  const tables: EncounterSlotTableMap = { grass: [], water: [] };
+  let current: keyof EncounterSlotTableMap | null = null;
+  const lastThresholds: Record<keyof EncounterSlotTableMap, number> = {
     grass: 0,
     water: 0,
   };
-  const seenSlots: Record<keyof EncounterSlotTables, Set<number>> = {
+  const seenSlots: Record<keyof EncounterSlotTableMap, Set<number>> = {
     grass: new Set(),
     water: new Set(),
   };
@@ -2529,7 +2535,7 @@ export const exportEncounterSlotTables = (): EncounterSlotTables => {
       "Could not export complete encounter slot probability tables",
     );
   }
-  for (const key of Object.keys(tables) as Array<keyof EncounterSlotTables>) {
+  for (const key of Object.keys(tables) as Array<keyof EncounterSlotTableMap>) {
     const finalThreshold = tables[key].at(-1)?.threshold;
     if (finalThreshold !== 100) {
       throw new Error(
@@ -2537,7 +2543,7 @@ export const exportEncounterSlotTables = (): EncounterSlotTables => {
       );
     }
   }
-  const payload = { grass: tables.grass, water: tables.water };
+  const payload = { tables };
   writeJsonToTargets("encounter_slot_tables.json", payload, { indent: 2 });
   return payload;
 };
@@ -2816,7 +2822,13 @@ const moveEffectSchemaId = (asmEffect: string): string => {
       `Move effect priority id '${asmEffect}' must use an exact EFFECT_ token`,
     );
   }
-  return asmEffect.slice("EFFECT_".length);
+  const effect = asmEffect.slice("EFFECT_".length);
+  const statChange = effect.match(/^([A-Z_]+)_(UP|DOWN)_?(\d)?_?(HIT)?$/);
+  if (!statChange) return effect;
+  const [, stat, direction, amount, hit] = statChange;
+  const canonicalStat =
+    stat === "SP_ATK" ? "SPECIAL_ATTACK" : stat === "SP_DEF" ? "SPECIAL_DEFENSE" : stat;
+  return `${canonicalStat}_${direction}${amount ? `_${amount}` : ""}${hit ? "_HIT" : ""}`;
 };
 
 export const exportMovePriorityTable = (
@@ -3036,7 +3048,6 @@ const parseFrontpicAnimNumber = (token: string): number => {
 
 const parseFrontpicAnimScript = (source: string): FrontpicAnimProgram => {
   const commands: FrontpicAnimCommand[] = [];
-  let repeatStartIndex: number | null = null;
   for (const rawLine of source.split(/\r?\n/)) {
     const line = stripAsmComment(rawLine);
     if (!line) {
@@ -3069,7 +3080,6 @@ const parseFrontpicAnimScript = (source: string): FrontpicAnimProgram => {
         kind: "setrepeat",
         count,
       });
-      repeatStartIndex = commands.length - 1;
       continue;
     }
     if (opcode === "dorepeat") {
@@ -3079,9 +3089,6 @@ const parseFrontpicAnimScript = (source: string): FrontpicAnimProgram => {
         );
       }
       const target = parseFrontpicAnimNumber(parts[1]);
-      if (repeatStartIndex === null) {
-        throw new Error("Frontpic animation dorepeat requires setrepeat.");
-      }
       if (target >= commands.length) {
         throw new Error(
           `Frontpic animation dorepeat target ${target} does not reference an earlier command.`,
@@ -3091,7 +3098,6 @@ const parseFrontpicAnimScript = (source: string): FrontpicAnimProgram => {
         kind: "dorepeat",
         target,
       });
-      repeatStartIndex = null;
       continue;
     }
     if (opcode === "endanim") {
@@ -3109,11 +3115,37 @@ const parseFrontpicAnimScript = (source: string): FrontpicAnimProgram => {
   if (endIndex < 0) {
     throw new Error("Frontpic animation program is missing endanim.");
   }
-  if (repeatStartIndex !== null) {
-    throw new Error("Frontpic animation setrepeat is missing dorepeat.");
-  }
   if (endIndex !== commands.length - 1) {
     throw new Error("Frontpic animation program has commands after endanim.");
+  }
+  for (const [index, command] of commands.entries()) {
+    if (command.kind !== "dorepeat") {
+      continue;
+    }
+    const hasPriorSetrepeat = commands
+      .slice(0, index)
+      .some((candidate) => candidate.kind === "setrepeat");
+    if (!hasPriorSetrepeat) {
+      throw new Error("Frontpic animation dorepeat requires setrepeat.");
+    }
+  }
+  for (const [index, command] of commands.entries()) {
+    if (command.kind !== "setrepeat") {
+      continue;
+    }
+    const nextSetrepeatIndex = commands
+      .slice(index + 1)
+      .findIndex((candidate) => candidate.kind === "setrepeat");
+    const repeatWindow =
+      nextSetrepeatIndex < 0
+        ? commands.slice(index + 1)
+        : commands.slice(index + 1, index + 1 + nextSetrepeatIndex);
+    const hasDorepeat = repeatWindow.some(
+      (candidate) => candidate.kind === "dorepeat",
+    );
+    if (!hasDorepeat && nextSetrepeatIndex < 0) {
+      throw new Error("Frontpic animation setrepeat is missing dorepeat.");
+    }
   }
   return { commands };
 };
@@ -3141,9 +3173,15 @@ export const exportPokemonFrontpicAnimations = (): Record<
         speciesByFileStem,
         animPath,
       );
-      const program = parseFrontpicAnimScript(
-        fs.readFileSync(animPath, "utf8"),
-      );
+      let program: FrontpicAnimProgram;
+      try {
+        program = parseFrontpicAnimScript(fs.readFileSync(animPath, "utf8"));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Failed to parse frontpic animation for ${species} in ${animPath}: ${message}`,
+        );
+      }
       if (program.commands.length) {
         entries[species] = program;
       }

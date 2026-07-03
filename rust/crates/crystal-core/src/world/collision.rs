@@ -51,6 +51,8 @@ pub struct CollisionSample {
 pub mod permissions {
     pub const FLOOR: u8 = 0x00;
     pub const WALL: u8 = 0x07;
+    pub const HEADBUTT_TREE: u8 = 0x15;
+    pub const HEADBUTT_TREE_1D: u8 = 0x1d;
     pub const TALL_GRASS: u8 = 0x18;
     pub const PIT: u8 = 0x60;
     pub const PIT_68: u8 = 0x68;
@@ -263,19 +265,27 @@ pub fn collect_collision_samples(
     tile: TilePosition,
     stride: i16,
 ) -> Vec<CollisionSample> {
-    let stride = stride.max(1);
+    if stride <= 0 {
+        return Vec::new();
+    }
     let (width, height) = map.tile_bounds();
     let mut samples = Vec::with_capacity((stride * stride) as usize);
     for dx in 0..stride {
         for dy in 0..stride {
+            let Some(sample_x) = tile.x.checked_sub(dx) else {
+                return Vec::new();
+            };
+            let Some(sample_y) = tile.y.checked_sub(dy) else {
+                return Vec::new();
+            };
             let sample_tile = TilePosition {
-                x: tile.x - dx,
-                y: tile.y - dy,
+                x: sample_x,
+                y: sample_y,
             };
             if sample_tile.x < 0
                 || sample_tile.y < 0
-                || sample_tile.x >= width as i16
-                || sample_tile.y >= height as i16
+                || i32::from(sample_tile.x) >= i32::from(width)
+                || i32::from(sample_tile.y) >= i32::from(height)
             {
                 return Vec::new();
             }
@@ -594,6 +604,15 @@ mod tests {
         assert!(
             collect_collision_samples(&test_map(), &test_tileset(), TilePosition::new(0, 0), 2)
                 .is_empty()
+        );
+        assert!(
+            collect_collision_samples(
+                &test_map(),
+                &test_tileset(),
+                TilePosition::new(i16::MIN, 1),
+                2,
+            )
+            .is_empty()
         );
     }
 

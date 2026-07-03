@@ -45,6 +45,8 @@ pub struct Item {
     #[serde(deserialize_with = "required_nullable_item_token")]
     pub battle_escape_mode: Option<String>,
     #[serde(deserialize_with = "required_nullable_bool")]
+    pub battle_capture_ball: Option<bool>,
+    #[serde(deserialize_with = "required_nullable_bool")]
     pub battle_focus_energy: Option<bool>,
     #[serde(deserialize_with = "required_nullable_bool")]
     pub battle_stat_drop_guard: Option<bool>,
@@ -118,10 +120,12 @@ impl<'de> Deserialize<'de> for Item {
             #[serde(deserialize_with = "required_nullable_item_token")]
             battle_escape_mode: Option<String>,
             #[serde(deserialize_with = "required_nullable_bool")]
+            battle_capture_ball: Option<bool>,
+            #[serde(deserialize_with = "required_nullable_bool")]
             battle_focus_energy: Option<bool>,
-            #[serde(default, deserialize_with = "required_nullable_bool")]
+            #[serde(deserialize_with = "required_nullable_bool")]
             battle_stat_drop_guard: Option<bool>,
-            #[serde(default, deserialize_with = "required_nullable_u8")]
+            #[serde(deserialize_with = "required_nullable_u8")]
             battle_stat_drop_guard_turns: Option<u8>,
             #[serde(deserialize_with = "required_nullable_bool")]
             confusion_heal: Option<bool>,
@@ -137,13 +141,11 @@ impl<'de> Deserialize<'de> for Item {
             property: String,
             #[serde(deserialize_with = "required_item_token")]
             pocket: ItemPocket,
-            #[serde(default, deserialize_with = "required_empty_or_item_token")]
+            #[serde(deserialize_with = "required_empty_or_item_token")]
             field_menu: String,
-            #[serde(default)]
             field_usable: bool,
-            #[serde(default, deserialize_with = "required_empty_or_item_token")]
+            #[serde(deserialize_with = "required_empty_or_item_token")]
             battle_menu: String,
-            #[serde(default)]
             battle_usable: bool,
             #[serde(deserialize_with = "required_item_token")]
             script_name: String,
@@ -172,6 +174,7 @@ impl<'de> Deserialize<'de> for Item {
             battle_stat_boost_stat: raw.battle_stat_boost_stat,
             battle_stat_boost_stages: raw.battle_stat_boost_stages,
             battle_escape_mode: raw.battle_escape_mode,
+            battle_capture_ball: raw.battle_capture_ball,
             battle_focus_energy: raw.battle_focus_energy,
             battle_stat_drop_guard: raw.battle_stat_drop_guard,
             battle_stat_drop_guard_turns: raw.battle_stat_drop_guard_turns,
@@ -1306,6 +1309,32 @@ mod tests {
             assert!(
                 error.contains("item token must be")
                     || error.contains("uses reserved modpack payload prefix"),
+                "{field} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn serialized_items_require_explicit_menu_and_battle_guard_fields() {
+        for field in [
+            "battle_stat_drop_guard",
+            "battle_stat_drop_guard_turns",
+            "field_menu",
+            "field_usable",
+            "battle_menu",
+            "battle_usable",
+        ] {
+            let mut item = valid_item_json();
+            item.as_object_mut()
+                .expect("valid item json is an object")
+                .remove(field);
+
+            let error = serde_json::from_value::<Item>(item)
+                .expect_err("item pack data must not infer omitted menu or guard fields")
+                .to_string();
+
+            assert!(
+                error.contains(&format!("missing field `{field}`")),
                 "{field} produced unexpected error: {error}"
             );
         }

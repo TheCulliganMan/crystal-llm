@@ -63,9 +63,6 @@ impl Default for StepEventRules {
 
 impl StepEventRules {
     fn validate_shape(&self) -> Result<(), String> {
-        if self == &Self::default() {
-            return Ok(());
-        }
         if let Some(issue) = step_event_rules_issues(self).into_iter().next() {
             return Err(format!("invalid step event rules: {issue:?}"));
         }
@@ -92,10 +89,6 @@ pub enum StepEventError {
 }
 
 pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssue> {
-    if rules == &StepEventRules::default() {
-        return Vec::new();
-    }
-
     let mut issues = Vec::new();
     if rules.poison_step_interval == 0 {
         issues.push(StepEventRulesIssue::MissingPoisonStepInterval);
@@ -371,7 +364,18 @@ mod tests {
 
     #[test]
     fn step_event_rules_issues_validate_exact_pack_tokens() {
-        assert_eq!(step_event_rules_issues(&StepEventRules::default()), []);
+        assert_eq!(
+            step_event_rules_issues(&StepEventRules::default()),
+            [
+                StepEventRulesIssue::MissingPoisonStepInterval,
+                StepEventRulesIssue::InvalidPoisonStatus {
+                    poison_status: String::new()
+                },
+                StepEventRulesIssue::InvalidEggNickname {
+                    egg_nickname: String::new()
+                },
+            ]
+        );
 
         let rules = StepEventRules {
             poison_step_interval: 0,

@@ -21,6 +21,7 @@ describe("parseMoves", () => {
   it("expands known ASM stat-effect tokens exactly and preserves non-stat effect ids", () => {
     jest.spyOn(fs, "readFileSync").mockReturnValue([
       "\tmove CRUNCH, EFFECT_SP_DEF_DOWN_HIT, 80, DARK, 100 percent, 15, 20 percent",
+      "\tmove BARRIER, EFFECT_DEFENSE_UP2, 0, PSYCHIC, 100 percent, 30, 0 percent",
       "\tmove PSYCH_UP, EFFECT_PSYCH_UP, 0, NORMAL, 100 percent, 10, 0 percent",
     ].join("\n") as never);
 
@@ -30,6 +31,13 @@ describe("parseMoves", () => {
         effect: "SPECIAL_DEFENSE_DOWN_HIT",
         stat: "SPECIAL_DEFENSE",
         amount: -1,
+      })
+    );
+    expect(moves.BARRIER).toEqual(
+      expect.objectContaining({
+        effect: "DEFENSE_UP_2",
+        stat: "DEFENSE",
+        amount: 2,
       })
     );
     expect(moves.PSYCH_UP).toEqual(

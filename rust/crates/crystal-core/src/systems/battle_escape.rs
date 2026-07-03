@@ -52,9 +52,6 @@ impl Default for BattleEscapeRules {
 
 impl BattleEscapeRules {
     fn validate_shape(&self) -> Result<(), String> {
-        if self == &Self::default() {
-            return Ok(());
-        }
         if let Some(issue) = battle_escape_rules_issues(self, true).into_iter().next() {
             return Err(format!("invalid battle escape rules: {issue:?}"));
         }

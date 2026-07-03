@@ -320,9 +320,9 @@ where
 fn is_exact_connection_flags_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'|' | b' '))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'|' | b' ')
+        })
         && !has_reserved_pack_prefix(value)
 }
 

@@ -25,7 +25,7 @@ impl<'de> Deserialize<'de> for ScriptVariableCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptVariableCommand {
-            #[serde(default, deserialize_with = "required_script_variable_command_token")]
+            #[serde(deserialize_with = "required_script_variable_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_script_variable_target_token")]
             target: Option<String>,
@@ -44,9 +44,7 @@ impl<'de> Deserialize<'de> for ScriptVariableCommand {
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
-        if !command.command.is_empty() {
-            validate_script_variable_command(&command).map_err(D::Error::custom)?;
-        }
+        validate_script_variable_command(&command).map_err(D::Error::custom)?;
         Ok(command)
     }
 }

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::models::Dv;
 use crate::state::{
     GameState, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
-    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
+    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor,
     ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
     ScriptRuntimeVariableWrite,
 };
@@ -13,7 +14,6 @@ pub const SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE: &str = "SPECIALCALL_NONE";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeCommand {
-    #[serde(default)]
     pub command: String,
     pub args: Vec<String>,
     pub source_script: String,
@@ -24,7 +24,14 @@ pub struct ScriptRuntimeCommand {
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeInputs {
     pub random_value: Option<u32>,
+    pub rng_seed_after: Option<u32>,
     pub game_version: Option<String>,
+    pub gift_original_trainer_name: Option<String>,
+    pub gift_original_trainer_id: Option<u16>,
+    pub gift_dvs: Option<Dv>,
+    pub gift_rng_seed_after: Option<u32>,
+    pub gift_nickname_accepted: Option<bool>,
+    pub gift_nickname: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -142,6 +149,31 @@ pub fn initialize_events_issues(config: &InitializeEventsConfig) -> Vec<Initiali
     issues
 }
 
+pub fn apply_initialize_events(
+    state: &mut GameState,
+    config: &InitializeEventsConfig,
+) -> Result<(), String> {
+    for flag in &config.event_flags {
+        state
+            .flags
+            .set_event_flag(flag, true)
+            .map_err(|error| format!("initialize_events.eventFlags[{flag}]: {error}"))?;
+    }
+    for flag in &config.engine_flags {
+        state
+            .flags
+            .set_engine_flag(flag, true)
+            .map_err(|error| format!("initialize_events.engineFlags[{flag}]: {error}"))?;
+    }
+    for (sprite, replacement) in &config.variable_sprites {
+        state
+            .script_runtime
+            .variable_sprites
+            .insert(sprite.clone(), replacement.clone());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoryEventScriptConstantIssue {
     InvalidGlobalConstant { key: String },
@@ -225,6 +257,10 @@ pub enum ScriptRuntimeCommandError {
     MissingActiveMenu { command: String },
     #[error("script runtime command 'random' requires deterministic random input")]
     MissingRandomInput,
+    #[error("script runtime command 'random' requires deterministic rng_seed_after input")]
+    MissingRandomSeedAfter,
+    #[error("script runtime command '{command}' must not declare random input fields")]
+    UnexpectedRandomInput { command: String },
     #[error("script runtime command 'random' requires a positive upper bound")]
     RandomBoundZero,
     #[error("script runtime command 'random' received value {value} outside upper bound {bound}")]
@@ -424,7 +460,17 @@ fn is_exact_nonempty_runtime_arg_token(value: &str) -> bool {
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
-                    b'_' | b'.' | b'@' | b'(' | b')' | b'-' | b'+' | b'$' | b'%'
+                    b'_' | b'.'
+                        | b'@'
+                        | b'('
+                        | b')'
+                        | b'['
+                        | b']'
+                        | b'-'
+                        | b'+'
+                        | b'$'
+                        | b'%'
+                        | b' '
                 )
         })
 }
@@ -711,6 +757,13 @@ pub fn apply_script_runtime_command(
     inputs: ScriptRuntimeInputs,
 ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
     validate_script_runtime_command(&command)?;
+    if command.command != "random"
+        && (inputs.random_value.is_some() || inputs.rng_seed_after.is_some())
+    {
+        return Err(ScriptRuntimeCommandError::UnexpectedRandomInput {
+            command: command.command.clone(),
+        });
+    }
 
     let outcome = match command.command.as_str() {
         "addval" => {
@@ -729,6 +782,10 @@ pub fn apply_script_runtime_command(
             if value >= bound {
                 return Err(ScriptRuntimeCommandError::RandomInputOutOfRange { value, bound });
             }
+            let rng_seed_after = inputs
+                .rng_seed_after
+                .ok_or(ScriptRuntimeCommandError::MissingRandomSeedAfter)?;
+            state.rng_seed = rng_seed_after;
             set_script_value(state, &command, value.to_string())
         }
         "checkpoke" => {
@@ -844,16 +901,6 @@ fn apply_runtime_effect(
                     command_index: command.command_index,
                 });
         }
-        "showemote" => state
-            .script_runtime
-            .pending_emotes
-            .push(ScriptRuntimeEmote {
-                emote: command.args[0].clone(),
-                object: command.args[1].clone(),
-                duration: parse_u16_token(&command.command, &command.args[2])?,
-                source_script: command.source_script.clone(),
-                command_index: command.command_index,
-            }),
         "setlasttalked" => state.script_runtime.last_talked_object = Some(command.args[0].clone()),
         "variablesprite" => {
             state
@@ -882,10 +929,10 @@ fn apply_runtime_effect(
         "closewindow" => state.script_runtime.window_open = false,
         "menu_coords" => {
             state.script_runtime.menu_coords = Some([
-                parse_i16_token(&command.command, &command.args[0])?,
-                parse_i16_token(&command.command, &command.args[1])?,
-                parse_i16_token(&command.command, &command.args[2])?,
-                parse_i16_token(&command.command, &command.args[3])?,
+                parse_menu_coord_token(&command.command, &command.args[0])?,
+                parse_menu_coord_token(&command.command, &command.args[1])?,
+                parse_menu_coord_token(&command.command, &command.args[2])?,
+                parse_menu_coord_token(&command.command, &command.args[3])?,
             ]);
         }
         "dontrestartmapmusic" => state.script_runtime.map_music_restart_disabled = true,
@@ -895,7 +942,6 @@ fn apply_runtime_effect(
         "lockall" => state.script_runtime.all_input_locked = true,
         "releaseall" => state.script_runtime.all_input_locked = false,
         "stop" => state.script_runtime.script_stop_requested = true,
-        "faceplayer" | "endifjustbattled" | "jumpstd" => {}
         "itemnotify" => state.script_runtime.item_notify_queued = true,
         "verbosegiveitemvar" => {
             state
@@ -930,13 +976,15 @@ fn apply_runtime_effect(
             .script_runtime
             .completed_trades
             .push(command.args[0].clone()),
-        "catchtutorial" => state
-            .script_runtime
-            .catch_tutorials
-            .push(command.args[0].clone()),
+        "catchtutorial" => {
+            state
+                .script_runtime
+                .catch_tutorials
+                .push(command.args[0].clone());
+            state.script_runtime.script_value = Some("1".to_string());
+        }
         "warpsound" => state.script_runtime.warp_sound_queued = true,
         "blackoutmod" => state.script_runtime.blackout_mod = Some(command.args[0].clone()),
-        "checkscene" => {}
         "battletowertext" => state.script_runtime.battle_tower_text = Some(command.args[0].clone()),
         "halloffame" => state.script_runtime.hall_of_fame_requested = true,
         "credits" => state.script_runtime.credits_requested = true,
@@ -1136,6 +1184,59 @@ fn parse_i16_token(command: &str, token: &str) -> Result<i16, ScriptRuntimeComma
     })
 }
 
+pub fn parse_menu_coord_token(
+    command: &str,
+    token: &str,
+) -> Result<i16, ScriptRuntimeCommandError> {
+    if let Ok(value) = parse_i16_token(command, token) {
+        return Ok(value);
+    }
+    if token.is_empty() || token.trim() != token || token.contains('\t') {
+        return Err(ScriptRuntimeCommandError::InvalidNumericToken {
+            command: command.to_string(),
+            token: token.to_string(),
+        });
+    }
+    let tokens = token.split(' ').collect::<Vec<_>>();
+    if tokens.iter().any(|part| part.is_empty()) {
+        return Err(ScriptRuntimeCommandError::InvalidNumericToken {
+            command: command.to_string(),
+            token: token.to_string(),
+        });
+    }
+    let value = match tokens.as_slice() {
+        [constant] => menu_coord_constant(command, constant)?,
+        [constant, "+", amount] => {
+            menu_coord_constant(command, constant)? + parse_i16_token(command, amount)?
+        }
+        [constant, "-", amount] => {
+            menu_coord_constant(command, constant)? - parse_i16_token(command, amount)?
+        }
+        _ => {
+            return Err(ScriptRuntimeCommandError::InvalidNumericToken {
+                command: command.to_string(),
+                token: token.to_string(),
+            });
+        }
+    };
+    Ok(value)
+}
+
+fn menu_coord_constant(command: &str, token: &str) -> Result<i16, ScriptRuntimeCommandError> {
+    match token {
+        "SCREEN_LEFT" | "SCREEN_TOP" => Ok(0),
+        "SCREEN_WIDTH" => Ok(20),
+        "SCREEN_HEIGHT" => Ok(18),
+        "SCREEN_EDGE" | "SCREEN_RIGHT" => Ok(19),
+        "SCREEN_BOTTOM" => Ok(17),
+        "TEXTBOX_Y" => Ok(12),
+        _ => Err(ScriptRuntimeCommandError::UnknownNumericToken {
+            command: command.to_string(),
+            token: token.to_string(),
+        }),
+    }
+}
+
 fn parse_u16_token(command: &str, token: &str) -> Result<u16, ScriptRuntimeCommandError> {
     let value = parse_i32_token(command, token)?;
     u16::try_from(value).map_err(|_| ScriptRuntimeCommandError::UnknownNumericToken {
@@ -1150,6 +1251,13 @@ fn parse_u32_token(command: &str, token: &str) -> Result<u32, ScriptRuntimeComma
         command: command.to_string(),
         token: token.to_string(),
     })
+}
+
+pub fn parse_script_i32_token(
+    command: &str,
+    token: &str,
+) -> Result<i32, ScriptRuntimeCommandError> {
+    parse_i32_token(command, token)
 }
 
 fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeCommandError> {
@@ -1234,7 +1342,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("special", 1),
         ("pause", 1),
         ("earthquake", 1),
-        ("showemote", 3),
         ("setlasttalked", 1),
         ("variablesprite", 2),
         ("gettrainername", 3),
@@ -1251,9 +1358,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("lockall", 0),
         ("releaseall", 0),
         ("stop", 0),
-        ("faceplayer", 0),
-        ("endifjustbattled", 0),
-        ("jumpstd", 1),
         ("itemnotify", 0),
         ("addval", 1),
         ("verbosegiveitemvar", 2),
@@ -1269,7 +1373,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("blackoutmod", 1),
         ("wait", 1),
         ("random", 1),
-        ("checkscene", 0),
         ("battletowertext", 1),
         ("halloffame", 0),
         ("credits", 0),
@@ -1380,6 +1483,11 @@ mod tests {
         assert_eq!(counts.get("lockall"), Some(&0));
         assert_eq!(counts.get("releaseall"), Some(&0));
         assert_eq!(counts.get("stop"), Some(&0));
+        assert!(!counts.contains_key("checkscene"));
+        assert!(!counts.contains_key("endifjustbattled"));
+        assert!(!counts.contains_key("faceplayer"));
+        assert!(!counts.contains_key("jumpstd"));
+        assert!(!counts.contains_key("showemote"));
         assert!(!counts.contains_key("SPECIAL"));
 
         assert_eq!(
@@ -1719,6 +1827,24 @@ mod tests {
     }
 
     #[test]
+    fn catchtutorial_records_battle_type_and_sets_true_script_value() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(
+            &mut state,
+            command("catchtutorial", &["BATTLETYPE_TUTORIAL"]),
+            default_inputs(),
+        )
+        .expect("catchtutorial");
+
+        assert_eq!(
+            state.script_runtime.catch_tutorials,
+            vec!["BATTLETYPE_TUTORIAL".to_string()]
+        );
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+    }
+
+    #[test]
     fn specialphonecall_none_clears_queued_calls_without_saving_sentinel() {
         let mut state = GameState::default();
 
@@ -1813,11 +1939,25 @@ mod tests {
             command("random", &["10"]),
             ScriptRuntimeInputs {
                 random_value: Some(7),
-                game_version: None,
+                rng_seed_after: Some(1234),
+                ..ScriptRuntimeInputs::default()
             },
         )
         .expect("random");
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
+        assert_eq!(state.rng_seed, 1234);
+
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command("random", &["10"]),
+                ScriptRuntimeInputs {
+                    random_value: Some(7),
+                    ..ScriptRuntimeInputs::default()
+                },
+            ),
+            Err(ScriptRuntimeCommandError::MissingRandomSeedAfter)
+        ));
 
         assert!(matches!(
             apply_script_runtime_command(
@@ -1825,7 +1965,7 @@ mod tests {
                 command("random", &["10"]),
                 ScriptRuntimeInputs {
                     random_value: Some(10),
-                    game_version: None,
+                    ..ScriptRuntimeInputs::default()
                 },
             ),
             Err(ScriptRuntimeCommandError::RandomInputOutOfRange { .. })
@@ -1836,11 +1976,25 @@ mod tests {
                 command("random", &["0"]),
                 ScriptRuntimeInputs {
                     random_value: Some(0),
-                    game_version: None,
+                    ..ScriptRuntimeInputs::default()
                 },
             ),
             Err(ScriptRuntimeCommandError::RandomBoundZero)
         );
+
+        assert!(matches!(
+            apply_script_runtime_command(
+                &mut state,
+                command("addval", &["1"]),
+                ScriptRuntimeInputs {
+                    random_value: Some(0),
+                    rng_seed_after: Some(1234),
+                    ..ScriptRuntimeInputs::default()
+                },
+            ),
+            Err(ScriptRuntimeCommandError::UnexpectedRandomInput { command })
+                if command == "addval"
+        ));
     }
 
     #[test]
@@ -1871,8 +2025,8 @@ mod tests {
             &mut state,
             command("checkver", &[]),
             ScriptRuntimeInputs {
-                random_value: None,
                 game_version: Some("CRYSTAL".to_string()),
+                ..ScriptRuntimeInputs::default()
             },
         )
         .expect("checkver");
@@ -2359,6 +2513,99 @@ mod tests {
     }
 
     #[test]
+    fn menu_coords_accepts_verified_screen_coordinate_expressions() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(
+            &mut state,
+            command(
+                "menu_coords",
+                &["SCREEN_LEFT", "2", "SCREEN_WIDTH - 1", "TEXTBOX_Y - 1"],
+            ),
+            default_inputs(),
+        )
+        .expect("menu coords");
+
+        assert_eq!(state.script_runtime.menu_coords, Some([0, 2, 19, 11]));
+    }
+
+    #[test]
+    fn exported_script_numeric_parser_preserves_exact_asm_tokens() {
+        assert_eq!(parse_script_i32_token("raw_script", "$10"), Ok(16));
+        assert_eq!(parse_script_i32_token("raw_script", "%1010"), Ok(10));
+        assert_eq!(parse_script_i32_token("raw_script", "-2"), Ok(-2));
+        assert_eq!(parse_script_i32_token("raw_script", "+1"), Ok(1));
+        assert!(matches!(
+            parse_script_i32_token("raw_script", "0x10"),
+            Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
+        ));
+    }
+
+    #[test]
+    fn menu_coords_rejects_unknown_coordinate_symbols_without_fallback() {
+        let mut state = GameState::default();
+
+        let error = apply_script_runtime_command(
+            &mut state,
+            command("menu_coords", &["0", "0", "SCREEN_EDGE + LEFT", "8"]),
+            default_inputs(),
+        )
+        .expect_err("unknown coordinate expression rejected");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::UnknownNumericToken {
+                command: "menu_coords".to_string(),
+                token: "LEFT".to_string(),
+            }
+        );
+        assert_eq!(state.script_runtime.menu_coords, None);
+    }
+
+    #[test]
+    fn menu_coords_rejects_padded_coordinate_expressions_without_normalization() {
+        let mut state = GameState::default();
+
+        let error = apply_script_runtime_command(
+            &mut state,
+            command(
+                "menu_coords",
+                &["SCREEN_LEFT", "2", "SCREEN_WIDTH  - 1", "TEXTBOX_Y"],
+            ),
+            default_inputs(),
+        )
+        .expect_err("padded coordinate expression rejected");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::InvalidNumericToken {
+                command: "menu_coords".to_string(),
+                token: "SCREEN_WIDTH  - 1".to_string(),
+            }
+        );
+        assert_eq!(state.script_runtime.menu_coords, None);
+
+        let error = apply_script_runtime_command(
+            &mut state,
+            command(
+                "menu_coords",
+                &["SCREEN_LEFT", "2", "SCREEN_WIDTH\t-\t1", "TEXTBOX_Y"],
+            ),
+            default_inputs(),
+        )
+        .expect_err("tabbed coordinate expression rejected");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::InvalidNumericToken {
+                command: "menu_coords".to_string(),
+                token: "SCREEN_WIDTH\t-\t1".to_string(),
+            }
+        );
+        assert_eq!(state.script_runtime.menu_coords, None);
+    }
+
+    #[test]
     fn story_event_script_constants_require_explicit_maps_field() {
         let missing_maps = serde_json::from_str::<StoryEventScriptConstants>(r#"{"global":{}}"#)
             .expect_err("story event constants must declare map constants explicitly")
@@ -2447,6 +2694,42 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn apply_initialize_events_sets_pack_defined_flags_and_variable_sprites() {
+        let mut state = GameState::default();
+        let config = InitializeEventsConfig {
+            event_flags: vec![
+                "EVENT_GOT_STARTER".to_string(),
+                "EVENT_INITIALIZED_EVENTS".to_string(),
+            ],
+            engine_flags: vec!["ENGINE_POKEGEAR".to_string()],
+            variable_sprites: [(
+                "SPRITE_FUCHSIA_GYM_1".to_string(),
+                "SPRITE_ROCKER".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        apply_initialize_events(&mut state, &config).expect("apply initialize events");
+
+        assert_eq!(state.flags.is_event_flag_set("EVENT_GOT_STARTER"), Ok(true));
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_INITIALIZED_EVENTS"),
+            Ok(true)
+        );
+        assert_eq!(state.flags.is_engine_flag_set("ENGINE_POKEGEAR"), Ok(true));
+        assert_eq!(
+            state
+                .script_runtime
+                .variable_sprites
+                .get("SPRITE_FUCHSIA_GYM_1")
+                .map(String::as_str),
+            Some("SPRITE_ROCKER")
+        );
+        assert_eq!(state.script_runtime.next_script, None);
     }
 
     #[test]

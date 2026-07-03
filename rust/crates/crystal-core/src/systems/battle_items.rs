@@ -3,15 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::pokemon::StatExperience;
 use crate::models::{
-    ITEM_POCKET_TM_HM, Item, Move, Party, Pokemon, PokemonSpecies, Stat, calculate_stats,
-    max_move_pp,
+    ITEM_POCKET_TM_HM, Item, LearnedMove, Move, Party, Pokemon, PokemonSpecies, Stat,
+    calculate_stats, max_move_pp,
 };
 use crate::state::{BattleMemory, GameState};
 use crate::systems::battle_rewards::{
     BattleRewardError, BattleRewardRules, apply_direct_level_gain,
 };
 use crate::systems::evolution::{
-    EvolutionContext, EvolutionError, EvolutionEvent, EvolutionTable, LinkMode, check_and_evolve,
+    EvolutionContext, EvolutionError, EvolutionEvent, EvolutionReport, EvolutionTable, LinkMode,
+    check_and_evolve,
 };
 use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
@@ -81,6 +82,8 @@ pub struct BattleItemOutcome {
     pub stat_changes: Vec<BattleItemStatChange>,
     pub battle_stat_stage_changes: Vec<BattleItemStageChange>,
     pub learned_moves: Vec<String>,
+    pub pending_move_learns: Vec<LearnedMove>,
+    pub deferred_level_evolution: bool,
     pub evolution_target: Option<String>,
     pub consumed: bool,
 }
@@ -138,7 +141,7 @@ pub enum BattleItemError {
     #[error("battle item {item_id} declares no battle item payload")]
     MissingBattleItemPayload { item_id: String },
     #[error("battle item effect plan field {field} has invalid token {value}")]
-    InvalidEffectPlanToken { field: &'static str, value: String },
+    InvalidEffectPlanToken { field: String, value: String },
     #[error("battle item {item_id} has invalid heal amount {amount}")]
     InvalidHealAmount { item_id: String, amount: i16 },
     #[error("battle item {item_id} cannot heal a fainted Pokemon")]
@@ -159,6 +162,8 @@ pub enum BattleItemError {
     InvalidPpRestoreScope { item_id: String, scope: String },
     #[error("battle item {item_id} requires a move slot for PP restore")]
     MissingMoveSlot { item_id: String },
+    #[error("battle item {item_id} must not declare a move slot for whole-Pokemon PP restore")]
+    UnexpectedMoveSlot { item_id: String },
     #[error("battle item {item_id} move slot {slot} is outside the target moves")]
     MoveSlotOutOfRange { item_id: String, slot: usize },
     #[error("battle item {item_id} references invalid move id {move_id}")]
@@ -280,6 +285,7 @@ pub enum ItemPayloadIssue {
     MissingBattleStatDropGuardTurns,
     InvalidBattleStatDropGuardTurns { turns: u8 },
     InvalidBattleEscapeMode { mode: String },
+    InvalidBattleCaptureBall,
     InvalidRepelSteps { steps: u16 },
     InvalidBattleFocusEnergy,
     InvalidConfusionHeal,
@@ -289,6 +295,8 @@ pub enum ItemPayloadIssue {
     InvalidTmhmMove { move_id: String },
     InvalidFieldUsableMenu { menu: String, usable: bool },
     InvalidBattleUsableMenu { menu: String, usable: bool },
+    MissingFieldItemPayload,
+    MissingBattleItemPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +305,13 @@ pub enum ItemReferenceIssue {
 }
 
 pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
+    item_payload_issues_with_known_field_rules(item, true)
+}
+
+pub fn item_payload_issues_with_known_field_rules(
+    item: &Item,
+    has_field_item_rule: bool,
+) -> Vec<ItemPayloadIssue> {
     let mut issues = Vec::new();
     if item.name.trim().is_empty() {
         issues.push(ItemPayloadIssue::MissingName);
@@ -340,7 +355,7 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
             held_effect: item.held_effect.clone(),
         });
     }
-    if !item.property.is_empty() && !is_exact_item_id_token(&item.property) {
+    if !item.property.is_empty() && !is_exact_item_property_expression(&item.property) {
         issues.push(ItemPayloadIssue::InvalidProperty {
             property: item.property.clone(),
         });
@@ -460,6 +475,9 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
             });
         }
     }
+    if let Some(false) = item.battle_capture_ball {
+        issues.push(ItemPayloadIssue::InvalidBattleCaptureBall);
+    }
     if let Some(0) = item.repel_steps {
         issues.push(ItemPayloadIssue::InvalidRepelSteps { steps: 0 });
     }
@@ -493,7 +511,9 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
             }
         }
     }
-    if (item.field_menu == "ITEMMENU_NOUSE") == item.field_usable {
+    if (item.field_menu == "ITEMMENU_NOUSE") == item.field_usable
+        && !is_exact_field_usable_effect_with_no_menu(item)
+    {
         issues.push(ItemPayloadIssue::InvalidFieldUsableMenu {
             menu: item.field_menu.clone(),
             usable: item.field_usable,
@@ -505,7 +525,35 @@ pub fn item_payload_issues(item: &Item) -> Vec<ItemPayloadIssue> {
             usable: item.battle_usable,
         });
     }
+    if item.field_usable && !has_field_item_rule && !has_intrinsic_field_item_payload(item) {
+        issues.push(ItemPayloadIssue::MissingFieldItemPayload);
+    }
+    if item.battle_usable
+        && active_battle_item_effect_plan(item).is_none()
+        && battle_pp_item_effect_plan(item).is_none()
+        && party_wide_item_effect_plan(item).is_none()
+        && item.battle_escape_mode.is_none()
+        && item.battle_capture_ball != Some(true)
+        && item.battle_stat_drop_guard != Some(true)
+    {
+        issues.push(ItemPayloadIssue::MissingBattleItemPayload);
+    }
     issues
+}
+
+fn has_intrinsic_field_item_payload(item: &Item) -> bool {
+    item.repel_steps.is_some()
+        || item.escape_rope_mode.is_some()
+        || item.rare_candy_level_gain.is_some()
+        || matches!(item.effect.as_str(), "EVO_STONE" | "BASEMENT_KEY" | "CARD_KEY")
+        || item.pocket == ITEM_POCKET_TM_HM
+        || active_battle_item_effect_plan(item).is_some()
+        || battle_pp_item_effect_plan(item).is_some()
+        || party_wide_item_effect_plan(item).is_some()
+}
+
+fn is_exact_field_usable_effect_with_no_menu(item: &Item) -> bool {
+    item.field_menu == "ITEMMENU_NOUSE" && item.field_usable && item.effect == "TOWN_MAP"
 }
 
 fn is_exact_item_id_token(value: &str) -> bool {
@@ -515,6 +563,44 @@ fn is_exact_item_id_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_item_effect_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_exact_item_effect_behavior_token(value: &str) -> bool {
+    matches!(
+        value,
+        ITEM_EFFECT_BEHAVIOR_REVIVE
+            | ITEM_EFFECT_BEHAVIOR_VITAMIN
+            | ITEM_EFFECT_BEHAVIOR_BATTLE_STAT_BOOST
+            | ITEM_EFFECT_BEHAVIOR_DIRE_HIT
+            | ITEM_EFFECT_BEHAVIOR_CONFUSION_HEAL
+            | ITEM_EFFECT_BEHAVIOR_FULL_RESTORE
+            | ITEM_EFFECT_BEHAVIOR_FULL_HEAL
+            | ITEM_EFFECT_BEHAVIOR_STATUS_HEAL
+            | ITEM_EFFECT_BEHAVIOR_RESTORE_HP
+            | ITEM_EFFECT_BEHAVIOR_PP_UP
+            | ITEM_EFFECT_BEHAVIOR_RESTORE_PP
+            | ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE
+            | ITEM_EFFECT_BEHAVIOR_RARE_CANDY
+            | ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE
+    )
+}
+
+fn is_exact_item_property_expression(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !has_reserved_pack_prefix(value)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'|' | b' '))
 }
 
 fn has_reserved_pack_prefix(value: &str) -> bool {
@@ -716,8 +802,8 @@ pub fn apply_active_battle_item_effect(
         ITEM_EFFECT_BEHAVIOR_FULL_HEAL => apply_full_heal(pokemon, item, consumed),
         ITEM_EFFECT_BEHAVIOR_STATUS_HEAL => apply_status_heal(pokemon, item, consumed),
         ITEM_EFFECT_BEHAVIOR_RESTORE_HP => apply_restore_hp(pokemon, item, consumed),
-        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
-            item_id: behavior_id.to_string(),
+        _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
         }),
     }
 }
@@ -740,8 +826,8 @@ pub fn apply_battle_pp_item_effect(
         ITEM_EFFECT_BEHAVIOR_RESTORE_PP => {
             apply_restore_pp(pokemon, item, moves, move_slot, consumed)
         }
-        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
-            item_id: behavior_id.to_string(),
+        _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
         }),
     }
 }
@@ -759,8 +845,8 @@ pub fn apply_party_wide_item_effect(
     validate_battle_item_effect_plan(&plan)?;
     match plan.behavior_id.as_str() {
         ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE => apply_sacred_ash(party, item, consumed),
-        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
-            item_id: behavior_id.to_string(),
+        _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
         }),
     }
 }
@@ -802,12 +888,12 @@ fn battle_item_effect_plan(
 }
 
 fn validate_battle_item_effect_plan(plan: &BattleItemEffectPlan) -> Result<(), BattleItemError> {
-    validate_battle_item_effect_plan_token("item_id", &plan.item_id)?;
-    validate_battle_item_effect_plan_token("effect_id", &plan.effect_id)?;
-    validate_battle_item_effect_plan_token("behavior_id", &plan.behavior_id)
+    validate_battle_item_effect_item_id("item_id", &plan.item_id)?;
+    validate_battle_item_effect_id("effect_id", &plan.effect_id)?;
+    validate_battle_item_effect_behavior_id("behavior_id", &plan.behavior_id)
 }
 
-fn validate_battle_item_effect_plan_token(
+fn validate_battle_item_effect_item_id(
     field: &'static str,
     value: &str,
 ) -> Result<(), BattleItemError> {
@@ -815,7 +901,32 @@ fn validate_battle_item_effect_plan_token(
         Ok(())
     } else {
         Err(BattleItemError::InvalidEffectPlanToken {
-            field,
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
+
+fn validate_battle_item_effect_id(field: &'static str, value: &str) -> Result<(), BattleItemError> {
+    if is_exact_item_effect_token(value) {
+        Ok(())
+    } else {
+        Err(BattleItemError::InvalidEffectPlanToken {
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
+
+fn validate_battle_item_effect_behavior_id(
+    field: &'static str,
+    value: &str,
+) -> Result<(), BattleItemError> {
+    if is_exact_item_effect_behavior_token(value) {
+        Ok(())
+    } else {
+        Err(BattleItemError::InvalidEffectPlanToken {
+            field: field.to_string(),
             value: value.to_string(),
         })
     }
@@ -973,8 +1084,16 @@ pub fn apply_rare_candy_item_effect(
         force_evolution: false,
         link_mode: LinkMode::None,
     };
-    let evolution = check_and_evolve(&mut changed, evolutions, &evolution_context, true)
-        .map_err(|error| rare_candy_evolution_error(&item.script_name, error))?;
+    let mut pending_move_learns = level_up.pending_move_learns;
+    let deferred_level_evolution = level_up.deferred_level_evolution;
+    let evolution = if deferred_level_evolution {
+        EvolutionReport::default()
+    } else {
+        let evolution = check_and_evolve(&mut changed, evolutions, &evolution_context, true)
+            .map_err(|error| rare_candy_evolution_error(&item.script_name, error))?;
+        pending_move_learns.extend(evolution.pending_move_learns.clone());
+        evolution
+    };
     *pokemon = changed;
 
     Ok(BattleItemOutcome {
@@ -995,6 +1114,8 @@ pub fn apply_rare_candy_item_effect(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: level_up.learned_moves,
+        pending_move_learns,
+        deferred_level_evolution,
         evolution_target: evolution.target_species,
         consumed,
     })
@@ -1041,8 +1162,8 @@ pub fn apply_party_special_item_effect(
             time_of_day,
             consumed,
         ),
-        behavior_id => Err(BattleItemError::MissingBattleItemPayload {
-            item_id: behavior_id.to_string(),
+        _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
+            item_id: item.script_name.clone(),
         }),
     }
 }
@@ -1086,6 +1207,7 @@ pub fn apply_evolution_stone_item_effect(
             _ => None,
         })
         .collect();
+    let pending_move_learns = evolution.pending_move_learns;
     *pokemon = changed;
 
     Ok(BattleItemOutcome {
@@ -1106,6 +1228,8 @@ pub fn apply_evolution_stone_item_effect(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves,
+        pending_move_learns,
+        deferred_level_evolution: false,
         evolution_target: Some(evolution_target),
         consumed,
     })
@@ -1143,6 +1267,8 @@ fn apply_restore_hp(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1181,6 +1307,8 @@ fn apply_full_restore(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1232,6 +1360,8 @@ fn apply_status_heal(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1296,6 +1426,8 @@ fn apply_full_heal(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1347,6 +1479,8 @@ fn apply_revive(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1384,7 +1518,14 @@ fn apply_restore_pp(
             }
             vec![slot]
         }
-        "POKEMON" => (0..pokemon.moves.len()).collect(),
+        "POKEMON" => {
+            if move_slot.is_some() {
+                return Err(BattleItemError::UnexpectedMoveSlot {
+                    item_id: item.script_name.clone(),
+                });
+            }
+            (0..pokemon.moves.len()).collect()
+        }
         other => {
             return Err(BattleItemError::InvalidPpRestoreScope {
                 item_id: item.script_name.clone(),
@@ -1448,6 +1589,8 @@ fn apply_restore_pp(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1539,6 +1682,8 @@ fn apply_pp_up(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1622,6 +1767,8 @@ fn apply_vitamin(
         }],
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1692,6 +1839,8 @@ fn apply_battle_stat_boost(
             stage_after,
         }],
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1742,6 +1891,8 @@ fn apply_battle_focus_energy(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1792,6 +1943,8 @@ fn apply_confusion_heal(
         stat_changes: Vec::new(),
         battle_stat_stage_changes: Vec::new(),
         learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
         evolution_target: None,
         consumed,
     })
@@ -1967,28 +2120,39 @@ mod tests {
     }
 
     #[test]
-    fn battle_item_error_json_rejects_unknown_fallback_fields() {
-        let item_error = serde_json::from_value::<BattleItemError>(serde_json::json!({
-            "MissingBattleItemPayload": {
-                "item_id": "POTION",
-                "fallback_effect": "RESTORE_HP"
-            }
+    fn battle_item_effect_plan_json_rejects_unknown_fallback_fields() {
+        let item_error = serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+            "item_id": "POTION",
+            "effect_id": "RESTORE_HP",
+            "behavior_id": "RESTORE_HP",
+            "fallback_effect": "RESTORE_HP"
         }))
-        .expect_err("battle item errors must not accept fallback effects")
+        .expect_err("battle item effect plans must not accept fallback effects")
         .to_string();
         assert!(
             item_error.contains("unknown field `fallback_effect`"),
             "{item_error}"
         );
 
-        let move_error = serde_json::from_value::<BattleItemError>(serde_json::json!({
-            "UnknownMove": {
-                "item_id": "ETHER",
-                "move_id": "MOD_MOVE",
-                "legacy_move_id": "TACKLE"
+        let nested_error = serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+            "item_id": "POTION",
+            "effect_id": "RESTORE_HP",
+            "behavior_id": {
+                "item_id": "POTION",
+                "fallback_effect": "RESTORE_HP"
             }
         }))
-        .expect_err("battle item errors must not accept legacy move ids")
+        .expect_err("battle item effect plans must not accept object aliases")
+        .to_string();
+        assert!(nested_error.contains("invalid type"), "{nested_error}");
+
+        let move_error = serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+            "item_id": "ETHER",
+            "effect_id": "RESTORE_PP",
+            "behavior_id": "RESTORE_PP",
+            "legacy_move_id": "TACKLE"
+        }))
+        .expect_err("battle item effect plans must not accept legacy move ids")
         .to_string();
         assert!(
             move_error.contains("unknown field `legacy_move_id`"),
@@ -2007,6 +2171,7 @@ mod tests {
         let pokemon = test_pokemon(10, 20);
         state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon.clone()],
@@ -2062,6 +2227,7 @@ mod tests {
 
         state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon],
@@ -2094,7 +2260,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -2223,6 +2390,7 @@ mod tests {
         let mut wild = GameState::default();
         wild.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon],
@@ -2617,6 +2785,7 @@ mod tests {
 
         item.field_menu = "ITEMMENU_MODDED".to_string();
         item.battle_menu = "ITEMMENU_MODDED_BATTLE".to_string();
+        item.parameter = 1;
         assert_eq!(item_payload_issues(&item), Vec::new());
     }
 
@@ -2647,6 +2816,63 @@ mod tests {
         item.battle_menu = "ITEMMENU_NOUSE".to_string();
         item.battle_usable = false;
         assert_eq!(item_payload_issues(&item), Vec::new());
+
+        let mut town_map = test_item("TOWN_MAP", 0);
+        town_map.effect = "TOWN_MAP".to_string();
+        town_map.field_menu = "ITEMMENU_NOUSE".to_string();
+        town_map.field_usable = true;
+        assert_eq!(item_payload_issues(&town_map), Vec::new());
+
+        let mut bad_map = test_item("BAD_MAP", 0);
+        bad_map.effect = "MOD_TOWN_MAP".to_string();
+        bad_map.field_menu = "ITEMMENU_NOUSE".to_string();
+        bad_map.field_usable = true;
+        assert_eq!(
+            item_payload_issues(&bad_map),
+            vec![ItemPayloadIssue::InvalidFieldUsableMenu {
+                menu: "ITEMMENU_NOUSE".to_string(),
+                usable: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn battle_usable_items_require_declared_battle_payload() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.battle_menu = "ITEMMENU_PARTY".to_string();
+        item.battle_usable = true;
+
+        assert_eq!(
+            item_payload_issues(&item),
+            vec![ItemPayloadIssue::MissingBattleItemPayload]
+        );
+
+        item.parameter = 20;
+        assert_eq!(item_payload_issues(&item), Vec::new());
+    }
+
+    #[test]
+    fn field_usable_items_require_declared_payload_or_pack_rule() {
+        let mut item = test_item("MOD_ITEM", 0);
+        item.field_menu = "ITEMMENU_CURRENT".to_string();
+        item.field_usable = true;
+        item.battle_menu = "ITEMMENU_NOUSE".to_string();
+        item.battle_usable = false;
+
+        assert_eq!(
+            item_payload_issues_with_known_field_rules(&item, false),
+            vec![ItemPayloadIssue::MissingFieldItemPayload]
+        );
+        assert_eq!(
+            item_payload_issues_with_known_field_rules(&item, true),
+            Vec::new()
+        );
+
+        item.repel_steps = Some(100);
+        assert_eq!(
+            item_payload_issues_with_known_field_rules(&item, false),
+            Vec::new()
+        );
     }
 
     fn pp_up_item(stages: Option<u8>) -> Item {
@@ -3181,6 +3407,23 @@ mod tests {
         );
         assert_eq!(pokemon.moves[0].current_pp, 35);
         assert_eq!(pokemon.moves[1].current_pp, 11);
+    }
+
+    #[test]
+    fn battle_items_elixir_rejects_unused_move_slot_without_mutation() {
+        let item = pp_item(Some("POKEMON"), Some(10));
+        let moves = move_catalog();
+        let mut pokemon = pokemon_with_pp(28, 1);
+        let before = pokemon.clone();
+
+        assert_eq!(
+            apply_battle_pp_item_effect(&mut pokemon, &item, &moves, Some(0), true)
+                .expect_err("whole-Pokemon PP restore must not receive a selected move"),
+            BattleItemError::UnexpectedMoveSlot {
+                item_id: "ETHER".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
     }
 
     #[test]
@@ -4222,7 +4465,7 @@ mod tests {
         assert_eq!(
             error,
             BattleItemError::MissingBattleItemPayload {
-                item_id: "POTION".to_string(),
+                item_id: "MOD_UNDECLARED".to_string(),
             }
         );
         assert_eq!(pokemon, before);
@@ -4240,7 +4483,7 @@ mod tests {
         assert_eq!(
             error,
             BattleItemError::InvalidEffectPlanToken {
-                field: "effect_id",
+                field: "effect_id".to_string(),
                 value: "RESTORE HP".to_string(),
             }
         );
@@ -4253,11 +4496,59 @@ mod tests {
         assert_eq!(
             error,
             BattleItemError::InvalidEffectPlanToken {
-                field: "item_id",
+                field: "item_id".to_string(),
                 value: "fallback_potion".to_string(),
             }
         );
         assert_eq!(pokemon, before);
+    }
+
+    #[test]
+    fn battle_item_effect_plan_tokens_are_exact_without_item_id_or_enum_coercion() {
+        let plan = serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+            "item_id": "MOD_POTION",
+            "effect_id": "MODDED_RESTORE_HP",
+            "behavior_id": "RESTORE_HP"
+        }))
+        .expect("modded exact effect ids remain strings");
+        assert_eq!(plan.item_id, "MOD_POTION");
+        assert_eq!(plan.effect_id, "MODDED_RESTORE_HP");
+        assert_eq!(plan.behavior_id, "RESTORE_HP");
+
+        let behavior_error = serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+            "item_id": "MOD_POTION",
+            "effect_id": "MODDED_RESTORE_HP",
+            "behavior_id": "restore_hp"
+        }))
+        .expect_err("behavior id must be exact")
+        .to_string();
+        assert!(behavior_error.contains("behavior_id"), "{behavior_error}");
+
+        let unknown_behavior_error =
+            serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+                "item_id": "MOD_POTION",
+                "effect_id": "MODDED_RESTORE_HP",
+                "behavior_id": "MODDED_RESTORE_HP"
+            }))
+            .expect_err("behavior id must be an implemented runtime behavior")
+            .to_string();
+        assert!(
+            unknown_behavior_error.contains("behavior_id"),
+            "{unknown_behavior_error}"
+        );
+
+        let reserved_effect_error =
+            serde_json::from_value::<BattleItemEffectPlan>(serde_json::json!({
+                "item_id": "MOD_POTION",
+                "effect_id": "fallback_restore_hp",
+                "behavior_id": "RESTORE_HP"
+            }))
+            .expect_err("reserved effect ids reject")
+            .to_string();
+        assert!(
+            reserved_effect_error.contains("effect_id"),
+            "{reserved_effect_error}"
+        );
     }
 
     #[test]

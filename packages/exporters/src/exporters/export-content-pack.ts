@@ -27,6 +27,7 @@ import type { ExportedPokemonEvolutionData } from "./export-evolutions";
 import type { ExportedFieldEncounterData } from "./export-field-encounters";
 import type { ExportedFishingCatalog } from "./export-fishing";
 import type { ExportedFieldMoveCatalog } from "./export-field-moves";
+import type { ExportedFieldBoxItemRule } from "./export-field-box-items";
 import type { ExportedFlyDestinationTable } from "./export-fly-destinations";
 import type { ExportedBattleRewardRules } from "./export-battle-reward-rules";
 import type { ExportedBattleEscapeRules } from "./export-battle-escape-rules";
@@ -80,6 +81,8 @@ const CONTENT_PACK_CATEGORIES = [
   "step_event_rules",
   "fishing",
   "field_moves",
+  "field_box_items",
+  "runtime_title_screen",
   "fruit_trees",
   "npcs",
   "pokegear_landmarks",
@@ -138,6 +141,11 @@ type CompiledContentPack = {
   categories: Record<ContentPackCategory, unknown[]>;
 };
 
+type ExportedRuntimeTitleScreen = {
+  new_game_spawn_identifier: number | null;
+  title_music: string | null;
+};
+
 export type CoreExportPayload = {
   pokemonData: PokemonSpecies[];
   movesData: Record<string, Move>;
@@ -150,6 +158,8 @@ export type CoreExportPayload = {
   fieldEncounters?: ExportedFieldEncounterData[];
   fishing?: ExportedFishingCatalog;
   fieldMoves?: ExportedFieldMoveCatalog;
+  fieldBoxItems?: Record<string, ExportedFieldBoxItemRule>;
+  runtimeTitleScreen?: ExportedRuntimeTitleScreen;
   flyDestinations?: ExportedFlyDestinationTable;
   fruitTrees?: ExportedFruitTreeCatalog;
   runtimeSpawnPoints?: unknown;
@@ -215,6 +225,139 @@ export type CoreExportPayload = {
 const CORE_PACK_ID = "core-modular";
 const CORE_PACK_PATH = `content-packs/${CORE_PACK_ID}`;
 const MODULE_PREFIX = "module";
+
+type RuntimeSpawnPointPayload = {
+  identifier: number;
+  mapConstant: string;
+  mapName: string;
+  groupId: number;
+  mapId: number;
+  tileX: number;
+  tileY: number;
+  groupName: string;
+  metatileX: number;
+  metatileY: number;
+  subtileX: number;
+  subtileY: number;
+};
+
+const requireIntegerField = (
+  spawn: Record<string, unknown>,
+  key: keyof RuntimeSpawnPointPayload,
+  id: string,
+): number => {
+  const value = spawn[key];
+  if (!Number.isInteger(value)) {
+    throw new Error(`Runtime spawn point ${id} requires integer ${key}`);
+  }
+  return value as number;
+};
+
+const requireStringField = (
+  spawn: Record<string, unknown>,
+  key: keyof RuntimeSpawnPointPayload,
+  id: string,
+): string => {
+  const value = spawn[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Runtime spawn point ${id} requires exact ${key}`);
+  }
+  return value;
+};
+
+const alignRuntimeSpawnPoints = (
+  runtimeSpawnPoints: unknown,
+): Record<string, RuntimeSpawnPointPayload> => {
+  if (
+    typeof runtimeSpawnPoints !== "object" ||
+    runtimeSpawnPoints === null ||
+    Array.isArray(runtimeSpawnPoints)
+  ) {
+    throw new Error("Runtime spawn points payload must be an object map");
+  }
+  const aligned: Record<string, RuntimeSpawnPointPayload> = {};
+  for (const [id, rawSpawn] of Object.entries(runtimeSpawnPoints)) {
+    if (
+      typeof rawSpawn !== "object" ||
+      rawSpawn === null ||
+      Array.isArray(rawSpawn)
+    ) {
+      throw new Error(`Runtime spawn point ${id} must be an object`);
+    }
+    const spawn = rawSpawn as Record<string, unknown>;
+    const identifier = requireIntegerField(spawn, "identifier", id);
+    if (String(identifier) !== id) {
+      throw new Error(
+        `Runtime spawn point key ${id} does not match identifier ${identifier}`,
+      );
+    }
+    const mapConstant = requireStringField(spawn, "mapConstant", id);
+    const mapName = requireStringField(spawn, "mapName", id);
+    const groupName = requireStringField(spawn, "groupName", id);
+    const groupId = requireIntegerField(spawn, "groupId", id);
+    const mapId = requireIntegerField(spawn, "mapId", id);
+    const tileX = requireIntegerField(spawn, "tileX", id);
+    const tileY = requireIntegerField(spawn, "tileY", id);
+    const metatileX = requireIntegerField(spawn, "metatileX", id);
+    const metatileY = requireIntegerField(spawn, "metatileY", id);
+    const subtileX = requireIntegerField(spawn, "subtileX", id);
+    const subtileY = requireIntegerField(spawn, "subtileY", id);
+    if (
+      mapConstant === "N_A" &&
+      mapName === "N_A" &&
+      groupName === "N_A" &&
+      groupId === -1 &&
+      mapId === -1 &&
+      tileX === -1 &&
+      tileY === -1 &&
+      metatileX === -1 &&
+      metatileY === -1 &&
+      subtileX === -1 &&
+      subtileY === -1
+    ) {
+      continue;
+    }
+    const expectedTileX = metatileX * 2 + subtileX;
+    const expectedTileY = metatileY * 2 + subtileY;
+    if (tileX !== expectedTileX || tileY !== expectedTileY) {
+      throw new Error(
+        `Runtime spawn point ${id} tile (${tileX}, ${tileY}) must match metatile/subtile-derived tile (${expectedTileX}, ${expectedTileY})`,
+      );
+    }
+    aligned[id] = {
+      identifier,
+      mapConstant,
+      mapName,
+      groupId,
+      mapId,
+      tileX: metatileX * 2,
+      tileY: metatileY * 2,
+      groupName,
+      metatileX,
+      metatileY,
+      subtileX: 0,
+      subtileY: 0,
+    };
+  }
+  return aligned;
+};
+
+const buildCoreRuntimeTitleScreen = (
+  audioAssets?: Record<string, ExportedAudioAsset>,
+  runtimeSpawnPoints?: unknown,
+): ExportedRuntimeTitleScreen => {
+  const title = audioAssets?.MUSIC_TITLE;
+  if (!title || title.id !== "MUSIC_TITLE" || title.kind !== "music") {
+    throw new Error("Core title screen requires exact MUSIC_TITLE music asset");
+  }
+  const spawn = runtimeSpawnPoints as
+    | Record<string, { identifier?: unknown }>
+    | undefined;
+  if (!spawn?.["0"] || spawn["0"].identifier !== 0) {
+    throw new Error("Core title screen requires exact runtime spawn identifier 0");
+  }
+  return { new_game_spawn_identifier: 0, title_music: title.id };
+};
 
 const assertExactFileStem = (value: string): void => {
   if (value.trim() !== value || value.length === 0) {
@@ -544,7 +687,14 @@ const collectJsonFiles = (relativeDir: ContentPackCategory): string[] => {
     .readdirSync(absoluteDir)
     .filter((entry) => entry.endsWith(".json"))
     .sort()
-    .map((entry) => `${relativeDir}/${entry}`);
+    .map((entry) => {
+      const relativePath = `${CORE_PACK_PATH}/${relativeDir}/${entry}`;
+      const payload = JSON.parse(
+        fs.readFileSync(joinPath(absoluteDir, entry), "utf8"),
+      );
+      writeJsonToTargets(relativePath, payload, { indent: 2 });
+      return relativePath;
+    });
 };
 
 const exactMapNameFromPayload = (
@@ -829,6 +979,8 @@ const buildCompiledCorePack = (
 };
 
 export function exportCoreContentPack(payload: CoreExportPayload): void {
+  const remainingPacks = readPreservedPacks();
+
   removeMatchingOutputs(CORE_PACK_PATH, ".json");
   clearGeneratedAudioOutputs();
 
@@ -937,7 +1089,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       files.runtime_spawn_points,
       "runtime_spawn_points",
       "spawn_points",
-      payload.runtimeSpawnPoints,
+      alignRuntimeSpawnPoints(payload.runtimeSpawnPoints),
     );
   }
   if (payload.flyDestinations) {
@@ -1167,6 +1319,14 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       payload.fieldMoves,
     );
   }
+  if (payload.fieldBoxItems && Object.keys(payload.fieldBoxItems).length > 0) {
+    writeCorePackEntry(
+      files.field_box_items,
+      "field_box_items",
+      "field_box_items",
+      payload.fieldBoxItems,
+    );
+  }
   if (payload.fruitTrees && Object.keys(payload.fruitTrees).length > 0) {
     writeCorePackEntry(
       files.fruit_trees,
@@ -1178,7 +1338,6 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
   for (const [audioId, audioAsset] of Object.entries(payload.audioAssets ?? {})) {
     writeAudioAssetFile(files.audio, audioId, audioAsset, writtenPayloads);
   }
-
   const mapAttributePathByName = new Map<string, string>();
   const mapBlockPathByName = new Map<string, string>();
   const mapDimensionKeyByName = new Map<string, string>();
@@ -1453,6 +1612,13 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       payload.playability,
     );
   }
+  writeCorePackEntry(
+    files.runtime_title_screen,
+    "runtime_title_screen",
+    "title",
+    payload.runtimeTitleScreen ??
+      buildCoreRuntimeTitleScreen(payload.audioAssets, payload.runtimeSpawnPoints),
+  );
   files.story_events.push(...collectJsonFiles("story_events"));
   files.phone_scripts.push(...collectJsonFiles("phone_scripts"));
   writeTilesetAssetFiles(
@@ -1468,7 +1634,6 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { indent: 0 },
   );
 
-  const remainingPacks = readPreservedPacks();
   remainingPacks.push({
     id: CORE_PACK_ID,
     enabled: true,
@@ -1520,6 +1685,8 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "step_event_rules", prefix: "step-event-rules" },
     { category: "fishing", prefix: "fishing" },
     { category: "field_moves", prefix: "field-moves" },
+    { category: "field_box_items", prefix: "field-box-items" },
+    { category: "runtime_title_screen", prefix: "runtime-title-screen" },
     { category: "fruit_trees", prefix: "fruit-trees" },
     { category: "pokemon", prefix: "pokemon" },
     { category: "moves", prefix: "move" },

@@ -265,7 +265,7 @@ impl PokedexState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum PokedexSaveError {
     #[error("saved {path} {species} is missing from compiled pack pokemon")]

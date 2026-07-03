@@ -7,6 +7,7 @@ use crate::models::Item;
 use crate::state::{EventFlagError, GameState};
 use crate::systems::script_objects::is_hideable_object_event_flag;
 use crate::world::map::TilePosition;
+use crate::world::session::background_event_tile_position_checked;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -70,7 +71,7 @@ impl<'de> Deserialize<'de> for ScriptFieldPickup {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawPickup {
-            #[serde(default, deserialize_with = "required_script_field_pickup_command_token")]
+            #[serde(deserialize_with = "required_script_field_pickup_command_token")]
             command: String,
             #[serde(deserialize_with = "required_nullable_field_item_token")]
             item_id: Option<String>,
@@ -85,8 +86,7 @@ impl<'de> Deserialize<'de> for ScriptFieldPickup {
         }
 
         let raw = RawPickup::deserialize(deserializer)?;
-        if !raw.command.is_empty() {
-            match raw.command.as_str() {
+        match raw.command.as_str() {
             "itemball" | "hiddenitem" => {
                 if raw.quantity == 0 {
                     return Err(serde::de::Error::custom(
@@ -132,7 +132,6 @@ impl<'de> Deserialize<'de> for ScriptFieldPickup {
                     raw.command
                 )));
             }
-            }
         }
 
         Ok(Self {
@@ -159,12 +158,12 @@ impl<'de> Deserialize<'de> for FruitTreeCatalog {
         for (fruit_tree_id, item_id) in &values {
             validate_field_item_token(fruit_tree_id).map_err(|_| {
                 serde::de::Error::custom(format!(
-                    "fruit tree id must be exact ASCII alphanumeric/underscore, found {fruit_tree_id:?}"
+                    "fruit tree catalog entry id '{fruit_tree_id}' must be exact ASCII alphanumeric or underscore"
                 ))
             })?;
             validate_field_item_token(item_id).map_err(|_| {
                 serde::de::Error::custom(format!(
-                    "fruit tree item id must be exact ASCII alphanumeric/underscore, found {item_id:?}"
+                    "fruit tree item id '{item_id}' must be exact ASCII alphanumeric or underscore"
                 ))
             })?;
         }
@@ -536,6 +535,11 @@ pub enum FieldItemError {
         x: u16,
         y: u16,
     },
+    HiddenItemCoordinatesOutOfRange {
+        source_script: String,
+        x: u16,
+        y: u16,
+    },
     MissingHiddenItemEventFlag {
         source_script: String,
         map_name: String,
@@ -563,7 +567,14 @@ pub fn find_itemfinder_hidden_item(
         if event.event_type != "BGEVENT_ITEM" {
             continue;
         }
-        if !event_in_itemfinder_range(event.x, event.y, player_tile) {
+        let event_tile = background_event_tile_position_checked(event).ok_or_else(|| {
+            FieldItemError::HiddenItemCoordinatesOutOfRange {
+                source_script: event.script.clone(),
+                x: event.x,
+                y: event.y,
+            }
+        })?;
+        if !event_in_itemfinder_range(event_tile, player_tile) {
             continue;
         }
         let pickup = script_field_pickups
@@ -597,7 +608,7 @@ pub fn find_itemfinder_hidden_item(
                 })?;
         return Ok(Some(ItemfinderHiddenItem {
             map_name: map_name.to_string(),
-            tile: TilePosition::new(event.x as i16, event.y as i16),
+            tile: event_tile,
             source_script: pickup.source_script.clone(),
             event_flag: event_flag.clone(),
             item_id: item_id.clone(),
@@ -606,18 +617,30 @@ pub fn find_itemfinder_hidden_item(
     Ok(None)
 }
 
-fn event_in_itemfinder_range(event_x: u16, event_y: u16, player_tile: TilePosition) -> bool {
+fn event_in_itemfinder_range(event_tile: TilePosition, player_tile: TilePosition) -> bool {
     const SCREEN_WIDTH_TILES: i16 = 20;
     const SCREEN_HEIGHT_TILES: i16 = 18;
     let x_margin = SCREEN_WIDTH_TILES / 4;
     let y_margin = SCREEN_HEIGHT_TILES / 4;
     let half_width = SCREEN_WIDTH_TILES / 2;
     let half_height = SCREEN_HEIGHT_TILES / 2;
-    let dx = player_tile.x + x_margin - event_x as i16;
+    let Some(dx) = player_tile
+        .x
+        .checked_add(x_margin)
+        .and_then(|x| x.checked_sub(event_tile.x))
+    else {
+        return false;
+    };
     if dx < 0 || dx >= half_width {
         return false;
     }
-    let dy = player_tile.y + y_margin - event_y as i16;
+    let Some(dy) = player_tile
+        .y
+        .checked_add(y_margin)
+        .and_then(|y| y.checked_sub(event_tile.y))
+    else {
+        return false;
+    };
     if dy < 0 || dy >= half_height {
         return false;
     }
@@ -764,7 +787,8 @@ mod tests {
             battle_stat_boost_stat: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
-            battle_focus_energy: None,
+            battle_capture_ball: None,
+battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -837,11 +861,11 @@ mod tests {
                 "ROUTE_29",
                 &[hidden_event(5, 4, "Route29HiddenPotion")],
                 &[pickup],
-                TilePosition::new(0, 0),
+                TilePosition::new(12, 10),
             ),
             Ok(Some(ItemfinderHiddenItem {
                 map_name: "ROUTE_29".to_string(),
-                tile: TilePosition::new(5, 4),
+                tile: TilePosition::new(10, 8),
                 source_script: "Route29HiddenPotion".to_string(),
                 event_flag: "EVENT_GOT_ROUTE_29_HIDDEN_POTION".to_string(),
                 item_id: "POTION".to_string(),
@@ -871,6 +895,16 @@ mod tests {
             ),
             Ok(None)
         );
+        assert_eq!(
+            find_itemfinder_hidden_item(
+                &state,
+                "ROUTE_29",
+                &[hidden_event(5, 4, "Route29HiddenPotion")],
+                &[pickup.clone()],
+                TilePosition::new(i16::MAX, i16::MAX),
+            ),
+            Ok(None)
+        );
         state.flags = Default::default();
         assert_eq!(
             find_itemfinder_hidden_item(
@@ -885,6 +919,30 @@ mod tests {
     }
 
     #[test]
+    fn itemfinder_rejects_hiddenitem_event_coordinates_outside_runtime_tile_space() {
+        let state = GameState::default();
+        let mut pickup = script_pickup("hiddenitem");
+        pickup.source_script = "BrokenHiddenPotion".to_string();
+        pickup.item_id = Some("POTION".to_string());
+        pickup.event_flag = Some("EVENT_GOT_ROUTE_29_HIDDEN_POTION".to_string());
+
+        assert_eq!(
+            find_itemfinder_hidden_item(
+                &state,
+                "ROUTE_29",
+                &[hidden_event(40_000, 0, "BrokenHiddenPotion")],
+                &[pickup],
+                TilePosition::new(0, 0),
+            ),
+            Err(FieldItemError::HiddenItemCoordinatesOutOfRange {
+                source_script: "BrokenHiddenPotion".to_string(),
+                x: 40_000,
+                y: 0,
+            })
+        );
+    }
+
+    #[test]
     fn itemfinder_rejects_item_event_without_exact_hiddenitem_pickup() {
         let state = GameState::default();
 
@@ -894,7 +952,7 @@ mod tests {
                 "ROUTE_29",
                 &[hidden_event(5, 4, "Route29HiddenPotion")],
                 &[],
-                TilePosition::new(0, 0),
+                TilePosition::new(12, 10),
             ),
             Err(FieldItemError::MissingHiddenItemPickup {
                 source_script: "Route29HiddenPotion".to_string(),
@@ -1368,6 +1426,21 @@ mod tests {
                 "{field} produced unexpected error: {error}"
             );
         }
+
+        let missing_command = serde_json::from_value::<ScriptFieldPickup>(serde_json::json!({
+            "item_id": "BERRY",
+            "quantity": 1,
+            "event_flag": "EVENT_ROUTE_29_BERRY",
+            "fruit_tree_id": null,
+            "source_script": ".branch@FieldScript",
+            "command_index": 2
+        }))
+        .expect_err("script field pickup command must not default to empty")
+        .to_string();
+        assert!(
+            missing_command.contains("missing field `command`"),
+            "{missing_command}"
+        );
 
         let error = serde_json::from_value::<FieldItemPickup>(serde_json::json!({
             "item_id": "fallback_berry",

@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::map::MapSceneTable;
 use crate::models::{
-    Bag, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonSpecies, PokemonStorage, Trainer,
+    Bag, LearnedMove, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonSpecies,
+    PokemonStorage, Trainer,
 };
 use crate::systems::script_audio::{
     SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
@@ -19,7 +20,9 @@ use crate::systems::time::TimeState;
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
-use crate::world::session::OverworldSnapshot;
+use crate::world::session::{
+    OverworldSnapshot, raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
+};
 
 pub const PLAYER_NAME_LENGTH: usize = 8;
 const MOBILE_LOGIN_PASSWORD_LENGTH: usize = 17;
@@ -49,6 +52,7 @@ pub struct GameState {
     pub player_id: u16,
     pub party: PartyState,
     pub storage: PokemonStorage,
+    pub pending_move_learn: Option<PendingMoveLearn>,
     pub bag: Bag,
     pub money: u32,
     pub moms_money: u32,
@@ -64,8 +68,10 @@ pub struct GameState {
     pub battle_rewarded_enemy_party_indices: BTreeSet<usize>,
     pub battle_escape_attempts: u8,
     pub battle_player_stat_drop_guard_turns: u8,
+    pub battle_pay_day_money: u32,
     pub repel_steps_remaining: u16,
     pub active_repel_item: Option<String>,
+    pub registered_key_item: Option<String>,
     pub dig_warp_map_name: Option<String>,
     pub dig_warp_index: Option<u16>,
     pub last_spawn_identifier: Option<u16>,
@@ -118,6 +124,7 @@ impl<'de> Deserialize<'de> for GameState {
             player_id: u16,
             party: PartyState,
             storage: PokemonStorage,
+            pending_move_learn: Option<PendingMoveLearn>,
             bag: Bag,
             money: u32,
             moms_money: u32,
@@ -133,8 +140,10 @@ impl<'de> Deserialize<'de> for GameState {
             battle_rewarded_enemy_party_indices: BTreeSet<usize>,
             battle_escape_attempts: u8,
             battle_player_stat_drop_guard_turns: u8,
+            battle_pay_day_money: u32,
             repel_steps_remaining: u16,
             active_repel_item: Option<String>,
+            registered_key_item: Option<String>,
             dig_warp_map_name: Option<String>,
             dig_warp_index: Option<u16>,
             last_spawn_identifier: Option<u16>,
@@ -181,6 +190,7 @@ impl<'de> Deserialize<'de> for GameState {
             player_id: raw.player_id,
             party: raw.party,
             storage: raw.storage,
+            pending_move_learn: raw.pending_move_learn,
             bag: raw.bag,
             money: raw.money,
             moms_money: raw.moms_money,
@@ -196,8 +206,10 @@ impl<'de> Deserialize<'de> for GameState {
             battle_rewarded_enemy_party_indices: raw.battle_rewarded_enemy_party_indices,
             battle_escape_attempts: raw.battle_escape_attempts,
             battle_player_stat_drop_guard_turns: raw.battle_player_stat_drop_guard_turns,
+            battle_pay_day_money: raw.battle_pay_day_money,
             repel_steps_remaining: raw.repel_steps_remaining,
             active_repel_item: raw.active_repel_item,
+            registered_key_item: raw.registered_key_item,
             dig_warp_map_name: raw.dig_warp_map_name,
             dig_warp_index: raw.dig_warp_index,
             last_spawn_identifier: raw.last_spawn_identifier,
@@ -249,6 +261,7 @@ impl Default for GameState {
             player_id: 0,
             party: PartyState::default(),
             storage: PokemonStorage::default(),
+            pending_move_learn: None,
             bag: Bag::default(),
             money: 0,
             moms_money: 0,
@@ -264,8 +277,10 @@ impl Default for GameState {
             battle_rewarded_enemy_party_indices: BTreeSet::new(),
             battle_escape_attempts: 0,
             battle_player_stat_drop_guard_turns: 0,
+            battle_pay_day_money: 0,
             repel_steps_remaining: 0,
             active_repel_item: None,
+            registered_key_item: None,
             dig_warp_map_name: None,
             dig_warp_index: None,
             last_spawn_identifier: None,
@@ -350,6 +365,65 @@ impl UnusedTwoDayTimerState {
         if !self.active && (self.remaining_days != 0 || self.start_day != 0) {
             return Err("inactive timer must have remaining_days 0 and start_day 0".to_string());
         }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingMoveLearn {
+    pub party_index: usize,
+    pub species_id: String,
+    pub level: u8,
+    pub learned_move: LearnedMove,
+    pub defer_level_evolution: bool,
+}
+
+impl<'de> Deserialize<'de> for PendingMoveLearn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPendingMoveLearn {
+            party_index: usize,
+            species_id: String,
+            level: u8,
+            learned_move: LearnedMove,
+            defer_level_evolution: bool,
+        }
+
+        let raw = RawPendingMoveLearn::deserialize(deserializer)?;
+        let pending = Self {
+            party_index: raw.party_index,
+            species_id: raw.species_id,
+            level: raw.level,
+            learned_move: raw.learned_move,
+            defer_level_evolution: raw.defer_level_evolution,
+        };
+        pending
+            .validate_saved_state()
+            .map_err(serde::de::Error::custom)?;
+        Ok(pending)
+    }
+}
+
+impl PendingMoveLearn {
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        if self.party_index >= PARTY_SIZE {
+            return Err(format!(
+                "pending_move_learn.party_index {} is outside party range 0..{}",
+                self.party_index, PARTY_SIZE
+            ));
+        }
+        validate_script_runtime_token("pending_move_learn.species_id", &self.species_id)?;
+        if self.level == 0 {
+            return Err("pending_move_learn.level must be nonzero".to_string());
+        }
+        self.learned_move
+            .validate_saved_state(0)
+            .map_err(|error| format!("invalid pending_move_learn.learned_move: {error}"))?;
         Ok(())
     }
 }
@@ -1399,7 +1473,7 @@ impl MysteryGiftState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum MysteryGiftSaveError {
     #[error("saved {path} {item_id} is missing from compiled pack items")]
@@ -1714,12 +1788,45 @@ impl OverworldObjectMapMemory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldObjectMemory {
     pub x: u16,
     pub y: u16,
+    pub tile: Option<TilePosition>,
     pub facing: Option<Direction>,
+}
+
+impl<'de> Deserialize<'de> for OverworldObjectMemory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOverworldObjectMemory {
+            x: u16,
+            y: u16,
+            #[serde(deserialize_with = "required_nullable_tile_position")]
+            tile: Option<TilePosition>,
+            facing: Option<Direction>,
+        }
+
+        let raw = RawOverworldObjectMemory::deserialize(deserializer)?;
+        Ok(Self {
+            x: raw.x,
+            y: raw.y,
+            tile: raw.tile,
+            facing: raw.facing,
+        })
+    }
+}
+
+fn required_nullable_tile_position<'de, D>(deserializer: D) -> Result<Option<TilePosition>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<TilePosition>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1736,12 +1843,14 @@ pub enum BattleMemory {
     Inactive,
     Wild {
         battle_type: String,
+        battle_music: String,
         map_name: String,
         enemy_pokemon: Pokemon,
         enemy_party: Vec<Pokemon>,
     },
     StaticWild {
         battle_type: String,
+        battle_music: String,
         species: String,
         level: u8,
         source_script: String,
@@ -1780,12 +1889,14 @@ impl<'de> Deserialize<'de> for BattleMemory {
             Inactive,
             Wild {
                 battle_type: String,
+                battle_music: String,
                 map_name: String,
                 enemy_pokemon: Pokemon,
                 enemy_party: Vec<Pokemon>,
             },
             StaticWild {
                 battle_type: String,
+                battle_music: String,
                 species: String,
                 level: u8,
                 source_script: String,
@@ -1818,17 +1929,20 @@ impl<'de> Deserialize<'de> for BattleMemory {
             RawBattleMemory::Inactive => Self::Inactive,
             RawBattleMemory::Wild {
                 battle_type,
+                battle_music,
                 map_name,
                 enemy_pokemon,
                 enemy_party,
             } => Self::Wild {
                 battle_type,
+                battle_music,
                 map_name,
                 enemy_pokemon,
                 enemy_party,
             },
             RawBattleMemory::StaticWild {
                 battle_type,
+                battle_music,
                 species,
                 level,
                 source_script,
@@ -1836,6 +1950,7 @@ impl<'de> Deserialize<'de> for BattleMemory {
                 enemy_party,
             } => Self::StaticWild {
                 battle_type,
+                battle_music,
                 species,
                 level,
                 source_script,
@@ -1891,16 +2006,19 @@ impl BattleMemory {
             Self::Inactive => Ok(()),
             Self::Wild {
                 battle_type,
+                battle_music,
                 map_name,
                 enemy_pokemon,
                 enemy_party,
             } => {
                 validate_script_runtime_token("battle.wild.battle_type", battle_type)?;
+                validate_script_runtime_token("battle.wild.battle_music", battle_music)?;
                 validate_script_runtime_token("battle.wild.map_name", map_name)?;
                 validate_battle_enemy_party_state("battle.wild", enemy_pokemon, enemy_party)
             }
             Self::StaticWild {
                 battle_type,
+                battle_music,
                 species,
                 level,
                 source_script,
@@ -1908,6 +2026,7 @@ impl BattleMemory {
                 enemy_party,
             } => {
                 validate_script_runtime_token("battle.static_wild.battle_type", battle_type)?;
+                validate_script_runtime_token("battle.static_wild.battle_music", battle_music)?;
                 validate_script_runtime_token("battle.static_wild.species", species)?;
                 if *level == 0 {
                     return Err("battle.static_wild.level must be nonzero".to_string());
@@ -1953,10 +2072,10 @@ impl BattleMemory {
                     validate_flag_name(event_flag)
                         .map_err(|error| format!("battle.trainer.event_flag {error}"))?;
                 }
-                validate_script_runtime_token("battle.trainer.seen_text", seen_text)?;
-                validate_script_runtime_token("battle.trainer.win_text", win_text)?;
-                validate_script_runtime_token("battle.trainer.loss_text", loss_text)?;
-                validate_script_runtime_token("battle.trainer.callback", callback)?;
+                validate_empty_or_script_runtime_token("battle.trainer.seen_text", seen_text)?;
+                validate_empty_or_script_runtime_token("battle.trainer.win_text", win_text)?;
+                validate_empty_or_script_runtime_token("battle.trainer.loss_text", loss_text)?;
+                validate_empty_or_script_runtime_token("battle.trainer.callback", callback)?;
                 validate_script_runtime_label("battle.trainer.source_script", source_script)?;
                 validate_script_runtime_token("battle.trainer.encounter_music", encounter_music)?;
                 for (index, ai_layer) in ai_layers.iter().enumerate() {
@@ -2620,6 +2739,7 @@ impl ScriptRuntimeMemory {
                 "pending_script_warp.source_script",
                 &warp.source_script,
             )?;
+            validate_pending_script_warp_payload(warp)?;
         }
         if let Some(load) = &self.pending_map_load {
             validate_script_runtime_token("pending_map_load.command", &load.command)?;
@@ -2672,6 +2792,7 @@ impl ScriptRuntimeMemory {
         if let Some(shop) = &self.pending_shop {
             validate_script_shop_request("pending_shop", shop)?;
         }
+        self.validate_modal_state()?;
         for (index, event) in self.item_use_events.iter().enumerate() {
             validate_script_runtime_token(
                 &format!("item_use_events[{index}].item_id"),
@@ -2682,6 +2803,47 @@ impl ScriptRuntimeMemory {
                 &event.context,
             )?;
             validate_item_use_event_context(index, &event.context)?;
+        }
+        Ok(())
+    }
+
+    fn validate_modal_state(&self) -> Result<(), String> {
+        if self.pending_shop.is_some() {
+            if let Some(menu) = &self.active_menu {
+                return Err(format!(
+                    "pending_shop cannot be saved while active_menu {menu} is open"
+                ));
+            }
+            if self.pending_yes_no.is_some() {
+                return Err("pending_shop cannot be saved with pending_yes_no".to_string());
+            }
+            if self.pending_text_wait.is_some() {
+                return Err("pending_shop cannot be saved with pending_text_wait".to_string());
+            }
+            if let Some(text_label) = &self.pending_text_label {
+                return Err(format!(
+                    "pending_shop cannot be saved with pending_text_label {text_label}"
+                ));
+            }
+        }
+        if let Some(menu) = &self.active_menu {
+            if self.pending_yes_no.is_some() {
+                return Err(format!(
+                    "active_menu {menu} cannot be saved with pending_yes_no"
+                ));
+            }
+            if self.pending_text_wait.is_some() {
+                return Err(format!(
+                    "active_menu {menu} cannot be saved with pending_text_wait"
+                ));
+            }
+        }
+        if let Some(text_label) = &self.pending_text_label
+            && self.pending_yes_no.is_some()
+        {
+            return Err(format!(
+                "pending_text_label {text_label} cannot be saved with pending_yes_no"
+            ));
         }
         Ok(())
     }
@@ -4770,8 +4932,10 @@ pub fn validate_saved_map_object_reference(
 pub enum OverworldReferenceSaveError {
     #[error("saved overworld.active.map_name {map_name} is missing from compiled pack maps")]
     MissingMap { map_name: String },
+    #[error("saved overworld.active tile ({x}, {y}) is not aligned to a raw map event coordinate")]
+    UnalignedTile { map_name: String, x: i16, y: i16 },
     #[error(
-        "saved overworld.active tile ({x}, {y}) is outside compiled map {map_name} dimensions {width}x{height}"
+        "saved overworld.active tile ({x}, {y}) is outside compiled map {map_name} runtime tile bounds {width}x{height}"
     )]
     TileOutOfBounds {
         map_name: String,
@@ -4784,12 +4948,12 @@ pub enum OverworldReferenceSaveError {
 
 pub fn validate_saved_overworld_references(
     overworld: &OverworldMemory,
-    map_dimensions: impl FnOnce(&str) -> Option<(u16, u16)>,
+    runtime_tile_bounds: impl FnOnce(&str) -> Option<(u16, u16)>,
 ) -> Result<(), OverworldReferenceSaveError> {
     let OverworldMemory::Active { map_name, tile, .. } = overworld else {
         return Ok(());
     };
-    let Some((width, height)) = map_dimensions(map_name) else {
+    let Some((width, height)) = runtime_tile_bounds(map_name) else {
         return Err(OverworldReferenceSaveError::MissingMap {
             map_name: map_name.clone(),
         });
@@ -4805,6 +4969,12 @@ pub fn validate_saved_overworld_references(
             y: tile.y,
             width,
             height,
+        })
+    } else if runtime_tile_to_raw_event_tile(*tile).is_none() {
+        Err(OverworldReferenceSaveError::UnalignedTile {
+            map_name: map_name.clone(),
+            x: tile.x,
+            y: tile.y,
         })
     } else {
         Ok(())
@@ -4898,13 +5068,24 @@ pub enum ObjectOverrideSaveError {
         object_id: String,
     },
     #[error(
-        "saved map_object_overrides.objects {map_name}:{object_id} coordinate ({x}, {y}) is outside compiled map dimensions {width}x{height}"
+        "saved map_object_overrides.objects {map_name}:{object_id} raw coordinate ({x}, {y}) overflows runtime tile coordinates"
     )]
-    CoordinateOutOfBounds {
+    CoordinateOutOfRange {
         map_name: String,
         object_id: String,
         x: u16,
         y: u16,
+    },
+    #[error(
+        "saved map_object_overrides.objects {map_name}:{object_id} raw coordinate ({raw_x}, {raw_y}) resolves to runtime tile ({runtime_x}, {runtime_y}) outside compiled runtime tile bounds {width}x{height}"
+    )]
+    RuntimeTileOutOfBounds {
+        map_name: String,
+        object_id: String,
+        raw_x: u16,
+        raw_y: u16,
+        runtime_x: i16,
+        runtime_y: i16,
         width: u16,
         height: u16,
     },
@@ -4913,10 +5094,10 @@ pub enum ObjectOverrideSaveError {
 pub fn validate_saved_object_overrides(
     map_name: &str,
     memory: &OverworldObjectMapMemory,
-    map_dimensions: impl FnOnce(&str) -> Option<(u16, u16)>,
+    runtime_tile_bounds: impl FnOnce(&str) -> Option<(u16, u16)>,
     mut object_exists: impl FnMut(&str) -> bool,
 ) -> Result<(), ObjectOverrideSaveError> {
-    let Some((width, height)) = map_dimensions(map_name) else {
+    let Some((width, height)) = runtime_tile_bounds(map_name) else {
         return Err(ObjectOverrideSaveError::MissingMap {
             map_name: map_name.to_string(),
         });
@@ -4928,12 +5109,28 @@ pub fn validate_saved_object_overrides(
             object_id,
             &mut object_exists,
         )?;
-        if object_memory.x >= width || object_memory.y >= height {
-            return Err(ObjectOverrideSaveError::CoordinateOutOfBounds {
+        let Some(runtime_tile) =
+            raw_event_tile_to_runtime_tile_checked(object_memory.x, object_memory.y)
+        else {
+            return Err(ObjectOverrideSaveError::CoordinateOutOfRange {
                 map_name: map_name.to_string(),
                 object_id: object_id.clone(),
                 x: object_memory.x,
                 y: object_memory.y,
+            });
+        };
+        if runtime_tile.x < 0
+            || runtime_tile.y < 0
+            || i32::from(runtime_tile.x) >= i32::from(width)
+            || i32::from(runtime_tile.y) >= i32::from(height)
+        {
+            return Err(ObjectOverrideSaveError::RuntimeTileOutOfBounds {
+                map_name: map_name.to_string(),
+                object_id: object_id.clone(),
+                raw_x: object_memory.x,
+                raw_y: object_memory.y,
+                runtime_x: runtime_tile.x,
+                runtime_y: runtime_tile.y,
                 width,
                 height,
             });
@@ -5385,6 +5582,16 @@ fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Re
                     event.command
                 ));
             }
+            let tile = event
+                .tile
+                .expect("Warp map runtime event tile was required above");
+            validate_script_map_runtime_tile_alignment(
+                &format!("map_events[{index}]"),
+                &event.source_script,
+                event.command_index,
+                expected_command,
+                tile,
+            )?;
         }
         ScriptMapRuntimeKind::LoadMap => {
             validate_map_load_command_payload(
@@ -5412,6 +5619,37 @@ fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Re
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_pending_script_warp_payload(warp: &ScriptWarpRequest) -> Result<(), String> {
+    let command = if warp.facing.is_some() {
+        "warpfacing"
+    } else {
+        "warp"
+    };
+    validate_script_map_runtime_tile_alignment(
+        "pending_script_warp",
+        &warp.source_script,
+        warp.command_index,
+        command,
+        warp.tile,
+    )
+}
+
+fn validate_script_map_runtime_tile_alignment(
+    path: &str,
+    source_script: &str,
+    command_index: usize,
+    command: &str,
+    tile: TilePosition,
+) -> Result<(), String> {
+    if runtime_tile_to_raw_event_tile(tile).is_none() {
+        return Err(format!(
+            "{path} {source_script}:{command_index} command {command} tile ({}, {}) is not aligned to a raw map event coordinate",
+            tile.x, tile.y
+        ));
     }
     Ok(())
 }
@@ -5467,6 +5705,17 @@ pub enum ScriptMapRuntimeCommandError {
         command_index: usize,
         command: String,
     },
+    #[error(
+        "saved {path} {source_script}:{command_index} command {command} tile ({x}, {y}) is not aligned to a raw map event coordinate"
+    )]
+    UnsavableTile {
+        path: String,
+        source_script: String,
+        command_index: usize,
+        command: String,
+        x: i16,
+        y: i16,
+    },
 }
 
 pub fn saved_map_runtime_event_command_args(
@@ -5483,11 +5732,14 @@ pub fn saved_map_runtime_event_command_args(
                 ));
             }
             match (&event.target_map, event.tile) {
-                (Some(target_map), Some(tile)) => Ok(Some(vec![
-                    target_map.clone(),
-                    tile.x.to_string(),
-                    tile.y.to_string(),
-                ])),
+                (Some(target_map), Some(tile)) => {
+                    let raw_tile = saved_raw_event_tile(path, event, tile)?;
+                    Ok(Some(vec![
+                        target_map.clone(),
+                        raw_tile.x.to_string(),
+                        raw_tile.y.to_string(),
+                    ]))
+                }
                 (None, None) => Ok(Some(vec![
                     "NONE".to_string(),
                     "0".to_string(),
@@ -5518,13 +5770,14 @@ pub fn saved_map_runtime_event_command_args(
             let tile = event.tile.ok_or_else(|| {
                 map_command_error(path, event, ScriptMapRuntimeCommandErrorKind::MissingTile)
             })?;
+            let raw_tile = saved_raw_event_tile(path, event, tile)?;
             let facing = event.facing.ok_or_else(|| {
                 map_command_error(path, event, ScriptMapRuntimeCommandErrorKind::MissingFacing)
             })?;
             Ok(Some(vec![
                 target_map,
-                tile.x.to_string(),
-                tile.y.to_string(),
+                raw_tile.x.to_string(),
+                raw_tile.y.to_string(),
                 direction_script_token(facing).to_string(),
             ]))
         }
@@ -5557,6 +5810,7 @@ enum ScriptMapRuntimeCommandErrorKind {
     MissingTargetMap,
     MissingTile,
     MissingFacing,
+    UnsavableTile,
 }
 
 fn map_command_error(
@@ -5613,7 +5867,30 @@ fn map_command_error(
                 command: event.command.clone(),
             }
         }
+        ScriptMapRuntimeCommandErrorKind::UnsavableTile => {
+            let tile = event
+                .tile
+                .expect("unsaveable map event tile error requires a tile");
+            ScriptMapRuntimeCommandError::UnsavableTile {
+                path: path.to_string(),
+                source_script: event.source_script.clone(),
+                command_index: event.command_index,
+                command: event.command.clone(),
+                x: tile.x,
+                y: tile.y,
+            }
+        }
     }
+}
+
+fn saved_raw_event_tile(
+    path: &str,
+    event: &ScriptMapRuntimeEvent,
+    tile: TilePosition,
+) -> Result<TilePosition, ScriptMapRuntimeCommandError> {
+    runtime_tile_to_raw_event_tile(tile).ok_or_else(|| {
+        map_command_error(path, event, ScriptMapRuntimeCommandErrorKind::UnsavableTile)
+    })
 }
 
 fn saved_optional_map_setup_arg(map_setup: Option<&str>) -> Vec<String> {
@@ -5634,17 +5911,34 @@ pub fn saved_map_refresh_command_payload(refresh: &ScriptMapRefreshRequest) -> (
     )
 }
 
-pub fn saved_script_warp_command_payload(warp: &ScriptWarpRequest) -> (&'static str, Vec<String>) {
+pub fn saved_script_warp_command_payload(
+    path: &str,
+    warp: &ScriptWarpRequest,
+) -> Result<(&'static str, Vec<String>), ScriptMapRuntimeCommandError> {
+    let raw_tile = runtime_tile_to_raw_event_tile(warp.tile).ok_or_else(|| {
+        ScriptMapRuntimeCommandError::UnsavableTile {
+            path: path.to_string(),
+            source_script: warp.source_script.clone(),
+            command_index: warp.command_index,
+            command: if warp.facing.is_some() {
+                "warpfacing".to_string()
+            } else {
+                "warp".to_string()
+            },
+            x: warp.tile.x,
+            y: warp.tile.y,
+        }
+    })?;
     let mut args = vec![
         warp.target_map.clone(),
-        warp.tile.x.to_string(),
-        warp.tile.y.to_string(),
+        raw_tile.x.to_string(),
+        raw_tile.y.to_string(),
     ];
     if let Some(facing) = warp.facing {
         args.push(direction_script_token(facing).to_string());
-        ("warpfacing", args)
+        Ok(("warpfacing", args))
     } else {
-        ("warp", args)
+        Ok(("warp", args))
     }
 }
 
@@ -6904,6 +7198,45 @@ impl GameState {
         if self.party != projected_party {
             return Err("saved party projection does not match authoritative storage".to_string());
         }
+        if let Some(pending) = &self.pending_move_learn {
+            pending
+                .validate_saved_state()
+                .map_err(|error| format!("invalid pending move learn: {error}"))?;
+            let Some(Some(pokemon)) = self.storage.party.pokemon.get(pending.party_index) else {
+                return Err(format!(
+                    "pending move learn party index {} is not occupied",
+                    pending.party_index
+                ));
+            };
+            if pokemon.species.id != pending.species_id {
+                return Err(format!(
+                    "pending move learn species {} does not match party slot {} species {}",
+                    pending.species_id, pending.party_index, pokemon.species.id
+                ));
+            }
+            if pokemon.level != pending.level {
+                return Err(format!(
+                    "pending move learn level {} does not match party slot {} level {}",
+                    pending.level, pending.party_index, pokemon.level
+                ));
+            }
+            if pokemon
+                .moves
+                .iter()
+                .any(|known| known.name == pending.learned_move.name)
+            {
+                return Err(format!(
+                    "pending move learn {} is already known by party slot {}",
+                    pending.learned_move.name, pending.party_index
+                ));
+            }
+            if pokemon.moves.len() < 4 {
+                return Err(format!(
+                    "pending move learn for party slot {} requires a full move list",
+                    pending.party_index
+                ));
+            }
+        }
         if self.current_pc_box >= MAX_PC_BOXES {
             return Err(format!(
                 "current_pc_box {} is outside PC box range 0..{}",
@@ -7010,10 +7343,18 @@ impl GameState {
                         .to_string(),
                 );
             }
+            if self.battle_pay_day_money != 0 {
+                return Err(
+                    "battle_pay_day_money cannot be saved without an active battle".to_string(),
+                );
+            }
             return Ok(());
         };
         if enemy_party_len == 0 {
             return Ok(());
+        }
+        if self.battle_active_party_index.is_none() {
+            return Err("battle_active_party_index must be saved for an active battle".to_string());
         }
         if self.battle_active_enemy_party_index.is_none() {
             return Err(
@@ -7044,6 +7385,17 @@ impl GameState {
             "active_repel_item",
             self.active_repel_item.as_deref(),
         )?;
+        validate_optional_script_runtime_token(
+            "registered_key_item",
+            self.registered_key_item.as_deref(),
+        )?;
+        if let Some(item_id) = &self.registered_key_item {
+            if !matches!(self.bag.key_items.get(item_id), Some(quantity) if *quantity > 0) {
+                return Err(format!(
+                    "registered_key_item {item_id} is not carried in saved key_items"
+                ));
+            }
+        }
         match (self.repel_steps_remaining, &self.active_repel_item) {
             (0, Some(item_id)) => {
                 return Err(format!(
@@ -7482,13 +7834,28 @@ pub enum SceneError {
     EmptySceneTable { map_name: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum SceneSaveError {
     #[error("saved scenes.scene_name is empty while current map {map_name} has a saved scene")]
     EmptyCurrentSceneWithSavedMapScene { map_name: String },
     #[error("saved scenes.scene_name requires scenes.current_map_name")]
     CurrentSceneMissingMap,
+    #[error(
+        "saved scenes.current {map_name}:{scene_name} is missing from scenes.map_scenes definitive entries"
+    )]
+    CurrentSceneMissingMapSceneEntry {
+        map_name: String,
+        scene_name: String,
+    },
+    #[error(
+        "saved scenes.current {map_name}:{scene_name} does not match scenes.map_scenes value {saved_scene_name}"
+    )]
+    CurrentSceneMapSceneMismatch {
+        map_name: String,
+        scene_name: String,
+        saved_scene_name: String,
+    },
     #[error("saved {path} {map_name} is missing from compiled pack maps")]
     MissingMap {
         path: &'static str,
@@ -7636,6 +8003,20 @@ impl SceneMemory {
         scene_name: &str,
         table: &MapSceneTable,
     ) -> Result<SceneStatus, SceneError> {
+        if table.scenes.is_empty() {
+            let scene_index = scene_name
+                .parse::<usize>()
+                .map_err(|_| SceneError::UnknownScene {
+                    map_name: map_name.to_string(),
+                    scene_name: scene_name.to_string(),
+                })?;
+            return Ok(SceneStatus {
+                map_name: map_name.to_string(),
+                scene_name: scene_name.to_string(),
+                scene_index,
+                script_name: None,
+            });
+        }
         let (scene_index, scene) = table
             .scenes
             .iter()
@@ -7677,6 +8058,19 @@ where
                 });
             }
         } else {
+            let Some(saved_scene_name) = scenes.map_scenes.get(&scenes.current_map_name) else {
+                return Err(SceneSaveError::CurrentSceneMissingMapSceneEntry {
+                    map_name: scenes.current_map_name.clone(),
+                    scene_name: scenes.scene_name.clone(),
+                });
+            };
+            if saved_scene_name != &scenes.scene_name {
+                return Err(SceneSaveError::CurrentSceneMapSceneMismatch {
+                    map_name: scenes.current_map_name.clone(),
+                    scene_name: scenes.scene_name.clone(),
+                    saved_scene_name: saved_scene_name.clone(),
+                });
+            }
             validate_saved_scene_entry(
                 "scenes.current",
                 &scenes.current_map_name,
@@ -8144,7 +8538,6 @@ impl JoypadMemory {
         validate_joypad_mask(self.h_joypad_released).map_err(|error| error.to_string())?;
         validate_joypad_mask(self.h_joypad_pressed).map_err(|error| error.to_string())?;
         validate_joypad_mask(self.h_joypad_down).map_err(|error| error.to_string())?;
-        validate_joypad_mask(self.h_joypad_sum).map_err(|error| error.to_string())?;
         validate_joypad_mask(self.h_joy_released).map_err(|error| error.to_string())?;
         validate_joypad_mask(self.h_joy_pressed).map_err(|error| error.to_string())?;
         validate_joypad_mask(self.h_joy_down).map_err(|error| error.to_string())?;
@@ -8278,6 +8671,7 @@ mod tests {
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
+        assert_eq!(state.registered_key_item, None);
         assert_eq!(state.dig_warp_map_name, None);
         assert_eq!(state.dig_warp_index, None);
         assert_eq!(state.kenji_break_timer, 0);
@@ -8322,6 +8716,15 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("active_repel_item has invalid token 'SUPER REPEL'".to_string())
+        );
+
+        state = GameState {
+            registered_key_item: Some("COIN CASE".to_string()),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("registered_key_item has invalid token 'COIN CASE'".to_string())
         );
 
         state = GameState {
@@ -8527,6 +8930,7 @@ mod tests {
                     OverworldObjectMemory {
                         x: 1,
                         y: 1,
+                        tile: Some(TilePosition::new(1, 1)),
                         facing: None,
                     },
                 )]),
@@ -9151,7 +9555,7 @@ mod tests {
         state = GameState {
             overworld: OverworldMemory::Active {
                 map_name: "Route 29".to_string(),
-                tile: TilePosition::new(1, 2),
+                tile: TilePosition::new(2, 2),
                 facing: Direction::Down,
                 mode: MovementMode::Normal,
             },
@@ -9178,7 +9582,7 @@ mod tests {
         let active_state = GameState {
             overworld: OverworldMemory::Active {
                 map_name: "Route29".to_string(),
-                tile: TilePosition::new(1, 2),
+                tile: TilePosition::new(2, 2),
                 facing: Direction::Down,
                 mode: MovementMode::Normal,
             },
@@ -9605,6 +10009,18 @@ mod tests {
             validate_saved_overworld_references(
                 &OverworldMemory::Active {
                     map_name: "Route29".to_string(),
+                    tile: TilePosition { x: 18, y: 8 },
+                    facing: Direction::Down,
+                    mode: MovementMode::Normal,
+                },
+                |_| Some((20, 10)),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_overworld_references(
+                &OverworldMemory::Active {
+                    map_name: "Route29".to_string(),
                     tile: TilePosition { x: 20, y: 4 },
                     facing: Direction::Down,
                     mode: MovementMode::Normal,
@@ -9617,6 +10033,40 @@ mod tests {
                 y: 4,
                 width: 20,
                 height: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_overworld_references(
+                &OverworldMemory::Active {
+                    map_name: "Route29".to_string(),
+                    tile: TilePosition { x: -1, y: 4 },
+                    facing: Direction::Down,
+                    mode: MovementMode::Normal,
+                },
+                |_| Some((20, 10)),
+            ),
+            Err(OverworldReferenceSaveError::TileOutOfBounds {
+                map_name: "Route29".to_string(),
+                x: -1,
+                y: 4,
+                width: 20,
+                height: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_overworld_references(
+                &OverworldMemory::Active {
+                    map_name: "Route29".to_string(),
+                    tile: TilePosition { x: 3, y: 4 },
+                    facing: Direction::Down,
+                    mode: MovementMode::Normal,
+                },
+                |_| Some((20, 10)),
+            ),
+            Err(OverworldReferenceSaveError::UnalignedTile {
+                map_name: "Route29".to_string(),
+                x: 3,
+                y: 4,
             })
         );
         assert_eq!(
@@ -9644,6 +10094,7 @@ mod tests {
                         OverworldObjectMemory {
                             x: 10,
                             y: 1,
+                            tile: Some(TilePosition::new(10, 1)),
                             facing: None,
                         },
                     )]),
@@ -9652,13 +10103,80 @@ mod tests {
                 |_| Some((10, 10)),
                 |_| true,
             ),
-            Err(ObjectOverrideSaveError::CoordinateOutOfBounds {
+            Err(ObjectOverrideSaveError::RuntimeTileOutOfBounds {
                 map_name: "Route29".to_string(),
                 object_id: "YOUNGSTER".to_string(),
-                x: 10,
-                y: 1,
+                raw_x: 10,
+                raw_y: 1,
+                runtime_x: 10,
+                runtime_y: 1,
                 width: 10,
                 height: 10,
+            })
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "Route29",
+                &OverworldObjectMapMemory {
+                    objects: BTreeMap::from([(
+                        "YOUNGSTER".to_string(),
+                        OverworldObjectMemory {
+                            x: 1,
+                            y: 0,
+                            tile: Some(TilePosition::new(1, 0)),
+                            facing: None,
+                        },
+                    )]),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((2, 2)),
+                |_| true,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "Route29",
+                &OverworldObjectMapMemory {
+                    objects: BTreeMap::from([(
+                        "YOUNGSTER".to_string(),
+                        OverworldObjectMemory {
+                            x: 1,
+                            y: 0,
+                            tile: Some(TilePosition::new(-1, 9)),
+                            facing: None,
+                        },
+                    )]),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((2, 2)),
+                |_| true,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "Route29",
+                &OverworldObjectMapMemory {
+                    objects: BTreeMap::from([(
+                        "YOUNGSTER".to_string(),
+                        OverworldObjectMemory {
+                            x: 40_000,
+                            y: 1,
+                            tile: Some(TilePosition::new(0, 1)),
+                            facing: None,
+                        },
+                    )]),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((30_000, 10)),
+                |_| true,
+            ),
+            Err(ObjectOverrideSaveError::CoordinateOutOfRange {
+                map_name: "Route29".to_string(),
+                object_id: "YOUNGSTER".to_string(),
+                x: 40_000,
+                y: 1,
             })
         );
         assert_eq!(
@@ -9926,6 +10444,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -9943,6 +10462,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -10010,14 +10530,32 @@ mod tests {
         );
 
         state = GameState {
+            battle_pay_day_money: 1,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_pay_day_money cannot be saved without an active battle".to_string())
+        );
+
+        state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
             ..GameState::default()
         };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("battle_active_party_index must be saved for an active battle".to_string())
+        );
+
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        state.sync_party_from_storage();
+        state.battle_active_party_index = Some(0);
         assert_eq!(
             state.validate_saved_state(),
             Err("battle_active_enemy_party_index must be saved for an active battle".to_string())
@@ -10026,13 +10564,17 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
+            battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(1),
             ..GameState::default()
         };
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        state.sync_party_from_storage();
         assert_eq!(
             state.validate_saved_state(),
             Err("battle_active_enemy_party_index 1 is outside enemy party range 0..1".to_string())
@@ -10041,13 +10583,17 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
+            battle_active_party_index: Some(0),
             battle_rewarded_enemy_party_indices: BTreeSet::from([1]),
             ..GameState::default()
         };
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        state.sync_party_from_storage();
         assert_eq!(
             state.validate_saved_state(),
             Err(
@@ -10059,14 +10605,18 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
+            battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(0),
             battle_rewarded_enemy_party_indices: BTreeSet::from([0]),
             ..GameState::default()
         };
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        state.sync_party_from_storage();
         assert_eq!(
             state.validate_saved_state(),
             Err(
@@ -10078,6 +10628,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: Vec::new(),
@@ -10094,13 +10645,17 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: damaged_enemy,
                 enemy_party: vec![pokemon.clone()],
             },
+            battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(0),
             ..GameState::default()
         };
+        state.storage.party.pokemon[0] = Some(pokemon.clone());
+        state.sync_party_from_storage();
         assert_eq!(
             state.validate_saved_state(),
             Err(
@@ -10111,6 +10666,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::Wild {
                 battle_type: "BATTLETYPE NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -10125,6 +10681,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 species: "RED GYARADOS".to_string(),
                 level: 30,
                 source_script: "LakeOfRageRedGyarados".to_string(),
@@ -10141,6 +10698,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 0,
                 source_script: "LakeOfRageRedGyarados".to_string(),
@@ -10157,6 +10715,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 species: "CYNDAQUIL".to_string(),
                 level: 6,
                 source_script: "LakeOfRageRedGyarados".to_string(),
@@ -10176,6 +10735,7 @@ mod tests {
         state = GameState {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 7,
                 source_script: "LakeOfRageRedGyarados".to_string(),
@@ -10215,6 +10775,21 @@ mod tests {
             state.validate_saved_state(),
             Err("battle.trainer.event_flag invalid flag name EVENT BEAT_FALKNER".to_string())
         );
+    }
+
+    #[test]
+    fn saved_registered_key_item_must_be_carried_key_item() {
+        let mut state = GameState {
+            registered_key_item: Some("BICYCLE".to_string()),
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("registered_key_item BICYCLE is not carried in saved key_items".to_string())
+        );
+
+        state.bag.key_items.insert("BICYCLE".to_string(), 1);
+        assert_eq!(state.validate_saved_state(), Ok(()));
     }
 
     #[test]
@@ -10523,7 +11098,7 @@ mod tests {
             command: "warp".to_string(),
             kind: ScriptMapRuntimeKind::Warp,
             target_map: Some("Route 29".to_string()),
-            tile: Some(TilePosition::new(1, 2)),
+            tile: Some(TilePosition::new(2, 2)),
             facing: Some(Direction::Down),
             map_setup: None,
             source_script: "Route29Script".to_string(),
@@ -10539,7 +11114,7 @@ mod tests {
             command: "warp".to_string(),
             kind: ScriptMapRuntimeKind::Warp,
             target_map: None,
-            tile: Some(TilePosition::new(1, 2)),
+            tile: Some(TilePosition::new(2, 2)),
             facing: Some(Direction::Down),
             map_setup: None,
             source_script: "Route29Script".to_string(),
@@ -10555,7 +11130,7 @@ mod tests {
             command: "warp".to_string(),
             kind: ScriptMapRuntimeKind::Warp,
             target_map: Some("Route29".to_string()),
-            tile: Some(TilePosition { x: 1, y: 2 }),
+            tile: Some(TilePosition { x: 2, y: 2 }),
             facing: Some(Direction::Right),
             map_setup: None,
             source_script: "Route29Script".to_string(),
@@ -10571,7 +11146,7 @@ mod tests {
             command: "warp".to_string(),
             kind: ScriptMapRuntimeKind::Warp,
             target_map: Some("Route29".to_string()),
-            tile: Some(TilePosition::new(1, 2)),
+            tile: Some(TilePosition::new(2, 2)),
             facing: Some(Direction::Down),
             map_setup: Some("MAPSETUP_WARP".to_string()),
             source_script: "Route29Script".to_string(),
@@ -10736,6 +11311,63 @@ mod tests {
                 "pending_shop.mart_id 0 requires a zero-inventory mart type, got MARTTYPE_STANDARD"
                     .to_string()
             )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.active_menu = Some("RuntimeMenu".to_string());
+        runtime.pending_shop = Some(ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_shop cannot be saved while active_menu RuntimeMenu is open".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_window_open = true;
+        runtime.pending_yes_no = Some(ScriptYesNoPrompt {
+            source_script: "PromptScript".to_string(),
+            command_index: 4,
+        });
+        runtime.pending_shop = Some(ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "CHERRYGROVE_MART".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 2,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_shop cannot be saved with pending_yes_no".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_window_open = true;
+        runtime.active_menu = Some("RuntimeMenu".to_string());
+        runtime.pending_text_wait = Some(ScriptTextWait {
+            command: "waitbutton".to_string(),
+            source_script: "TextScript".to_string(),
+            command_index: 5,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("active_menu RuntimeMenu cannot be saved with pending_text_wait".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.text_window_open = true;
+        runtime.pending_text_label = Some("GreetingText".to_string());
+        runtime.pending_yes_no = Some(ScriptYesNoPrompt {
+            source_script: "PromptScript".to_string(),
+            command_index: 4,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err("pending_text_label GreetingText cannot be saved with pending_yes_no".to_string())
         );
         let shop_request = ScriptShopRequest {
             mart_type: "MARTTYPE_STANDARD".to_string(),
@@ -11017,22 +11649,57 @@ mod tests {
         );
         let warp = ScriptWarpRequest {
             target_map: "Route29".to_string(),
-            tile: TilePosition { x: 4, y: 7 },
+            tile: TilePosition { x: 18, y: 30 },
             facing: Some(Direction::Right),
             source_script: "WarpScript".to_string(),
             command_index: 5,
         };
         assert_eq!(
-            saved_script_warp_command_payload(&warp),
-            (
+            saved_script_warp_command_payload(
+                "script_runtime.pending_script_warp.source_script",
+                &warp
+            ),
+            Ok((
                 "warpfacing",
                 vec![
                     "Route29".to_string(),
-                    "4".to_string(),
-                    "7".to_string(),
+                    "9".to_string(),
+                    "15".to_string(),
                     "RIGHT".to_string(),
                 ],
-            )
+            ))
+        );
+        let mut unaligned_warp = warp.clone();
+        unaligned_warp.tile = TilePosition { x: 1, y: 0 };
+        assert_eq!(
+            saved_script_warp_command_payload(
+                "script_runtime.pending_script_warp.source_script",
+                &unaligned_warp
+            ),
+            Err(ScriptMapRuntimeCommandError::UnsavableTile {
+                path: "script_runtime.pending_script_warp.source_script".to_string(),
+                source_script: "WarpScript".to_string(),
+                command_index: 5,
+                command: "warpfacing".to_string(),
+                x: 1,
+                y: 0,
+            })
+        );
+        let mut unsavable_warp = warp;
+        unsavable_warp.tile = TilePosition { x: -1, y: 15 };
+        assert_eq!(
+            saved_script_warp_command_payload(
+                "script_runtime.pending_script_warp.source_script",
+                &unsavable_warp
+            ),
+            Err(ScriptMapRuntimeCommandError::UnsavableTile {
+                path: "script_runtime.pending_script_warp.source_script".to_string(),
+                source_script: "WarpScript".to_string(),
+                command_index: 5,
+                command: "warpfacing".to_string(),
+                x: -1,
+                y: 15,
+            })
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -11760,11 +12427,27 @@ mod tests {
             Err("pending_map_load.command has invalid token 'reload map'".to_string())
         );
 
-        let map_event = ScriptMapRuntimeEvent {
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_script_warp = Some(ScriptWarpRequest {
+            target_map: "Route29".to_string(),
+            tile: TilePosition { x: -1, y: 15 },
+            facing: Some(Direction::Right),
+            source_script: "WarpScript".to_string(),
+            command_index: 5,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_script_warp WarpScript:5 command warpfacing tile (-1, 15) is not aligned to a raw map event coordinate"
+                    .to_string()
+            )
+        );
+
+        let mut map_event = ScriptMapRuntimeEvent {
             command: "warpfacing".to_string(),
             kind: ScriptMapRuntimeKind::Warp,
             target_map: Some("Route29".to_string()),
-            tile: Some(TilePosition { x: 4, y: 7 }),
+            tile: Some(TilePosition { x: 18, y: 30 }),
             facing: Some(Direction::Left),
             map_setup: None,
             source_script: "MapScript".to_string(),
@@ -11777,11 +12460,37 @@ mod tests {
             ),
             Ok(Some(vec![
                 "Route29".to_string(),
-                "4".to_string(),
-                "7".to_string(),
+                "9".to_string(),
+                "15".to_string(),
                 "LEFT".to_string(),
             ]))
         );
+
+        map_event.tile = Some(TilePosition { x: -1, y: 15 });
+        assert_eq!(
+            saved_map_runtime_event_command_args(
+                "script_runtime.map_events[0].source_script",
+                &map_event
+            ),
+            Err(ScriptMapRuntimeCommandError::UnsavableTile {
+                path: "script_runtime.map_events[0].source_script".to_string(),
+                source_script: "MapScript".to_string(),
+                command_index: 11,
+                command: "warpfacing".to_string(),
+                x: -1,
+                y: 15,
+            })
+        );
+        runtime = ScriptRuntimeMemory::default();
+        runtime.map_events.push(map_event.clone());
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "map_events[0] MapScript:11 command warpfacing tile (-1, 15) is not aligned to a raw map event coordinate"
+                    .to_string()
+            )
+        );
+        map_event.tile = Some(TilePosition { x: 18, y: 30 });
 
         let mut map_event = map_event;
         map_event.command = "warp".to_string();
@@ -12263,6 +12972,51 @@ mod tests {
             "{overworld_memory_error}"
         );
 
+        let object_without_tile_error =
+            serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
+                "x": 1,
+                "y": 2,
+                "facing": null
+            }))
+            .expect_err("saved object memory must explicitly declare runtime tile")
+            .to_string();
+        assert!(
+            object_without_tile_error.contains("missing field `tile`"),
+            "{object_without_tile_error}"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
+                "x": 1,
+                "y": 2,
+                "tile": null,
+                "facing": null
+            }))
+            .expect("explicit null tile is authoritative raw-coordinate memory"),
+            OverworldObjectMemory {
+                x: 1,
+                y: 2,
+                tile: None,
+                facing: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
+                "x": 1,
+                "y": 2,
+                "tile": { "x": -1, "y": 9 },
+                "facing": "left"
+            }))
+            .expect("signed object runtime tile is saveable"),
+            OverworldObjectMemory {
+                x: 1,
+                y: 2,
+                tile: Some(TilePosition::new(-1, 9)),
+                facing: Some(Direction::Left),
+            }
+        );
+
         let text_speed_error =
             serde_json::from_str::<TextSpeed>(r#"{"fast":{"legacy_speed":"FAST"}}"#)
                 .expect_err("saved text speed must not accept legacy aliases")
@@ -12417,6 +13171,18 @@ mod tests {
         assert_eq!(state.joypad.h_joypad_released, 0b0001_0000);
         assert_eq!(state.joypad.h_joy_last, 0b0001_0001);
         assert_eq!(state.joypad.h_joypad_sum, 0b0011_0001);
+
+        state
+            .apply_joypad_mask(B_PAD_DOWN)
+            .expect("direct direction change is a valid single-frame input");
+        assert_eq!(state.joypad.h_joypad_pressed, B_PAD_DOWN);
+        assert_eq!(state.joypad.h_joypad_down, B_PAD_DOWN);
+        assert_eq!(state.joypad.h_joypad_sum & B_PAD_RIGHT, B_PAD_RIGHT);
+        assert_eq!(state.joypad.h_joypad_sum & B_PAD_DOWN, B_PAD_DOWN);
+        state
+            .joypad
+            .validate_saved_state()
+            .expect("joypad accumulator may contain directions pressed across different frames");
     }
 
     #[test]
@@ -12448,6 +13214,7 @@ mod tests {
         let mut wild = GameState::default();
         wild.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon.clone()],
@@ -12462,6 +13229,7 @@ mod tests {
         let mut static_wild = GameState::default();
         static_wild.battle = BattleMemory::StaticWild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             species: "SUDOWOODO".to_string(),
             level: 30,
             source_script: "Route36SudowoodoScript".to_string(),
@@ -12575,10 +13343,10 @@ mod tests {
     }
 
     #[test]
-    fn overworld_memory_serializes_exact_active_position_for_saves_and_sync() {
+    fn overworld_memory_serializes_aligned_active_position_for_saves_and_sync() {
         let memory = OverworldMemory::Active {
             map_name: "PlayersHouse2F".to_string(),
-            tile: TilePosition::new(3, 3),
+            tile: TilePosition::new(4, 4),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -12586,7 +13354,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"active":{"map_name":"PlayersHouse2F","tile":{"x":3,"y":3},"facing":"down","mode":"normal"}}"#
+            r#"{"active":{"map_name":"PlayersHouse2F","tile":{"x":4,"y":4},"facing":"down","mode":"normal"}}"#
         );
         assert_eq!(
             serde_json::from_str::<OverworldMemory>(&json).expect("deserialize overworld memory"),
@@ -12725,6 +13493,35 @@ mod tests {
             }
         );
 
+        let error = validate_saved_scene_references(&memory, |_| true, |_, _| Some(0))
+            .expect_err("current scene must have a definitive per-map entry");
+        assert_eq!(
+            error,
+            SceneSaveError::CurrentSceneMissingMapSceneEntry {
+                map_name: "ElmsLab".to_string(),
+                scene_name: "SCENE_ELMSLAB_MEET_ELM".to_string(),
+            }
+        );
+
+        memory
+            .map_scenes
+            .insert("ElmsLab".to_string(), "SCENE_ELMSLAB_NOOP".to_string());
+        memory.map_scene_indices.insert("ElmsLab".to_string(), 1);
+        let error = validate_saved_scene_references(&memory, |_| true, |_, _| Some(0))
+            .expect_err("current scene must match definitive per-map entry");
+        assert_eq!(
+            error,
+            SceneSaveError::CurrentSceneMapSceneMismatch {
+                map_name: "ElmsLab".to_string(),
+                scene_name: "SCENE_ELMSLAB_MEET_ELM".to_string(),
+                saved_scene_name: "SCENE_ELMSLAB_NOOP".to_string(),
+            }
+        );
+
+        memory
+            .map_scenes
+            .insert("ElmsLab".to_string(), "SCENE_ELMSLAB_MEET_ELM".to_string());
+        memory.map_scene_indices.insert("ElmsLab".to_string(), 0);
         let error = validate_saved_scene_references(&memory, |_| true, |_, _| None)
             .expect_err("current scene must exist in compiled scene table");
         assert_eq!(

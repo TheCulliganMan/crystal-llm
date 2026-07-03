@@ -20,6 +20,7 @@ pub enum RuntimePackPresenceIssue {
     MissingFishingCatalog,
     MissingFruitTrees,
     MissingFieldMoves,
+    MissingRuntimeTitleScreen,
     MissingItems,
     MissingBallItems,
     MissingTmHmItems,
@@ -92,6 +93,7 @@ pub struct RuntimePackSections {
     pub has_fishing_catalog: bool,
     pub has_fruit_trees: bool,
     pub has_field_moves: bool,
+    pub has_runtime_title_screen: bool,
     pub has_items: bool,
     pub has_ball_items: bool,
     pub has_tmhm_items: bool,
@@ -206,6 +208,9 @@ pub fn runtime_pack_presence_issues(
     }
     if !sections.has_field_moves {
         issues.push(RuntimePackPresenceIssue::MissingFieldMoves);
+    }
+    if !sections.has_runtime_title_screen {
+        issues.push(RuntimePackPresenceIssue::MissingRuntimeTitleScreen);
     }
     if !sections.has_items {
         issues.push(RuntimePackPresenceIssue::MissingItems);
@@ -384,6 +389,7 @@ mod tests {
                 RuntimePackPresenceIssue::MissingFishingCatalog,
                 RuntimePackPresenceIssue::MissingFruitTrees,
                 RuntimePackPresenceIssue::MissingFieldMoves,
+                RuntimePackPresenceIssue::MissingRuntimeTitleScreen,
                 RuntimePackPresenceIssue::MissingItems,
                 RuntimePackPresenceIssue::MissingBallItems,
                 RuntimePackPresenceIssue::MissingTmHmItems,
@@ -456,6 +462,7 @@ mod tests {
                 has_fishing_catalog: true,
                 has_fruit_trees: true,
                 has_field_moves: true,
+                has_runtime_title_screen: true,
                 has_items: true,
                 has_ball_items: true,
                 has_tmhm_items: true,
@@ -532,6 +539,7 @@ mod tests {
             has_fishing_catalog: true,
             has_fruit_trees: true,
             has_field_moves: true,
+            has_runtime_title_screen: true,
             has_items: true,
             has_ball_items: true,
             has_tmhm_items: true,
