@@ -1822,7 +1822,9 @@ impl<'de> Deserialize<'de> for OverworldObjectMemory {
     }
 }
 
-fn required_nullable_tile_position<'de, D>(deserializer: D) -> Result<Option<TilePosition>, D::Error>
+fn required_nullable_tile_position<'de, D>(
+    deserializer: D,
+) -> Result<Option<TilePosition>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -8004,12 +8006,13 @@ impl SceneMemory {
         table: &MapSceneTable,
     ) -> Result<SceneStatus, SceneError> {
         if table.scenes.is_empty() {
-            let scene_index = scene_name
-                .parse::<usize>()
-                .map_err(|_| SceneError::UnknownScene {
-                    map_name: map_name.to_string(),
-                    scene_name: scene_name.to_string(),
-                })?;
+            let scene_index =
+                scene_name
+                    .parse::<usize>()
+                    .map_err(|_| SceneError::UnknownScene {
+                        map_name: map_name.to_string(),
+                        scene_name: scene_name.to_string(),
+                    })?;
             return Ok(SceneStatus {
                 map_name: map_name.to_string(),
                 scene_name: scene_name.to_string(),

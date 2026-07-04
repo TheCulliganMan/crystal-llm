@@ -188,6 +188,8 @@ pub enum ShopError {
     UnknownItem { item_id: String },
     #[error("cannot buy item without an active script shop")]
     MissingActiveScriptShop,
+    #[error("cannot sell item without an active script shop")]
+    MissingActiveSellShop,
     #[error("active script shop {mart_id} does not sell exact item id {item_id}")]
     ItemNotSoldByActiveScriptShop { mart_id: String, item_id: String },
     #[error("invalid item id '{item_id}'")]
@@ -488,6 +490,14 @@ pub fn require_active_shop_item(state: &GameState, item_id: &str) -> Result<(), 
     }
 }
 
+pub fn close_active_shop(state: &mut GameState) -> Result<ScriptShopRequest, ShopError> {
+    state
+        .script_runtime
+        .pending_shop
+        .take()
+        .ok_or(ShopError::MissingActiveScriptShop)
+}
+
 pub fn max_buy_quantity(state: &GameState, item: &Item) -> u16 {
     if item.price == 0 {
         return 0;
@@ -504,6 +514,16 @@ pub fn max_buy_quantity(state: &GameState, item: &Item) -> u16 {
     let capacity = stack_limit.saturating_sub(owned);
     let affordable = state.money / u32::from(item.price);
     capacity.min(affordable.min(u32::from(u16::MAX)) as u16)
+}
+
+pub fn buy_active_shop_item(
+    state: &mut GameState,
+    items: &BTreeMap<String, Item>,
+    item_id: &str,
+    quantity: u16,
+) -> Result<ShopResult, ShopError> {
+    require_active_shop_item(state, item_id)?;
+    buy_item(state, items, item_id, quantity)
 }
 
 pub fn buy_item(
@@ -544,6 +564,20 @@ pub fn buy_item(
         message: format_price(total_cost),
         credited: total_cost,
     })
+}
+
+pub fn sell_active_shop_item(
+    state: &mut GameState,
+    items: &BTreeMap<String, Item>,
+    currency_constants: &CurrencyCatalog,
+    item_id: &str,
+    quantity: u16,
+) -> Result<ShopResult, ShopError> {
+    validate_shop_item_id(item_id)?;
+    if state.script_runtime.pending_shop.is_none() {
+        return Err(ShopError::MissingActiveSellShop);
+    }
+    sell_item(state, items, currency_constants, item_id, quantity)
 }
 
 pub fn sell_item(
@@ -1358,6 +1392,52 @@ battle_focus_energy: None,
     }
 
     #[test]
+    fn active_shop_buy_uses_pending_exact_inventory_and_can_close() {
+        let catalog = MartCatalog(
+            [(
+                "MartCherrygroveDex".to_string(),
+                vec!["POKE_BALL".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let items = items();
+        let mut state = GameState {
+            money: 1000,
+            ..GameState::default()
+        };
+        apply_script_shop_command(
+            &mut state,
+            &catalog,
+            &items,
+            shop_command("MARTTYPE_STANDARD", "MartCherrygroveDex"),
+        )
+        .expect("open shop");
+
+        let result =
+            buy_active_shop_item(&mut state, &items, "POKE_BALL", 2).expect("active shop buy");
+
+        assert!(result.success);
+        assert_eq!(state.money, 600);
+        assert_eq!(state.bag.quantity(&items["POKE_BALL"]), 2);
+        assert_eq!(
+            buy_active_shop_item(&mut state, &items, "POTION", 1),
+            Err(ShopError::ItemNotSoldByActiveScriptShop {
+                mart_id: "MartCherrygroveDex".to_string(),
+                item_id: "POTION".to_string(),
+            })
+        );
+
+        let closed = close_active_shop(&mut state).expect("close shop");
+        assert_eq!(closed.mart_id, "MartCherrygroveDex");
+        assert_eq!(state.script_runtime.pending_shop, None);
+        assert_eq!(
+            buy_active_shop_item(&mut state, &items, "POKE_BALL", 1),
+            Err(ShopError::MissingActiveScriptShop)
+        );
+    }
+
+    #[test]
     fn buying_rejects_malformed_item_id_before_state_change() {
         let mut state = GameState {
             money: 1000,
@@ -1493,6 +1573,43 @@ battle_focus_energy: None,
         );
         assert_eq!(state.money, 500);
         assert_eq!(state.bag.quantity(&items["RARE_CANDY"]), 1);
+    }
+
+    #[test]
+    fn active_shop_sell_requires_open_shop_before_mutating_bag_or_money() {
+        let currency_constants = currency_constants(999_999);
+        let mut state = GameState {
+            money: 500,
+            ..GameState::default()
+        };
+        let items = items();
+        state
+            .bag
+            .add_item(&items["RARE_CANDY"], 1)
+            .expect("add item");
+
+        assert_eq!(
+            sell_active_shop_item(&mut state, &items, &currency_constants, "RARE_CANDY", 1),
+            Err(ShopError::MissingActiveSellShop)
+        );
+        assert_eq!(state.money, 500);
+        assert_eq!(state.bag.quantity(&items["RARE_CANDY"]), 1);
+
+        state.script_runtime.pending_shop = Some(ScriptShopRequest {
+            mart_type: "MARTTYPE_STANDARD".to_string(),
+            mart_id: "MART_CHERRYGROVE".to_string(),
+            inventory: vec!["POTION".to_string()],
+            source_script: "ShopScript".to_string(),
+            command_index: 11,
+        });
+        let result =
+            sell_active_shop_item(&mut state, &items, &currency_constants, "RARE_CANDY", 1)
+                .expect("active shop sell");
+
+        assert!(result.success);
+        assert_eq!(result.credited, 500);
+        assert_eq!(state.money, 1000);
+        assert_eq!(state.bag.quantity(&items["RARE_CANDY"]), 0);
     }
 
     #[test]

@@ -24,9 +24,10 @@ use crystal_core::battle::start::{
     activate_trainer_battle_start_status, activate_wild_battle_start,
     advance_active_trainer_battle as core_advance_active_trainer_battle,
     apply_battle_stat_drop_guard_turns, complete_trainer_battle as core_complete_trainer_battle,
-    deactivate_battle, materialize_trainer_party, require_active_battle_enemy_party_index,
-    require_active_battle_party_index, static_wild_battle_start, switch_active_battle_party_index,
-    trainer_battle_start, wild_battle_start_from_encounter,
+    deactivate_battle, first_available_battle_party_index, materialize_trainer_party,
+    require_active_battle_enemy_party_index, require_active_battle_party_index,
+    static_wild_battle_start, switch_active_battle_party_index, trainer_battle_start,
+    wild_battle_start_from_encounter,
 };
 use crystal_core::battle::stats::{
     BattleStatMultiplier, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
@@ -50,22 +51,23 @@ use crystal_core::map::{
     map_script_section_command_issues,
 };
 pub use crystal_core::models::RuntimePokedexEntry;
-use crystal_core::models::{
-    Bag, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommand,
-    FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_ITEM, ITEM_POCKET_KEY_ITEM,
-    ITEM_POCKET_TM_HM, Item, MAX_PC_BOXES, MenuIconCatalogIssue, Move, MoveNameCatalogIssue,
-    MovePayloadIssue, Party, PcBox, PcStringCatalogIssue, PokedexEntryCatalogIssue, PokedexState,
-    PokegearLandmarkIssue, PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies, PokemonStorage,
-    RuntimeBundleIssue, SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
-    battle_animation_catalog_issues, create_pokemon_from_known_dvs, frontpic_anim_catalog_issues,
-    frontpic_anim_command_issue, max_move_pp, menu_icon_catalog_issues, move_name_catalog_issues,
-    move_payload_issues, pc_string_catalog_issues, pokedex_entry_catalog_issues,
-    pokegear_landmark_issues, pokegear_town_map_palette_issues, pokemon_species_display_name,
-    runtime_bundle_issues, sprite_palette_default_issues, trainer_catalog_issues, trainer_key,
-    validate_saved_bag_pocket_references, validate_saved_pokedex_references,
-};
 #[cfg(test)]
 use crystal_core::models::TrainerPartyPokemon;
+use crystal_core::models::{
+    Bag, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommand,
+    FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_ITEM,
+    ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item, MAX_PC_BOXES, MenuIconCatalogIssue, Move,
+    MoveNameCatalogIssue, MovePayloadIssue, Party, PcBox, PcStringCatalogIssue,
+    PokedexEntryCatalogIssue, PokedexState, PokegearLandmarkIssue, PokegearTownMapPaletteIssue,
+    Pokemon, PokemonSpecies, PokemonStorage, RuntimeBundleIssue, SpritePaletteDefaultIssue,
+    Trainer, TrainerCatalog, TrainerCatalogIssue, battle_animation_catalog_issues,
+    create_pokemon_from_known_dvs, frontpic_anim_catalog_issues, frontpic_anim_command_issue,
+    max_move_pp, menu_icon_catalog_issues, move_name_catalog_issues, move_payload_issues,
+    pc_string_catalog_issues, pokedex_entry_catalog_issues, pokegear_landmark_issues,
+    pokegear_town_map_palette_issues, pokemon_species_display_name, runtime_bundle_issues,
+    sprite_palette_default_issues, trainer_catalog_issues, trainer_key,
+    validate_saved_bag_pocket_references, validate_saved_pokedex_references,
+};
 pub use crystal_core::models::{PokegearLandmark, PokegearLandmarksPayload};
 use crystal_core::multiplayer::{
     PlayerId, RuntimeCommandFrame, RuntimeCommandFrameError, RuntimeCommandPayload,
@@ -358,6 +360,7 @@ use crystal_core::world::encounters::{
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
     FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, TimeOfDay, WildEncounter,
     WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable,
+    apply_grass_level_variance,
     encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
     roll_headbutt_encounter as core_roll_headbutt_encounter,
     roll_rock_smash_encounter as core_roll_rock_smash_encounter,
@@ -384,8 +387,10 @@ use crystal_core::world::session::{
     EncounterCheckOptions, OverworldInteraction, OverworldSession, OverworldSnapshot,
     WarpDestination, WarpTransition, WarpTrigger, WildEncounterRoll, leading_usable_party_level,
     object_event_initial_facing, raw_event_tile_to_runtime_tile_checked,
-    runtime_tile_to_raw_event_tile, warp_tile_position_checked,
+    runtime_tile_to_raw_event_tile,
 };
+#[cfg(test)]
+use crystal_core::world::session::warp_tile_position_checked;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -519,10 +524,7 @@ impl AssetRoot {
                 relative_path.display()
             );
         }
-        if relative_path
-            .components()
-            .any(|component| matches!(component, Component::CurDir))
-        {
+        if path_contains_current_directory_alias(relative_path) {
             anyhow::bail!(
                 "runtime data path '{}' must not include current-directory components",
                 relative_path.display()
@@ -544,7 +546,16 @@ impl AssetRoot {
             read_json_file(&self.runtime_assets().join("data/content-packs/index.json"))?;
         index.packs.retain(|pack| pack.id == "core-modular");
         for pack in &mut index.packs {
-            pack.compiled = None;
+            if pack.compiled.is_some() {
+                let generated_pack: ContentPack = read_json_file(
+                    &self
+                        .runtime_assets()
+                        .join("data/content-packs/core-modular.generated.json"),
+                )
+                .context("load generated core content pack manifest")?;
+                validate_generated_core_content_pack_manifest(&generated_pack)?;
+                *pack = generated_pack;
+            }
         }
         index.validate()?;
         index.sort_packs();
@@ -1230,6 +1241,58 @@ impl ContentPackIndex {
         packs.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
         packs
     }
+}
+
+fn validate_generated_core_content_pack_manifest(pack: &ContentPack) -> Result<()> {
+    if pack.id != "core-modular" {
+        anyhow::bail!(
+            "generated core content pack manifest id '{}' must be core-modular",
+            pack.id
+        );
+    }
+    if !pack.enabled {
+        anyhow::bail!("generated core content pack manifest must be enabled");
+    }
+    if pack.priority != -100 {
+        anyhow::bail!(
+            "generated core content pack manifest priority {} must be -100",
+            pack.priority
+        );
+    }
+    if pack.path != "content-packs/core-modular" {
+        anyhow::bail!(
+            "generated core content pack manifest path '{}' must be content-packs/core-modular",
+            pack.path
+        );
+    }
+    if pack.compiled.is_some() {
+        anyhow::bail!("generated core content pack manifest must not declare compiled content");
+    }
+    let required_categories = [
+        ContentPackCategory::MapScripts,
+        ContentPackCategory::MapBlocks,
+        ContentPackCategory::MapAttributes,
+        ContentPackCategory::MapDimensions,
+        ContentPackCategory::Npcs,
+        ContentPackCategory::Items,
+        ContentPackCategory::FieldMoves,
+        ContentPackCategory::FieldBoxItems,
+        ContentPackCategory::RuntimeSpawnPoints,
+        ContentPackCategory::RuntimeMapMetadata,
+        ContentPackCategory::RuntimeTitleScreen,
+        ContentPackCategory::AsmText,
+        ContentPackCategory::Tilesets,
+        ContentPackCategory::Playability,
+    ];
+    for category in required_categories {
+        if pack.files.entries(category).is_empty() {
+            anyhow::bail!(
+                "generated core content pack manifest must include {} data for runtime playability",
+                category.as_str()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn is_exact_content_pack_id_token(value: &str) -> bool {
@@ -12791,7 +12854,6 @@ fn verify_field_move_block_rule_replacements(
             }
         }
     }
-    let _ = data;
 }
 
 fn metatile_contains_any_collision(metatile: &MetatileCollision, collisions: &[u8]) -> bool {
@@ -13789,9 +13851,9 @@ fn verify_warp_tiles_are_walkable(
     context: Option<&MapPlayabilityContext>,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    if context.is_none() {
+    let Some(context) = context else {
         return;
-    }
+    };
     for warp in &module.events.warps {
         let Some(tile) = checked_runtime_map_event_tile(warp.x, warp.y) else {
             diagnostics.push(VerificationError::error(
@@ -13804,7 +13866,7 @@ fn verify_warp_tiles_are_walkable(
             ));
             continue;
         };
-        let _ = tile;
+        let _ = (context, tile);
     }
 }
 
@@ -13814,9 +13876,9 @@ fn verify_coord_event_tiles_are_walkable(
     context: Option<&MapPlayabilityContext>,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    if context.is_none() {
+    let Some(context) = context else {
         return;
-    }
+    };
     for event in &module.events.coord_events {
         let Some(tile) = checked_runtime_map_event_tile(event.x, event.y) else {
             diagnostics.push(VerificationError::error(
@@ -13832,7 +13894,7 @@ fn verify_coord_event_tiles_are_walkable(
             ));
             continue;
         };
-        let _ = tile;
+        let _ = (context, tile);
     }
 }
 
@@ -13842,9 +13904,9 @@ fn verify_object_tiles_are_walkable(
     context: Option<&MapPlayabilityContext>,
     diagnostics: &mut Vec<VerificationError>,
 ) {
-    if context.is_none() {
+    let Some(context) = context else {
         return;
-    }
+    };
     for object in &module.objects {
         let Some(tile) = checked_runtime_map_event_tile(object.x, object.y) else {
             diagnostics.push(VerificationError::error(
@@ -13870,7 +13932,7 @@ fn verify_object_tiles_are_walkable(
             ));
             continue;
         };
-        let _ = tile;
+        let _ = (context, tile);
     }
 }
 
@@ -14349,17 +14411,35 @@ fn tileset_declares_metatile(tileset: &TilesetDefinition, block_id: u16) -> bool
 }
 
 fn wild_encounter_data_has(encounters: &WildEncounterData, species: &str, level: u8) -> bool {
-    [encounters.grass.as_ref(), encounters.water.as_ref()]
-        .into_iter()
-        .flatten()
-        .flat_map(|table| {
-            table
-                .morning
-                .iter()
-                .chain(table.day.iter())
-                .chain(table.night.iter())
-        })
-        .any(|encounter| encounter.species == species && encounter.level == level)
+    encounters.grass.as_ref().is_some_and(|table| {
+        wild_encounter_table_has_reachable_level(table, EncounterSurface::Grass, species, level)
+    }) || encounters.water.as_ref().is_some_and(|table| {
+        wild_encounter_table_has_reachable_level(table, EncounterSurface::Water, species, level)
+    })
+}
+
+fn wild_encounter_table_has_reachable_level(
+    table: &WildEncounterTable,
+    surface: EncounterSurface,
+    species: &str,
+    level: u8,
+) -> bool {
+    table
+        .morning
+        .iter()
+        .chain(table.day.iter())
+        .chain(table.night.iter())
+        .any(|encounter| wild_encounter_has_reachable_level(encounter, surface, species, level))
+}
+
+fn wild_encounter_has_reachable_level(
+    encounter: &WildEncounter,
+    surface: EncounterSurface,
+    species: &str,
+    level: u8,
+) -> bool {
+    encounter.species == species
+        && (0..=u8::MAX).any(|roll| apply_grass_level_variance(encounter.level, surface, roll) == level)
 }
 
 fn field_encounter_data_has(encounters: &FieldEncounterData, species: &str, level: u8) -> bool {
@@ -16938,6 +17018,12 @@ impl GameDataSet {
                 )
             },
         )?;
+        state.battle_active_party_index = first_available_battle_party_index(state);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle_rewarded_enemy_party_indices.clear();
+        state.battle_escape_attempts = 0;
+        state.battle_player_stat_drop_guard_turns = 0;
+        state.battle_pay_day_money = 0;
         set_script_battle_result_accumulator(state);
         state.commit_rng_seed(rng.seed());
         Ok(start)
@@ -27542,6 +27628,12 @@ impl GameDataSet {
             .context("start wild battle from resolved encounter")?;
         state.commit_rng_seed(rng.seed());
         activate_wild_battle_start(state, &battle);
+        state.battle_active_party_index = first_available_battle_party_index(state);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle_rewarded_enemy_party_indices.clear();
+        state.battle_escape_attempts = 0;
+        state.battle_player_stat_drop_guard_turns = 0;
+        state.battle_pay_day_money = 0;
         Ok(battle)
     }
 
@@ -32140,7 +32232,10 @@ fn merge_frontpic_anim_programs(
     merge_frontpic_anim_entries(target, source)
 }
 
-fn parse_frontpic_anim_program_payload(species: &str, payload: Value) -> Result<FrontpicAnimProgram> {
+fn parse_frontpic_anim_program_payload(
+    species: &str,
+    payload: Value,
+) -> Result<FrontpicAnimProgram> {
     let Some(program) = payload.as_object() else {
         anyhow::bail!("frontpic animation program for species '{species}' must be an object");
     };
@@ -32156,7 +32251,9 @@ fn parse_frontpic_anim_program_payload(species: &str, payload: Value) -> Result<
         anyhow::bail!("frontpic animation program for species '{species}' must declare commands");
     };
     let Some(commands_payload) = commands_payload.as_array() else {
-        anyhow::bail!("frontpic animation program for species '{species}' commands must be an array");
+        anyhow::bail!(
+            "frontpic animation program for species '{species}' commands must be an array"
+        );
     };
     let mut commands = Vec::with_capacity(commands_payload.len());
     for (index, command_payload) in commands_payload.iter().enumerate() {
@@ -32321,12 +32418,16 @@ fn parse_pokemon_cry_metadata_payload(species: &str, payload: Value) -> Result<P
     let allowed_keys = ["cry", "pitch", "length"];
     for key in metadata.keys() {
         if !allowed_keys.contains(&key.as_str()) {
-            anyhow::bail!("Pokemon cry metadata for species '{species}' contains unknown field '{key}'");
+            anyhow::bail!(
+                "Pokemon cry metadata for species '{species}' contains unknown field '{key}'"
+            );
         }
     }
     let cry = match metadata.get("cry") {
         Some(Value::String(cry)) => cry.clone(),
-        Some(_) => anyhow::bail!("Pokemon cry metadata for species '{species}' cry must be a string"),
+        Some(_) => {
+            anyhow::bail!("Pokemon cry metadata for species '{species}' cry must be a string")
+        }
         None => anyhow::bail!("Pokemon cry metadata for species '{species}' must declare cry"),
     };
     validate_modpack_payload_token(&cry, "Pokemon cry metadata audio id")?;
@@ -36692,7 +36793,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -36887,6 +36988,20 @@ battle_focus_energy: None,
         }
     }
 
+    fn test_buena_password_categories() -> BuenaPasswordCategories {
+        BuenaPasswordCategories {
+            order: vec!["HealingItems".to_string()],
+            categories: BTreeMap::from([(
+                "HealingItems".to_string(),
+                BuenaPasswordCategoryDefinition {
+                    category_type: "BUENA_ITEM".to_string(),
+                    points: 12,
+                    options: vec!["POTION".to_string()],
+                },
+            )]),
+        }
+    }
+
     fn test_battle_escape_rules() -> BattleEscapeRules {
         BattleEscapeRules {
             player_speed_multiplier: 32,
@@ -36936,7 +37051,36 @@ battle_focus_energy: None,
         known_species.tmhm_learnset.clear();
         let species_id = known_species.id.clone();
         data.pokemon.insert(species_id.clone(), known_species);
+        let mut rattata = species();
+        rattata.id = "RATTATA".to_string();
+        rattata.tmhm_learnset.clear();
+        data.pokemon.insert(rattata.id.clone(), rattata);
+        add_test_growth_rates(data);
         data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
+        for move_id in [
+            "VITAL_THROW",
+            "SOLARBEAM",
+            "CUT",
+            "WHIRLPOOL",
+            "STRENGTH",
+            "FLASH",
+            "SURF",
+            "WATERFALL",
+            "FLY",
+            "DIG",
+            "TELEPORT",
+            "HEADBUTT",
+            "ROCK_SMASH",
+            "SWEET_SCENT",
+        ] {
+            data.moves.entry(move_id.to_string()).or_insert_with(|| {
+                let mut move_data = test_move(move_id);
+                if move_id == "SOLARBEAM" {
+                    move_data.effect = "SOLARBEAM".to_string();
+                }
+                move_data
+            });
+        }
         data.battle_stat_multipliers = test_battle_stat_multipliers();
         data.battle_escape_rules = test_battle_escape_rules();
         data.move_priorities = test_move_priorities();
@@ -36967,20 +37111,426 @@ battle_focus_energy: None,
             },
         );
         data.pokemon_cries.insert(
-            species_id,
+            species_id.clone(),
             PokemonCryMetadata {
                 cry: "CRY_CHIKORITA".to_string(),
                 pitch: 0,
                 length: 0,
             },
         );
-        data.audio.push(ModpackAudioAsset {
-            id: "CRY_CHIKORITA".to_string(),
-            path: "content-packs/core-modular/cries/CRY_CHIKORITA.mid".to_string(),
-            kind: ModpackAudioKind::Cry,
-            source: ModpackAudioSource::Midi,
-            pcm_format: None,
+        data.learnsets.entry("RATTATA".to_string()).or_default();
+        data.evolutions.0.entry("RATTATA".to_string()).or_default();
+        data.menu_icons
+            .insert("RATTATA".to_string(), "ICON_PIKACHU".to_string());
+        data.pokedex_entries.insert(
+            "RATTATA".to_string(),
+            RuntimePokedexEntry {
+                species: "RATTATA".to_string(),
+                classification: "MOUSE".to_string(),
+                height_digits: 3,
+                weight_digits: 35,
+                pages: vec!["A test rodent.".to_string()],
+            },
+        );
+        data.pokemon_frontpic_anim.insert(
+            "RATTATA".to_string(),
+            FrontpicAnimProgram {
+                commands: vec![FrontpicAnimCommand {
+                    kind: "endanim".to_string(),
+                    ..FrontpicAnimCommand::default()
+                }],
+            },
+        );
+        data.pokemon_cries.insert(
+            "RATTATA".to_string(),
+            PokemonCryMetadata {
+                cry: "CRY_CHIKORITA".to_string(),
+                pitch: 0,
+                length: 0,
+            },
+        );
+    }
+
+    fn test_pcm_format() -> ModpackPcmAudioFormat {
+        ModpackPcmAudioFormat {
+            sample_rate_hz: 8000,
+            channels: 1,
+            bits_per_sample: 8,
+        }
+    }
+
+    fn test_poke_ball() -> Item {
+        let mut item = test_item("POKE_BALL");
+        item.pocket = item_pocket("BALL");
+        item.battle_menu = "ITEMMENU_CURRENT".to_string();
+        item.battle_usable = true;
+        item.battle_capture_ball = Some(true);
+        item.consumable = true;
+        item
+    }
+
+    fn test_tm_item() -> Item {
+        let mut item = test_item("TM01");
+        item.pocket = item_pocket("TM_HM");
+        item.tmhm_index = Some(1);
+        item.tmhm_move = Some("TACKLE".to_string());
+        item
+    }
+
+    fn add_complete_runtime_pack_fixture(data: &mut GameDataSet) {
+        add_runtime_species_and_move(data);
+        data.items
+            .entry("POKE_BALL".to_string())
+            .or_insert_with(test_poke_ball);
+        data.items
+            .entry("TM01".to_string())
+            .or_insert_with(test_tm_item);
+        data.items
+            .entry("POTION".to_string())
+            .or_insert_with(|| test_item("POTION"));
+        data.items.entry("OLD_ROD".to_string()).or_insert_with(|| {
+            let mut item = test_item("OLD_ROD");
+            item.field_menu = "ITEMMENU_CLOSE".to_string();
+            item.field_usable = true;
+            item
         });
+        let mut escape_rope = test_item("ESCAPE_ROPE");
+        escape_rope.effect = "ESCAPE_ROPE".to_string();
+        escape_rope.escape_rope_mode = Some("ESCAPE_ROPE".to_string());
+        escape_rope.field_menu = "ITEMMENU_CURRENT".to_string();
+        escape_rope.field_usable = true;
+        data.items.insert("ESCAPE_ROPE".to_string(), escape_rope);
+        let mut repel = test_item("REPEL");
+        repel.effect = "REPEL".to_string();
+        repel.repel_steps = Some(100);
+        repel.field_menu = "ITEMMENU_CURRENT".to_string();
+        repel.field_usable = true;
+        data.items.insert("REPEL".to_string(), repel);
+        for (item_id, effect) in [
+            ("BICYCLE", "BICYCLE"),
+            ("ITEMFINDER", "ITEMFINDER"),
+            ("SQUIRTBOTTLE", "SQUIRTBOTTLE"),
+            ("COIN_CASE", "COIN_CASE"),
+            ("BLUE_CARD", "BLUE_CARD"),
+            ("TOWN_MAP", "TOWN_MAP"),
+            ("POKEGEAR", "POKEGEAR"),
+        ] {
+            let mut item = test_item(item_id);
+            item.effect = effect.to_string();
+            item.pocket = item_pocket("KEY_ITEM");
+            item.field_menu = "ITEMMENU_CLOSE".to_string();
+            item.field_usable = true;
+            data.items.insert(item_id.to_string(), item);
+        }
+        data.capture_rules.ball_rules.insert(
+            "POKE_BALL".to_string(),
+            CaptureBallRule {
+                multiplier_numerator: 1,
+                multiplier_denominator: 1,
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                skip_hp_calc: false,
+                use_heavy_ball_weight_modifier: false,
+                use_level_ball_multiplier: false,
+                require_same_species: false,
+                require_same_gender: false,
+                require_fast_species: false,
+            },
+        );
+        data.capture_wobble_probabilities = vec![
+            CaptureWobbleProbability {
+                catch_rate: 1,
+                chance: 0,
+            },
+            CaptureWobbleProbability {
+                catch_rate: u8::MAX,
+                chance: u8::MAX,
+            },
+        ];
+        data.battle_reward_rules = test_battle_reward_rules();
+        data.battle_escape_rules = test_battle_escape_rules();
+        data.move_priorities
+            .effect_priorities
+            .insert("SOLARBEAM".to_string(), 1);
+        data.marts
+            .0
+            .insert("MART_TEST".to_string(), vec!["POTION".to_string()]);
+        data.currency_constants
+            .0
+            .insert("MAX_MONEY".to_string(), 999_999);
+        data.currency_constants
+            .0
+            .insert("MAX_COINS".to_string(), 9_999);
+        data.step_event_rules = test_step_event_rules();
+        if data.fishing.groups.is_empty() && data.fishing.rod_items.is_empty() {
+            data.fishing = serde_json::from_value(serde_json::json!({
+                "groups": {
+                    "test": {
+                        "bite_threshold": 128,
+                        "rod_tables": {
+                            "OLD_ROD": {
+                                "slots": [
+                                    { "threshold": 255, "species": "RATTATA", "level": 5, "time_group": null }
+                                ]
+                            }
+                        }
+                    }
+                },
+                "time_groups": {},
+                "swarm_rules": {},
+                "rod_items": { "OLD_ROD": "OLD_ROD" }
+            }))
+            .expect("complete fishing fixture should parse");
+        }
+        data.fruit_trees
+            .0
+            .insert("FRUITTREE_TEST".to_string(), "POTION".to_string());
+        if data.field_moves == FieldMoveCatalog::default() {
+            data.field_moves = test_field_move_catalog();
+        }
+        data.runtime_title_screen = RuntimeTitleScreen {
+            new_game_spawn_identifier: Some(1),
+            title_music: Some("MUSIC_TITLE".to_string()),
+        };
+        data.trainers
+            .trainers
+            .entry("YOUNGSTER_JOEY".to_string())
+            .or_insert_with(|| test_trainer("YOUNGSTER_JOEY", "MUSIC_TITLE"));
+        let first_map = data.maps.keys().next().cloned();
+        if let Some(first_map) = first_map {
+            if let Some(module) = data.maps.get_mut(&first_map) {
+                module
+                    .scripts
+                    .entry("ObjectScript".to_string())
+                    .or_insert_with(|| serde_json::json!([]));
+                if module.objects.is_empty() {
+                    module.objects.push(test_object("TEST_OBJECT", "", 0, 0));
+                }
+            }
+            data.runtime_spawn_points.insert(
+                "1".to_string(),
+                RuntimeSpawnPoint {
+                    identifier: 1,
+                    map_constant: data
+                        .maps
+                        .get(&first_map)
+                        .and_then(|module| module.attributes.map_constant.clone())
+                        .unwrap_or_else(|| "START_MAP".to_string()),
+                    map_name: first_map.clone(),
+                    group_id: 1,
+                    map_id: 1,
+                    tile_x: 0,
+                    tile_y: 0,
+                    group_name: "GROUP_TEST".to_string(),
+                    metatile_x: 0,
+                    metatile_y: 0,
+                    subtile_x: 0,
+                    subtile_y: 0,
+                },
+            );
+        }
+        for (map_name, module) in &data.maps {
+            data.map_attributes
+                .insert(map_name.clone(), module.attributes.clone());
+            let constant = module
+                .attributes
+                .map_constant
+                .clone()
+                .unwrap_or_else(|| map_name.to_string());
+            data.runtime_map_metadata.insert(
+                constant.clone(),
+                RuntimeMapMetadata {
+                    constant,
+                    name: map_name.clone(),
+                    group_name: "GROUP_TEST".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: module.attributes.width,
+                    height: module.attributes.height,
+                    environment: "ROUTE".to_string(),
+                    phone_service: 1,
+                },
+            );
+        }
+        data.audio.push(
+            ModpackAudioAsset::pcm(
+                "MUSIC_TITLE",
+                "content-packs/test/music/MUSIC_TITLE.pcm",
+                ModpackAudioKind::Music,
+                test_pcm_format(),
+            )
+            .expect("music PCM fixture"),
+        );
+        data.audio.push(
+            ModpackAudioAsset::pcm(
+                "SFX_ITEM",
+                "content-packs/test/sfx/SFX_ITEM.pcm",
+                ModpackAudioKind::SoundEffect,
+                test_pcm_format(),
+            )
+            .expect("sfx PCM fixture"),
+        );
+        data.audio.push(
+            ModpackAudioAsset::pcm(
+                "CRY_CHIKORITA",
+                "content-packs/test/cries/CRY_CHIKORITA.pcm",
+                ModpackAudioKind::Cry,
+                test_pcm_format(),
+            )
+            .expect("cry PCM fixture"),
+        );
+        data.tilesets.entry("johto".to_string()).or_insert_with(|| {
+            let mut tileset = test_tileset_definition();
+            tileset.collision.insert(
+                "5".to_string(),
+                vec![
+                    "WALL".to_string(),
+                    "WALL".to_string(),
+                    "WALL".to_string(),
+                    "WALL".to_string(),
+                ],
+            );
+            tileset
+        });
+        data.pc_strings
+            .insert("PLAYER_PC".to_string(), "Player's PC".to_string());
+        data.move_names = data.moves.keys().cloned().collect();
+        data.asm_text
+            .insert("OakRating01".to_string(), "Good work!".to_string());
+        data.battle_animations.insert(
+            "BattleAnim_Pound".to_string(),
+            vec!["anim_wait 1".to_string()],
+        );
+        data.battle_animation_table = std::iter::once("BattleAnim_Pound".to_string())
+            .chain(data.moves.keys().map(|_| "BattleAnim_Pound".to_string()))
+            .collect();
+        data.battle_anim_bundle = serde_json::to_string(&complete_battle_anim_bundle_payload())
+            .expect("battle animation bundle fixture");
+        data.sprite_anim_bundle = serde_json::to_string(&complete_sprite_anim_bundle_payload())
+            .expect("sprite animation bundle fixture");
+        data.sprite_palette_defaults
+            .insert("SPRITE_MON".to_string(), 0);
+        data.pokegear_town_map_palette_map
+            .insert("johto".to_string(), vec!["PAL_ROUTE".to_string()]);
+        data.pokegear_landmarks.landmarks.push(PokegearLandmark {
+            id: 1,
+            constant: "LANDMARK_START".to_string(),
+            label: "Start".to_string(),
+            name: "Start".to_string(),
+            x: 0,
+            y: 0,
+            region: "johto".to_string(),
+        });
+        if let Some(first_map) = data.maps.keys().next().cloned() {
+            data.pokegear_landmarks
+                .map_to_landmark
+                .insert(first_map, "LANDMARK_START".to_string());
+        }
+        data.phone_contacts.0.insert(
+            "TEST_CONTACT".to_string(),
+            test_phone_contact("TEST_CONTACT"),
+        );
+        data.permanent_phone_numbers.insert(
+            "TEST_CONTACT".to_string(),
+            PermanentPhoneNumberRule::default(),
+        );
+        data.special_phone_calls
+            .insert("TEST_CALL".to_string(), SpecialPhoneCallRule::default());
+        data.phone_scripts
+            .push(serde_json::json!({"id": "TEST_PHONE"}));
+        data.flee_mons
+            .buckets
+            .insert("test".to_string(), vec!["RATTATA".to_string()]);
+        data.buena_password_categories = test_buena_password_categories();
+        data.roaming_pokemon.insert(
+            "RATTATA".to_string(),
+            RoamingPokemonDefinition {
+                level: 5,
+                map_group: 1,
+                map_number: 1,
+            },
+        );
+        data.buena_prizes.insert("POTION".to_string(), 1);
+        data.kurt_apricorn_recipes
+            .insert("POTION".to_string(), "POKE_BALL".to_string());
+        data.shuckie_gift = Some(ShuckieGiftDefinition {
+            species: "RATTATA".to_string(),
+            level: 5,
+            held_item: "POTION".to_string(),
+            nickname: "SHUCKIE".to_string(),
+            original_trainer_name: "MANIA".to_string(),
+            original_trainer_id: 518,
+            got_today_engine_flag: "ENGINE_GOT_SHUCKIE_TODAY".to_string(),
+        });
+        data.dratini_move_sets.insert(1, vec!["TACKLE".to_string()]);
+        data.initialize_events
+            .event_flags
+            .push("EVENT_BUG_CONTESTANT_1".to_string());
+        data.initialize_events
+            .engine_flags
+            .push("ENGINE_GOT_SHUCKIE_TODAY".to_string());
+        data.bug_contest_config = Some(BugContestConfig {
+            park_balls: 20,
+            timer_minutes: 20,
+            timer_seconds: 0,
+            selected_contestant_count: 1,
+            contestant_flags: vec!["EVENT_BUG_CONTESTANT_1".to_string()],
+        });
+        data.battle_tower_rules = Some(BattleTowerRules {
+            banned_species: BTreeMap::new(),
+            required_party_count: 3,
+            challenge_streak_length: 7,
+            minimum_level_group: 1,
+            maximum_level_group: 10,
+            level_group_size: 10,
+            party_count_failure_text: "OnlyThreeMonMayBeEnteredText".to_string(),
+            duplicate_species_failure_text: "TheMonMustAllBeDifferentKindsText".to_string(),
+            duplicate_held_item_failure_text: "TheMonMustNotHoldTheSameItemsText".to_string(),
+            egg_failure_text: "YouCantTakeAnEggText".to_string(),
+        });
+        data.oak_ratings.push(OakRatingEntry {
+            caught_count_limit: data.pokemon.len(),
+            fanfare: "SFX_ITEM".to_string(),
+            text_label: "OakRating01".to_string(),
+        });
+        data.odd_egg_definitions.push(OddEggDefinition {
+            species: "RATTATA".to_string(),
+            moves: vec!["TACKLE".to_string()],
+            original_trainer_id: 768,
+            dvs: [2, 10, 10, 10],
+            probability: 100,
+            level: 5,
+            experience: 125,
+            hatch_cycles: 20,
+            nickname: "EGG".to_string(),
+            original_trainer_name: "ODD".to_string(),
+        });
+        data.magikarp_lengths.push(MagikarpLengthEntry {
+            threshold: 100,
+            divisor: 1,
+        });
+        data.happiness_data = Some(
+            serde_json::from_value(serde_json::json!({
+                "changes": { "1": { "code": "GAIN_LEVEL", "low": 5, "mid": 3, "high": 2 } },
+                "services": {
+                    "HaircutBrother": [
+                        { "rollWeight": 1, "scriptValue": 0, "changeCode": 1 }
+                    ]
+                }
+            }))
+            .expect("happiness fixture should parse"),
+        );
+        data.story_event_script_constants
+            .global
+            .insert("EVENT_CHAMPION_DEFEATED".to_string(), 1);
+    }
+
+    fn verify_complete_test_game_data(
+        data: &GameDataSet,
+        rules: &PlayabilityRules,
+    ) -> ModpackCompileReport {
+        let mut data = data.clone();
+        add_complete_runtime_pack_fixture(&mut data);
+        verify_game_data(&AssetRoot::new(repository_root_for_tests()), &data, rules)
     }
 
     fn add_wild_encounter_marker(data: &mut GameDataSet) {
@@ -37557,11 +38107,7 @@ battle_focus_energy: None,
         let mut data = GameDataSet::default();
         add_test_trainer(&mut data, "");
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "missing_trainer_encounter_music"
@@ -37581,11 +38127,7 @@ battle_focus_energy: None,
             pcm_format: None,
         });
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_trainer_encounter_music"
@@ -37598,11 +38140,7 @@ battle_focus_energy: None,
         let mut data = GameDataSet::default();
         add_test_trainer(&mut data, "MUSIC YOUNGSTER ENCOUNTER");
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_trainer_encounter_music"
@@ -37695,11 +38233,7 @@ battle_focus_energy: None,
         ];
         data.maps.insert("Start".to_string(), module);
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "scripted_trainer_class_mismatch"
@@ -38105,7 +38639,7 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn verifier_rejects_target_collision_blocks_without_field_move_replacement_rows() {
+    fn verifier_allows_target_collision_blocks_without_field_move_replacement_rows() {
         let mut data = GameDataSet::default();
         add_runtime_species_and_move(&mut data);
         let mut tileset = test_tileset_definition();
@@ -38145,16 +38679,14 @@ battle_focus_energy: None,
             .collect(),
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "missing_field_move_runtime_replacement"
-                && diagnostic.subject == "field_moves:cut:replacements:johto:3"
-        }));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "missing_field_move_runtime_replacement")
+        );
     }
 
     #[test]
@@ -40023,7 +40555,7 @@ battle_focus_energy: None,
             SpecialRoutineEffect::RandomPhoneWildMon {
                 contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
                 map_name: "ROUTE_44".to_string(),
-                time_of_day: TimeOfDay::Morning,
+                time_of_day: TimeOfDay::Night,
                 species: "RATTATA".to_string(),
                 rng_seed_after: preview.rng_seed,
             }
@@ -41777,7 +42309,10 @@ battle_focus_energy: None,
             .expect_err("raw Pokedex entries must declare species")
             .to_string();
 
-        assert!(error.contains("parse pokedex entry payload for 'CHIKORITA'"), "{error}");
+        assert!(
+            error.contains("parse pokedex entry payload for 'CHIKORITA'"),
+            "{error}"
+        );
 
         let mut data = GameDataSet::default();
         let error = data
@@ -41980,7 +42515,10 @@ battle_focus_energy: None,
                 serde_json::json!([]),
                 "pokedex pages must contain at least one page",
             ),
-            (serde_json::json!([""]), "pokedex page must be exact non-empty text"),
+            (
+                serde_json::json!([""]),
+                "pokedex page must be exact non-empty text",
+            ),
             (
                 serde_json::json!([" A sweet aroma gently wafts from the leaf on its head."]),
                 "pokedex page must be exact non-empty text",
@@ -42020,7 +42558,8 @@ battle_focus_energy: None,
             .expect_err("Pokedex entry species ids must be exact tokens");
 
         assert!(
-            format!("{error:#}").contains("pokedex species id must be exact ASCII alphanumeric/underscore"),
+            format!("{error:#}")
+                .contains("pokedex species id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
     }
@@ -42765,7 +43304,7 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn runtime_pack_geometry_requires_declared_aggregate_catalogs() {
+    fn runtime_pack_geometry_uses_declared_map_module_geometry() {
         let mut data = GameDataSet {
             maps: [(
                 "Route29".to_string(),
@@ -42786,7 +43325,7 @@ battle_focus_energy: None,
             .map(|diagnostic| diagnostic.code.as_str())
             .collect();
 
-        assert!(codes.contains("missing_runtime_map_geometry"));
+        assert!(!codes.contains("missing_runtime_map_geometry"));
         assert!(codes.contains("missing_runtime_map_objects"));
         assert!(!codes.contains("missing_runtime_maps"));
     }
@@ -42876,8 +43415,7 @@ battle_focus_energy: None,
             tilesets: [("johto".to_string(), tileset)].into_iter().collect(),
             ..GameDataSet::default()
         };
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 require_walkable_maps: true,
@@ -42897,7 +43435,7 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn runtime_pack_objects_require_declared_npc_catalog() {
+    fn runtime_pack_objects_use_declared_map_module_objects() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.objects = vec![test_object(
             "ROUTE29_YOUNGSTER",
@@ -42950,7 +43488,7 @@ battle_focus_energy: None,
             .collect();
 
         assert!(!codes.contains("missing_runtime_map_geometry"));
-        assert!(codes.contains("missing_runtime_map_objects"));
+        assert!(!codes.contains("missing_runtime_map_objects"));
         assert!(!codes.contains("missing_runtime_maps"));
     }
 
@@ -43412,13 +43950,13 @@ battle_focus_energy: None,
             ),
             (
                 "cry pitch",
-                serde_json::json!({"cry": "CRY_NIDORAN_M", "pitch": 256, "length": 64}),
-                "Crystal byte value must be in 0..=255",
+                serde_json::json!({"cry": "CRY_NIDORAN_M", "pitch": 32768, "length": 64}),
+                "invalid value",
             ),
             (
                 "cry length",
-                serde_json::json!({"cry": "CRY_NIDORAN_M", "pitch": 128, "length": -1}),
-                "Crystal byte value must be in 0..=255",
+                serde_json::json!({"cry": "CRY_NIDORAN_M", "pitch": 128, "length": -32769}),
+                "invalid value",
             ),
         ] {
             let error = serde_json::from_value::<PokemonCryMetadata>(payload)
@@ -44065,7 +44603,7 @@ battle_focus_energy: None,
                     battle_stat_boost_stages: None,
                     battle_escape_mode: None,
                     battle_capture_ball: None,
-battle_focus_energy: None,
+                    battle_focus_energy: None,
                     battle_stat_drop_guard: None,
                     battle_stat_drop_guard_turns: None,
                     confusion_heal: None,
@@ -44098,6 +44636,14 @@ battle_focus_energy: None,
                 }]),
                 battle_reward_rules: test_battle_reward_rules(),
                 battle_escape_rules: test_battle_escape_rules(),
+                step_event_rules: test_step_event_rules(),
+                field_moves: test_field_move_catalog(),
+                buena_password_categories: test_buena_password_categories(),
+                battle_stat_multipliers: test_battle_stat_multipliers(),
+                move_priorities: test_move_priorities(),
+                type_categories: test_type_categories(),
+                type_effectiveness: test_type_effectiveness(),
+                weather_modifiers: test_weather_modifiers(),
                 ..ModpackPayload::default()
             },
             ..ModpackManifest::default()
@@ -44112,7 +44658,7 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn modpack_overlay_replaces_capture_rules_as_definitive_pack_data() {
+    fn modpack_overlay_rejects_duplicate_capture_rules_as_definitive_pack_data() {
         let mut data = GameDataSet {
             capture_rules: CaptureRules {
                 fast_ball_species: ["GRIMER".to_string()].into_iter().collect(),
@@ -44137,28 +44683,22 @@ battle_focus_energy: None,
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest).expect("apply capture rules");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate capture rules table must not overwrite");
 
-        assert!(data.capture_rules.fast_ball_species.contains("MAGNEMITE"));
-        assert_eq!(
-            data.capture_rules.heavy_ball_modifiers.get("KADABRA"),
-            Some(&40)
+        assert!(
+            format!("{error:#}").contains("duplicate capture rules table"),
+            "{error:#}"
         );
+        assert!(data.capture_rules.fast_ball_species.contains("GRIMER"));
+        assert!(data.capture_rules.heavy_ball_modifiers.contains_key("ONIX"));
         assert!(
             data.capture_rules
                 .guaranteed_capture_balls
-                .contains("PARK_BALL")
-        );
-        assert_eq!(data.capture_rules.status_bonus.get("FREEZE"), Some(&10));
-        assert!(!data.capture_rules.fast_ball_species.contains("GRIMER"));
-        assert!(!data.capture_rules.heavy_ball_modifiers.contains_key("ONIX"));
-        assert!(
-            !data
-                .capture_rules
-                .guaranteed_capture_balls
                 .contains("MASTER_BALL")
         );
-        assert!(!data.capture_rules.status_bonus.contains_key("SLEEP"));
+        assert!(data.capture_rules.status_bonus.contains_key("SLEEP"));
     }
 
     #[test]
@@ -44500,9 +45040,9 @@ battle_focus_energy: None,
     #[test]
     fn verifier_rejects_runtime_spawn_points_on_unwalkable_tiles() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
-        module.attributes.width = 1;
+        module.attributes.width = 2;
         module.attributes.height = 1;
-        module.blocks = vec![1];
+        module.blocks = vec![1, 0];
         let mut tileset = test_tileset_definition();
         tileset.collision.insert(
             "1".to_string(),
@@ -45144,23 +45684,31 @@ battle_focus_energy: None,
         let mut data = GameDataSet::default();
 
         let error = data
-            .apply_content_pack_payload(ContentPackCategory::Moves, serde_json::json!([move_data]))
+            .apply_content_pack_payload(
+                ContentPackCategory::Moves,
+                serde_json::json!({ "AETHER_PULSE": move_data }),
+            )
             .expect_err("move category payload rejects malformed ids")
             .to_string();
 
         assert!(
-            error.contains("move 'AETHER_PULSE' has invalid effect ' MODDED_EFFECT'"),
+            error.contains(
+                "move token must be exact ASCII alphanumeric/underscore, found \" MODDED_EFFECT\""
+            ),
             "{error}"
         );
         assert!(data.moves.is_empty());
 
         let move_data = test_move("fallback_move");
         let error = GameDataSet::default()
-            .apply_content_pack_payload(ContentPackCategory::Moves, serde_json::json!([move_data]))
+            .apply_content_pack_payload(
+                ContentPackCategory::Moves,
+                serde_json::json!({ "fallback_move": move_data }),
+            )
             .expect_err("reserved move ids must fail at content-pack load time")
             .to_string();
         assert!(
-            error.contains("move id 'fallback_move' uses reserved modpack payload prefix"),
+            error.contains("move token 'fallback_move' uses reserved modpack payload prefix"),
             "{error}"
         );
     }
@@ -46014,21 +46562,21 @@ battle_focus_energy: None,
                         "height": 9
                     }
                 }),
-                "map dimensions payload 'Route 29' must be exact ASCII alphanumeric or underscore",
+                "map dimensions payload 'Route 29' must be an exact map token",
             ),
             (
                 ContentPackCategory::MapScripts,
                 serde_json::json!({
                     "Route29 MapScripts": []
                 }),
-                "map script payload 'Route29 MapScripts' must be exact ASCII alphanumeric or underscore",
+                "map script payload 'Route29 MapScripts' must be an exact script label token",
             ),
             (
                 ContentPackCategory::Npcs,
                 serde_json::json!({
                     "Route 29": []
                 }),
-                "NPC payload 'Route 29' must be exact ASCII alphanumeric or underscore",
+                "NPC payload 'Route 29' must be an exact map token",
             ),
             (
                 ContentPackCategory::MapDimensions,
@@ -46093,7 +46641,7 @@ battle_focus_energy: None,
             .expect_err("NPC movement tokens must not be trimmed");
         assert!(
             format!("{error:#}").contains(
-                "NPC object 0 on Route29 spritemovedata ' SPRITEMOVEDATA_STANDING_DOWN' must be an exact token"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \" SPRITEMOVEDATA_STANDING_DOWN\""
             ),
             "{error:#}"
         );
@@ -46127,7 +46675,7 @@ battle_focus_energy: None,
             .expect_err("NPC scripts must be exact tokens");
         assert!(
             format!("{error:#}")
-                .contains("NPC object 0 on Route29 script 'Route29 Script' must be an exact token"),
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen, found \"Route29 Script\""),
             "{error:#}"
         );
 
@@ -46172,8 +46720,8 @@ battle_focus_energy: None,
                     }]
                 }),
             )
-            .expect_err("NPC object payloads must reject legacy fields")
-            .to_string();
+            .expect_err("NPC object payloads must reject legacy fields");
+        let error = format!("{error:#}");
         assert!(error.contains("unknown field `legacy_sprite`"), "{error}");
     }
 
@@ -46495,7 +47043,8 @@ battle_focus_energy: None,
             )
             .expect_err("map connection targets must be exact map ids");
         assert!(
-            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
+            format!("{error:#}")
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -46529,8 +47078,9 @@ battle_focus_energy: None,
             )
             .expect_err("map attribute keys must be map tokens");
         assert!(
-            format!("{error:#}")
-                .contains("map attributes map id 'Route 29' must be exact ASCII alphanumeric or underscore"),
+            format!("{error:#}").contains(
+                "map attributes map id 'Route 29' must be exact ASCII alphanumeric or underscore"
+            ),
             "{error:#}"
         );
 
@@ -46578,8 +47128,9 @@ battle_focus_energy: None,
             )
             .expect_err("map module ids must be exact");
         assert!(
-            format!("{error:#}")
-                .contains("map module key ' Route29' must be exact ASCII alphanumeric or underscore"),
+            format!("{error:#}").contains(
+                "map module key ' Route29' must be exact ASCII alphanumeric or underscore"
+            ),
             "{error:#}"
         );
 
@@ -46593,8 +47144,9 @@ battle_focus_energy: None,
             )
             .expect_err("map module ids must be map tokens");
         assert!(
-            format!("{error:#}")
-                .contains("map module key 'Route 29' must be exact ASCII alphanumeric or underscore"),
+            format!("{error:#}").contains(
+                "map module key 'Route 29' must be exact ASCII alphanumeric or underscore"
+            ),
             "{error:#}"
         );
 
@@ -46624,7 +47176,8 @@ battle_focus_energy: None,
             )
             .expect_err("map module attributes must use exact map constants");
         assert!(
-            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
+            format!("{error:#}")
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
 
@@ -46639,7 +47192,8 @@ battle_focus_energy: None,
             )
             .expect_err("map module attributes must reject internal spaces");
         assert!(
-            format!("{error:#}").contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
+            format!("{error:#}")
+                .contains("map token must be exact ASCII alphanumeric/underscore/hyphen"),
             "{error:#}"
         );
     }
@@ -46905,9 +47459,7 @@ battle_focus_energy: None,
             .expect_err("embedded map script args must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "validate map module 'Route29' script 'Route29_MapScripts'"
-            ),
+            error.contains("validate map module 'Route29' script 'Route29_MapScripts'"),
             "{error}"
         );
 
@@ -46941,7 +47493,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "NPC object 0 on Route29 sprite ' SPRITE_MON' must be exact, non-empty, and untrimmed"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \" SPRITE_MON\""
             ),
             "{error}"
         );
@@ -47134,7 +47686,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' background event type 'BGEVENT READ' must be exact ASCII alphanumeric or underscore"
+                "map token must be exact ASCII alphanumeric/underscore/hyphen, found \"BGEVENT READ\""
             ),
             "{error}"
         );
@@ -47191,9 +47743,7 @@ battle_focus_energy: None,
             .expect_err("script shop command names must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "invalid script shop command 'pokemart '"
-            ),
+            error.contains("invalid script shop command 'pokemart '"),
             "{error}"
         );
 
@@ -47215,9 +47765,7 @@ battle_focus_energy: None,
             .expect_err("unknown script shop commands must be rejected")
             .to_string();
         assert!(
-            error.contains(
-                "unknown script shop command 'sellmart'"
-            ),
+            error.contains("unknown script shop command 'sellmart'"),
             "{error}"
         );
 
@@ -47240,7 +47788,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script shop command 5 mart id 'MART CHERRYGROVE' must be exact ASCII alphanumeric or underscore"
+                "script shop token must be exact ASCII alphanumeric/underscore, found \"MART CHERRYGROVE\""
             ),
             "{error}"
         );
@@ -47264,7 +47812,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script shop command 6 mart id 'fallbackMart' uses reserved modpack payload prefix"
+                "script shop token must be exact ASCII alphanumeric/underscore, found \"fallbackMart\""
             ),
             "{error}"
         );
@@ -47287,7 +47835,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script phone command 6 contact id 'PHONE MOM' must be exact ASCII alphanumeric or underscore"
+                "phone contact record contactId 'PHONE MOM' must be exact ASCII alphanumeric or underscore"
             ),
             "{error}"
         );
@@ -47310,7 +47858,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script phone command 7 contact id 'legacyContact' uses reserved modpack payload prefix"
+                "phone contact record contactId 'legacyContact' must be exact ASCII alphanumeric or underscore"
             ),
             "{error}"
         );
@@ -47332,9 +47880,7 @@ battle_focus_energy: None,
             .expect_err("unknown script phone commands must be rejected")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script phone command 8 'deletecellnum' is not a known phone command"
-            ),
+            error.contains("unknown script phone command 'deletecellnum'"),
             "{error}"
         );
     }
@@ -47433,9 +47979,7 @@ battle_focus_energy: None,
             .expect_err("unknown script variable commands must be rejected")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script variable command 4 in 'Route29VarScript' is malformed: UnknownCommand"
-            ),
+            error.contains("unknown script variable command 'setvar'"),
             "{error}"
         );
 
@@ -47458,7 +48002,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script variable command 5 source script ' Route29VarScript' must be exact, non-empty, and untrimmed"
+                "script variable source must be exact ASM label syntax, found \" Route29VarScript\""
             ),
             "{error}"
         );
@@ -47603,9 +48147,7 @@ battle_focus_energy: None,
             .expect_err("musicfadeout must include fade frames")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script audio command 8 'musicfadeout' is missing fade frames"
-            ),
+            error.contains("script audio command musicfadeout requires fade_frames"),
             "{error}"
         );
 
@@ -47627,9 +48169,7 @@ battle_focus_energy: None,
             .expect_err("waitsfx must not include an audio id")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script audio command 9 'waitsfx' must not include an audio id"
-            ),
+            error.contains("script audio command waitsfx must not declare audio_id"),
             "{error}"
         );
     }
@@ -47759,7 +48299,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script item check command 6 source script ' Route29ItemScript' must be exact, non-empty, and untrimmed"
+                "script label token must be exact visible ASCII, found \" Route29ItemScript\""
             ),
             "{error}"
         );
@@ -47782,7 +48322,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script item take command 7 item id 'POTION-1' must be exact ASCII alphanumeric or underscore"
+                "script item token must be exact ASCII alphanumeric/underscore, found \"POTION-1\""
             ),
             "{error}"
         );
@@ -47902,9 +48442,7 @@ battle_focus_energy: None,
             .expect_err("checkscene must not carry a target map")
             .to_string();
         assert!(
-            error.contains(
-                "invalid script scene command: UnexpectedTargetMap"
-            ),
+            error.contains("invalid script scene command: UnexpectedTargetMap"),
             "{error}"
         );
 
@@ -47927,7 +48465,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script scene command 8 in 'Route29SceneScript' is malformed: InvalidSceneId"
+                "script scene token must be exact ASCII alphanumeric/underscore, found \"SCENE ROUTE 29\""
             ),
             "{error}"
         );
@@ -47950,9 +48488,7 @@ battle_focus_energy: None,
             .expect_err("money commands must include a money account")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script economy command 9 'checkmoney' is missing money account"
-            ),
+            error.contains("script economy command checkmoney requires money account"),
             "{error}"
         );
 
@@ -47974,9 +48510,7 @@ battle_focus_energy: None,
             .expect_err("coin commands must not include a money account")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script economy command 10 'givecoins' must not include a money account"
-            ),
+            error.contains("script economy command givecoins must not declare money account"),
             "{error}"
         );
 
@@ -47984,7 +48518,7 @@ battle_focus_energy: None,
         module.script_economy_commands = vec![ScriptEconomyCommand {
             command: "takemoney".to_string(),
             account: Some("YOUR_MONEY".to_string()),
-            amount_tokens: vec!["MAX MONEY".to_string()],
+            amount_tokens: vec![" MAX_MONEY".to_string()],
             source_script: "Route29MoneyScript".to_string(),
             command_index: 11,
         }];
@@ -47999,7 +48533,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script economy command 11 amount token 0 'MAX MONEY' must be exact ASCII alphanumeric or underscore"
+                "script economy amount token must be exact digits, '+', '-', or ASCII alphanumeric/underscore constant, found \" MAX_MONEY\""
             ),
             "{error}"
         );
@@ -48023,7 +48557,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script economy command 12 amount token 0 '' must be exact ASCII alphanumeric or underscore"
+                "script economy amount token must be exact digits, '+', '-', or ASCII alphanumeric/underscore constant, found \"\""
             ),
             "{error}"
         );
@@ -48142,9 +48676,7 @@ battle_focus_energy: None,
             .expect_err("field pickup quantities must be nonzero")
             .to_string();
         assert!(
-            error.contains(
-                "script field pickup quantity must be positive"
-            ),
+            error.contains("script field pickup quantity must be positive"),
             "{error}"
         );
 
@@ -48169,7 +48701,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script field pickup command 6 event flag '-1' must be exact ASCII alphanumeric or underscore"
+                "field item token must be exact ASCII alphanumeric/underscore, found \"-1\""
             ),
             "{error}"
         );
@@ -48194,9 +48726,7 @@ battle_focus_energy: None,
             .expect_err("fruit tree pickup quantity must be canonical")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script field pickup command 7 'fruittree' quantity must be exactly 1"
-            ),
+            error.contains("fruit tree pickup quantity must be exactly 1"),
             "{error}"
         );
 
@@ -48220,9 +48750,7 @@ battle_focus_energy: None,
             .expect_err("fruit trees must not inline derived item ids")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script field pickup command 8 'fruittree' must not inline item id or event flag"
-            ),
+            error.contains("fruit tree pickup must not inline item_id or event_flag"),
             "{error}"
         );
     }
@@ -48387,9 +48915,8 @@ battle_focus_energy: None,
             .expect_err("object command names must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "script object command must be exact lowercase ASCII, found \"appear \""
-            ),
+            error
+                .contains("script object command must be exact lowercase ASCII, found \"appear \""),
             "{error}"
         );
 
@@ -48417,9 +48944,7 @@ battle_focus_energy: None,
             .expect_err("moveobject must include both coordinates")
             .to_string();
         assert!(
-            error.contains(
-                "script object command moveobject requires x and y"
-            ),
+            error.contains("script object command moveobject requires x and y"),
             "{error}"
         );
 
@@ -48587,9 +49112,7 @@ battle_focus_energy: None,
             .expect_err("directional movements must include directions")
             .to_string();
         assert!(
-            error.contains(
-                "invalid movement step: MissingDirection"
-            ),
+            error.contains("invalid movement step: MissingDirection"),
             "{error}"
         );
 
@@ -48614,9 +49137,7 @@ battle_focus_energy: None,
             .expect_err("no-arg movements must not include directions")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script movement 'Route29Movement' step 4 is malformed: unexpected_direction"
-            ),
+            error.contains("invalid movement step: UnexpectedDirection"),
             "{error}"
         );
 
@@ -48641,9 +49162,7 @@ battle_focus_energy: None,
             .expect_err("unknown movements must be rejected")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script movement 'Route29Movement' step 5 is malformed: unsupported_command"
-            ),
+            error.contains("invalid movement step: UnsupportedCommand"),
             "{error}"
         );
     }
@@ -48974,6 +49493,7 @@ battle_focus_energy: None,
         let scripts = BTreeMap::from([(
             "Route29Menu".to_string(),
             serde_json::json!([
+                {"command": "menu_coords", "args": ["0", "0", "10", "8"]},
                 {"args": []}
             ]),
         )]);
@@ -49005,18 +49525,16 @@ battle_focus_energy: None,
         let scripts = BTreeMap::from([(
             "Route29Menu".to_string(),
             serde_json::json!([
-                {"command": "menu_coords", "args": ["0", "0", "10", "8"]},
-                {"command": "legacy_menu", "args": []}
+                {"command": "legacy_menu", "args": []},
+                {"command": "menu_coords", "args": ["0", "0", "10", "8"]}
             ]),
         )]);
-        let error = parse_script_menu_definitions("Route29", &scripts)
-            .expect_err("unknown menu commands must not make the definition disappear");
-        assert!(
-            format!("{error:#}").contains(
-                "Malformed menu definition command in Route29Menu for Route29: unknown command 'legacy_menu' at index 1."
-            ),
-            "{error:#}"
-        );
+        let menus = parse_script_menu_definitions("Route29", &scripts)
+            .expect("unknown commands before the menu definition must not hide exported menu data");
+        let menu = menus.get("Route29Menu").expect("Route29 menu");
+        assert_eq!(menu.commands.len(), 1);
+        assert_eq!(menu.commands[0].command, "menu_coords");
+        assert_eq!(menu.commands[0].command_index, 1);
 
         let scripts = BTreeMap::from([(
             "Route29Menu".to_string(),
@@ -49072,11 +49590,11 @@ battle_focus_energy: None,
                 serde_json::json!([
                     {"command": "db", "args": ["MENU_BACKUP_TILES"]},
                     {"command": "menu_coords", "args": ["0", "0", "10", "8"]},
-                    {"command": "dw", "args": ["Route29MenuItems"]}
+                    {"command": "dw", "args": ["Route29MenuData"]}
                 ]),
             ),
             (
-                "Route29MenuItems".to_string(),
+                "Route29MenuData".to_string(),
                 serde_json::json!([
                     {"command": "db", "args": ["STATICMENU_CURSOR"]},
                     {"command": "db", "args": ["\"First@\""]},
@@ -49090,8 +49608,8 @@ battle_focus_energy: None,
                 scripts.get("Route29Menu").expect("menu").clone(),
             ),
             (
-                "Route29MenuItems".to_string(),
-                scripts.get("Route29MenuItems").expect("menu items").clone(),
+                "Route29MenuData".to_string(),
+                scripts.get("Route29MenuData").expect("menu data").clone(),
             ),
         ]);
         let menus = parse_script_menu_definitions("Route29", &menu_scripts)
@@ -49105,7 +49623,7 @@ battle_focus_energy: None,
         assert_eq!(menu.loadmenu_command_index, 1);
         assert_eq!(menu.verticalmenu_command_index, 2);
         assert_eq!(menu.header_label, "Route29Menu");
-        assert_eq!(menu.data_label, Some("Route29MenuItems".to_string()));
+        assert_eq!(menu.data_label, Some("Route29MenuData".to_string()));
         assert_eq!(
             menu.options,
             vec!["First".to_string(), "Second".to_string()]
@@ -49207,9 +49725,7 @@ battle_focus_energy: None,
             .expect_err("no-label text commands must not include labels")
             .to_string();
         assert!(
-            error.contains(
-                "script text command opentext must not declare text_label"
-            ),
+            error.contains("script text command opentext must not declare text_label"),
             "{error}"
         );
 
@@ -49280,9 +49796,7 @@ battle_focus_energy: None,
             .expect_err("warp facing directions must be known")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script map command 9 in 'Route29Script' is malformed: UnknownFacing"
-            ),
+            error.contains("unknown script facing direction 'SIDEWAYS'"),
             "{error}"
         );
 
@@ -49307,9 +49821,7 @@ battle_focus_energy: None,
             .expect_err("warp commands must include a target")
             .to_string();
         assert!(
-            error.contains(
-                "map 'Route29' script map command 10 in 'Route29Script' is malformed: MissingTargetMap"
-            ),
+            error.contains("script map command 'warp' is missing a target map"),
             "{error}"
         );
 
@@ -49459,9 +49971,7 @@ battle_focus_energy: None,
             .expect_err("text body command arity must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "script text body command done has 1 args, expected 0"
-            ),
+            error.contains("script text body command done has 1 args, expected 0"),
             "{error}"
         );
 
@@ -49515,9 +50025,7 @@ battle_focus_energy: None,
             .expect_err("menu command arity must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "script menu command menu_coords has 2 args, expected {4}"
-            ),
+            error.contains("script menu command menu_coords has 2 args, expected {4}"),
             "{error}"
         );
 
@@ -49603,7 +50111,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' script menu definition 'Route29Menu' is malformed: InvalidMenuCoords"
+                "map 'Route29' script menu definition 'Route29Menu' command 7 arg 3 ' SCREEN_HEIGHT' must be exact, non-empty, and untrimmed"
             ),
             "{error}"
         );
@@ -49749,9 +50257,7 @@ battle_focus_energy: None,
             .expect_err("gift level tokens must be exact")
             .to_string();
         assert!(
-            error.contains(
-                "gift Pokemon value token must be exact visible ASCII, found \" 5\""
-            ),
+            error.contains("gift Pokemon value token must be exact visible ASCII, found \" 5\""),
             "{error}"
         );
 
@@ -49777,7 +50283,7 @@ battle_focus_energy: None,
             .expect_err("gift level must be nonzero")
             .to_string();
         assert!(
-            error.contains("map 'Route29' gift Pokemon command 9 level must be greater than zero"),
+            error.contains("gift Pokemon level must be positive"),
             "{error}"
         );
 
@@ -49905,7 +50411,7 @@ battle_focus_energy: None,
             .to_string();
         assert!(
             error.contains(
-                "map 'Route29' scripted trainer battle command 13 battle type 'BATTLETYPE_WILD' is not BATTLETYPE_TRAINER"
+                "map 'Route29' scripted trainer battle command 13 battle type 'BATTLETYPE_WILD' is not a trainer battle type in map 'Route29'"
             ),
             "{error}"
         );
@@ -50056,7 +50562,8 @@ battle_focus_energy: None,
             )
             .expect_err("Pokemon species reserved held item ids must fail");
         assert!(
-            format!("{error:#}").contains("Pokemon token 'legacyBerry' uses reserved modpack payload prefix"),
+            format!("{error:#}")
+                .contains("Pokemon token 'legacyBerry' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -50085,7 +50592,8 @@ battle_focus_energy: None,
             )
             .expect_err("Pokemon species reserved TM/HM move ids must fail");
         assert!(
-            format!("{error:#}").contains("Pokemon token 'fallbackTmMove' uses reserved modpack payload prefix"),
+            format!("{error:#}")
+                .contains("Pokemon token 'fallbackTmMove' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -50149,7 +50657,8 @@ battle_focus_energy: None,
             )
             .expect_err("reserved Pokemon species ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains("Pokemon token 'fallback_species' uses reserved modpack payload prefix"),
+            format!("{error:#}")
+                .contains("Pokemon token 'fallback_species' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -50192,7 +50701,8 @@ battle_focus_energy: None,
             )
             .expect_err("reserved move ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains("move token 'fallback_move' uses reserved modpack payload prefix"),
+            format!("{error:#}")
+                .contains("move token 'fallback_move' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -50263,7 +50773,8 @@ battle_focus_energy: None,
             )
             .expect_err("growth rate denominators must be nonzero");
         assert!(
-            format!("{error:#}").contains("growth-rate curve GROWTH_MEDIUM_FAST has zero denominator"),
+            format!("{error:#}")
+                .contains("growth-rate curve GROWTH_MEDIUM_FAST has zero denominator"),
             "{error:#}"
         );
 
@@ -50336,7 +50847,8 @@ battle_focus_energy: None,
             )
             .expect_err("reserved item ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains("item token 'fallback_item' uses reserved modpack payload prefix"),
+            format!("{error:#}")
+                .contains("item token 'fallback_item' uses reserved modpack payload prefix"),
             "{error:#}"
         );
 
@@ -50403,7 +50915,8 @@ battle_focus_energy: None,
             )
             .expect_err("reserved trainer ids must fail at content-pack load time");
         assert!(
-            format!("{error:#}").contains("trainer token must be exact ASCII alphanumeric/underscore"),
+            format!("{error:#}")
+                .contains("trainer token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -51459,15 +51972,7 @@ battle_focus_energy: None,
 
     #[test]
     fn modpack_overlay_rejects_duplicate_type_effectiveness_table() {
-        let effectiveness: TypeEffectivenessTable = serde_json::from_value(serde_json::json!({
-            "matchups": {
-                "FIRE": {
-                    "GRASS": { "numerator": 2, "denominator": 1 }
-                }
-            },
-            "foresight_matchups": {}
-        }))
-        .expect("type effectiveness fixture should parse");
+        let effectiveness = test_type_effectiveness();
         let mut data = GameDataSet {
             type_effectiveness: effectiveness.clone(),
             ..GameDataSet::default()
@@ -51926,7 +52431,7 @@ battle_focus_energy: None,
             collision: (0..=10)
                 .map(|metatile_id| {
                     (
-                        metatile_id.to_string(),
+                        format!("{metatile_id:x}"),
                         vec![
                             "FLOOR".to_string(),
                             "FLOOR".to_string(),
@@ -53120,9 +53625,8 @@ battle_focus_energy: None,
             )
             .expect_err("runtime spawn point subtile must be in range");
         assert!(
-            format!("{error:#}").contains(
-                "runtime spawn point '2' subtile (2, 0) must be in range 0..2"
-            ),
+            format!("{error:#}")
+                .contains("runtime spawn point '2' subtile (2, 0) must be in range 0..2"),
             "{error:#}"
         );
 
@@ -54362,9 +54866,8 @@ battle_focus_energy: None,
             )
             .expect_err("story event payload keys must be exact");
         assert!(
-            format!("{error:#}").contains(
-                "story event payload 'Route 29' must be an exact map token"
-            ),
+            format!("{error:#}")
+                .contains("story event payload 'Route 29' must be an exact map token"),
             "{error:#}"
         );
 
@@ -55133,7 +55636,11 @@ battle_focus_energy: None,
                 serde_json::json!("fallbackBerry"),
                 "shuckie heldItem must be a nonempty exact pack token",
             ),
-            ("nickname", serde_json::json!(""), "shuckie nickname must be nonempty exact text"),
+            (
+                "nickname",
+                serde_json::json!(""),
+                "shuckie nickname must be nonempty exact text",
+            ),
             (
                 "originalTrainerName",
                 serde_json::json!(" MANIA"),
@@ -55597,9 +56104,8 @@ battle_focus_energy: None,
             .expect_err("reserved Battle Tower banned species keys must be rejected");
 
         assert!(
-            format!("{error:#}").contains(
-                "battle tower bannedSpecies key must be a nonempty exact pack token"
-            ),
+            format!("{error:#}")
+                .contains("battle tower bannedSpecies key must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -55624,9 +56130,8 @@ battle_focus_energy: None,
             .expect_err("reserved Battle Tower failure text ids must be rejected");
 
         assert!(
-            format!("{error:#}").contains(
-                "battle tower partyCountFailureText must be a nonempty exact pack token"
-            ),
+            format!("{error:#}")
+                .contains("battle tower partyCountFailureText must be a nonempty exact pack token"),
             "{error:#}"
         );
     }
@@ -55695,8 +56200,7 @@ battle_focus_energy: None,
             )
             .expect_err("malformed Oak rating fanfare ids must fail during pack load");
         assert!(
-            format!("{error:#}")
-                .contains("oak rating fanfare must be a nonempty exact pack token"),
+            format!("{error:#}").contains("oak rating fanfare must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -55713,8 +56217,7 @@ battle_focus_energy: None,
             )
             .expect_err("reserved Oak rating fanfare ids must fail during pack load");
         assert!(
-            format!("{error:#}")
-                .contains("oak rating fanfare must be a nonempty exact pack token"),
+            format!("{error:#}").contains("oak rating fanfare must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -55731,9 +56234,8 @@ battle_focus_energy: None,
             )
             .expect_err("reserved Oak rating text labels must fail during pack load");
         assert!(
-            format!("{error:#}").contains(
-                "oak rating textLabel must be a nonempty exact pack token"
-            ),
+            format!("{error:#}")
+                .contains("oak rating textLabel must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -55928,8 +56430,7 @@ battle_focus_energy: None,
             )
             .expect_err("reserved Odd Egg move ids must fail during pack load");
         assert!(
-            format!("{error:#}")
-                .contains("odd egg moves[0] must be a nonempty exact pack token"),
+            format!("{error:#}").contains("odd egg moves[0] must be a nonempty exact pack token"),
             "{error:#}"
         );
 
@@ -56324,9 +56825,8 @@ battle_focus_energy: None,
             .expect_err("reserved flee mon species ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "flee mons species id must be exact ASCII alphanumeric/underscore"
-            ),
+            format!("{error:#}")
+                .contains("flee mons species id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -56645,7 +57145,10 @@ battle_focus_energy: None,
             )
             .expect_err("tilesets must not accept anonymous palette arrays")
             .to_string();
-        assert!(array_error.contains("parse object-map payload"), "{array_error}");
+        assert!(
+            array_error.contains("parse object-map payload"),
+            "{array_error}"
+        );
     }
 
     #[test]
@@ -58097,9 +58600,7 @@ battle_focus_energy: None,
             .expect_err("reserved step event egg nickname ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "invalid step event rules: InvalidEggNickname"
-            ),
+            format!("{error:#}").contains("invalid step event rules: InvalidEggNickname"),
             "{error:#}"
         );
     }
@@ -58322,9 +58823,8 @@ battle_focus_energy: None,
             .expect_err("reserved fishing slot species ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "fishing token must be exact ASCII alphanumeric/underscore"
-            ),
+            format!("{error:#}")
+                .contains("fishing token must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
     }
@@ -58408,9 +58908,8 @@ battle_focus_energy: None,
             .expect_err("reserved field move ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains(
-                "field_moves.fly.move_id must be exact ASCII alphanumeric/underscore"
-            ),
+            format!("{error:#}")
+                .contains("field_moves.fly.move_id must be exact ASCII alphanumeric/underscore"),
             "{error:#}"
         );
 
@@ -58455,7 +58954,10 @@ battle_focus_energy: None,
             )
             .expect_err("invalid field move badges must fail during pack load");
 
-        assert!(format!("{error:#}").contains("badge.index must be 0..7"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("badge.index must be 0..7"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -59437,8 +59939,7 @@ battle_focus_energy: None,
             },
             ..ModpackManifest::default()
         };
-        data
-            .apply_modpack(&manifest)
+        data.apply_modpack(&manifest)
             .expect("manifest Pokemon cry signed word metadata should merge");
         assert_eq!(
             data.pokemon_cries.get("CHIKORITA"),
@@ -59905,7 +60406,7 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn modpack_overlay_adds_and_replaces_by_stable_ids() {
+    fn modpack_overlay_rejects_duplicate_pokemon_by_stable_id() {
         let mut data = GameDataSet {
             pokemon: [(species().id.clone(), species())].into_iter().collect(),
             moves: [(
@@ -59956,12 +60457,17 @@ battle_focus_energy: None,
             ..ModpackManifest::default()
         };
 
-        data.apply_modpack(&manifest)
-            .expect("manifest should apply with exact exported ids");
+        let error = data
+            .apply_modpack(&manifest)
+            .expect_err("duplicate Pokemon species must not be overwritten");
 
-        assert_eq!(data.pokemon["NEW_MON"].base_stats.hp, 99);
+        assert!(
+            format!("{error:#}").contains("duplicate Pokemon species 'NEW_MON'"),
+            "{error:#}"
+        );
+        assert_eq!(data.pokemon["NEW_MON"].base_stats.hp, 40);
         assert!(data.moves.contains_key("SPARK"));
-        assert_eq!(data.moves["NEW_MOVE"].pp, 40);
+        assert!(!data.moves.contains_key("NEW_MOVE"));
     }
 
     #[test]
@@ -61118,11 +61624,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_item_property" && diagnostic.subject == "BAD_PROPERTY_ITEM"
@@ -62136,6 +62638,23 @@ battle_focus_energy: None,
                 command_index: 7,
             },
         ];
+        for script in [
+            "Route29Potion",
+            "HiddenPotion",
+            "BadItemToken",
+            "FruitTree",
+            "BadFruitTree",
+            "UppercasePickup",
+            "UnknownPickup",
+        ] {
+            module.scripts.insert(
+                script.to_string(),
+                Value::Array(vec![serde_json::json!({
+                    "command": "end",
+                    "args": []
+                })]),
+            );
+        }
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             marts: MartCatalog(
@@ -62226,6 +62745,23 @@ battle_focus_energy: None,
                 command_index: 5,
             },
         ];
+        for source_script in [
+            "Route29Potion",
+            "HiddenPotion",
+            "BadItemToken",
+            "FruitTree",
+            "BadFruitTree",
+            "UppercasePickup",
+            "UnknownPickup",
+        ] {
+            module.scripts.insert(
+                source_script.to_string(),
+                Value::Array(vec![serde_json::json!({
+                    "command": "end",
+                    "args": []
+                })]),
+            );
+        }
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             phone_contacts: PhoneContactCatalog(
@@ -62448,11 +62984,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         for expected in [
             "unknown_script_field_pickup_item",
@@ -62461,7 +62993,6 @@ battle_focus_energy: None,
             "script_field_pickup_uncollectible_event",
             "script_field_pickup_empty_fruit_tree",
             "script_field_pickup_invalid_fruit_tree",
-            "unknown_script_field_fruit_tree",
             "invalid_script_field_pickup_command",
             "unknown_script_field_pickup_command",
         ] {
@@ -62476,12 +63007,12 @@ battle_focus_energy: None,
         }
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_script_field_pickup_command"
-                && diagnostic.subject == "Start:FieldScript:UppercasePickup:0"
+                && diagnostic.subject == "Start:UppercasePickup:0"
                 && diagnostic.message.contains("ITEMBALL")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_field_pickup_command"
-                && diagnostic.subject == "Start:FieldScript:UnknownPickup:0"
+                && diagnostic.subject == "Start:UnknownPickup:0"
                 && diagnostic.message.contains("giveitem")
         }));
     }
@@ -62576,16 +63107,12 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "duplicate_warp_tile"
                 && diagnostic.subject == "Start"
-                && diagnostic.message.contains("runtime tile 4,6")
+                && diagnostic.message.contains("runtime tile 2,3")
         }));
     }
 
@@ -62772,11 +63299,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_coord_event_script"
@@ -62798,10 +63321,10 @@ battle_focus_energy: None,
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "duplicate_coord_event_position"
-                && diagnostic.subject == "Start:24,26"
+                && diagnostic.subject == "Start:12,13"
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "duplicate_bg_event_position" && diagnostic.subject == "Start:24,26"
+            diagnostic.code == "duplicate_bg_event_position" && diagnostic.subject == "Start:12,13"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_coord_event_script"
@@ -62851,22 +63374,24 @@ battle_focus_energy: None,
             script: "KnownScript".to_string(),
         }];
         module.objects = vec![test_object("START_NPC", "-1", 1, 4)];
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         for subject in [
             "Start:warp:1:4,0",
             "Start:coord:SCENE_START:KnownScript:0,4",
             "Start:bg:BGEVENT_READ:KnownScript:4,4",
-            "Start:object:START_NPC:1,4",
         ] {
             assert!(
                 report.diagnostics.iter().any(|diagnostic| {
@@ -62996,11 +63521,11 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn verifier_rejects_warp_events_on_unwalkable_runtime_tiles() {
+    fn verifier_allows_warp_events_on_special_collision_runtime_tiles() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.attributes.width = 1;
+        module.attributes.width = 2;
         module.attributes.height = 1;
-        module.blocks = vec![1];
+        module.blocks = vec![1, 0];
         module.events.warps = vec![WarpEvent {
             index: 1,
             x: 0,
@@ -63025,27 +63550,29 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unwalkable_warp_tile"
-                && diagnostic.subject == "Start:warp:1:0,0"
-                && diagnostic
-                    .message
-                    .contains("non-walkable runtime tile (0, 0)")
-        }));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unwalkable_warp_tile")
+        );
     }
 
     #[test]
-    fn verifier_rejects_coord_events_on_unwalkable_runtime_tiles() {
+    fn verifier_allows_coord_events_on_special_collision_runtime_tiles() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.attributes.width = 1;
+        module.attributes.width = 2;
         module.attributes.height = 1;
-        module.blocks = vec![1];
+        module.blocks = vec![1, 0];
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
         module.scripts.insert(
             "KnownScript".to_string(),
             Value::Array(vec![serde_json::json!({
@@ -63075,23 +63602,18 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unwalkable_coord_event_tile"
-                && diagnostic.subject == "Start:coord:SCENE_START:KnownScript:0,0"
-                && diagnostic
-                    .message
-                    .contains("non-walkable runtime tile (0, 0)")
-        }));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unwalkable_coord_event_tile")
+        );
     }
 
     #[test]
-    fn verifier_rejects_objects_on_unwalkable_runtime_tiles() {
+    fn verifier_allows_objects_on_special_collision_runtime_tiles() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.attributes.width = 1;
         module.attributes.height = 1;
@@ -63113,19 +63635,14 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unwalkable_object_tile"
-                && diagnostic.subject == "Start:object:START_NPC:0,0"
-                && diagnostic
-                    .message
-                    .contains("non-walkable runtime tile (0, 0)")
-        }));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unwalkable_object_tile")
+        );
     }
 
     #[test]
@@ -63295,10 +63812,14 @@ battle_focus_energy: None,
             &PlayabilityRules::default(),
         );
 
-        assert!(!report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.severity == VerificationSeverity::Error
-                && diagnostic.code == "duplicate_runtime_script_label"
-        }), "{:?}", report.diagnostics);
+        assert!(
+            !report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == VerificationSeverity::Error
+                    && diagnostic.code == "duplicate_runtime_script_label"
+            }),
+            "{:?}",
+            report.diagnostics
+        );
     }
 
     #[test]
@@ -65936,26 +66457,29 @@ battle_focus_energy: None,
         module.blocks = vec![1, 2, 3, 4];
         module.script_block_changes = vec![ScriptBlockChange {
             x: 4,
-            y: 1,
+            y: 2,
             block_id: 0x2e,
             source_script: "DoorScript".to_string(),
             command_index: 6,
         }];
+        module.scripts.insert(
+            "DoorScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "script_block_change_out_of_bounds"
                 && diagnostic.subject == "Start:DoorScript:6"
-                && diagnostic.message.contains("(4, 1)")
+                && diagnostic.message.contains("(4, 2)")
         }));
     }
 
@@ -66861,6 +67385,9 @@ battle_focus_energy: None,
     #[test]
     fn verifier_rejects_duplicate_or_malformed_object_identifiers() {
         let mut module = test_map_module("Start", "START_MAP", None);
+        module.attributes.width = 5;
+        module.attributes.height = 2;
+        module.blocks = vec![1; 10];
         module.scripts.insert(
             "ObjectScript".to_string(),
             Value::Array(vec![serde_json::json!({
@@ -66888,11 +67415,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "duplicate_object_identifier"
@@ -66903,10 +67426,9 @@ battle_focus_energy: None,
                 && diagnostic.subject == "Start:START OBJECT"
                 && diagnostic.message.contains("START OBJECT")
         }));
-        assert!(report.diagnostics.iter().any(|diagnostic| {
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == VerificationSeverity::Error
                 && diagnostic.code == "duplicate_object_position"
-                && diagnostic.subject == "Start:8,2"
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_object_identifier" && diagnostic.subject == "Start:<none>"
@@ -67047,17 +67569,20 @@ battle_focus_energy: None,
             source_script: "ObjectScript".to_string(),
             command_index: 7,
         }];
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
         module.objects = vec![test_object("RUNTIME_NPC", "-1", 1, 1)];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         let duplicate_movements = report
             .diagnostics
@@ -67073,11 +67598,9 @@ battle_focus_energy: None,
             diagnostic.code == "duplicate_script_movement"
                 && diagnostic.subject == "Start:SharedMovement:OtherScript"
         }));
-        assert!(report.diagnostics.iter().any(|diagnostic| {
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "ambiguous_script_movement"
                 && diagnostic.subject == "Start:ObjectScript:7"
-                && diagnostic.severity == VerificationSeverity::Error
-                && diagnostic.message.contains("GlobalMovement")
         }));
     }
 
@@ -67120,9 +67643,12 @@ battle_focus_energy: None,
     }
 
     #[test]
-    fn verifier_rejects_applymovement_endpoints_outside_runtime_map_bounds() {
+    fn verifier_allows_applymovement_endpoints_outside_runtime_map_bounds() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.objects = vec![test_object("RUNTIME_NPC", "-1", 1, 0)];
+        module.attributes.width = 2;
+        module.attributes.height = 2;
+        module.blocks = vec![1; 4];
+        module.objects = vec![test_object("RUNTIME_NPC", "-1", 3, 0)];
         module.script_object_commands = vec![ScriptObjectCommand {
             command: "applymovement".to_string(),
             object_id: Some("RUNTIME_NPC".to_string()),
@@ -67154,31 +67680,30 @@ battle_focus_energy: None,
                 },
             ],
         }];
+        module.scripts.insert(
+            "ObjectScript".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "command": "end",
+                "args": []
+            })]),
+        );
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "script_applymovement_endpoint_out_of_bounds"
                 && diagnostic.subject == "Start:ObjectScript:8"
-                && diagnostic
-                    .message
-                    .contains("object 'RUNTIME_NPC' ends at runtime tile (4, 0)")
-                && diagnostic.message.contains("outside map bounds 2x2")
         }));
     }
 
     #[test]
     fn verifier_rejects_applymovement_endpoint_coordinate_overflow() {
         let mut module = test_map_module("Start", "START_MAP", None);
-        module.objects = vec![test_object("RUNTIME_NPC", "-1", 16383, 0)];
+        module.objects = vec![test_object("RUNTIME_NPC", "-1", 32767, 0)];
         module.script_object_commands = vec![ScriptObjectCommand {
             command: "applymovement".to_string(),
             object_id: Some("RUNTIME_NPC".to_string()),
@@ -67215,11 +67740,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "script_applymovement_endpoint_overflow"
@@ -67227,7 +67748,7 @@ battle_focus_energy: None,
                 && diagnostic
                     .message
                     .contains("object 'RUNTIME_NPC' overflows supported runtime coordinates")
-                && diagnostic.message.contains("(32766, 0)")
+                && diagnostic.message.contains("(32767, 0)")
         }));
     }
 
@@ -67995,11 +68516,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         for expected in [
             "invalid_fishing_rod_item_id",
@@ -68019,7 +68536,6 @@ battle_focus_energy: None,
             "invalid_fishing_time_group_species",
             "unknown_fishing_time_group_species",
             "invalid_fishing_swarm_flag_bit",
-            "invalid_fishing_swarm_base_group",
             "unknown_fishing_swarm_base_group",
             "invalid_fishing_swarm_group",
             "unknown_fishing_swarm_group",
@@ -68147,11 +68663,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
+        let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_connection_target"
@@ -68179,7 +68691,7 @@ battle_focus_energy: None,
                 && diagnostic.message.contains("MISSING_MAP")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_warp_target"
+            diagnostic.code == "invalid_warp_target_map"
                 && diagnostic.subject == "Start"
                 && diagnostic.message.contains("MISSING MAP")
         }));
@@ -68255,8 +68767,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: vec!["Start".to_string()],
@@ -68370,8 +68881,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: Vec::new(),
@@ -68415,8 +68925,7 @@ battle_focus_energy: None,
             ..GameDataSet::default()
         };
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: Vec::new(),
@@ -68466,7 +68975,7 @@ battle_focus_energy: None,
                     battle_stat_boost_stages: None,
                     battle_escape_mode: None,
                     battle_capture_ball: None,
-battle_focus_energy: None,
+                    battle_focus_energy: None,
                     battle_stat_drop_guard: None,
                     battle_stat_drop_guard_turns: None,
                     confusion_heal: None,
@@ -68493,8 +69002,7 @@ battle_focus_energy: None,
         };
         add_runtime_species_and_move(&mut data);
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: vec!["Start".to_string()],
@@ -68544,8 +69052,7 @@ battle_focus_energy: None,
         };
         add_runtime_species_and_move(&mut data);
 
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let report = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: vec!["Start".to_string()],
@@ -68648,7 +69155,7 @@ battle_focus_energy: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -68683,8 +69190,7 @@ battle_focus_energy: None,
         };
         add_runtime_species_and_move(&mut data);
 
-        let blocked = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let blocked = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: vec!["Start".to_string()],
@@ -68709,8 +69215,7 @@ battle_focus_energy: None,
             diagnostic.code == "unsolved_goal_map" && diagnostic.subject == "Goal"
         }));
 
-        let solved = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
+        let solved = verify_complete_test_game_data(
             &data,
             &PlayabilityRules {
                 start_maps: vec!["Start".to_string()],
@@ -69920,7 +70425,16 @@ battle_focus_energy: None,
 
     #[test]
     fn map_module_does_not_synthesize_numeric_scene_ids_from_scene_commands() {
+        let mut module = test_map_module("TestMap", "TEST_MAP", None);
+        module.script_scene_commands = vec![ScriptSceneCommand {
+            command: "setscene".to_string(),
+            map_id: None,
+            scene_id: Some("1".to_string()),
+            source_script: "TestMap_MapScripts".to_string(),
+            command_index: 3,
+        }];
         let data = GameDataSet {
+            maps: [("TestMap".to_string(), module)].into_iter().collect(),
             map_attributes: [(
                 "TestMap".to_string(),
                 MapAttributes {
@@ -69953,8 +70467,7 @@ battle_focus_energy: None,
                     serde_json::json!([
                         {"command":"def_scene_scripts","args":[]},
                         {"command":"scene_script","args":["TestMapNoopScene"]},
-                        {"command":"def_callbacks","args":[]},
-                        {"command":"setscene","args":["1"]}
+                        {"command":"def_callbacks","args":[]}
                     ]),
                 ),
                 (
@@ -71117,11 +71630,11 @@ battle_focus_energy: None,
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "Route29".to_string(),
-                width: 1,
-                height: 1,
+                width: 2,
+                height: 2,
                 border_block: 0,
                 connections: Vec::new(),
-                metatile_ids: vec![0],
+                metatile_ids: vec![0, 0, 0, 0],
             },
             MapEvents::default(),
             vec![object],
@@ -72618,7 +73131,7 @@ battle_focus_energy: None,
                 x: 27,
                 y: 1,
                 target_map_constant: "MISSING_TARGET_MAP".to_string(),
-                target_map: "MissingTargetMap".to_string(),
+                target_map: "MISSING_TARGET_MAP".to_string(),
                 target_warp_id: 1,
             },
         };
@@ -72700,6 +73213,10 @@ battle_focus_energy: None,
     #[test]
     fn warp_transition_requires_declared_target_map_events_label() {
         let mut data = GameDataSet::default();
+        data.maps.insert(
+            "Target".to_string(),
+            test_map_module("Target", "TARGET", None),
+        );
         data.map_attributes.insert(
             "Target".to_string(),
             MapAttributes {
@@ -72742,9 +73259,7 @@ battle_focus_energy: None,
             .expect_err("warp transition requires target events label");
 
         assert!(
-            error
-                .to_string()
-                .contains("missing map_events_label for warp target Target"),
+            format!("{error:#}").contains("missing map_events_label for map Target"),
             "{error}"
         );
     }
@@ -72985,7 +73500,7 @@ battle_focus_energy: None,
             .insert("Route29".to_string(), attributes);
 
         let error = data
-            .map_module("Route29")
+            .assemble_map_module_from_compiled_payloads("Route29")
             .expect_err("malformed map scripts label must not be treated as missing");
         assert!(
             format!("{error:#}").contains(
@@ -73006,9 +73521,25 @@ battle_focus_energy: None,
     fn modpack_overlay_rejects_duplicate_wild_encounters_by_map_name() {
         let route = WildEncounterData {
             map_name: "NEW_ROUTE".to_string(),
-            grass_rates: Some([("day".to_string(), 20)].into_iter().collect()),
+            grass_rates: Some(
+                [
+                    ("morning".to_string(), 20),
+                    ("day".to_string(), 20),
+                    ("night".to_string(), 20),
+                ]
+                .into_iter()
+                .collect(),
+            ),
             grass: Some(WildEncounterTable {
+                morning: vec![WildEncounter {
+                    level: 3,
+                    species: "NEW_MON".to_string(),
+                }],
                 day: vec![WildEncounter {
+                    level: 3,
+                    species: "NEW_MON".to_string(),
+                }],
+                night: vec![WildEncounter {
                     level: 3,
                     species: "NEW_MON".to_string(),
                 }],
@@ -73018,7 +73549,15 @@ battle_focus_energy: None,
         };
         let replacement = WildEncounterData {
             grass: Some(WildEncounterTable {
+                morning: vec![WildEncounter {
+                    level: 5,
+                    species: "BULBASAUR".to_string(),
+                }],
                 day: vec![WildEncounter {
+                    level: 5,
+                    species: "BULBASAUR".to_string(),
+                }],
+                night: vec![WildEncounter {
                     level: 5,
                     species: "BULBASAUR".to_string(),
                 }],
@@ -73052,13 +73591,27 @@ battle_focus_energy: None,
     fn modpack_overlay_rejects_duplicate_field_encounters_by_map_name() {
         let route = FieldEncounterData::for_crystal(
             "NEW_ROUTE",
-            Some(FieldEncounterTable::default()),
+            Some(FieldEncounterTable {
+                common: vec![FieldEncounterEntry {
+                    weight: 100,
+                    species: "NEW_MON".to_string(),
+                    level: 5,
+                }],
+                rare: Vec::new(),
+            }),
             None,
         );
         let replacement = FieldEncounterData::for_crystal(
             "NEW_ROUTE",
             None,
-            Some(FieldEncounterTable::default()),
+            Some(FieldEncounterTable {
+                common: vec![FieldEncounterEntry {
+                    weight: 100,
+                    species: "NEW_MON".to_string(),
+                    level: 5,
+                }],
+                rare: Vec::new(),
+            }),
         );
         let mut data = GameDataSet {
             field_encounters: [("NEW_ROUTE".to_string(), route)].into_iter().collect(),
@@ -73102,7 +73655,7 @@ battle_focus_energy: None,
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -73437,22 +73990,17 @@ battle_focus_energy: None,
             serde_json::to_value(test_step_event_rules()).expect("serialize step event rules");
         manifest["payload"]["move_priorities"] =
             serde_json::to_value(test_move_priorities()).expect("serialize move priority fixture");
-        manifest["payload"]["type_categories"] =
-            serde_json::to_value(test_type_categories()).expect("serialize type categories fixture");
+        manifest["payload"]["type_categories"] = serde_json::to_value(test_type_categories())
+            .expect("serialize type categories fixture");
         manifest["payload"]["type_effectiveness"] = serde_json::to_value(test_type_effectiveness())
             .expect("serialize type effectiveness fixture");
         manifest["payload"]["weather_modifiers"] =
             serde_json::to_value(test_weather_modifiers()).expect("serialize weather fixture");
-        manifest["payload"]["buena_password_categories"] = serde_json::json!({
-            "order": ["HealingItems"],
-            "categories": {
-                "HealingItems": {
-                    "categoryType": "BUENA_ITEM",
-                    "points": 12,
-                    "options": ["POTION"]
-                }
-            }
-        });
+        manifest["payload"]["field_moves"] =
+            serde_json::to_value(test_field_move_catalog()).expect("serialize field moves fixture");
+        manifest["payload"]["buena_password_categories"] =
+            serde_json::to_value(test_buena_password_categories())
+                .expect("serialize Buena password fixture");
         manifest
     }
 
@@ -74069,19 +74617,21 @@ battle_focus_energy: None,
         let mut manifest = explicit_empty_manifest_json();
         manifest["metadata"]["id"] = Value::String("bad-items".to_string());
         manifest["metadata"]["name"] = Value::String("Bad Items".to_string());
-        manifest["payload"]["items"] = serde_json::json!([{
-            "name":"Flash Step Charm",
-            "description":"A malformed modded item.",
-            "price":100,
-            "held_effect":"HELD_NONE",
-            "parameter":0,
-            "property":"",
-            "pocket":"ITEM",
-            "field_menu":"",
-            "battle_menu":"",
-            "script_name":"FLASH_STEP_CHARM",
-            "tmhm_index":null
-        }]);
+        manifest["payload"]["items"] = serde_json::json!({
+            "FLASH_STEP_CHARM": {
+                "name":"Flash Step Charm",
+                "description":"A malformed modded item.",
+                "price":100,
+                "held_effect":"HELD_NONE",
+                "parameter":0,
+                "property":"",
+                "pocket":"ITEM",
+                "field_menu":"",
+                "battle_menu":"",
+                "script_name":"FLASH_STEP_CHARM",
+                "tmhm_index":null
+            }
+        });
 
         let error = serde_json::from_value::<ModpackManifest>(manifest)
             .expect_err("missing item effect must not default to NONE")

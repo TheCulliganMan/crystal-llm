@@ -482,11 +482,11 @@ mod tests {
             outcome,
             StepOutcome::Moved {
                 from: TilePosition::new(0, 0),
-                to: TilePosition::new(2, 0),
+                to: TilePosition::new(1, 0),
                 speed_multiplier: 1,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 0));
+        assert_eq!(state.tile, TilePosition::new(1, 0));
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
             &tileset(),
             StepOptions::default(),
             &[OccupiedTile {
-                tile: TilePosition::new(2, 0),
+                tile: TilePosition::new(1, 0),
                 object_identifier: Some("ROUTE29_TEACHER1".to_string()),
             }],
         );
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::BlockedByObject {
-                at: TilePosition::new(2, 0),
+                at: TilePosition::new(1, 0),
                 facing: Direction::Right,
                 object_identifier: Some("ROUTE29_TEACHER1".to_string()),
             }
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Blocked {
-                at: TilePosition::new(2, 4),
+                at: TilePosition::new(2, 3),
                 facing: Direction::Down,
             }
         );
@@ -562,11 +562,11 @@ mod tests {
             outcome,
             StepOutcome::Moved {
                 from: TilePosition::new(5, 0),
-                to: TilePosition::new(7, 0),
+                to: TilePosition::new(6, 0),
                 speed_multiplier: 1,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(7, 0));
+        assert_eq!(state.tile, TilePosition::new(6, 0));
     }
 
     #[test]
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Blocked {
-                at: TilePosition::new(7, 0),
+                at: TilePosition::new(6, 0),
                 facing: Direction::Right,
             }
         );
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn step_reports_runtime_tile_overflow_without_moving() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(i16::MAX - 1, 0),
+            tile: TilePosition::new(i16::MAX, 0),
             facing: Direction::Right,
             mode: MovementMode::Normal,
         };
@@ -651,18 +651,18 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::RuntimeTileOverflow {
-                from: TilePosition::new(i16::MAX - 1, 0),
+                from: TilePosition::new(i16::MAX, 0),
                 facing: Direction::Right,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(i16::MAX - 1, 0));
+        assert_eq!(state.tile, TilePosition::new(i16::MAX, 0));
         assert_eq!(state.facing, Direction::Right);
     }
 
     #[test]
     fn ledge_jump_reports_runtime_tile_overflow_without_moving() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(0, i16::MAX - 1),
+            tile: TilePosition::new(0, i16::MAX),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -678,11 +678,11 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::RuntimeTileOverflow {
-                from: TilePosition::new(0, i16::MAX - 1),
+                from: TilePosition::new(0, i16::MAX),
                 facing: Direction::Down,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(0, i16::MAX - 1));
+        assert_eq!(state.tile, TilePosition::new(0, i16::MAX));
         assert_eq!(state.facing, Direction::Down);
     }
 
@@ -739,7 +739,7 @@ mod tests {
             outcome,
             StepOutcome::Moved {
                 from: TilePosition::new(0, 0),
-                to: TilePosition::new(2, 0),
+                to: TilePosition::new(1, 0),
                 speed_multiplier: 2,
             }
         );
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn ledge_jump_moves_two_strides_over_valid_ledge() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 1),
+            tile: TilePosition::new(2, 2),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -763,13 +763,13 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::Jumped {
-                from: TilePosition::new(2, 1),
+                from: TilePosition::new(2, 2),
                 over: TilePosition::new(2, 3),
-                to: TilePosition::new(2, 5),
+                to: TilePosition::new(2, 4),
                 speed_multiplier: 1,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 5));
+        assert_eq!(state.tile, TilePosition::new(2, 4));
         assert_eq!(state.facing, Direction::Down);
     }
 
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::NotLedge {
-                at: TilePosition::new(2, 3),
+                at: TilePosition::new(2, 4),
                 facing: Direction::Up,
             }
         );
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn ledge_jump_rejects_blocked_landing() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 1),
+            tile: TilePosition::new(2, 2),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -816,17 +816,17 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::BlockedLanding {
-                at: TilePosition::new(2, 5),
+                at: TilePosition::new(2, 4),
                 facing: Direction::Down,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 1));
+        assert_eq!(state.tile, TilePosition::new(2, 2));
     }
 
     #[test]
     fn occupied_tile_blocks_ledge_landing_without_moving() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 1),
+            tile: TilePosition::new(2, 2),
             facing: Direction::Down,
             mode: MovementMode::Normal,
         };
@@ -837,7 +837,7 @@ mod tests {
             &ledge_tileset(permissions::FLOOR),
             StepOptions::default(),
             &[OccupiedTile {
-                tile: TilePosition::new(2, 5),
+                tile: TilePosition::new(2, 4),
                 object_identifier: Some("LANDING_NPC".to_string()),
             }],
         );
@@ -845,11 +845,11 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::BlockedByObject {
-                at: TilePosition::new(2, 5),
+                at: TilePosition::new(2, 4),
                 facing: Direction::Down,
                 object_identifier: Some("LANDING_NPC".to_string()),
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 1));
+        assert_eq!(state.tile, TilePosition::new(2, 2));
     }
 }

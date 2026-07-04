@@ -1051,6 +1051,27 @@ describe("export-core-content-pack", () => {
       }),
     );
     expect(compiledCall?.[2]).toEqual({ indent: 0 });
+    expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
+      "content-packs/core-modular.generated.json",
+      expect.objectContaining({
+        id: "core-modular",
+        enabled: true,
+        priority: -100,
+        path: "content-packs/core-modular",
+        compiled: null,
+        files: expect.objectContaining({
+          pokemon: ["content-packs/core-modular/pokemon/TOTODILE.json"],
+          moves: ["content-packs/core-modular/moves/SCRATCH.json"],
+          map_attributes: [
+            "content-packs/core-modular/map_attributes/Route1.json",
+          ],
+          map_dimensions: [
+            "content-packs/core-modular/map_dimensions/ROUTE_1.json",
+          ],
+        }),
+      }),
+      { indent: 2 },
+    );
 
     const indexCall = mockWriteJsonToTargets.mock.calls.at(-1);
     expect(indexCall?.[0]).toBe("content-packs/index.json");
@@ -1062,117 +1083,8 @@ describe("export-core-content-pack", () => {
           id: "core-modular",
           enabled: true,
           priority: -100,
-          compiled: "content-packs/core-modular.compiled.json",
-          files: expect.objectContaining({
-            pokemon: ["content-packs/core-modular/pokemon/TOTODILE.json"],
-            moves: ["content-packs/core-modular/moves/SCRATCH.json"],
-            learnsets: ["content-packs/core-modular/learnsets/TOTODILE.json"],
-            level_up_moves: [
-              "content-packs/core-modular/level_up_moves/TOTODILE.json",
-            ],
-            egg_moves: ["content-packs/core-modular/egg_moves/TOTODILE.json"],
-            evolutions: ["content-packs/core-modular/evolutions/TOTODILE.json"],
-            map_attributes: [
-              "content-packs/core-modular/map_attributes/Route1.json",
-            ],
-            map_dimensions: [
-              "content-packs/core-modular/map_dimensions/ROUTE_1.json",
-            ],
-            wild_encounters: [
-              "content-packs/core-modular/wild_encounters/Route1.json",
-            ],
-            roaming_pokemon: [
-              "content-packs/core-modular/roaming_pokemon/roaming_pokemon.json",
-            ],
-            buena_password_categories: [
-              "content-packs/core-modular/buena_password_categories/buena_password_categories.json",
-            ],
-            buena_prizes: [
-              "content-packs/core-modular/buena_prizes/buena_prizes.json",
-            ],
-            kurt_apricorn_recipes: [
-              "content-packs/core-modular/kurt_apricorn_recipes/kurt_apricorn_recipes.json",
-            ],
-            shuckie_gift: [
-              "content-packs/core-modular/shuckie_gift/shuckie_gift.json",
-            ],
-            dratini_move_sets: [
-              "content-packs/core-modular/dratini_move_sets/dratini_move_sets.json",
-            ],
-            bug_contest_config: [
-              "content-packs/core-modular/bug_contest_config/bug_contest_config.json",
-            ],
-            battle_tower_rules: [
-              "content-packs/core-modular/battle_tower_rules/battle_tower_rules.json",
-            ],
-            oak_ratings: [
-              "content-packs/core-modular/oak_ratings/oak_ratings.json",
-            ],
-            odd_egg_definitions: [
-              "content-packs/core-modular/odd_egg_definitions/odd_egg_definitions.json",
-            ],
-            magikarp_lengths: [
-              "content-packs/core-modular/magikarp_lengths/magikarp_lengths.json",
-            ],
-            happiness_data: [
-              "content-packs/core-modular/happiness_data/happiness_data.json",
-            ],
-            encounter_slot_tables: [
-              "content-packs/core-modular/encounter_slot_tables/encounter_slot_tables.json",
-            ],
-            encounter_music_modifiers: [
-              "content-packs/core-modular/encounter_music_modifiers/encounter_music_modifiers.json",
-            ],
-            battle_stat_multipliers: [
-              "content-packs/core-modular/battle_stat_multipliers/battle_stat_multipliers.json",
-            ],
-            capture_wobble_probabilities: [
-              "content-packs/core-modular/capture_wobble_probabilities/capture_wobble_probabilities.json",
-            ],
-            capture_rules: [
-              "content-packs/core-modular/capture_rules/rules.json",
-            ],
-            move_priorities: [
-              "content-packs/core-modular/move_priorities/move_priorities.json",
-            ],
-            type_categories: [
-              "content-packs/core-modular/type_categories/type_categories.json",
-            ],
-            type_effectiveness: [
-              "content-packs/core-modular/type_effectiveness/type_effectiveness.json",
-            ],
-            weather_modifiers: [
-              "content-packs/core-modular/weather_modifiers/weather_modifiers.json",
-            ],
-            battle_reward_rules: [
-              "content-packs/core-modular/battle_reward_rules/rules.json",
-            ],
-            battle_escape_rules: [
-              "content-packs/core-modular/battle_escape_rules/rules.json",
-            ],
-            step_event_rules: [
-              "content-packs/core-modular/step_event_rules/rules.json",
-            ],
-            fruit_trees: [
-              "content-packs/core-modular/fruit_trees/fruit_trees.json",
-            ],
-            runtime_title_screen: [
-              "content-packs/core-modular/runtime_title_screen/title.json",
-            ],
-            currency_constants: [
-              "content-packs/core-modular/currency_constants/constants.json",
-            ],
-            npcs: ["content-packs/core-modular/npcs/Route1.json"],
-            pokegear_landmarks: [
-              "content-packs/core-modular/pokegear_landmarks/landmarks.json",
-            ],
-            items: ["content-packs/core-modular/items/POTION.json"],
-            playability: ["content-packs/core-modular/playability/core.json"],
-            audio: [
-              "content-packs/core-modular/music/MUSIC_TITLE.json",
-              "content-packs/core-modular/music/MUSIC_ROUTE_29.json",
-            ],
-          }),
+          compiled: "content-packs/core-modular.crystalpack",
+          files: strictFiles({}),
         }),
         expect.objectContaining({
           id: "module-audio-MUSIC_TITLE",
@@ -1448,12 +1360,24 @@ describe("export-core-content-pack", () => {
         npcs: string[];
       };
     }>;
-    const corePack = packs.find((pack) => pack.id === "core-modular");
+    const generatedCorePackCall = mockWriteJsonToTargets.mock.calls.find(
+      (call) => call[0] === "content-packs/core-modular.generated.json",
+    );
+    const generatedCorePack = generatedCorePackCall?.[1] as
+      | {
+          enabled?: boolean;
+          files: {
+            maps: string[];
+            map_scripts: string[];
+            map_attributes: string[];
+          };
+        }
+      | undefined;
     const routeModule = packs.find(
       (pack) => pack.id === "module-route-Route 29",
     );
 
-    expect(corePack).toEqual(
+    expect(generatedCorePack).toEqual(
       expect.objectContaining({
         enabled: true,
         files: expect.objectContaining({

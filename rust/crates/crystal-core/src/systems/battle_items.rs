@@ -545,7 +545,10 @@ fn has_intrinsic_field_item_payload(item: &Item) -> bool {
     item.repel_steps.is_some()
         || item.escape_rope_mode.is_some()
         || item.rare_candy_level_gain.is_some()
-        || matches!(item.effect.as_str(), "EVO_STONE" | "BASEMENT_KEY" | "CARD_KEY")
+        || matches!(
+            item.effect.as_str(),
+            "EVO_STONE" | "BASEMENT_KEY" | "CARD_KEY"
+        )
         || item.pocket == ITEM_POCKET_TM_HM
         || active_battle_item_effect_plan(item).is_some()
         || battle_pp_item_effect_plan(item).is_some()
@@ -598,9 +601,14 @@ fn is_exact_item_property_expression(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && !has_reserved_pack_prefix(value)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'|' | b' '))
+        && value.split('|').all(|property| {
+            let property = property.trim();
+            !property.is_empty()
+                && !has_reserved_pack_prefix(property)
+                && property
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
 }
 
 fn has_reserved_pack_prefix(value: &str) -> bool {
@@ -2261,7 +2269,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,

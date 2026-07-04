@@ -2391,13 +2391,13 @@ mod tests {
 
     #[test]
     fn script_movement_stride_matches_runtime_player_stride() {
-        assert_eq!(SCRIPT_MOVEMENT_EVENT_TILE_STRIDE, 2);
+        assert_eq!(SCRIPT_MOVEMENT_EVENT_TILE_STRIDE, 1);
         assert_eq!(
             crate::world::movement::StepOptions::default().stride_tiles,
             SCRIPT_MOVEMENT_EVENT_TILE_STRIDE
         );
-        assert_eq!(script_movement_step_runtime_stride("step"), Some(2));
-        assert_eq!(script_movement_step_runtime_stride("jump_step"), Some(4));
+        assert_eq!(script_movement_step_runtime_stride("step"), Some(1));
+        assert_eq!(script_movement_step_runtime_stride("jump_step"), Some(2));
         assert_eq!(script_movement_step_runtime_stride("turn_head"), None);
     }
 
@@ -3078,7 +3078,7 @@ mod tests {
             Some(TilePosition::new(8, 4))
         );
         assert_eq!((session.objects[0].x, session.objects[0].y), (7, 4));
-        assert_eq!(outcome.steps_applied, 1);
+        assert_eq!(outcome.steps_applied, 2);
         assert!(
             session
                 .hidden_object_identifiers
@@ -3091,7 +3091,7 @@ mod tests {
         let mut session = session(vec![object(
             "ECRUTEAKPOKECENTER1F_BILL",
             "EVENT_BILL_IN_ECRUTEAK",
-            16383,
+            i16::MAX as u16,
             0,
         )]);
         let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
@@ -3124,11 +3124,14 @@ mod tests {
                 movement: "MovesPastRuntimeLimit".to_string(),
                 command: "step".to_string(),
                 index: 1,
-                x: i16::MAX - 1,
+                x: i16::MAX,
                 y: 0,
             }
         );
-        assert_eq!((session.objects[0].x, session.objects[0].y), (16383, 0));
+        assert_eq!(
+            (session.objects[0].x, session.objects[0].y),
+            (i16::MAX as u16, 0)
+        );
         assert!(
             !session
                 .hidden_object_identifiers
@@ -3633,7 +3636,7 @@ mod tests {
             apply_script_movement(&mut session, &command, &movement).expect("slide applies");
 
         assert_eq!(outcome.previous_tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.tile, TilePosition::new(6, 0));
+        assert_eq!(outcome.tile, TilePosition::new(3, 0));
         assert_eq!(outcome.facing, Direction::Left);
         assert_eq!(
             outcome
@@ -3718,8 +3721,8 @@ mod tests {
             apply_script_movement(&mut session, &command, &movement).expect("movement applies");
 
         assert_eq!(outcome.previous_tile, TilePosition::new(4, 4));
-        assert_eq!(outcome.tile, TilePosition::new(2, 6));
-        assert_eq!(session.player.tile, TilePosition::new(2, 6));
+        assert_eq!(outcome.tile, TilePosition::new(3, 5));
+        assert_eq!(session.player.tile, TilePosition::new(3, 5));
         assert_eq!(outcome.facing, Direction::Left);
         assert_eq!(outcome.steps_applied, 3);
         assert_eq!(

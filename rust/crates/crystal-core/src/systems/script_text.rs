@@ -652,6 +652,7 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             source_script,
             command_index,
         } => {
+            state.script_runtime.pending_text_label = None;
             state.script_runtime.pending_yes_no = Some(ScriptYesNoPrompt {
                 source_script: source_script.clone(),
                 command_index: *command_index,
@@ -1193,6 +1194,7 @@ mod tests {
                 command_index: 3,
             })
         );
+        assert_eq!(state.script_runtime.pending_text_label, None);
         assert_eq!(
             state.script_runtime.text_events[0].kind,
             ScriptTextRuntimeKind::YesNo
@@ -1210,6 +1212,7 @@ mod tests {
         )
         .expect("write");
         apply_script_text_command(&mut state, command("yesorno", None), &labels()).expect("yes no");
+        assert_eq!(state.script_runtime.pending_text_label, None);
         apply_script_text_command(&mut state, command("closetext", None), &labels())
             .expect("close");
 

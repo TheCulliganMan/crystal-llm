@@ -224,6 +224,9 @@ export type CoreExportPayload = {
 
 const CORE_PACK_ID = "core-modular";
 const CORE_PACK_PATH = `content-packs/${CORE_PACK_ID}`;
+const CORE_RUNTIME_PACK_PATH = "content-packs/core-modular.crystalpack";
+const CORE_GENERATED_PACK_MANIFEST_PATH =
+  "content-packs/core-modular.generated.json";
 const MODULE_PREFIX = "module";
 
 type RuntimeSpawnPointPayload = {
@@ -1634,13 +1637,25 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { indent: 0 },
   );
 
+  const generatedCorePack = {
+    id: CORE_PACK_ID,
+    enabled: true,
+    priority: -100,
+    path: CORE_PACK_PATH,
+    compiled: null,
+    files,
+  };
+  writeJsonToTargets(CORE_GENERATED_PACK_MANIFEST_PATH, generatedCorePack, {
+    indent: 2,
+  });
+
   remainingPacks.push({
     id: CORE_PACK_ID,
     enabled: true,
     priority: -100,
     path: CORE_PACK_PATH,
-    compiled: compiledPath,
-    files,
+    compiled: CORE_RUNTIME_PACK_PATH,
+    files: emptyContentPackFiles(),
   });
 
   const singleCategoryModules: Array<{

@@ -193,7 +193,9 @@ pub fn apply_state_object_overrides(
         object.x = object_memory.x;
         object.y = object_memory.y;
         if let Some(tile) = object_memory.tile {
-            overworld.object_runtime_tiles.insert(object_id.clone(), tile);
+            overworld
+                .object_runtime_tiles
+                .insert(object_id.clone(), tile);
         } else {
             let tile = saved_object_raw_tile_to_runtime_tile(
                 &overworld.map.name,
@@ -203,7 +205,9 @@ pub fn apply_state_object_overrides(
                 width,
                 height,
             )?;
-            overworld.object_runtime_tiles.insert(object_id.clone(), tile);
+            overworld
+                .object_runtime_tiles
+                .insert(object_id.clone(), tile);
         }
         if let Some(facing) = object_memory.facing {
             overworld.object_facings.insert(object_id.clone(), facing);
@@ -590,12 +594,12 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 40_000,
-                            y: 0,
-                            tile: Some(TilePosition::new(0, 0)),
-                            facing: None,
-                        },
+                    OverworldObjectMemory {
+                        x: 40_000,
+                        y: 0,
+                        tile: Some(TilePosition::new(0, 0)),
+                        facing: None,
+                    },
                 )]),
                 hidden_object_identifiers: BTreeSet::new(),
                 following: None,
@@ -687,12 +691,12 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 6,
-                            y: 0,
-                            tile: Some(TilePosition::new(6, 0)),
-                            facing: None,
-                        },
+                    OverworldObjectMemory {
+                        x: 6,
+                        y: 0,
+                        tile: Some(TilePosition::new(6, 0)),
+                        facing: None,
+                    },
                 )]),
                 hidden_object_identifiers: BTreeSet::new(),
                 following: None,

@@ -7,11 +7,16 @@ use crate::battle::damage::{
     Weather, WeatherModifiers, calculate_damage,
     calculate_type_effectiveness_multiplier_with_foresight, is_physical_type,
 };
-use crate::battle::start::{ActiveBattleEnemyError, deactivate_battle, update_active_battle_enemy};
+use crate::battle::start::{
+    ActiveBattleEnemyError, ActiveBattlePartyError, deactivate_battle,
+    require_active_battle_enemy_party_index, require_active_battle_party_index,
+    update_active_battle_enemy,
+};
 use crate::battle::stats::{BattleStatMultiplierTables, accuracy_stage_multiplier, apply_stage};
+use crate::models::pokemon::default_stat_boosts;
 use crate::models::{Dv, Item, LearnedMove, Move, Pokemon, PokemonSpecies, PokemonType, Stat};
 use crate::random::Random;
-use crate::state::GameState;
+use crate::state::{BattleMemory, GameState};
 use crate::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
 };
@@ -1865,12 +1870,61 @@ pub enum OhkoFailureReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum BattleTurnCommitError {
+    #[error("active battle combat state requires an active battle")]
+    InactiveBattle,
+    #[error("active battle combat state party error: {0:?}")]
+    ActiveParty(#[from] ActiveBattlePartyError),
+    #[error("active battle combat state enemy error: {0:?}")]
+    ActiveEnemyIndex(ActiveBattleEnemyError),
     #[error("battle turn active party index {index} is outside the party")]
     PartyIndexOutOfRange { index: usize },
     #[error("battle turn active party index {index} has no Pokemon")]
     EmptyPartySlot { index: usize },
     #[error("battle turn active enemy update failed: {0:?}")]
     ActiveEnemy(#[from] ActiveBattleEnemyError),
+}
+
+pub fn active_battle_combat_state(
+    state: &GameState,
+) -> Result<BattleCombatState, BattleTurnCommitError> {
+    let active_party_index = require_active_battle_party_index(state)?;
+    let active_enemy_index =
+        require_active_battle_enemy_party_index(state).map_err(BattleTurnCommitError::ActiveEnemyIndex)?;
+    let player = state.storage.party.pokemon[active_party_index]
+        .clone()
+        .ok_or(BattleTurnCommitError::EmptyPartySlot {
+            index: active_party_index,
+        })?;
+    let player_party = state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let (enemy, enemy_party) = match &state.battle {
+        BattleMemory::Wild {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        }
+        | BattleMemory::StaticWild {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        }
+        | BattleMemory::Trainer {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        } => (enemy_pokemon.clone(), enemy_party.clone()),
+        BattleMemory::Inactive => return Err(BattleTurnCommitError::InactiveBattle),
+    };
+    validate_enemy_party_snapshot(state, &enemy_party, active_enemy_index)?;
+    Ok(BattleCombatState::new(player, enemy, state.rng_seed)
+        .with_parties(player_party, enemy_party)
+        .with_party_indices(active_party_index, active_enemy_index))
 }
 
 pub fn commit_battle_turn_outcome(
@@ -2012,7 +2066,7 @@ fn clear_switch_in_pokemon_battle_state(pokemon: &mut Pokemon) {
     pokemon.perish_song_turns = 0;
     pokemon.focus_energy = false;
     pokemon.turns_in_battle = 0;
-    pokemon.stat_boosts.clear();
+    pokemon.stat_boosts = default_stat_boosts();
 }
 
 fn battle_outcome_used_player_heal_bell(outcome: &BattleTurnOutcome) -> bool {
@@ -10448,7 +10502,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,

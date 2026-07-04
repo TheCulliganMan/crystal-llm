@@ -33,3 +33,4 @@ bevy-shell = ["dep:bevy"]
 
 [dev-dependencies]
 crystal-assets = { path = "../crystal-assets", features = ["test-fixtures"] }
+crystal-core = { path = "../crystal-core", features = ["test-fixtures"] }

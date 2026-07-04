@@ -16,7 +16,7 @@ impl Random {
         if max == 0 {
             return 0;
         }
-        self.seed = (self.seed * 9301 + 49_297) % 233_280;
+        self.seed = self.seed.wrapping_mul(9301).wrapping_add(49_297) % 233_280;
         ((self.seed as f64 / 233_280.0) * max as f64).floor() as u32
     }
 }
@@ -38,5 +38,12 @@ mod tests {
         let mut rng = Random::new(7);
         assert_eq!(rng.randrange(0), 0);
         assert_eq!(rng.seed(), 7);
+    }
+
+    #[test]
+    fn high_seed_uses_wrapping_lcg_arithmetic() {
+        let mut rng = Random::new(0x1234_5678);
+        assert_eq!(rng.randrange(16), 7);
+        assert_eq!(rng.seed(), 116_457);
     }
 }

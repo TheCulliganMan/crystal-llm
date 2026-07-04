@@ -878,6 +878,7 @@ pub fn fishing_bite(
     }
     if !session.outcome.bite || session.outcome.encounter.is_none() {
         state.fishing.rod_state = FishingRodState::Idle;
+        state.fishing.rod_index = None;
         state.fishing.bites_remaining = 0;
         state.fishing.result = if session.group.is_none() { 0 } else { 2 };
         session.resolved = true;
@@ -1093,7 +1094,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,

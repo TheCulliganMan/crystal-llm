@@ -2820,8 +2820,7 @@ pub fn checked_runtime_spawn_expected_tile(spawn: &RuntimeSpawnPointRef) -> Opti
 }
 
 pub fn runtime_spawn_subtiles_are_valid(spawn: &RuntimeSpawnPointRef) -> bool {
-    (0..METATILE_WIDTH).contains(&spawn.subtile_x)
-        && (0..METATILE_WIDTH).contains(&spawn.subtile_y)
+    (0..METATILE_WIDTH).contains(&spawn.subtile_x) && (0..METATILE_WIDTH).contains(&spawn.subtile_y)
 }
 
 fn is_exact_nonempty_spawn_token(value: &str) -> bool {
@@ -9590,7 +9589,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -16964,7 +16963,7 @@ battle_focus_energy: None,
             "GROUP_ROUTE_29".to_string(),
             TilePosition::new(4, 6),
         )
-            .expect("runtime tile can form spawn point");
+        .expect("runtime tile can form spawn point");
 
         assert_eq!(spawn.tile_x, 4);
         assert_eq!(spawn.tile_y, 6);

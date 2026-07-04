@@ -247,7 +247,7 @@ struct BevyRuntimeShell {
     last_overworld_input: Option<VisibleOverworldInputRecord>,
     recent_overworld_inputs: VecDeque<VisibleOverworldInputRecord>,
     deterministic_session_start: StateChecksum,
-    deterministic_session_checkpoint: SessionSaveCheckpointFrame,
+    deterministic_session_checkpoint: Option<SessionSaveCheckpointFrame>,
     deterministic_input_frames: VecDeque<PlayerInputFrame>,
     deterministic_battle_actions: VecDeque<BattleActionFrame>,
     deterministic_menu_results: VecDeque<MenuChoiceResultFrame>,
@@ -1453,9 +1453,16 @@ fn initialize_bevy_runtime_shell(
         } => RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), spawn_identifier)?,
     };
 
-    let deterministic_session_start = shell.snapshot()?.state_checksum;
-    let deterministic_session_checkpoint =
-        visible_deterministic_session_checkpoint(&shell, deterministic_session_start.clone())?;
+    let initial_snapshot = shell.snapshot()?;
+    let deterministic_session_start = initial_snapshot.state_checksum;
+    let deterministic_session_checkpoint = if initial_snapshot.trainer.player_name.is_empty() {
+        None
+    } else {
+        Some(visible_deterministic_session_checkpoint(
+            &shell,
+            deterministic_session_start.clone(),
+        )?)
+    };
     let mut runtime_shell = BevyRuntimeShell {
         asset_root,
         runtime,
@@ -1561,6 +1568,15 @@ fn visible_deterministic_session_checkpoint(
         );
     }
     Ok(descriptor.save_checkpoint)
+}
+
+fn required_visible_deterministic_session_checkpoint(
+    runtime_shell: &BevyRuntimeShell,
+) -> Result<&SessionSaveCheckpointFrame> {
+    runtime_shell
+        .deterministic_session_checkpoint
+        .as_ref()
+        .context("deterministic session checkpoint requires confirmed trainer identity")
 }
 
 fn setup_shell_view(mut commands: Commands) {
@@ -7443,9 +7459,10 @@ fn confirm_visible_player_name_input(runtime_shell: &mut BevyRuntimeShell) -> Re
         .set_trainer_identity(input.value, snapshot.trainer.player_id)?;
     let identity_checksum = identity.state_checksum.clone();
     runtime_shell.deterministic_session_start = identity_checksum.clone();
-    runtime_shell.deterministic_session_checkpoint =
+    runtime_shell.deterministic_session_checkpoint = Some(
         visible_deterministic_session_checkpoint(&runtime_shell.shell, identity_checksum)
-            .context("refresh deterministic session checkpoint after trainer identity")?;
+            .context("refresh deterministic session checkpoint after trainer identity")?,
+    );
     runtime_shell.last_audio_events.push(format!(
         "trainer identity name={} id={} checksum={:?}",
         identity.player_name_after, identity.player_id_after, identity.state_checksum
@@ -13306,8 +13323,12 @@ fn visible_battle_action_ids(
 }
 
 fn sync_visible_battle_action_cursor(runtime_shell: &mut BevyRuntimeShell) {
-    let Ok(snapshot) = runtime_shell.shell.snapshot() else {
-        return;
+    let snapshot = match runtime_shell.shell.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            runtime_shell.last_error = Some(error.to_string());
+            return;
+        }
     };
     let Some(battle) = snapshot.battle.as_ref() else {
         runtime_shell.battle_action_cursor = None;
@@ -19376,14 +19397,19 @@ fn reset_visible_map_reload_after_battle(runtime_shell: &mut BevyRuntimeShell, r
 }
 
 fn reset_visible_deterministic_session_history(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let checksum = runtime_shell
+    let snapshot = runtime_shell
         .shell
         .snapshot()
-        .map(|snapshot| snapshot.state_checksum)
         .context("deterministic session reset requires a valid runtime snapshot")?;
-    runtime_shell.deterministic_session_checkpoint =
-        visible_deterministic_session_checkpoint(&runtime_shell.shell, checksum.clone())
-            .context("deterministic session reset requires a valid runtime checkpoint")?;
+    let checksum = snapshot.state_checksum;
+    runtime_shell.deterministic_session_checkpoint = if snapshot.trainer.player_name.is_empty() {
+        None
+    } else {
+        Some(
+            visible_deterministic_session_checkpoint(&runtime_shell.shell, checksum.clone())
+                .context("deterministic session reset requires a valid runtime checkpoint")?,
+        )
+    };
     runtime_shell.deterministic_session_start = checksum;
     runtime_shell.deterministic_input_frames.clear();
     runtime_shell.deterministic_battle_actions.clear();
@@ -19531,6 +19557,20 @@ fn prepare_visible_local_link_descriptor(runtime_shell: &mut BevyRuntimeShell) -
         .journal()
         .frames()
         .len();
+    let deterministic_session_checkpoint =
+        required_visible_deterministic_session_checkpoint(runtime_shell)?;
+    let retained_session_id = deterministic_session_checkpoint
+        .session()
+        .session_id()
+        .to_string();
+    let retained_checkpoint_frame = deterministic_session_checkpoint
+        .checkpoint()
+        .summary()
+        .state_frame();
+    let retained_checkpoint_hash = deterministic_session_checkpoint
+        .checkpoint()
+        .summary()
+        .state_hash();
     record_visible_runtime_action(
         runtime_shell,
         format!(
@@ -19556,22 +19596,11 @@ fn prepare_visible_local_link_descriptor(runtime_shell: &mut BevyRuntimeShell) -
         journal_bytes.len(),
         journal_message_bytes.len(),
         save_resume_message_bytes.len(),
-        runtime_shell
-            .deterministic_session_checkpoint
-            .session()
-            .session_id(),
+        retained_session_id,
         runtime_shell.deterministic_session_start.frame(),
         runtime_shell.deterministic_session_start.hash(),
-        runtime_shell
-            .deterministic_session_checkpoint
-            .checkpoint()
-            .summary()
-            .state_frame(),
-        runtime_shell
-            .deterministic_session_checkpoint
-            .checkpoint()
-            .summary()
-            .state_hash(),
+        retained_checkpoint_frame,
+        retained_checkpoint_hash,
         runtime_shell.deterministic_input_frames.len(),
         retained_journal_frames,
         runtime_shell.deterministic_battle_actions.len(),
@@ -19691,8 +19720,7 @@ fn retained_lockstep_frames_from_masks(
 }
 
 fn encode_retained_state_hash_messages(runtime_shell: &BevyRuntimeShell) -> Result<usize> {
-    let start = runtime_shell
-        .deterministic_session_checkpoint
+    let start = required_visible_deterministic_session_checkpoint(runtime_shell)?
         .checkpoint()
         .checksum()
         .clone();
@@ -19921,7 +19949,7 @@ fn encode_retained_runtime_command_messages(runtime_shell: &BevyRuntimeShell) ->
     let mut byte_count = 0usize;
     for command in visible_retained_runtime_command_frames(
         runtime_shell,
-        &runtime_shell.deterministic_session_checkpoint,
+        required_visible_deterministic_session_checkpoint(runtime_shell)?,
     )? {
         let message = LinkMessage::SessionRuntimeCommand(command);
         byte_count = byte_count
@@ -19984,7 +20012,7 @@ fn encode_retained_runtime_result_messages(runtime_shell: &BevyRuntimeShell) -> 
     let mut byte_count = 0usize;
     for result in visible_retained_runtime_result_frames(
         runtime_shell,
-        &runtime_shell.deterministic_session_checkpoint,
+        required_visible_deterministic_session_checkpoint(runtime_shell)?,
     )? {
         let message = LinkMessage::SessionRuntimeCommandResult(result);
         byte_count = byte_count
@@ -20061,7 +20089,7 @@ fn validate_retained_runtime_results(
 fn visible_retained_save_resume_replay_bundle(
     runtime_shell: &BevyRuntimeShell,
 ) -> Result<SaveResumeReplayBundle> {
-    let checkpoint = runtime_shell.deterministic_session_checkpoint.clone();
+    let checkpoint = required_visible_deterministic_session_checkpoint(runtime_shell)?.clone();
     let start_checksum = checkpoint.checkpoint().checksum().clone();
     let terminal_checksum = runtime_shell
         .shell
@@ -22060,23 +22088,23 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
         .deterministic_session_start
         .hash()
         .hash(&mut hasher);
-    runtime_shell
-        .deterministic_session_checkpoint
-        .session()
-        .session_id()
-        .hash(&mut hasher);
-    runtime_shell
-        .deterministic_session_checkpoint
-        .checkpoint()
-        .summary()
-        .state_frame()
-        .hash(&mut hasher);
-    runtime_shell
-        .deterministic_session_checkpoint
-        .checkpoint()
-        .summary()
-        .state_hash()
-        .hash(&mut hasher);
+    match &runtime_shell.deterministic_session_checkpoint {
+        Some(checkpoint) => {
+            true.hash(&mut hasher);
+            checkpoint.session().session_id().hash(&mut hasher);
+            checkpoint
+                .checkpoint()
+                .summary()
+                .state_frame()
+                .hash(&mut hasher);
+            checkpoint
+                .checkpoint()
+                .summary()
+                .state_hash()
+                .hash(&mut hasher);
+        }
+        None => false.hash(&mut hasher),
+    }
     runtime_shell
         .deterministic_input_frames
         .len()
@@ -26545,15 +26573,9 @@ fn refresh_battle_hp_bars(
     runtime_shell: Res<BevyRuntimeShell>,
     mut query: Query<(&BattleHpBar, &mut Sprite, &mut Transform)>,
 ) {
-    let snapshot = if runtime_shell.title_menu.is_some() {
-        None
-    } else {
-        Some(
-            runtime_shell
-                .shell
-                .snapshot()
-                .expect("battle HP bar refresh requires valid runtime shell state"),
-        )
+    let snapshot = match runtime_shell.title_menu.is_some() {
+        true => None,
+        false => runtime_shell.shell.snapshot().ok(),
     };
     let battle = snapshot
         .as_ref()
@@ -27690,42 +27712,60 @@ fn format_snapshot(
         .state_checksum
         .frame()
         .saturating_sub(runtime_shell.deterministic_session_start.frame());
+    let checkpoint_details =
+        runtime_shell
+            .deterministic_session_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                (
+                    checkpoint.session().session_id().to_string(),
+                    checkpoint.checkpoint().summary().state_hash(),
+                )
+            });
     if let Some(input) = runtime_shell.deterministic_input_frames.back() {
-        lines.push(format!(
-            "deterministic_input session={} start_frame={} start_hash={:#010x} checkpoint_hash={:#010x} player={} frame={} joypad_mask={:#010b} retained_inputs={} retained_journal_frames={}",
-            runtime_shell
-                .deterministic_session_checkpoint
-                .session()
-                .session_id(),
-            runtime_shell.deterministic_session_start.frame(),
-            runtime_shell.deterministic_session_start.hash(),
-            runtime_shell
-                .deterministic_session_checkpoint
-                .checkpoint()
-                .summary()
-                .state_hash(),
-            input.player_id(),
-            input.frame(),
-            input.joypad_mask(),
-            runtime_shell.deterministic_input_frames.len(),
-            retained_journal_frame_count
-        ));
+        if let Some((session_id, checkpoint_hash)) = checkpoint_details {
+            lines.push(format!(
+                "deterministic_input session={} start_frame={} start_hash={:#010x} checkpoint_hash={:#010x} player={} frame={} joypad_mask={:#010b} retained_inputs={} retained_journal_frames={}",
+                session_id,
+                runtime_shell.deterministic_session_start.frame(),
+                runtime_shell.deterministic_session_start.hash(),
+                checkpoint_hash,
+                input.player_id(),
+                input.frame(),
+                input.joypad_mask(),
+                runtime_shell.deterministic_input_frames.len(),
+                retained_journal_frame_count
+            ));
+        } else {
+            lines.push(format!(
+                "deterministic_input pending_identity start_frame={} start_hash={:#010x} player={} frame={} joypad_mask={:#010b} retained_inputs={} retained_journal_frames={}",
+                runtime_shell.deterministic_session_start.frame(),
+                runtime_shell.deterministic_session_start.hash(),
+                input.player_id(),
+                input.frame(),
+                input.joypad_mask(),
+                runtime_shell.deterministic_input_frames.len(),
+                retained_journal_frame_count
+            ));
+        }
     } else {
-        lines.push(format!(
-            "deterministic_input session={} start_frame={} start_hash={:#010x} checkpoint_hash={:#010x} retained_inputs=0 retained_journal_frames={}",
-            runtime_shell
-                .deterministic_session_checkpoint
-                .session()
-                .session_id(),
-            runtime_shell.deterministic_session_start.frame(),
-            runtime_shell.deterministic_session_start.hash(),
-            runtime_shell
-                .deterministic_session_checkpoint
-                .checkpoint()
-                .summary()
-                .state_hash(),
-            retained_journal_frame_count
-        ));
+        if let Some((session_id, checkpoint_hash)) = checkpoint_details {
+            lines.push(format!(
+                "deterministic_input session={} start_frame={} start_hash={:#010x} checkpoint_hash={:#010x} retained_inputs=0 retained_journal_frames={}",
+                session_id,
+                runtime_shell.deterministic_session_start.frame(),
+                runtime_shell.deterministic_session_start.hash(),
+                checkpoint_hash,
+                retained_journal_frame_count
+            ));
+        } else {
+            lines.push(format!(
+                "deterministic_input pending_identity start_frame={} start_hash={:#010x} retained_inputs=0 retained_journal_frames={}",
+                runtime_shell.deterministic_session_start.frame(),
+                runtime_shell.deterministic_session_start.hash(),
+                retained_journal_frame_count
+            ));
+        }
     }
     if let Some(action) = runtime_shell.deterministic_battle_actions.back() {
         lines.push(format!(
@@ -30287,12 +30327,10 @@ mod tests {
         )
         .expect("facing runtime tile stays inside runtime coordinate bounds");
 
-        assert_eq!(front, TilePosition::new(4, 2));
-        assert_eq!(
-            runtime_tile_to_metatile_u16(front.x, front.y, "test")
-                .expect("facing tile converts to metatile"),
-            (2, 1)
-        );
+        assert_eq!(front, TilePosition::new(3, 2));
+        let error = runtime_tile_to_metatile_u16(front.x, front.y, "test")
+            .expect_err("odd runtime tile does not convert to metatile");
+        assert!(error.to_string().contains("not aligned to metatile width"));
     }
 
     #[test]
@@ -30351,7 +30389,7 @@ mod tests {
         };
         assert_eq!(
             format_warp_event_detail_line(&warp),
-            "warp 3 runtime_tile=(4, 6) raw=(2, 3) target=ROUTE_29 target_warp=1"
+            "warp 3 runtime_tile=(2, 3) raw=(2, 3) target=ROUTE_29 target_warp=1"
         );
 
         let object = crate::core::map::ObjectEvent {
@@ -30374,7 +30412,7 @@ mod tests {
         };
         assert_eq!(
             format_visible_object_detail_line(&object),
-            "visible_object Some(\"ROUTE29_TEACHER\") sprite=SPRITE_TEACHER runtime_tile=(4, 6) raw=(2, 3) script=TeacherScript flag=EVENT_TEACHER"
+            "visible_object Some(\"ROUTE29_TEACHER\") sprite=SPRITE_TEACHER runtime_tile=(2, 3) raw=(2, 3) script=TeacherScript flag=EVENT_TEACHER"
         );
     }
 

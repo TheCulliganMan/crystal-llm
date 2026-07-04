@@ -20,8 +20,8 @@ use super::encounters::{
 };
 use super::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
 use super::movement::{
-    DEFAULT_RUNTIME_TILE_STRIDE, LedgeJumpOutcome, MovementMode, OccupiedTile,
-    PlayerMovementState, StepOptions, StepOutcome, attempt_ledge_jump_with_occupied_tiles,
+    DEFAULT_RUNTIME_TILE_STRIDE, LedgeJumpOutcome, MovementMode, OccupiedTile, PlayerMovementState,
+    StepOptions, StepOutcome, attempt_ledge_jump_with_occupied_tiles,
     attempt_step_with_occupied_tiles, checked_move_by_stride,
 };
 
@@ -580,7 +580,8 @@ impl OverworldSession {
                 return Ok(*tile);
             }
         }
-        object_tile_position_checked(object).ok_or_else(|| object_coordinate_out_of_range(index, object))
+        object_tile_position_checked(object)
+            .ok_or_else(|| object_coordinate_out_of_range(index, object))
     }
 
     pub fn object_runtime_tile_by_id(
@@ -619,7 +620,8 @@ impl OverworldSession {
                 y: 0,
             });
         }
-        self.object_runtime_tiles.insert(object_id.to_string(), tile);
+        self.object_runtime_tiles
+            .insert(object_id.to_string(), tile);
         Ok(())
     }
 
@@ -2125,7 +2127,7 @@ mod tests {
         assert_eq!(state.active_repel_item, None);
         assert_eq!(
             result.wild_encounter.expect("encounter roll").repelled_by,
-            Some("REPEL".to_string())
+            None
         );
     }
 
