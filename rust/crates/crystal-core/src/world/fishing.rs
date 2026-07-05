@@ -1474,9 +1474,6 @@ mod tests {
                 FishingCatalogIssue::InvalidRodItemId {
                     item_id: " OLD_ROD".to_string(),
                 },
-                FishingCatalogIssue::InvalidRodItemId {
-                    item_id: "OLD ROD".to_string(),
-                },
                 FishingCatalogIssue::UnknownRodItemId {
                     item_id: "MISSING_ROD".to_string(),
                 },
@@ -1486,6 +1483,9 @@ mod tests {
                 },
                 FishingCatalogIssue::UnknownRodItemId {
                     item_id: "MISSING_ROD_2".to_string(),
+                },
+                FishingCatalogIssue::InvalidRodItemId {
+                    item_id: "OLD ROD".to_string(),
                 },
                 FishingCatalogIssue::InvalidMapFishingGroup {
                     map_name: "LAKE".to_string(),

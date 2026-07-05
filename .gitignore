@@ -55,6 +55,7 @@ gfx/pokemon/*/frames.asm
 *.sn*
 *.sa*
 *.sg1
+*.crystalsave
 
 # Python build artifacts
 *.egg-info
@@ -69,6 +70,7 @@ packages/assets/dist/
 apps/web/assets/audio/**/*.mp3
 apps/web/assets/audio/manifests/**/*.json
 .asm_to_wav_manifest.json
+content-packs/test/
 .DS_Store
 pokecrystal_disassembly/gfx/*
 .coverage

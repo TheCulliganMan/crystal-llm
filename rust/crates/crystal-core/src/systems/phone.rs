@@ -1261,7 +1261,7 @@ mod tests {
             &permanent_numbers(["PHONE_MOM", "PHONE_ELM"]),
         )
         .expect("initialize");
-        assert_eq!(inserted, vec!["PHONE_MOM", "PHONE_ELM"]);
+        assert_eq!(inserted, vec!["PHONE_ELM", "PHONE_MOM"]);
         assert!(state.script_runtime.phone_numbers.contains("PHONE_MOM"));
         assert!(state.script_runtime.phone_numbers.contains("PHONE_ELM"));
     }

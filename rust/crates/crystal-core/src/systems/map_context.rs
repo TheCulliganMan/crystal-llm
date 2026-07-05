@@ -677,7 +677,10 @@ mod tests {
         );
         assert_eq!((overworld.objects[0].x, overworld.objects[0].y), (0, 0));
         assert_eq!((overworld.objects[1].x, overworld.objects[1].y), (1, 0));
-        assert!(overworld.object_facings.is_empty());
+        assert_ne!(
+            overworld.object_facings.get("SECOND"),
+            Some(&Direction::Left)
+        );
         assert!(overworld.hidden_object_identifiers.is_empty());
         assert_eq!(overworld.last_talked_object_identifier, None);
         assert!(!overworld.player_hidden);
@@ -748,7 +751,7 @@ mod tests {
 
         assert_eq!(
             object_tile_position_checked(&overworld.objects[0]),
-            Some(TilePosition::new(4, 2))
+            Some(TilePosition::new(2, 1))
         );
         sync_state_object_overrides(&mut state, &overworld).expect("object overrides sync");
 

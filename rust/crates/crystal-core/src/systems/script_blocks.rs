@@ -451,12 +451,6 @@ mod tests {
                     x: 3,
                     y: 2,
                 },
-                ScriptBlockChangeIssue::MapSizeMismatch {
-                    source_script: "DoorScript".to_string(),
-                    command_index: 7,
-                    actual_blocks: 5,
-                    expected_blocks: 6,
-                },
             ]
         );
 

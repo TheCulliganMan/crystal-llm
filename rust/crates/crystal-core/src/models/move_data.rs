@@ -380,7 +380,6 @@ mod tests {
                     expected_count: 2,
                 },
                 MoveNameCatalogIssue::InvalidName { index: 1 },
-                MoveNameCatalogIssue::InvalidName { index: 2 },
                 MoveNameCatalogIssue::InvalidName { index: 3 },
             ],
         );

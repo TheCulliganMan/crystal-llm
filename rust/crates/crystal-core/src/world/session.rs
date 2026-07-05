@@ -685,7 +685,10 @@ impl OverworldSession {
             return Ok(None);
         }
 
-        if let Some((object_index, object)) = self.visible_object_at_checked(facing_tile)? {
+        if let Some((object_index, object)) = self
+            .visible_object_at_checked(facing_tile)?
+            .filter(|(_, object)| object_has_dispatchable_script(object))
+        {
             return Ok(Some(self.object_interaction(
                 object_index,
                 object,
@@ -695,7 +698,10 @@ impl OverworldSession {
 
         let adjusted_tile = self.counter_adjusted_tile(facing_tile);
         if adjusted_tile != facing_tile {
-            if let Some((object_index, object)) = self.visible_object_at_checked(adjusted_tile)? {
+            if let Some((object_index, object)) = self
+                .visible_object_at_checked(adjusted_tile)?
+                .filter(|(_, object)| object_has_dispatchable_script(object))
+            {
                 return Ok(Some(self.object_interaction(
                     object_index,
                     object,
@@ -990,7 +996,11 @@ impl OverworldSession {
     ) -> Result<OverworldStepResult, OverworldCoordinateError> {
         let mut staged = self.clone();
         let outcome = staged.step_checked(direction, options)?;
-        let warp = staged.check_warp_checked()?;
+        let warp = if matches!(outcome, StepOutcome::Moved { .. }) {
+            staged.check_warp_checked()?
+        } else {
+            None
+        };
         *self = staged;
         Ok(OverworldStepResult { outcome, warp })
     }
@@ -1196,7 +1206,11 @@ impl OverworldSession {
     ) -> Result<OverworldLedgeJumpResult, OverworldCoordinateError> {
         let mut staged = self.clone();
         let outcome = staged.ledge_jump_checked(direction, options)?;
-        let warp = staged.check_warp_checked()?;
+        let warp = if matches!(outcome, LedgeJumpOutcome::Jumped { .. }) {
+            staged.check_warp_checked()?
+        } else {
+            None
+        };
         *self = staged;
         Ok(OverworldLedgeJumpResult { outcome, warp })
     }
@@ -1286,6 +1300,10 @@ impl OverworldSession {
     }
 }
 
+fn object_has_dispatchable_script(object: &ObjectEvent) -> bool {
+    object.script != "-1" && object.script != "ObjectEvent"
+}
+
 fn apply_repel_to_wild_encounter(
     resolved: Option<ResolvedWildEncounter>,
     options: &EncounterCheckOptions,
@@ -1302,7 +1320,7 @@ fn apply_repel_to_wild_encounter(
     let Some(encounter) = resolved else {
         return Ok((None, None));
     };
-    if encounter.level <= lead_level {
+    if encounter.level < lead_level {
         return Ok((None, Some(item_id.clone())));
     }
     Ok((Some(encounter), None))
@@ -1461,6 +1479,9 @@ fn tile_is_in_sightline(
         Direction::Right if dy == 0 && dx > 0 => dx,
         _ => return false,
     };
+    if distance > i32::from(i16::MAX) {
+        return false;
+    }
     let Some(max_distance) = i32::from(radius).checked_mul(stride) else {
         return false;
     };
@@ -1815,12 +1836,7 @@ mod tests {
                     collision: [permissions::FLOOR; 4],
                 },
                 MetatileCollision {
-                    collision: [
-                        permissions::FLOOR,
-                        permissions::HOP_DOWN,
-                        permissions::HOP_DOWN,
-                        permissions::WALL,
-                    ],
+                    collision: [permissions::HOP_DOWN; 4],
                 },
             ],
         }
@@ -1947,8 +1963,8 @@ mod tests {
     fn default_input_stride_reaches_next_runtime_warp_tile() {
         let warp = WarpEvent {
             index: 1,
-            x: 26,
-            y: 1,
+            x: 51,
+            y: 2,
             target_map_constant: "ROUTE_29_ROUTE_46_GATE".to_string(),
             target_map: "Route29Route46Gate".to_string(),
             target_warp_id: 3,
@@ -1957,7 +1973,7 @@ mod tests {
             warps: vec![warp.clone()],
             ..MapEvents::default()
         };
-        let map = map_with_blocks(27, 2, vec![0; 54]);
+        let map = map_with_blocks(52, 3, vec![0; 156]);
         let mut session =
             OverworldSession::with_events(map, events, tileset(), TilePosition::new(50, 2));
 
@@ -1975,7 +1991,7 @@ mod tests {
             result.outcome,
             StepOutcome::Moved {
                 from: TilePosition::new(50, 2),
-                to: TilePosition::new(52, 2),
+                to: TilePosition::new(51, 2),
                 speed_multiplier: 1,
             }
         );
@@ -1983,7 +1999,7 @@ mod tests {
             result.warp,
             Some(WarpTrigger {
                 map_name: "test".to_string(),
-                tile: TilePosition::new(52, 2),
+                tile: TilePosition::new(51, 2),
                 warp,
             })
         );
@@ -2004,14 +2020,14 @@ mod tests {
             ),
             StepOutcome::Moved {
                 from: TilePosition::new(0, 0),
-                to: TilePosition::new(2, 0),
+                to: TilePosition::new(1, 0),
                 speed_multiplier: 1,
             }
         );
 
         let snapshot = session.snapshot();
         assert_eq!(snapshot.frame, 1);
-        assert_eq!(snapshot.tile, TilePosition::new(2, 0));
+        assert_eq!(snapshot.tile, TilePosition::new(1, 0));
         assert_ne!(session.state_hash(), start_hash);
         assert_eq!(
             session
@@ -2044,13 +2060,13 @@ mod tests {
             OverworldInputAction::Step(OverworldStepResult {
                 outcome: StepOutcome::Moved {
                     from: TilePosition::new(0, 0),
-                    to: TilePosition::new(2, 0),
+                    to: TilePosition::new(1, 0),
                     speed_multiplier: 1,
                 },
                 warp: None,
             })
         );
-        assert_eq!(result.snapshot.tile, TilePosition::new(2, 0));
+        assert_eq!(result.snapshot.tile, TilePosition::new(1, 0));
     }
 
     #[test]
@@ -2079,9 +2095,9 @@ mod tests {
             )
             .expect("field input encounter");
 
-        assert_eq!(result.input.snapshot.tile, TilePosition::new(2, 0));
+        assert_eq!(result.input.snapshot.tile, TilePosition::new(1, 0));
         let roll = result.wild_encounter.expect("wild encounter roll");
-        assert_eq!(roll.tile, TilePosition::new(2, 0));
+        assert_eq!(roll.tile, TilePosition::new(1, 0));
         assert_eq!(roll.encounter_roll, 64);
         assert_eq!(roll.slot_percent_roll, Some(88));
         assert_eq!(roll.rng_seed_after, rng.seed());
@@ -2166,7 +2182,7 @@ mod tests {
     #[test]
     fn input_frame_jumps_ledge_before_regular_step() {
         let mut session = OverworldSession::new(
-            map_with_blocks(1, 3, vec![0, 1, 0]),
+            map_with_blocks(1, 2, vec![0, 1]),
             ledge_tileset(),
             TilePosition::new(0, 1),
         );
@@ -2188,14 +2204,14 @@ mod tests {
             OverworldInputAction::LedgeJump(OverworldLedgeJumpResult {
                 outcome: LedgeJumpOutcome::Jumped {
                     from: TilePosition::new(0, 1),
-                    over: TilePosition::new(0, 3),
-                    to: TilePosition::new(0, 5),
+                    over: TilePosition::new(0, 2),
+                    to: TilePosition::new(0, 3),
                     speed_multiplier: 1,
                 },
                 warp: None,
             })
         );
-        assert_eq!(result.snapshot.tile, TilePosition::new(0, 5));
+        assert_eq!(result.snapshot.tile, TilePosition::new(0, 3));
     }
 
     #[test]
@@ -2233,7 +2249,7 @@ mod tests {
         let mut session = OverworldSession::with_events_and_objects(
             map_with_blocks(3, 2, vec![0; 6]),
             MapEvents::default(),
-            vec![object("ROUTE29_TEACHER1", 2, 1, "-1")],
+            vec![object("ROUTE29_TEACHER1", 3, 2, "-1")],
             tileset(),
             TilePosition::new(2, 2),
         );
@@ -2249,7 +2265,7 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::BlockedByObject {
-                at: TilePosition::new(4, 2),
+                at: TilePosition::new(3, 2),
                 facing: Direction::Right,
                 object_identifier: Some("ROUTE29_TEACHER1".to_string()),
             }
@@ -2283,7 +2299,7 @@ mod tests {
         );
 
         assert!(matches!(outcome, StepOutcome::Moved { .. }));
-        assert_eq!(session.snapshot().tile, TilePosition::new(2, 0));
+        assert_eq!(session.snapshot().tile, TilePosition::new(1, 0));
     }
 
     #[test]
@@ -2348,10 +2364,10 @@ mod tests {
 
     #[test]
     fn interaction_targets_visible_object_on_facing_tile() {
-        let mut teacher = object("ROUTE29_TEACHER1", 1, 2, "-1");
+        let mut teacher = object("ROUTE29_TEACHER1", 2, 3, "-1");
         teacher.script = "Route29TeacherScript".to_string();
         let mut session = OverworldSession::with_events_and_objects(
-            map_with_blocks(2, 3, vec![0; 6]),
+            map_with_blocks(3, 4, vec![0; 12]),
             MapEvents::default(),
             vec![teacher],
             tileset(),
@@ -2370,7 +2386,7 @@ mod tests {
                 map_name: "test".to_string(),
                 player_tile: TilePosition::new(2, 2),
                 facing: Direction::Down,
-                target_tile: TilePosition::new(2, 4),
+                target_tile: TilePosition::new(2, 3),
                 script: "Route29TeacherScript".to_string(),
                 target: OverworldInteractionTarget::Object {
                     object_index: 1,
@@ -2388,6 +2404,26 @@ mod tests {
             Some(TilePosition::new(27, 1))
         );
         assert_eq!(raw_event_tile_to_runtime_tile_checked(u16::MAX, 0), None);
+    }
+
+    #[test]
+    fn interaction_skips_reserved_object_event_script_without_dispatch() {
+        let mut rival = object("CHERRYGROVECITY_RIVAL", 2, 3, "-1");
+        rival.script = "ObjectEvent".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 4, vec![0; 12]),
+            MapEvents::default(),
+            vec![rival],
+            tileset(),
+            TilePosition::new(2, 2),
+        );
+        session.player.facing = Direction::Down;
+
+        let interaction = session
+            .check_interaction_checked(StepOptions::default().stride_tiles)
+            .expect("checked interaction");
+
+        assert_eq!(interaction, None);
     }
 
     #[test]
@@ -2441,7 +2477,7 @@ mod tests {
             MapEvents::default(),
             Vec::new(),
             tileset(),
-            TilePosition::new(i16::MAX - 1, 0),
+            TilePosition::new(i16::MAX, 0),
         );
         session.player.facing = Direction::Right;
 
@@ -2452,7 +2488,7 @@ mod tests {
         assert_eq!(
             error,
             OverworldInputError::Coordinate(OverworldCoordinateError::RuntimeTileOverflow {
-                x: i16::MAX - 1,
+                x: i16::MAX,
                 y: 0,
                 facing: Direction::Right,
             })
@@ -2495,7 +2531,13 @@ mod tests {
         );
 
         let outcome = session
-            .step_checked(Direction::Right, StepOptions::default())
+            .step_checked(
+                Direction::Right,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+            )
             .expect("odd runtime tile is a valid tile coordinate");
 
         assert_eq!(
@@ -2529,12 +2571,12 @@ mod tests {
 
     #[test]
     fn interaction_uses_lowest_visible_object_slot_on_shared_tile() {
-        let mut first = object("FIRST_OBJECT", 1, 2, "-1");
+        let mut first = object("FIRST_OBJECT", 2, 3, "-1");
         first.script = "FirstScript".to_string();
-        let mut second = object("SECOND_OBJECT", 1, 2, "-1");
+        let mut second = object("SECOND_OBJECT", 2, 3, "-1");
         second.script = "SecondScript".to_string();
         let mut session = OverworldSession::with_events_and_objects(
-            map_with_blocks(2, 3, vec![0; 6]),
+            map_with_blocks(3, 4, vec![0; 12]),
             MapEvents::default(),
             vec![first, second],
             tileset(),
@@ -2689,11 +2731,11 @@ mod tests {
     #[test]
     fn interaction_does_not_hide_objects_with_case_changed_event_flags() {
         let hidden_flags = BTreeSet::from(["event_route_29_potion".to_string()]);
-        let mut item = object("ROUTE29_POKE_BALL", 1, 2, "EVENT_ROUTE_29_POTION");
+        let mut item = object("ROUTE29_POKE_BALL", 2, 3, "EVENT_ROUTE_29_POTION");
         item.object_type = "OBJECTTYPE_ITEMBALL".to_string();
         item.script = "Route29Potion".to_string();
         let mut session = OverworldSession::with_events_and_objects(
-            map_with_blocks(2, 3, vec![0; 6]),
+            map_with_blocks(3, 4, vec![0; 12]),
             MapEvents::default(),
             vec![item],
             tileset(),
@@ -2723,7 +2765,7 @@ mod tests {
         let mut clerk = object("MART_CLERK", 2, 0, "-1");
         clerk.script = "MartClerkScript".to_string();
         let mut session = OverworldSession::with_events_and_objects(
-            map_with_blocks(3, 1, vec![0, 1, 0]),
+            map_with_blocks(2, 1, vec![1, 0]),
             MapEvents::default(),
             vec![clerk],
             counter_tileset(),
@@ -2736,7 +2778,7 @@ mod tests {
             .expect("checked interaction")
             .expect("counter object");
 
-        assert_eq!(interaction.target_tile, TilePosition::new(4, 0));
+        assert_eq!(interaction.target_tile, TilePosition::new(2, 0));
         assert_eq!(interaction.script, "MartClerkScript");
     }
 
@@ -2758,13 +2800,13 @@ mod tests {
     }
 
     #[test]
-    fn interaction_targets_background_events_by_scaled_event_tile() {
+    fn interaction_targets_background_events_by_raw_event_tile() {
         let events = MapEvents {
-            bg_events: vec![background_event(2, 1, "BGEVENT_READ", "SignpostScript")],
+            bg_events: vec![background_event(3, 2, "BGEVENT_READ", "SignpostScript")],
             ..MapEvents::default()
         };
         let mut session = OverworldSession::with_events(
-            map_with_blocks(3, 2, vec![0, 0, 0, 0, 0, 0]),
+            map_with_blocks(4, 3, vec![0; 12]),
             events,
             tileset(),
             TilePosition::new(2, 2),
@@ -2782,7 +2824,7 @@ mod tests {
                 map_name: "test".to_string(),
                 player_tile: TilePosition::new(2, 2),
                 facing: Direction::Right,
-                target_tile: TilePosition::new(4, 2),
+                target_tile: TilePosition::new(3, 2),
                 script: "SignpostScript".to_string(),
                 target: OverworldInteractionTarget::Background {
                     event_type: "BGEVENT_READ".to_string(),
@@ -2828,8 +2870,8 @@ mod tests {
     }
 
     #[test]
-    fn trainer_sight_uses_scaled_object_tile_radius() {
-        let mut trainer = object("ROUTE29_YOUNGSTER", 1, 0, "-1");
+    fn trainer_sight_uses_raw_object_tile_radius() {
+        let mut trainer = object("ROUTE29_YOUNGSTER", 2, 0, "-1");
         trainer.radius = 2;
         trainer.sightline_direction_override = Some("DOWN".to_string());
         trainer.script = "Route29YoungsterScript".to_string();
@@ -2838,7 +2880,7 @@ mod tests {
             MapEvents::default(),
             vec![trainer],
             tileset(),
-            TilePosition::new(2, 4),
+            TilePosition::new(2, 2),
         );
 
         let sight = session
@@ -2850,7 +2892,7 @@ mod tests {
             sight,
             OverworldInteraction {
                 map_name: "test".to_string(),
-                player_tile: TilePosition::new(2, 4),
+                player_tile: TilePosition::new(2, 2),
                 facing: Direction::Down,
                 target_tile: TilePosition::new(2, 0),
                 script: "Route29YoungsterScript".to_string(),
@@ -2864,17 +2906,17 @@ mod tests {
     }
 
     #[test]
-    fn trainer_sight_checks_scaled_intermediate_tiles_for_blockers() {
-        let mut trainer = object("ROUTE29_YOUNGSTER", 1, 0, "-1");
+    fn trainer_sight_checks_raw_intermediate_tiles_for_blockers() {
+        let mut trainer = object("ROUTE29_YOUNGSTER", 2, 0, "-1");
         trainer.radius = 2;
         trainer.sightline_direction_override = Some("DOWN".to_string());
-        let blocker = object("ROUTE29_TEACHER", 1, 1, "-1");
+        let blocker = object("ROUTE29_TEACHER", 2, 1, "-1");
         let session = OverworldSession::with_events_and_objects(
             map_with_blocks(3, 4, vec![0; 12]),
             MapEvents::default(),
             vec![trainer, blocker],
             tileset(),
-            TilePosition::new(2, 4),
+            TilePosition::new(2, 2),
         );
 
         assert_eq!(
@@ -2896,10 +2938,10 @@ mod tests {
     }
 
     #[test]
-    fn coord_event_triggers_for_matching_scene_and_scaled_event_tile() {
+    fn coord_event_triggers_for_matching_scene_and_raw_event_tile() {
         let events = MapEvents {
             coord_events: vec![coord_event(
-                1,
+                2,
                 0,
                 "SCENE_ROUTE29_CATCHING_TUTORIAL",
                 "Route29Tutorial1",
@@ -3194,7 +3236,7 @@ mod tests {
                 &mut rng,
                 EncounterCheckOptions {
                     active_repel_item: Some("REPEL".to_string()),
-                    lead_party_level: Some(3),
+                    lead_party_level: Some(8),
                     ..EncounterCheckOptions::default()
                 },
             )
@@ -3206,6 +3248,31 @@ mod tests {
         assert_eq!(roll.encounter_roll, 64);
         assert_eq!(roll.slot_percent_roll, Some(88));
         assert_eq!(roll.rng_seed_after, rng.seed());
+    }
+
+    #[test]
+    fn session_repel_allows_resolved_same_level_wild_encounter() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut rng = Random::new(1);
+
+        let roll = session
+            .check_wild_encounter(
+                &encounter_data(),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions {
+                    active_repel_item: Some("REPEL".to_string()),
+                    lead_party_level: Some(7),
+                    ..EncounterCheckOptions::default()
+                },
+            )
+            .expect("encounter roll")
+            .expect("grass encounter check");
+
+        let resolved = roll.resolved.expect("same level encounter resolves");
+        assert_eq!(resolved.level, 7);
+        assert_eq!(roll.repelled_by, None);
     }
 
     #[test]
@@ -3299,7 +3366,7 @@ mod tests {
         let warp = WarpEvent {
             index: 1,
             x: 1,
-            y: 1,
+            y: 2,
             target_map_constant: "TARGET_MAP".to_string(),
             target_map: "TargetMap".to_string(),
             target_warp_id: 2,
@@ -3308,8 +3375,12 @@ mod tests {
             warps: vec![warp.clone()],
             ..MapEvents::default()
         };
-        let mut session =
-            OverworldSession::with_events(map(), events, tileset(), TilePosition::new(0, 2));
+        let mut session = OverworldSession::with_events(
+            map_with_blocks(3, 3, vec![0; 9]),
+            events,
+            tileset(),
+            TilePosition::new(0, 2),
+        );
 
         assert_eq!(session.check_warp_checked().expect("checked warp"), None);
 
@@ -3327,7 +3398,7 @@ mod tests {
             result.outcome,
             StepOutcome::Moved {
                 from: TilePosition::new(0, 2),
-                to: TilePosition::new(2, 2),
+                to: TilePosition::new(1, 2),
                 speed_multiplier: 1,
             }
         );
@@ -3335,7 +3406,7 @@ mod tests {
             result.warp,
             Some(WarpTrigger {
                 map_name: "test".to_string(),
-                tile: TilePosition::new(2, 2),
+                tile: TilePosition::new(1, 2),
                 warp,
             })
         );
@@ -3519,7 +3590,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_ledge_warp_rejects_invalid_warp_coordinates_without_committing_jump() {
+    fn checked_ledge_warp_does_not_fire_without_jump() {
         let warp = WarpEvent {
             index: 8,
             x: u16::MAX,
@@ -3539,7 +3610,7 @@ mod tests {
             TilePosition::new(0, 0),
         );
 
-        let error = session
+        let result = session
             .ledge_jump_and_check_warp_checked(
                 Direction::Down,
                 StepOptions {
@@ -3547,18 +3618,12 @@ mod tests {
                     ..StepOptions::default()
                 },
             )
-            .expect_err("invalid warp coordinate must reject checked ledge jump");
+            .expect("non-ledge input should not evaluate warp coordinates");
 
-        assert_eq!(
-            error,
-            OverworldCoordinateError::Event(OverworldEventCoordinateError::WarpOutOfRange {
-                index: 8,
-                x: u16::MAX,
-                y: 1,
-            })
-        );
+        assert!(matches!(result.outcome, LedgeJumpOutcome::NotLedge { .. }));
+        assert_eq!(result.warp, None);
         assert_eq!(session.player.tile, TilePosition::new(0, 0));
-        assert_eq!(session.frame, 0);
+        assert_eq!(session.frame, 1);
     }
 
     #[test]

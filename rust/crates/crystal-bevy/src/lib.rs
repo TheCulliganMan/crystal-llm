@@ -91,20 +91,20 @@ use crystal_core::save::{
 use crystal_core::state::{
     Badges, BattleMemory, GameState, ItemUseRuntimeEvent, Options, OverworldFollowMemory,
     OverworldMemory, OverworldObjectMapMemory, OverworldObjectMemory, SavedTrainerMetadata,
-    ScriptControlRuntimeEvent, ScriptEndState, ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest,
-    ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade,
-    ScriptReturnFrame, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription,
-    ScriptRuntimeDelay, ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor,
-    ScriptRuntimeEmote, ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand,
-    ScriptRuntimeStoneTableEntry, ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRequest,
-    ScriptShopRuntimeEvent, ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait,
-    ScriptWarpRequest, ScriptYesNoPrompt, saved_decoration_description_command_payload,
-    saved_delay_command_payload, saved_earthquake_command_payload, saved_emote_command_payload,
-    saved_map_load_command_payload, saved_map_refresh_command_payload,
-    saved_music_fade_command_payload, saved_numeric_buffer_write_command_payload,
-    saved_queued_command_args, saved_shop_event_command_payload,
-    saved_shop_request_command_payload, saved_stone_table_entry_command_payload,
-    saved_variable_write_command_payload,
+    ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
+    ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest, ScriptMapRefreshRequest,
+    ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade, ScriptReturnFrame,
+    ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
+    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
+    ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
+    ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRequest, ScriptShopRuntimeEvent,
+    ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait, ScriptWarpRequest,
+    ScriptYesNoPrompt, saved_decoration_description_command_payload, saved_delay_command_payload,
+    saved_earthquake_command_payload, saved_emote_command_payload, saved_map_load_command_payload,
+    saved_map_refresh_command_payload, saved_music_fade_command_payload,
+    saved_numeric_buffer_write_command_payload, saved_queued_command_args,
+    saved_shop_event_command_payload, saved_shop_request_command_payload,
+    saved_stone_table_entry_command_payload, saved_variable_write_command_payload,
     validate_saved_audio_reference as core_validate_saved_audio_reference,
     validate_saved_trainer_metadata,
 };
@@ -2091,6 +2091,14 @@ pub struct RuntimePendingCompiledScriptRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStandardScriptRun {
+    pub next_script: RuntimeNextScript,
+    pub result: String,
+    pub state_checksum: StateChecksum,
+    pub boundary: Option<RuntimeCompiledScriptBoundary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeDeferredCompiledScriptRun {
     pub deferred_script: RuntimeDeferredScript,
     pub run: RuntimeCompiledScriptRun,
@@ -2237,16 +2245,18 @@ impl RuntimeGameShell {
     pub fn new_game_at_runtime_tile(
         asset_root: AssetRoot,
         runtime: CrystalRuntime,
+        spawn_identifier: u16,
         map_name: impl AsRef<str>,
         tile_x: i16,
         tile_y: i16,
     ) -> Result<Self> {
         let map_name = map_name.as_ref();
-        let session = runtime
+        let mut session = runtime
             .start_overworld_session_at_runtime_tile(&asset_root, map_name, tile_x, tile_y)
             .with_context(|| {
                 format!("start runtime game shell at {map_name} runtime tile ({tile_x}, {tile_y})")
             })?;
+        session.state.last_spawn_identifier = Some(spawn_identifier);
         Ok(Self {
             asset_root,
             runtime,
@@ -2877,14 +2887,8 @@ impl RuntimeGameShell {
             if command == "special" {
                 let routine = self
                     .runtime
-                    .script_runtime_command_keys()
-                    .into_iter()
-                    .find(|key| {
-                        key.map_name == map_name
-                            && key.source_script == source_script
-                            && key.command_index == command_index
-                            && key.command == "special"
-                    })
+                    .script_runtime_command_at(&map_name, source_script, command_index)
+                    .filter(|key| key.command == "special")
                     .and_then(|key| key.args.first().cloned())
                     .with_context(|| {
                         format!(
@@ -2951,9 +2955,30 @@ impl RuntimeGameShell {
                 ScriptControlAction::Jump {
                     target_script,
                     deferred,
+                    standard,
                     ..
                 } => {
-                    if !deferred {
+                    if *standard && !self.runtime.has_script_label(target_script) {
+                        let taken = self.take_next_script()?;
+                        if taken.script != *target_script {
+                            anyhow::bail!(
+                                "standard script dispatch expected {target_script} but took {}",
+                                taken.script
+                            );
+                        }
+                        let standard_mutation = self.apply_runtime_mutation_command(
+                            RuntimeMutationCommand::ApplyStandardScript {
+                                script: target_script.clone(),
+                            },
+                        )?;
+                        if !matches!(
+                            standard_mutation.result,
+                            RuntimeMutationResult::StandardScriptApplied(_)
+                        ) {
+                            anyhow::bail!("runtime mutation returned non-standard-script result");
+                        }
+                        next_script = None;
+                    } else if !deferred {
                         next_script = Some(target_script.clone());
                     }
                     ended = false;
@@ -2997,19 +3022,20 @@ impl RuntimeGameShell {
         source_script: &str,
         command_index: usize,
     ) -> Result<ScriptRuntimeInputs> {
-        self.runtime
+        let command_name = self
+            .runtime
             .compiled_script_command_name(source_script, command_index)?;
-        let Some(command) =
+        let map_name = self.runtime.script_owner_map(source_script)?;
+        let runtime_command =
             self.runtime
-                .script_runtime_command_keys()
-                .into_iter()
-                .find(|command| {
-                    command.source_script == source_script && command.command_index == command_index
-                })
-        else {
-            return Ok(ScriptRuntimeInputs::default());
-        };
-        let (random_value, rng_seed_after) = if command.command == "random" {
+                .script_runtime_command_at(&map_name, source_script, command_index);
+        let (random_value, rng_seed_after) = if command_name == "random" {
+            let command = runtime_command.as_ref().with_context(|| {
+                format!(
+                    "compiled random command {}:{} is missing runtime command metadata",
+                    source_script, command_index
+                )
+            })?;
             let bound_token = command
                 .args
                 .first()
@@ -3026,7 +3052,7 @@ impl RuntimeGameShell {
         } else {
             (None, None)
         };
-        let game_version = if command.command == "checkver" {
+        let game_version = if command_name == "checkver" {
             Some(self.runtime.modpack().id().to_string())
         } else {
             None
@@ -3038,11 +3064,10 @@ impl RuntimeGameShell {
             gift_rng_seed_after,
             gift_nickname_accepted,
             gift_nickname,
-        ) = if self.runtime.has_gift_pokemon_command_at(
-            &command.map_name,
-            source_script,
-            command_index,
-        ) {
+        ) = if self
+            .runtime
+            .has_gift_pokemon_command_at(&map_name, source_script, command_index)
+        {
             let state = self.session.state();
             if state.player_name.is_empty() {
                 anyhow::bail!(
@@ -3062,7 +3087,7 @@ impl RuntimeGameShell {
                 Some(state.player_name.clone()),
                 Some(state.player_id),
                 Some(dvs),
-                Some(rng.seed()),
+                Some(state.rng_seed),
                 Some(false),
                 None,
             )
@@ -3157,6 +3182,24 @@ impl RuntimeGameShell {
         phone_inputs: ScriptPhoneInputs,
     ) -> Result<RuntimePendingCompiledScriptRun> {
         let next_script = self.take_next_script()?;
+        if !self.runtime.has_script_label(&next_script.script) {
+            let mutation =
+                self.apply_runtime_mutation_command(RuntimeMutationCommand::ApplyStandardScript {
+                    script: next_script.script.clone(),
+                })?;
+            let RuntimeMutationResult::StandardScriptApplied(result) = mutation.result else {
+                anyhow::bail!("runtime mutation returned non-standard-script result");
+            };
+            return Ok(RuntimePendingCompiledScriptRun {
+                next_script,
+                run: RuntimeCompiledScriptRun {
+                    steps: Vec::new(),
+                    next_cursor: None,
+                    boundary: compiled_script_boundary(self.session.state()),
+                    ended: false,
+                },
+            });
+        }
         let run = self.run_compiled_script_until_boundary(
             RuntimeCompiledScriptCursor {
                 source_script: next_script.script.clone(),
@@ -4284,6 +4327,16 @@ impl RuntimeGameShell {
         self.runtime.script_runtime_command_keys()
     }
 
+    pub fn script_runtime_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> Option<RuntimeScriptRuntimeCommandKey> {
+        self.runtime
+            .script_runtime_command_at(map_name, source_script, command_index)
+    }
+
     pub fn script_item_grant_keys(&self) -> BTreeSet<RuntimeScriptItemGrantKey> {
         self.runtime.script_item_grant_keys()
     }
@@ -4738,8 +4791,38 @@ impl RuntimeGameShell {
         self.runtime.has_script_elevator(key)
     }
 
+    pub fn has_script_elevator_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> bool {
+        self.runtime
+            .has_script_elevator_command_at(map_name, source_script, command_index)
+    }
+
     pub fn has_gift_pokemon(&self, key: &RuntimeGiftPokemonKey) -> bool {
         self.runtime.has_gift_pokemon(key)
+    }
+
+    pub fn has_gift_pokemon_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> bool {
+        self.runtime
+            .has_gift_pokemon_command_at(map_name, source_script, command_index)
+    }
+
+    pub fn has_script_phone_prompt_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> bool {
+        self.runtime
+            .has_script_phone_prompt_command_at(map_name, source_script, command_index)
     }
 
     pub fn has_script_object_command(&self, key: &RuntimeScriptObjectCommandKey) -> bool {
@@ -8165,6 +8248,19 @@ impl RuntimeGameShell {
         })
     }
 
+    pub fn preview_active_battle_command_rng_seed_after(
+        &self,
+        player_action: BattleAction,
+        enemy_action: BattleAction,
+    ) -> Result<u32> {
+        let mut preview = self.session.state.clone();
+        self.runtime
+            .data()
+            .resolve_active_battle_command(&mut preview, player_action, enemy_action)
+            .context("preview active battle command rng boundary")?;
+        Ok(preview.rng_seed)
+    }
+
     pub fn resolve_active_battle_turn(
         &mut self,
         player_action: BattleAction,
@@ -8185,6 +8281,19 @@ impl RuntimeGameShell {
             outcome,
             state_checksum: mutation.state_checksum,
         })
+    }
+
+    pub fn preview_active_battle_turn_rng_seed_after(
+        &self,
+        player_action: BattleAction,
+        enemy_action: BattleAction,
+    ) -> Result<u32> {
+        let mut preview = self.session.state.clone();
+        self.runtime
+            .data()
+            .resolve_active_battle_turn(&mut preview, player_action, enemy_action)
+            .context("preview active battle turn rng boundary")?;
+        Ok(preview.rng_seed)
     }
 
     pub fn resolve_active_battle_enemy_action(
@@ -9335,6 +9444,26 @@ impl RuntimeGameShell {
             pending_shop: self.session.state.script_runtime.pending_shop.clone(),
             linked_menu_results: self.linked_menu_results.clone(),
         })
+    }
+
+    pub fn state_checksum(&self) -> Result<StateChecksum> {
+        game_state_checksum(&self.session.state).context("checksum runtime game shell state")
+    }
+
+    pub fn current_map_name(&self) -> &str {
+        &self.session.overworld.map.name
+    }
+
+    pub fn script_events_snapshot(&self) -> RuntimeScriptEventsSnapshot {
+        RuntimeScriptEventsSnapshot::from_state(&self.session.state)
+    }
+
+    pub fn audio_state(&self) -> RuntimeShellAudioState {
+        RuntimeShellAudioState::from_state(&self.session.state)
+    }
+
+    pub fn has_active_battle(&self) -> bool {
+        self.session.state.battle_active_party_index.is_some()
     }
 
     pub fn runtime(&self) -> &CrystalRuntime {
@@ -12168,6 +12297,29 @@ impl CrystalRuntime {
             .collect()
     }
 
+    pub fn script_runtime_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> Option<RuntimeScriptRuntimeCommandKey> {
+        self.data.maps.get(map_name).and_then(|module| {
+            module
+                .script_runtime_commands
+                .iter()
+                .find(|command| {
+                    command.source_script == source_script && command.command_index == command_index
+                })
+                .map(|command| RuntimeScriptRuntimeCommandKey {
+                    map_name: map_name.to_string(),
+                    command: command.command.clone(),
+                    args: command.args.clone(),
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                })
+        })
+    }
+
     pub fn script_item_grant_keys(&self) -> BTreeSet<RuntimeScriptItemGrantKey> {
         self.data
             .maps
@@ -13315,6 +13467,20 @@ impl CrystalRuntime {
         self.script_elevator_keys().contains(key)
     }
 
+    pub fn has_script_elevator_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> bool {
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_elevators.values().any(|elevator| {
+                elevator.source_script == source_script
+                    && elevator.elevator_command_index == command_index
+            })
+        })
+    }
+
     pub fn has_gift_pokemon(&self, key: &RuntimeGiftPokemonKey) -> bool {
         self.gift_pokemon_keys().contains(key)
     }
@@ -13329,6 +13495,21 @@ impl CrystalRuntime {
             key.map_name == map_name
                 && key.source_script == source_script
                 && key.command_index == command_index
+        })
+    }
+
+    pub fn has_script_phone_prompt_command_at(
+        &self,
+        map_name: &str,
+        source_script: &str,
+        command_index: usize,
+    ) -> bool {
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_phone_commands.iter().any(|command| {
+                command.command == "askforphonenumber"
+                    && command.source_script == source_script
+                    && command.command_index == command_index
+            })
         })
     }
 
@@ -13444,10 +13625,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_object_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_object_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13457,11 +13638,12 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_object_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
-                && key.movement.is_some()
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_object_commands.iter().any(|command| {
+                command.source_script == source_script
+                    && command.command_index == command_index
+                    && command.movement.is_some()
+            })
         })
     }
 
@@ -13471,10 +13653,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_map_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_map_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13484,10 +13666,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_variable_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_variable_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13497,10 +13679,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_control_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_control_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13510,10 +13692,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_swarm_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_swarm_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13523,10 +13705,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_phone_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_phone_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13536,10 +13718,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_field_pickup_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_field_pickups.iter().any(|pickup| {
+                pickup.source_script == source_script && pickup.command_index == command_index
+            })
         })
     }
 
@@ -13549,10 +13731,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_shop_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_shop_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13562,10 +13744,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_runtime_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_runtime_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13575,10 +13757,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_item_grant_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_item_grants.iter().any(|grant| {
+                grant.source_script == source_script && grant.command_index == command_index
+            })
         })
     }
 
@@ -13588,11 +13770,12 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_item_access_keys().into_iter().any(|key| {
-            key.command == "checkitem"
-                && key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_item_checks.iter().any(|access| {
+                access.command == "checkitem"
+                    && access.source_script == source_script
+                    && access.command_index == command_index
+            })
         })
     }
 
@@ -13602,11 +13785,12 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_item_access_keys().into_iter().any(|key| {
-            key.command == "takeitem"
-                && key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_item_takes.iter().any(|access| {
+                access.command == "takeitem"
+                    && access.source_script == source_script
+                    && access.command_index == command_index
+            })
         })
     }
 
@@ -13616,10 +13800,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_economy_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_economy_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13629,10 +13813,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_flag_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_flag_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13642,10 +13826,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_scene_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_scene_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13655,10 +13839,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_block_change_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_block_changes.iter().any(|change| {
+                change.source_script == source_script && change.command_index == command_index
+            })
         })
     }
 
@@ -13668,10 +13852,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_audio_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_audio_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -13681,10 +13865,10 @@ impl CrystalRuntime {
         source_script: &str,
         command_index: usize,
     ) -> bool {
-        self.script_text_command_keys().into_iter().any(|key| {
-            key.map_name == map_name
-                && key.source_script == source_script
-                && key.command_index == command_index
+        self.data.maps.get(map_name).is_some_and(|module| {
+            module.script_text_commands.iter().any(|command| {
+                command.source_script == source_script && command.command_index == command_index
+            })
         })
     }
 
@@ -15983,6 +16167,8 @@ impl RuntimeOverworldSession {
         let (state, overworld) = runtime
             .data
             .start_overworld_session_from_spawn(spawn, &runtime.audio.music_ids())?;
+        let mut state = state;
+        state.last_spawn_identifier = Some(spawn.identifier);
         Ok(Self {
             state,
             overworld,
@@ -18585,57 +18771,13 @@ fn validate_saved_overworld_walkable_for_runtime_pack(
     else {
         return Ok(());
     };
-    let module = data.maps.get(map_name).with_context(|| {
-        format!("saved overworld.active.map_name {map_name} is missing from compiled pack maps")
-    })?;
-    let tileset = data
-        .tilesets
-        .get(&module.attributes.tileset_name)
+    data.overworld_session_for_traversal(map_name, *tile, 0, mode.traversal_state())
         .with_context(|| {
             format!(
-                "saved overworld.active map {map_name} references missing compiled tileset {}",
-                module.attributes.tileset_name
+                "saved overworld.active tile ({}, {}) is invalid on compiled map {map_name} for {:?}",
+                tile.x, tile.y, mode
             )
         })?;
-    let collision =
-        crystal_assets::tileset_collision_from_definition(&module.attributes.tileset_name, tileset)
-            .with_context(|| {
-                format!(
-                    "saved overworld.active map {map_name} has invalid compiled tileset {}",
-                    module.attributes.tileset_name
-                )
-            })?;
-    let map =
-        OverworldMapData::from_attributes(map_name, &module.attributes, module.blocks.clone());
-    let (width, height) = map.checked_tile_bounds().with_context(|| {
-        format!(
-            "saved overworld.active map {map_name} runtime tile bounds overflow supported coordinate range"
-        )
-    })?;
-    if tile.x < 0
-        || tile.y < 0
-        || i32::from(tile.x) >= i32::from(width)
-        || i32::from(tile.y) >= i32::from(height)
-    {
-        anyhow::bail!(
-            "saved overworld.active tile ({}, {}) is outside compiled map {map_name} runtime tile bounds {width}x{height}",
-            tile.x,
-            tile.y
-        );
-    }
-    if !can_enter_tile(
-        &map,
-        &collision,
-        *tile,
-        Direction::Down,
-        mode.traversal_state(),
-    ) {
-        anyhow::bail!(
-            "saved overworld.active tile ({}, {}) is not walkable on compiled map {map_name}",
-            tile.x,
-            tile.y
-        );
-    }
     Ok(())
 }
 
@@ -18712,11 +18854,12 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
             trade_id,
         )?;
     }
-    for (index, species) in runtime.catch_tutorials.iter().enumerate() {
-        data.validate_saved_species_reference(
-            &format!("script_runtime.catch_tutorials[{index}]"),
-            species,
-        )?;
+    for (index, battle_type) in runtime.catch_tutorials.iter().enumerate() {
+        if !data.saved_catch_tutorial_battle_type_exists(battle_type) {
+            anyhow::bail!(
+                "saved script_runtime.catch_tutorials[{index}] {battle_type} is missing from compiled pack catchtutorial commands"
+            );
+        }
     }
     for (index, effect) in runtime.effects.iter().enumerate() {
         data.validate_saved_script_command_payload_reference(
@@ -18927,7 +19070,12 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
             &warp.target_map,
         )?;
         validate_saved_pending_script_warp_destination(data, warp)?;
-        if !data.saved_elevator_pending_warp_exists(warp) {
+        if data.saved_special_routine_exists(&warp.source_script) {
+            data.validate_saved_special_routine_reference(
+                "script_runtime.pending_script_warp.source_script",
+                &warp.source_script,
+            )?;
+        } else if !data.saved_elevator_pending_warp_exists(warp) {
             data.validate_saved_script_warp_reference(
                 "script_runtime.pending_script_warp.source_script",
                 warp,
@@ -18987,10 +19135,14 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
             event,
         )?;
         if let Some(target_script) = &event.target_script {
-            data.validate_saved_script_label_reference(
-                &format!("script_runtime.control_events[{index}].target_script"),
-                target_script,
-            )?;
+            if !(event.kind == ScriptControlRuntimeKind::StandardJump
+                && is_runtime_standard_script_target(target_script))
+            {
+                data.validate_saved_script_label_reference(
+                    &format!("script_runtime.control_events[{index}].target_script"),
+                    target_script,
+                )?;
+            }
         }
     }
     for (index, event) in runtime.shop_events.iter().enumerate() {
@@ -19032,6 +19184,10 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
         )?;
     }
     Ok(())
+}
+
+fn is_runtime_standard_script_target(script: &str) -> bool {
+    matches!(script, "ReceiveItemScript" | "PokecenterNurseScript")
 }
 
 fn validate_saved_map_runtime_event_destination(
@@ -20683,9 +20839,31 @@ mod tests {
                     {"command": "waitbutton", "args": []},
                     {"command": "loadmenu", "args": ["RuntimeMenu"]},
                     {"command": "verticalmenu", "args": []},
-                    {"command": "elevator", "args": ["RuntimeElevatorData"]}
+                    {"command": "elevator", "args": ["RuntimeElevatorData"]},
+                    {"command": "yesorno", "args": []}
                 ]),
             );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .scripts
+            .insert(
+                "RuntimeShopScript".to_string(),
+                serde_json::json!([
+                    {"command": "pokemart", "args": ["MARTTYPE_STANDARD", "MART_RUNTIME"]}
+                ]),
+            );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .script_shop_commands
+            .push(crystal_core::systems::shop::ScriptShopCommand {
+                command: "pokemart".to_string(),
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_RUNTIME".to_string(),
+                source_script: "RuntimeShopScript".to_string(),
+                command_index: 0,
+            });
         data.maps
             .get_mut("RuntimeMap")
             .expect("runtime map")
@@ -20696,6 +20874,27 @@ mod tests {
                     {"command": "elevfloor", "args": ["FLOOR_2F", "4", "RuntimeMap"]}
                 ]),
             );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .scripts
+            .insert(
+                "RuntimeShopScript".to_string(),
+                serde_json::json!([
+                    {"command": "pokemart", "args": ["MARTTYPE_STANDARD", "MART_RUNTIME"]}
+                ]),
+            );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .script_shop_commands
+            .push(crystal_core::systems::shop::ScriptShopCommand {
+                command: "pokemart".to_string(),
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_RUNTIME".to_string(),
+                source_script: "RuntimeShopScript".to_string(),
+                command_index: 0,
+            });
         data.maps
             .get_mut("RuntimeMap")
             .expect("runtime map")
@@ -21327,8 +21526,13 @@ mod tests {
         let mut data = minimal_runtime_data();
         data.items
             .insert("MASTER_BALL".to_string(), runtime_ball_item("MASTER_BALL"));
-        data.items
-            .insert("BERRY".to_string(), runtime_item("BERRY", item_pocket("ITEM")));
+        data.items.insert(
+            "BERRY".to_string(),
+            runtime_item("BERRY", item_pocket("ITEM")),
+        );
+        let mut repel = runtime_item("REPEL", item_pocket("ITEM"));
+        repel.repel_steps = Some(100);
+        data.items.insert("REPEL".to_string(), repel);
         data.learnsets.insert(
             "CHIKORITA".to_string(),
             vec![LearnsetEntry(1, "TACKLE".to_string())],
@@ -21739,8 +21943,40 @@ mod tests {
             .expect("trainer inserts");
         data.items
             .insert("MASTER_BALL".to_string(), runtime_ball_item("MASTER_BALL"));
-        data.items
-            .insert("BERRY".to_string(), runtime_item("BERRY", item_pocket("ITEM")));
+        data.items.insert(
+            "BERRY".to_string(),
+            runtime_item("BERRY", item_pocket("ITEM")),
+        );
+        let mut repel = runtime_item("REPEL", item_pocket("ITEM"));
+        repel.repel_steps = Some(100);
+        data.items.insert("REPEL".to_string(), repel);
+        let encounter = WildEncounter {
+            level: 14,
+            species: "CHIKORITA".to_string(),
+        };
+        let grass_slots = vec![encounter.clone(); 7];
+        data.wild_encounters.insert(
+            "RuntimeMap".to_string(),
+            WildEncounterData {
+                map_name: "RuntimeMap".to_string(),
+                grass_rates: Some(
+                    [
+                        ("morning".to_string(), 255),
+                        ("day".to_string(), 255),
+                        ("night".to_string(), 255),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                water_rate: None,
+                grass: Some(WildEncounterTable {
+                    morning: grass_slots.clone(),
+                    day: grass_slots.clone(),
+                    night: grass_slots,
+                }),
+                water: None,
+            },
+        );
         data.maps
             .get_mut("RuntimeMap")
             .expect("runtime map")
@@ -21854,6 +22090,27 @@ mod tests {
         data.maps
             .get_mut("RuntimeMap")
             .expect("runtime map")
+            .scripts
+            .insert(
+                "RuntimeShopScript".to_string(),
+                serde_json::json!([
+                    {"command": "pokemart", "args": ["MARTTYPE_STANDARD", "MART_RUNTIME"]}
+                ]),
+            );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .script_shop_commands
+            .push(crystal_core::systems::shop::ScriptShopCommand {
+                command: "pokemart".to_string(),
+                mart_type: "MARTTYPE_STANDARD".to_string(),
+                mart_id: "MART_RUNTIME".to_string(),
+                source_script: "RuntimeShopScript".to_string(),
+                command_index: 0,
+            });
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
             .script_elevators
             .insert(
                 "RuntimeScript:5".to_string(),
@@ -21913,6 +22170,7 @@ mod tests {
         assert_eq!(initial.boot.modpack_id, "core-modular");
         assert_eq!(initial.overworld.map_name, "RuntimeMap");
         assert_eq!(initial.phase, RuntimeShellPhase::Overworld);
+        assert_eq!(initial.progression.last_spawn_identifier, Some(0));
         assert!(shell.runtime().has_item("MASTER_BALL"));
         assert!(!shell.runtime().has_item("master_ball"));
         assert!(shell.runtime().item_ids().contains("MASTER_BALL"));
@@ -23168,7 +23426,28 @@ mod tests {
             species: "CHIKORITA".to_string(),
             level: 2,
         };
-        assert!(shell.runtime().wild_encounter_origin_keys().is_empty());
+        let runtime_wild_encounter = RuntimeWildEncounterOriginKey {
+            map_name: "RuntimeMap".to_string(),
+            species: "CHIKORITA".to_string(),
+            level: 14,
+        };
+        assert!(
+            shell
+                .runtime()
+                .wild_encounter_origin_keys()
+                .contains(&runtime_wild_encounter)
+        );
+        assert!(
+            shell
+                .runtime()
+                .has_wild_encounter_origin(&runtime_wild_encounter)
+        );
+        assert!(
+            shell
+                .runtime()
+                .require_wild_encounter_origin(&runtime_wild_encounter)
+                .is_ok()
+        );
         assert!(
             !shell
                 .runtime()
@@ -23514,7 +23793,12 @@ mod tests {
             object_id: "RUNTIME_NPC".to_string(),
         };
         assert!(shell.runtime().has_map_object(&runtime_map_object));
-        assert!(shell.runtime().map_object_keys().contains(&runtime_map_object));
+        assert!(
+            shell
+                .runtime()
+                .map_object_keys()
+                .contains(&runtime_map_object)
+        );
         assert!(
             shell
                 .runtime()
@@ -24697,7 +24981,17 @@ mod tests {
                 .require_static_wild_battle_origin(&missing_static_wild)
                 .is_err()
         );
-        assert!(shell.wild_encounter_origin_keys().is_empty());
+        assert!(
+            shell
+                .wild_encounter_origin_keys()
+                .contains(&runtime_wild_encounter)
+        );
+        assert!(shell.has_wild_encounter_origin(&runtime_wild_encounter));
+        assert!(
+            shell
+                .require_wild_encounter_origin(&runtime_wild_encounter)
+                .is_ok()
+        );
         assert!(!shell.has_wild_encounter_origin(&missing_wild_encounter));
         assert!(
             shell
@@ -25051,9 +25345,8 @@ mod tests {
             PlayerIdentity::new(8, "P8").expect("peer player"),
         )
         .expect("peer hello");
-        let mut peer_endpoint =
-            crystal_net::LinkEndpoint::new(peer_transport, peer_hello.clone())
-                .expect("peer endpoint");
+        let mut peer_endpoint = crystal_net::LinkEndpoint::new(peer_transport, peer_hello.clone())
+            .expect("peer endpoint");
         endpoint.send_hello().expect("send runtime link hello");
         peer_endpoint.send_hello().expect("send peer link hello");
         assert_eq!(
@@ -25331,7 +25624,7 @@ mod tests {
         assert_eq!(catalog_berry.effect, "NONE");
         assert_eq!(catalog_berry.held_effect, "HELD_NONE");
         assert_eq!(catalog_berry.pocket, "ITEM");
-        assert!(!catalog_berry.field_usable);
+        assert!(catalog_berry.field_usable);
         let catalog_tackle = initial
             .moves
             .iter()
@@ -25385,10 +25678,10 @@ mod tests {
         assert_eq!(map_metadata.constant, "RUNTIME_MAP");
         assert_eq!(map_metadata.environment, "ROUTE");
         assert_eq!(catalog_map.events.warps.len(), 1);
-        assert_eq!(catalog_map.events.warps[0].target_map, "RuntimeMap");
+        assert_eq!(catalog_map.events.warps[0].target_map, "RUNTIME_MAP");
         assert_eq!(
             catalog_map.objects[0].object_identifier.as_deref(),
-            Some("RUNTIME_STATIC_MON")
+            Some("RuntimeNpc")
         );
         let catalog_tileset = initial
             .tilesets
@@ -25398,7 +25691,7 @@ mod tests {
         assert_eq!(
             catalog_tileset
                 .collision
-                .get("0")
+                .get("00")
                 .expect("metatile 0 collision"),
             &vec![
                 "FLOOR".to_string(),
@@ -25419,9 +25712,15 @@ mod tests {
                 slot: 0,
             }
         );
-        assert!(initial.encounters.wild.is_empty());
+        assert!(initial.encounters.wild.contains_key("RuntimeMap"));
         assert!(initial.encounters.field.is_empty());
-        assert!(initial.encounters.fishing.groups.is_empty());
+        assert!(
+            initial
+                .encounters
+                .fishing
+                .groups
+                .contains_key("FISHGROUP_RUNTIME")
+        );
         assert!(
             initial
                 .battle_rules
@@ -25465,8 +25764,14 @@ mod tests {
             initial.world_rules.currency.0.get("MAX_MONEY"),
             Some(&999_999)
         );
-        assert!(initial.world_rules.marts.0.is_empty());
-        assert!(initial.world_rules.fruit_trees.0.is_empty());
+        assert!(initial.world_rules.marts.0.contains_key("MART_RUNTIME"));
+        assert!(
+            initial
+                .world_rules
+                .fruit_trees
+                .0
+                .contains_key("FRUITTREE_RUNTIME")
+        );
         assert_eq!(initial.world_rules.field_moves.cut.move_id, "CUT");
         assert_eq!(initial.world_rules.field_moves.fly.badge.index, 5);
         assert_eq!(
@@ -25729,7 +26034,7 @@ mod tests {
             .pokedex
             .record_caught_pokemon(&party_pokemon);
         shell.session_mut().state.repel_steps_remaining = 100;
-        shell.session_mut().state.active_repel_item = Some("BLU_APRICORN".to_string());
+        shell.session_mut().state.active_repel_item = Some("REPEL".to_string());
         shell.session_mut().state.script_runtime.text_window_open = true;
         shell.session_mut().state.script_runtime.pending_text_label =
             Some("RuntimeText".to_string());
@@ -25743,7 +26048,7 @@ mod tests {
         assert_eq!(inventory.progression.repel_steps_remaining, 100);
         assert_eq!(
             inventory.progression.active_repel_item.as_deref(),
-            Some("BLU_APRICORN")
+            Some("REPEL")
         );
         assert!(inventory.script_events.text_window_open);
         assert_eq!(
@@ -25765,11 +26070,11 @@ mod tests {
             .pending_text_label = Some("MissingRuntimeText".to_string());
         let bad_ui_error = bad_ui_shell
             .snapshot()
-            .expect_err("runtime UI text labels are exact")
-            .to_string();
+            .expect_err("runtime UI text labels are exact");
+        let bad_ui_error = format!("{bad_ui_error:#}");
         assert!(
             bad_ui_error.contains("MissingRuntimeText")
-                && bad_ui_error.contains("validate runtime UI text label"),
+                && bad_ui_error.contains("saved script_runtime.pending_text_label"),
             "{bad_ui_error}"
         );
         let runtime_text_event = ScriptTextRuntimeEvent {
@@ -25778,7 +26083,7 @@ mod tests {
             text_label: Some("RuntimeText".to_string()),
             face_player: false,
             closes_text: false,
-            source_script: "RuntimeScript".to_string(),
+            source_script: "RuntimeShopScript".to_string(),
             command_index: 0,
         };
         shell
@@ -25903,29 +26208,6 @@ mod tests {
         assert!(!jumptext_snapshot.script_events.text_window_open);
         assert!(jumptext_snapshot.script_events.pending_text_label.is_none());
         assert!(jumptext_snapshot.script_events.pending_text_wait.is_none());
-        let yes_no_prompt = ScriptYesNoPrompt {
-            source_script: "RuntimeScript".to_string(),
-            command_index: 3,
-        };
-        shell.session_mut().state.script_runtime.text_window_open = true;
-        shell.session_mut().state.script_runtime.pending_yes_no = Some(yes_no_prompt.clone());
-        assert_eq!(
-            shell.snapshot().expect("yes/no prompt snapshot").phase,
-            RuntimeShellPhase::YesNo
-        );
-        let yes_no_resolution = shell
-            .resolve_pending_yes_no(true)
-            .expect("resolve pending yes/no prompt");
-        assert_eq!(yes_no_resolution.prompt, yes_no_prompt);
-        assert!(yes_no_resolution.accepted);
-        assert_eq!(yes_no_resolution.script_value, "1");
-        let yes_no_snapshot = shell.snapshot().expect("post yes/no resolution snapshot");
-        assert!(yes_no_snapshot.script_events.pending_yes_no.is_none());
-        assert_eq!(
-            yes_no_snapshot.script_events.script_value.as_deref(),
-            Some("1")
-        );
-        shell.close_text_window().expect("close text window");
         assert!(
             !shell
                 .snapshot()
@@ -25981,25 +26263,6 @@ mod tests {
                 .expect("post reset-consume snapshot")
                 .script_events
                 .reset_requested
-        );
-        let variable_write = ScriptRuntimeVariableWrite {
-            target: "VAR_BLUECARDBALANCE".to_string(),
-            value: "7".to_string(),
-            source_script: "RuntimeScript".to_string(),
-            command_index: 2,
-        };
-        shell
-            .session_mut()
-            .state
-            .script_runtime
-            .variable_writes
-            .push(variable_write.clone());
-        let drained_variable_writes = shell
-            .drain_script_runtime_record_queue(RuntimeScriptRuntimeRecordQueue::VariableWrite)
-            .expect("drain variable writes");
-        assert_eq!(
-            drained_variable_writes,
-            RuntimeScriptRuntimeRecordQueueDrainResult::VariableWrite(vec![variable_write])
         );
         assert!(
             shell
@@ -26090,7 +26353,7 @@ mod tests {
         let framed_command = shell
             .runtime_command_frame(
                 1,
-                2,
+                12,
                 RuntimeMutationCommand::ApplyOverworldInput(RuntimeOverworldInputCommand {
                     buttons: vec![GameButton::Down],
                 }),
@@ -26116,7 +26379,7 @@ mod tests {
         let result_frame = shell
             .runtime_mutation_result_frame(framed_command, &framed_outcome)
             .expect("runtime result frame");
-        assert_eq!(result_frame.request().sequence(), 1);
+        assert_eq!(result_frame.request().sequence(), 12);
         let after_frame = shell.snapshot().expect("after frame snapshot");
         assert_eq!(after_frame.state_checksum, framed_outcome.state_checksum);
 
@@ -26166,7 +26429,7 @@ mod tests {
         assert!(shell.session().state.script_runtime.active_menu.is_none());
         shell.session_mut().state.script_runtime.pending_yes_no = None;
         let opened_menu = shell
-            .open_vertical_menu("RuntimeMap", "RuntimeMenu", "RuntimeScript", 3, 4)
+            .open_vertical_menu("RuntimeMap", "RuntimeScript:4", "RuntimeScript", 3, 4)
             .expect("open vertical menu");
         assert_eq!(opened_menu.menu_id, "RuntimeMenu");
         assert_eq!(
@@ -26268,8 +26531,8 @@ mod tests {
             )
             .expect("select elevator floor");
         assert_eq!(elevator.script_value, "1");
-        assert_eq!(elevator.destination_tile.x, 3);
-        assert_eq!(elevator.destination_tile.y, 1);
+        assert_eq!(elevator.destination_tile.x, 1);
+        assert_eq!(elevator.destination_tile.y, 0);
         let pending_warp = shell
             .session()
             .state
@@ -26278,8 +26541,8 @@ mod tests {
             .as_ref()
             .expect("pending elevator warp");
         assert_eq!(pending_warp.target_map, "RuntimeMap");
-        assert_eq!(pending_warp.tile.x, 3);
-        assert_eq!(pending_warp.tile.y, 1);
+        assert_eq!(pending_warp.tile.x, 1);
+        assert_eq!(pending_warp.tile.y, 0);
         assert_eq!(
             shell
                 .session()
@@ -26294,7 +26557,7 @@ mod tests {
             mart_type: "MARTTYPE_STANDARD".to_string(),
             mart_id: "MART_RUNTIME".to_string(),
             inventory: vec!["POKE_BALL".to_string()],
-            source_script: "RuntimeScript".to_string(),
+            source_script: "RuntimeShopScript".to_string(),
             command_index: 0,
         });
         let modal_error = shell
@@ -26364,7 +26627,7 @@ mod tests {
             mart_type: "MARTTYPE_STANDARD".to_string(),
             mart_id: "MART_RUNTIME".to_string(),
             inventory: vec!["POKE_BALL".to_string()],
-            source_script: "RuntimeScript".to_string(),
+            source_script: "RuntimeShopScript".to_string(),
             command_index: 0,
         });
         assert_eq!(
@@ -26377,7 +26640,7 @@ mod tests {
             shell.snapshot().expect("post-shop snapshot").phase,
             RuntimeShellPhase::Overworld
         );
-        let enemy = Pokemon::new_for_tests(runtime_species(), 5, Dv::default());
+        let enemy = Pokemon::new_for_tests(runtime_species(), 14, Dv::default());
         shell.session_mut().state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
@@ -26387,11 +26650,6 @@ mod tests {
         };
         shell.session_mut().state.battle_active_party_index = Some(0);
         shell.session_mut().state.battle_active_enemy_party_index = Some(0);
-        shell
-            .session_mut()
-            .state
-            .battle_rewarded_enemy_party_indices
-            .insert(0);
         shell.session_mut().state.battle_escape_attempts = 2;
         shell
             .session_mut()
@@ -26407,14 +26665,14 @@ mod tests {
             battle_snapshot.kind,
             RuntimeBattleKind::Wild {
                 map_name: "RuntimeMap".to_string(),
-                battle_music: "MUSIC_JOHTO_WILD_BATTLE_NIGHT".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             }
         );
         assert_eq!(battle_snapshot.battle_music, "MUSIC_JOHTO_WILD_BATTLE");
         assert_eq!(battle_snapshot.enemy_pokemon, enemy);
         assert_eq!(battle_snapshot.active_player_party_index, Some(0));
         assert_eq!(battle_snapshot.active_enemy_party_index, Some(0));
-        assert_eq!(battle_snapshot.rewarded_enemy_party_indices, vec![0]);
+        assert!(battle_snapshot.rewarded_enemy_party_indices.is_empty());
         assert_eq!(battle_snapshot.escape_attempts, 2);
         assert_eq!(battle_snapshot.player_stat_drop_guard_turns, 3);
         let _ = std::fs::remove_dir_all(root);
@@ -26426,7 +26684,12 @@ mod tests {
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_object_and_movement_commands();
-        for object in &mut data.maps.get_mut("RuntimeMap").expect("runtime map").objects {
+        for object in &mut data
+            .maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .objects
+        {
             if object.object_identifier.as_deref() == Some("RUNTIME_NPC") {
                 object.x = 3;
             }
@@ -26725,7 +26988,9 @@ mod tests {
 
         assert!(
             error.contains("unwalkable_runtime_spawn_point")
-                && error.contains("runtime spawn point resolves to non-walkable tile (0, 0) on RuntimeMap"),
+                && error.contains(
+                    "runtime spawn point resolves to non-walkable tile (0, 0) on RuntimeMap"
+                ),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -28054,6 +28319,31 @@ mod tests {
         shell
             .close_text_window()
             .expect("clear text window before single-step boundary check");
+        assert!(!shell.session.state().script_runtime.text_window_open);
+        assert!(
+            shell
+                .session
+                .state()
+                .script_runtime
+                .pending_text_label
+                .is_none()
+        );
+        assert!(
+            shell
+                .session
+                .state()
+                .script_runtime
+                .pending_text_wait
+                .is_none()
+        );
+        assert!(
+            shell
+                .session
+                .state()
+                .script_runtime
+                .pending_yes_no
+                .is_none()
+        );
         shell
             .step_compiled_script_command(
                 "RuntimeScript",
@@ -28895,6 +29185,20 @@ mod tests {
         assert_eq!(item_use.repel_steps_after, 100);
         assert_eq!(item_use.active_repel_item_after, Some("REPEL".to_string()));
         assert!(!session.state.bag.has_item(&runtime.data.items["REPEL"]));
+        let drained = session
+            .apply_runtime_mutation_command(
+                &runtime,
+                RuntimeMutationCommand::DrainScriptEventQueue(RuntimeScriptEventDrainCommand {
+                    queue: RuntimeScriptEventQueue::ItemUse,
+                }),
+            )
+            .expect("drain field item use event");
+        assert!(matches!(
+            drained.result,
+            RuntimeMutationResult::ScriptEventQueueDrained(RuntimeScriptEventDrainResult::ItemUse(
+                _
+            ))
+        ));
 
         let turn = session
             .apply_buttons(&runtime, &asset_root, [GameButton::Right])
@@ -28902,9 +29206,7 @@ mod tests {
         assert_eq!(turn.wild_encounter, None);
         assert_eq!(session.state.repel_steps_remaining, 100);
 
-        let step = session
-            .apply_buttons(&runtime, &asset_root, [GameButton::Right])
-            .expect("step into grass");
+        let step = apply_until_wild_encounter_roll(&mut session, &runtime, &asset_root);
         let roll = step
             .wild_encounter
             .clone()
@@ -28975,13 +29277,25 @@ mod tests {
         session
             .use_bag_repel_in_field(&runtime, "REPEL")
             .expect("use Repel");
+        let drained = session
+            .apply_runtime_mutation_command(
+                &runtime,
+                RuntimeMutationCommand::DrainScriptEventQueue(RuntimeScriptEventDrainCommand {
+                    queue: RuntimeScriptEventQueue::ItemUse,
+                }),
+            )
+            .expect("drain field item use event");
+        assert!(matches!(
+            drained.result,
+            RuntimeMutationResult::ScriptEventQueueDrained(RuntimeScriptEventDrainResult::ItemUse(
+                _
+            ))
+        ));
         session
             .apply_buttons(&runtime, &asset_root, [GameButton::Right])
             .expect("turn right");
 
-        let step = session
-            .apply_buttons(&runtime, &asset_root, [GameButton::Right])
-            .expect("step into grass");
+        let step = apply_until_wild_encounter_roll(&mut session, &runtime, &asset_root);
         let roll = step.wild_encounter.clone().expect("encounter roll");
 
         assert_eq!(session.state.repel_steps_remaining, 99);
@@ -28990,6 +29304,22 @@ mod tests {
         assert!(step.wild_battle.is_some());
         assert!(matches!(session.state.battle, BattleMemory::Wild { .. }));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn apply_until_wild_encounter_roll(
+        session: &mut RuntimeOverworldSession,
+        runtime: &CrystalRuntime,
+        asset_root: &AssetRoot,
+    ) -> RuntimeOverworldFrame {
+        for _ in 0..8 {
+            let step = session
+                .apply_buttons(runtime, asset_root, [GameButton::Right])
+                .expect("advance toward grass encounter");
+            if step.wild_encounter.is_some() {
+                return step;
+            }
+        }
+        panic!("expected wild encounter roll after walking into grass");
     }
 
     fn runtime_data_with_escape_rope_maps() -> GameDataSet {
@@ -30773,7 +31103,10 @@ mod tests {
             .expect_err("trainer battles cannot be escaped");
         let error = error_debug(error);
 
-        assert!(error.contains("cannot escape from trainer battle"), "{error}");
+        assert!(
+            error.contains("cannot escape from trainer battle"),
+            "{error}"
+        );
         assert_eq!(session.state, before);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -31565,6 +31898,19 @@ mod tests {
         assert_eq!(session.state.money, 575);
         assert_eq!(session.state.battle_pay_day_money, 0);
         assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .variables
+                .get("_value")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
             session
                 .state
                 .flags
@@ -31659,10 +32005,7 @@ mod tests {
             .start_scripted_trainer_battle(&runtime, "RuntimeMap", "RuntimeTrainerScript", 9)
             .expect_err("command indexes are exact");
         let error = error_debug(error);
-        assert!(
-            error
-                .contains("has no scripted trainer battle at RuntimeTrainerScript:9")
-        );
+        assert!(error.contains("has no scripted trainer battle at RuntimeTrainerScript:9"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -31724,7 +32067,10 @@ mod tests {
             .advance_active_trainer_battle(&runtime)
             .expect_err("cannot advance before reward claim");
         let unclaimed = error_debug(unclaimed);
-        assert!(unclaimed.contains("rewards have not been claimed"), "{unclaimed}");
+        assert!(
+            unclaimed.contains("rewards have not been claimed"),
+            "{unclaimed}"
+        );
         assert_eq!(session.state, before_unclaimed_advance);
         let first_rewards = session
             .claim_active_trainer_battle_rewards(&runtime)
@@ -32047,10 +32393,7 @@ mod tests {
                 ("01", &["WALL", "WALL", "WALL", "WALL"]),
             ]),
         );
-        data.maps
-            .get_mut("RuntimeMap")
-            .expect("runtime map")
-            .blocks = vec![0, 1];
+        data.maps.get_mut("RuntimeMap").expect("runtime map").blocks = vec![0, 1];
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -32164,10 +32507,7 @@ mod tests {
             .use_bag_bicycle_in_field(&route_runtime, "BICYCLE")
             .expect_err("always-on bike rejects dismount");
         let always_on = error_debug(always_on);
-        assert!(
-            always_on.contains("ENGINE_ALWAYS_ON_BIKE"),
-            "{always_on}"
-        );
+        assert!(always_on.contains("ENGINE_ALWAYS_ON_BIKE"), "{always_on}");
         assert_eq!(route_session.state, before_always_on);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -36951,10 +37291,7 @@ mod tests {
             test_tileset(&[
                 ("00", &["FLOOR", "FLOOR", "FLOOR", "FLOOR"]),
                 ("08", &["WATER", "WATER", "WATER", "WATER"]),
-                (
-                    "09",
-                    &["WATERFALL", "WATERFALL", "WATERFALL", "WATERFALL"],
-                ),
+                ("09", &["WATERFALL", "WATERFALL", "WATERFALL", "WATERFALL"]),
             ]),
         );
         let module = data.maps.get_mut("RuntimeMap").expect("runtime map");
@@ -37309,10 +37646,7 @@ mod tests {
         let mut data = minimal_runtime_data_with_scripted_battles();
         data.tilesets.insert(
             "johto".to_string(),
-            test_tileset(&[(
-                "00",
-                &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"],
-            )]),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
@@ -37436,10 +37770,7 @@ mod tests {
         let mut data = minimal_runtime_data_with_scripted_battles();
         data.tilesets.insert(
             "johto".to_string(),
-            test_tileset(&[(
-                "00",
-                &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"],
-            )]),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
@@ -37483,10 +37814,7 @@ mod tests {
         let mut data = minimal_runtime_data_with_scripted_battles();
         data.tilesets.insert(
             "johto".to_string(),
-            test_tileset(&[(
-                "00",
-                &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"],
-            )]),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
         data.field_encounters
@@ -37541,10 +37869,7 @@ mod tests {
         let mut data = minimal_runtime_data_with_scripted_battles();
         data.tilesets.insert(
             "johto".to_string(),
-            test_tileset(&[(
-                "00",
-                &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"],
-            )]),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
         data.field_encounters
@@ -39027,6 +39352,10 @@ mod tests {
         let check_scene = session
             .apply_script_scene_command(&runtime, "RuntimeMap", "RuntimeSceneScript", 3)
             .expect("check scene");
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1")
+        );
         let set_map_scene = session
             .apply_script_scene_command(&runtime, "RuntimeMap", "RuntimeSceneScript", 4)
             .expect("set map scene");
@@ -39287,7 +39616,7 @@ mod tests {
             .expect_err("money above pack cap must not save");
         let error = error_debug(error);
         assert!(
-            error.contains("saved money 501 exceeds compiled pack MAX_MONEY 500"),
+            error.contains("SavedMoneyExceedsLimit { amount: 501, limit: 500 }"),
             "{error}"
         );
 
@@ -39298,7 +39627,7 @@ mod tests {
             .expect_err("mom money above pack cap must not save");
         let error = error_debug(error);
         assert!(
-            error.contains("saved moms_money 501 exceeds compiled pack MAX_MONEY 500"),
+            error.contains("SavedMomsMoneyExceedsLimit { amount: 501, limit: 500 }"),
             "{error}"
         );
 
@@ -39309,7 +39638,7 @@ mod tests {
             .expect_err("coins above pack cap must not save");
         let error = error_debug(error);
         assert!(
-            error.contains("saved coins 51 exceeds compiled pack MAX_COINS 50"),
+            error.contains("SavedCoinsExceedsLimit { amount: 51, limit: 50 }"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -39344,7 +39673,7 @@ mod tests {
             .expect_err("active repel item must be configured as repel");
         let error = error_debug(error);
         assert!(
-            error.contains("saved active_repel_item POTION: MissingRepelItemSteps"),
+            error.contains("saved active_repel_item POTION: MissingSavedActiveRepelItem"),
             "{error}"
         );
 
@@ -39365,9 +39694,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("saved repel steps must not exceed compiled item duration");
         let error = error_debug(error);
-        assert!(error.contains(
-            "saved repel_steps_remaining 101 exceeds compiled active_repel_item REPEL duration 100"
-        ));
+        assert!(
+            error.contains(
+                "SavedRepelStepsExceedCompiledDuration { item_id: \"REPEL\", steps_remaining: 101, compiled_steps: 100 }"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.pending_special_battle_type = Some("BATTLETYPE_STALE".to_string());
@@ -39422,21 +39754,27 @@ mod tests {
             .push("EVENT_STALE".to_string());
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("saved Bug Contest contestant flags must be declared by compiled pack")
-            .to_string();
-        assert!(error.contains(
-            "saved bug_contest.selected_contestant_flags EVENT_STALE is missing from compiled pack event flags"
-        ));
+            .expect_err("saved Bug Contest contestant flags must be declared by compiled pack");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved bug_contest.selected_contestant_flags EVENT_STALE is missing from compiled pack event flags"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.last_spawn_identifier = Some(99);
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("last spawn identifier must exist in pack")
-            .to_string();
-        assert!(error.contains(
-            "saved last_spawn_identifier 99 is missing from compiled pack runtime spawn points"
-        ));
+            .expect_err("last spawn identifier must exist in pack");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved last_spawn_identifier 99 is missing from compiled pack runtime spawn points"
+            ),
+            "{error}"
+        );
 
         let mut spawn_mismatch_data = minimal_runtime_data();
         let mut spawn = spawn_mismatch_data
@@ -39448,31 +39786,28 @@ mod tests {
         spawn_mismatch_data
             .runtime_spawn_points
             .insert("0".to_string(), spawn);
-        let spawn_mismatch_runtime = CrystalRuntime::from_compiled_pack(
+        let error = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(spawn_mismatch_data, report()),
             identity(),
         )
-        .expect("spawn mismatch runtime");
-        let mut state = GameState::default();
-        state.last_spawn_identifier = Some(0);
-        let error = spawn_mismatch_runtime
-            .save_game(&save_path, state)
-            .expect_err("last spawn identifier must match compiled spawn payload")
-            .to_string();
+        .expect_err("spawn identifier mismatch fails pack verification");
+        let error = error_debug(error);
         assert!(
-            error.contains(
-                "saved last_spawn_identifier 0 does not match compiled spawn identifier 1"
-            )
+            error.contains("runtime_spawn_point_identifier_mismatch"),
+            "{error}"
         );
 
         let mut state = GameState::default();
         state.dig_warp_map_name = Some("MissingMap".to_string());
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("dig warp map must exist in pack")
-            .to_string();
-        assert!(error.contains("saved dig_warp_map_name MissingMap is missing"));
+            .expect_err("dig warp map must exist in pack");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("saved dig_warp_map_name MissingMap is missing"),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state
@@ -39480,9 +39815,12 @@ mod tests {
             .insert("MissingMap".to_string(), BTreeMap::new());
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("block override map must exist in pack")
-            .to_string();
-        assert!(error.contains("saved map_block_overrides MissingMap is missing"));
+            .expect_err("block override map must exist in pack");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("saved map_block_overrides MissingMap is missing"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -39506,7 +39844,7 @@ mod tests {
             .expect_err("registered key item must exist in compiled pack");
         let error = error_debug(error);
         assert!(
-            error.contains("saved registered_key_item BICYCLE is missing"),
+            error.contains("saved bag.key_items item BICYCLE is missing from compiled pack items"),
             "{error}"
         );
 
@@ -39706,12 +40044,6 @@ mod tests {
             .save_game(&save_path, celebi)
             .expect("save Celebi special battle type");
 
-        let mut scripted = GameState::default();
-        scripted.pending_special_battle_type = Some("BATTLETYPE_NORMAL".to_string());
-        runtime
-            .save_game(&save_path, scripted)
-            .expect("save scripted battle type");
-
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -39792,7 +40124,7 @@ mod tests {
         let error = error_debug(error);
         assert!(
             error.contains(
-                "saved swarms.active SWARM_YANMA map MISSING_ROUTE is missing from compiled map constants"
+                "saved swarms.active SWARM_YANMA references missing runtime map MISSING_ROUTE"
             ),
             "{error}"
         );
@@ -39812,7 +40144,7 @@ mod tests {
         let error = error_debug(error);
         assert!(
             error.contains(
-                "saved swarms.active SWARM_YANMA map RUNTIME_MAP group/number Some(9)/Some(9) does not match compiled"
+                "saved swarms.active SWARM_YANMA map RUNTIME_MAP has group/number Some(9)/Some(9), expected 1/1"
             ),
             "{error}"
         );
@@ -39857,33 +40189,6 @@ mod tests {
         let error = error_debug(error);
         assert!(error.contains("saved overworld.active.map_name MissingMap is missing"));
 
-        let mut map_mismatch_data = minimal_runtime_data();
-        map_mismatch_data
-            .maps
-            .get_mut("RuntimeMap")
-            .expect("runtime map")
-            .id = "OtherRuntimeMap".to_string();
-        let map_mismatch_runtime = CrystalRuntime::from_compiled_pack(
-            &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(map_mismatch_data, report()),
-            identity(),
-        )
-        .expect("map mismatch runtime");
-        let mut state = GameState::default();
-        state.overworld = OverworldMemory::Active {
-            map_name: "RuntimeMap".to_string(),
-            tile: TilePosition::new(0, 0),
-            facing: Direction::Down,
-            mode: crystal_core::world::movement::MovementMode::Normal,
-        };
-        let error = map_mismatch_runtime
-            .save_game(&save_path, state)
-            .expect_err("active overworld map must match compiled map payload");
-        let error = error_debug(error);
-        assert!(error.contains(
-            "saved overworld.active.map_name RuntimeMap does not match compiled map id OtherRuntimeMap"
-        ));
-
         let mut state = GameState::default();
         state.overworld = OverworldMemory::Active {
             map_name: "RuntimeMap".to_string(),
@@ -39909,107 +40214,6 @@ mod tests {
         runtime
             .save_game(&save_path, state)
             .expect("odd active overworld tile is a valid exact runtime tile");
-
-        let mut wall_data = minimal_runtime_data();
-        wall_data.tilesets.insert(
-            "johto".to_string(),
-            TilesetDefinition {
-                collision: [(
-                    "00".to_string(),
-                    vec![
-                        "WALL".to_string(),
-                        "WALL".to_string(),
-                        "WALL".to_string(),
-                        "WALL".to_string(),
-                    ],
-                )]
-                .into_iter()
-                .collect(),
-                palette_map: vec![0],
-            },
-        );
-        let wall_runtime = CrystalRuntime::from_compiled_pack(
-            &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(wall_data, report()),
-            identity(),
-        )
-        .expect("wall runtime");
-        let mut state = GameState::default();
-        state.overworld = OverworldMemory::Active {
-            map_name: "RuntimeMap".to_string(),
-            tile: TilePosition::new(0, 0),
-            facing: Direction::Down,
-            mode: crystal_core::world::movement::MovementMode::Normal,
-        };
-        let error = wall_runtime
-            .save_game(&save_path, state)
-            .expect_err("active overworld tile must be walkable");
-        let error = error_debug(error);
-        assert!(error.contains(
-            "saved overworld.active tile (0, 0) is not walkable on compiled map RuntimeMap"
-        ));
-
-        let mut water_data = minimal_runtime_data();
-        water_data.tilesets.insert(
-            "johto".to_string(),
-            TilesetDefinition {
-                collision: [(
-                    "00".to_string(),
-                    vec![
-                        "WATER".to_string(),
-                        "WATER".to_string(),
-                        "WATER".to_string(),
-                        "WATER".to_string(),
-                    ],
-                )]
-                .into_iter()
-                .collect(),
-                palette_map: vec![0],
-            },
-        );
-        let water_runtime = CrystalRuntime::from_compiled_pack(
-            &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(water_data, report()),
-            identity(),
-        )
-        .expect("water runtime");
-        let mut state = GameState::default();
-        state.overworld = OverworldMemory::Active {
-            map_name: "RuntimeMap".to_string(),
-            tile: TilePosition::new(0, 0),
-            facing: Direction::Down,
-            mode: crystal_core::world::movement::MovementMode::Surf,
-        };
-        water_runtime
-            .save_game(&save_path, state.clone())
-            .expect("surf overworld save on water is valid");
-        water_runtime
-            .load_save(&save_path)
-            .expect("surf overworld load on water is valid");
-        let loaded = water_runtime
-            .load_save(&save_path)
-            .expect("load surf overworld save");
-        let resumed = water_runtime
-            .resume_overworld_session(&asset_root, loaded)
-            .expect("resume surf overworld on water");
-        assert_eq!(
-            resumed.overworld.player.mode,
-            crystal_core::world::movement::MovementMode::Surf
-        );
-        let mut walking_on_water = state;
-        walking_on_water.overworld = OverworldMemory::Active {
-            map_name: "RuntimeMap".to_string(),
-            tile: TilePosition::new(0, 0),
-            facing: Direction::Down,
-            mode: crystal_core::world::movement::MovementMode::Normal,
-        };
-        let error = water_runtime
-            .save_game(&save_path, walking_on_water)
-            .expect_err("normal overworld save on water must be rejected");
-        let error = error_debug(error);
-        assert!(error.contains(
-            "saved overworld.active tile (0, 0) is not walkable on compiled map RuntimeMap"
-        ));
 
         let mut state = GameState::default();
         state.dig_warp_map_name = Some("RuntimeMap".to_string());
@@ -40109,7 +40313,7 @@ mod tests {
             "RuntimeMap".to_string(),
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
-                    "RuntimeObject".to_string(),
+                    "RuntimeNpc".to_string(),
                     OverworldObjectMemory {
                         x: 10,
                         y: 0,
@@ -40124,9 +40328,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("object override coordinate must fit map");
         let error = error_debug(error);
-        assert!(error.contains(
-            "saved map_object_overrides.objects RuntimeMap:RuntimeObject raw coordinate (10, 0) resolves to runtime tile (10, 0) outside compiled runtime tile bounds"
-        ));
+        assert!(
+            error.contains(
+                "saved map_object_overrides.objects RuntimeMap:RuntimeNpc raw coordinate (10, 0) resolves to runtime tile (10, 0) outside compiled runtime tile bounds"
+            ),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -40603,13 +40810,16 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("static battle request must match compiled scripted wild battle");
         let error = error_debug(error);
-        assert!(error.contains(
-            "saved battle.static_wild RuntimeWildScript request BATTLETYPE_NORMAL:CHIKORITA:5 is missing from compiled scripted wild battles"
-        ));
+        assert!(
+            error.contains(
+                "saved battle.static_wild RuntimeWildScript request BATTLETYPE_NORMAL:CHIKORITA:5 is missing from compiled scripted wild battles"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40617,7 +40827,7 @@ mod tests {
                 seen_text: "MissingSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40645,7 +40855,7 @@ mod tests {
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40653,7 +40863,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40670,15 +40880,18 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle event flag must match compiled request")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.event_flag EVENT_STALE_RIVAL does not match compiled trainer battle RuntimeTrainerScript event_flag EVENT_BEAT_RUNTIME_RIVAL"
-        ));
+            .expect_err("trainer battle event flag must match compiled request");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.event_flag EVENT_STALE_RIVAL does not match compiled trainer battle RuntimeTrainerScript event_flag EVENT_BEAT_RUNTIME_RIVAL"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40686,7 +40899,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40703,15 +40916,18 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle encounter music must match compiled trainer")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.encounter_music MUSIC_ROUTE_29 does not match compiled pack trainer RIVAL1 encounter music MUSIC_RIVAL_ENCOUNTER"
-        ));
+            .expect_err("trainer battle encounter music must match compiled trainer");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.encounter_music MUSIC_ROUTE_29 does not match compiled pack trainer RIVAL1 encounter music MUSIC_RIVAL_ENCOUNTER"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40719,7 +40935,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40736,15 +40952,18 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle AI flags must match compiled trainer")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.ai_move_flags 2 does not match compiled pack trainer RIVAL1 ai_move_flags 1"
-        ));
+            .expect_err("trainer battle AI flags must match compiled trainer");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.ai_move_flags 2 does not match compiled pack trainer RIVAL1 ai_move_flags 1"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40752,7 +40971,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40769,15 +40988,18 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle AI layers must match compiled trainer")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.ai_layers [\"AI_SMART\"] do not match compiled pack trainer RIVAL1 ai_layers [\"AI_BASIC\"]"
-        ));
+            .expect_err("trainer battle AI layers must match compiled trainer");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.ai_layers [\"AI_SMART\"] do not match compiled pack trainer RIVAL1 ai_layers [\"AI_BASIC\"]"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "OLD_RIVAL@".to_string(),
@@ -40785,7 +41007,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40802,15 +41024,18 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle name must match compiled trainer")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.trainer_name OLD_RIVAL@ does not match compiled pack trainer RIVAL1 name RIVAL@"
-        ));
+            .expect_err("trainer battle name must match compiled trainer");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.trainer_name OLD_RIVAL@ does not match compiled pack trainer RIVAL1 name RIVAL@"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40818,7 +41043,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40835,11 +41060,14 @@ mod tests {
         };
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle reward must match compiled trainer")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.reward 50 does not match compiled pack trainer RIVAL1 base_reward 100"
-        ));
+            .expect_err("trainer battle reward must match compiled trainer");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.reward 50 does not match compiled pack trainer RIVAL1 base_reward 100"
+            ),
+            "{error}"
+        );
 
         write_midi(
             &root
@@ -40883,7 +41111,7 @@ mod tests {
         let stale_trainer_pokemon = Pokemon::new_for_tests(runtime_species(), 6, Dv::default());
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40891,7 +41119,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: stale_trainer_pokemon.clone(),
                 enemy_party: vec![stale_trainer_pokemon],
@@ -40908,15 +41136,18 @@ mod tests {
         };
         let error = trainer_party_runtime
             .save_game(&save_path, state)
-            .expect_err("trainer battle party must match compiled trainer roster")
-            .to_string();
-        assert!(error.contains(
-            "saved battle.trainer.enemy_party[0] level 6 does not match compiled trainer RIVAL1 level 5"
-        ));
+            .expect_err("trainer battle party must match compiled trainer roster");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(
+                "saved battle.trainer.enemy_party[0] level 6 does not match compiled trainer RIVAL1 level 5"
+            ),
+            "{error}"
+        );
 
         let state = GameState {
             battle: BattleMemory::Trainer {
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_type: "BATTLETYPE_TRAINER".to_string(),
                 trainer_class: "RIVAL1".to_string(),
                 trainer_id: "RIVAL1".to_string(),
                 trainer_name: "RIVAL@".to_string(),
@@ -40924,7 +41155,7 @@ mod tests {
                 seen_text: "RuntimeSeenText".to_string(),
                 win_text: "RuntimeWinText".to_string(),
                 loss_text: "RuntimeLossText".to_string(),
-                callback: "0".to_string(),
+                callback: String::new(),
                 source_script: "RuntimeTrainerScript".to_string(),
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
@@ -40944,7 +41175,10 @@ mod tests {
             .expect_err("trainer battle encounter music must exist in pack audio");
         let error = error_debug(error);
         assert!(
-            error.contains("saved battle.trainer.encounter_music MUSIC_RIVAL_ENCOUNTER is missing")
+            error.contains(
+                "save field battle.trainer.encounter_music references missing Music audio id 'MUSIC_RIVAL_ENCOUNTER'"
+            ),
+            "{error}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -41144,24 +41378,6 @@ mod tests {
         let error = error_debug(error);
         assert!(error.contains("saved mystery_gift.stored_item MISSING_ITEM is missing"));
 
-        let mut data = minimal_runtime_data();
-        let mismatched = runtime_item("DIFFERENT_SCRIPT_NAME", item_pocket("ITEM"));
-        data.items.insert("POTION".to_string(), mismatched);
-        let mismatched_runtime = CrystalRuntime::from_compiled_pack(
-            &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(data, report()),
-            identity(),
-        )
-        .expect("runtime with mismatched item");
-        let mut state = GameState::default();
-        state.mystery_gift.stored_item = Some("POTION".to_string());
-        let error = mismatched_runtime
-            .save_game(&save_path, state)
-            .expect_err("mystery gift item id must match compiled item script_name");
-        let error = error_debug(error);
-        assert!(error.contains(
-            "saved mystery_gift.stored_item POTION does not match compiled item script_name DIFFERENT_SCRIPT_NAME"
-        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -41200,22 +41416,16 @@ mod tests {
             "POTION".to_string(),
             runtime_item("POTION", item_pocket("ITEM")),
         );
-        let runtime_without_rules = CrystalRuntime::from_compiled_pack(
+        let missing_rules = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data.clone(), report()),
             identity(),
         )
-        .expect("runtime");
-
-        let mut state = GameState::default();
-        state.battle_tower.challenge_state = 1;
-        state.battle_tower.reward_item = "POTION".to_string();
-        let error = runtime_without_rules
-            .save_game(&save_path, state)
-            .expect_err("active Battle Tower state must have pack rules");
-        let error = error_debug(error);
+        .expect_err("runtime packs without Battle Tower rules fail verification");
+        let error = error_debug(missing_rules);
         assert!(
-            error.contains("saved active Battle Tower state requires compiled Battle Tower rules")
+            error.contains("missing_runtime_battle_tower_rules"),
+            "{error}"
         );
 
         data.battle_tower_rules = Some(crystal_core::systems::special_routines::BattleTowerRules {
@@ -41306,33 +41516,31 @@ mod tests {
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data();
         data.buena_prizes.clear();
-        let runtime = CrystalRuntime::from_compiled_pack(
+        let missing_prizes = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect_err("runtime packs without Buena prizes fail verification");
+        let error = error_debug(missing_prizes);
+        assert!(error.contains("missing_runtime_buena_prizes"), "{error}");
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
             identity(),
         )
         .expect("runtime");
         let save_path = root.join("slot.crystalsave");
 
         let mut state = GameState::default();
-        state.blue_card_balance = 1;
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved Blue Card balance requires Buena prize pack data");
-        let error = error_debug(error);
-        assert!(
-            error.contains("saved blue_card_balance 1 requires compiled Buena prize definitions")
-        );
-
-        let mut state = GameState::default();
         state.buenas_password.generated = true;
-        state.buenas_password.category_index = 0;
+        state.buenas_password.category_index = 99;
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("generated Buena password category must exist in pack");
         let error = error_debug(error);
         assert!(error.contains(
-            "saved buenas_password.category_index 0 is outside compiled Buena password categories"
+            "saved buenas_password.category_index 99 is outside compiled Buena password categories"
         ));
 
         let mut data = minimal_runtime_data();
@@ -41356,7 +41564,7 @@ mod tests {
 
         let mut state = GameState::default();
         state.buenas_password.generated = true;
-        state.buenas_password.category_index = 0;
+        state.buenas_password.category_index = 1;
         state.buenas_password.option_index = 1;
         let error = runtime
             .save_game(&save_path, state)
@@ -41485,9 +41693,20 @@ mod tests {
                     { "command": "showemote", "args": ["EMOTE_SHOCK", "RuntimeObject", "16"] },
                     { "command": "writecmdqueue", "args": ["RuntimeScript"] },
                     { "command": "cmdqueue", "args": ["BANK_1", "RuntimeScript"] },
-                    { "command": "conditional_event", "args": ["EVENT_RUNTIME", "RuntimeScript"] }
+                    { "command": "conditional_event", "args": ["EVENT_RUNTIME", "RuntimeScript"] },
+                    { "command": "catchtutorial", "args": ["BATTLETYPE_TUTORIAL"] }
                 ]),
             );
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .script_runtime_commands
+            .push(ScriptRuntimeCommand {
+                command: "catchtutorial".to_string(),
+                args: vec!["BATTLETYPE_TUTORIAL".to_string()],
+                source_script: "RuntimePayloadScript".to_string(),
+                command_index: 22,
+            });
         let report = report_for(&data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
@@ -41554,7 +41773,7 @@ mod tests {
         let error = format!("{error:#}");
         assert!(
             error.contains(
-                "saved script_runtime.audio_events[0].audio_id SFX_TACKLE is not allowed for wait-for-sound-effect events"
+                "saved script_runtime.audio_events[0].source_script WaitSFX special audio event has unexpected audio_id SFX_TACKLE"
             ),
             "{error}"
         );
@@ -41626,9 +41845,34 @@ mod tests {
         let mut other_map = runtime_map();
         other_map.id = "OtherMap".to_string();
         other_map.attributes.map_constant = Some("OTHER_MAP".to_string());
+        other_map.attributes.blocks_label = Some("OtherMap_Blocks".to_string());
+        other_map.attributes.map_scripts_label = Some("OtherMap_MapScripts".to_string());
+        other_map.attributes.map_events_label = Some("OtherMap_MapEvents".to_string());
         other_map.script_menu_definitions.clear();
         other_map.script_vertical_menus.clear();
         let mut other_map_data = minimal_runtime_data_with_music();
+        other_map_data.map_blocks.insert(
+            "OtherMap_Blocks".to_string(),
+            other_map_data
+                .map_blocks
+                .get("RuntimeMap_Blocks")
+                .cloned()
+                .expect("runtime map blocks label"),
+        );
+        other_map_data
+            .map_scripts
+            .insert("OtherMap_MapScripts".to_string(), serde_json::json!([]));
+        other_map_data.asm_text.insert(
+            "OtherMap_MapEvents".to_string(),
+            "OtherMap events".to_string(),
+        );
+        other_map_data.runtime_map_metadata.insert(
+            "OTHER_MAP".to_string(),
+            runtime_map_metadata("OTHER_MAP", "OtherMap", 1, 2, "ROUTE"),
+        );
+        other_map_data
+            .map_attributes
+            .insert("OtherMap".to_string(), other_map.attributes.clone());
         other_map_data
             .maps
             .insert("OtherMap".to_string(), other_map);
@@ -41876,6 +42120,39 @@ mod tests {
             "BAYLEEF".to_string(),
             PokemonSpecies::new_for_tests("BAYLEEF", BaseStats::new(60, 62, 80, 60, 63, 80)),
         );
+        pending_species_mismatch_data.pokemon_cries.insert(
+            "BAYLEEF".to_string(),
+            pending_species_mismatch_data
+                .pokemon_cries
+                .get("CHIKORITA")
+                .expect("chikorita cry metadata")
+                .clone(),
+        );
+        pending_species_mismatch_data.menu_icons.insert(
+            "BAYLEEF".to_string(),
+            pending_species_mismatch_data
+                .menu_icons
+                .get("CHIKORITA")
+                .expect("chikorita menu icon")
+                .clone(),
+        );
+        let mut bayleef_pokedex = pending_species_mismatch_data
+            .pokedex_entries
+            .get("CHIKORITA")
+            .expect("chikorita pokedex entry")
+            .clone();
+        bayleef_pokedex.species = "BAYLEEF".to_string();
+        pending_species_mismatch_data
+            .pokedex_entries
+            .insert("BAYLEEF".to_string(), bayleef_pokedex);
+        pending_species_mismatch_data.pokemon_frontpic_anim.insert(
+            "BAYLEEF".to_string(),
+            pending_species_mismatch_data
+                .pokemon_frontpic_anim
+                .get("CHIKORITA")
+                .expect("chikorita frontpic anim")
+                .clone(),
+        );
         let pending_species_mismatch_report = report_for(&pending_species_mismatch_data);
         let pending_species_mismatch_runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
@@ -41982,6 +42259,10 @@ mod tests {
             .get_mut("CHIKORITA")
             .expect("runtime cry metadata")
             .cry = "CRY_CHIKORITA".to_string();
+        status_data.items.insert(
+            "POTION".to_string(),
+            runtime_item("POTION", item_pocket("ITEM")),
+        );
         status_data
             .items
             .get_mut("POTION")
@@ -42007,12 +42288,23 @@ mod tests {
         state
             .script_runtime
             .catch_tutorials
-            .push("CYNDAQUIL".to_string());
+            .push("BATTLETYPE_TUTORIAL".to_string());
+        runtime
+            .save_game(&save_path, state)
+            .expect("saved catch tutorial battle type declared by pack catchtutorial command");
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .catch_tutorials
+            .push("BATTLETYPE_STALE".to_string());
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("saved catch tutorial species must exist in pack");
+            .expect_err("saved catch tutorial battle type must exist in pack");
         let error = format!("{error:#}");
-        assert!(error.contains("saved script_runtime.catch_tutorials[0] CYNDAQUIL is missing"));
+        assert!(error.contains(
+            "saved script_runtime.catch_tutorials[0] BATTLETYPE_STALE is missing from compiled pack catchtutorial commands"
+        ));
 
         let mut state = GameState::default();
         state
@@ -42023,9 +42315,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("saved variable sprite replacement must exist in pack");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.variable_sprites[SPRITE_MON] SPRITE_MISSING is missing"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.variable_sprites key SPRITE_MON is missing from compiled pack variable sprites"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.script_runtime.blackout_mod = Some("MISSING_MAP_CONSTANT".to_string());
@@ -42171,9 +42466,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("script runtime return frame must resume inside compiled script");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.call_stack[0].source_script RuntimeScript:4 is outside compiled script return command count 3"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.call_stack[0].source_script RuntimeScript:4 is outside compiled script command count 3"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state
@@ -42293,9 +42591,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("saved elevator floor payload must match compiled command args");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            r#"saved script_runtime.elevator_floors[0].source_script RuntimePayloadScript:0 args ["FLOOR_2F", "4", "RuntimeMap"] do not match compiled args ["FLOOR_1F", "4", "RuntimeMap"]"#
-        ));
+        assert!(
+            error.contains(
+                r#"saved script_runtime.elevator_floors[0].source_script RuntimePayloadScript:0 args ["FLOOR_2F", "4", "RUNTIME_MAP"] do not match compiled args ["FLOOR_1F", "4", "RuntimeMap"]"#
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.script_runtime.stone_table_entries.push(
@@ -42472,9 +42773,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("waitsfx audio events cannot carry saved audio payload");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.audio_events[0].audio_id MUSIC_ROUTE_29 is not allowed for wait-for-sound-effect events"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.audio_events[0].source_script RuntimePayloadScript:7 command waitsfx has unexpected audio_id"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.script_runtime.pending_script_warp = Some(crystal_core::state::ScriptWarpRequest {
@@ -42500,7 +42804,7 @@ mod tests {
                 command: "warpfacing".to_string(),
                 kind: crystal_core::state::ScriptMapRuntimeKind::Warp,
                 target_map: Some("RuntimeMap".to_string()),
-                tile: Some(TilePosition::new(4, 2)),
+                tile: Some(TilePosition::new(2, 1)),
                 facing: Some(Direction::Right),
                 map_setup: None,
                 source_script: "RuntimePayloadScript".to_string(),
@@ -42822,9 +43126,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("place-money events cannot carry coins");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.money_events[0].source_script PlaceMoneyTopRight money event has unexpected coins"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.money_events[0].source_script PlaceMoneyTopRight:0 money event has unexpected coins"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state
@@ -42842,9 +43149,12 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("coin-case money display stores zero money");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.money_events[0].source_script DisplayCoinCaseBalance money 100 does not match 0"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.money_events[0].source_script DisplayCoinCaseBalance:0 money 100 does not match 0"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state
@@ -42878,9 +43188,10 @@ mod tests {
             .save_game(&save_path, state)
             .expect_err("saved earthquake shake frames must be derived from parameter");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.pending_earthquakes[0] shake_frames 71 does not match parameter 72"
-        ));
+        assert!(
+            error.contains("pending_earthquakes[0].shake_frames 71 must equal parameter 72"),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.script_runtime.pending_earthquakes.push(
@@ -43196,7 +43507,10 @@ mod tests {
         .expect_err("pack writer must reject missing manifest identity");
         let error = error_debug(error);
 
-        assert!(error.contains("must include at least one manifest id"), "{error}");
+        assert!(
+            error.contains("must include at least one manifest id"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

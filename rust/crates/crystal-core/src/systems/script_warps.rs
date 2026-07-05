@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_scaled_warp_and_warpfacing_commands() {
+    fn resolves_raw_warp_and_warpfacing_commands() {
         let mut warp = command("warp");
         warp.target_map = Some("EcruteakCity".to_string());
         warp.x = Some(6);
@@ -1094,7 +1094,7 @@ mod tests {
             resolve_script_map_command(warp, &maps()).expect("warp"),
             ScriptMapAction::Warp {
                 target_map: "EcruteakCity".to_string(),
-                tile: TilePosition::new(12, 54),
+                tile: TilePosition::new(6, 27),
                 facing: None,
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
@@ -1110,7 +1110,7 @@ mod tests {
             resolve_script_map_command(warpfacing, &maps()).expect("warpfacing"),
             ScriptMapAction::Warp {
                 target_map: "BattleTower1F".to_string(),
-                tile: TilePosition::new(14, 14),
+                tile: TilePosition::new(7, 7),
                 facing: Some(Direction::Up),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn script_warp_coordinates_are_scaled_raw_event_tiles() {
+    fn script_warp_coordinates_are_raw_event_tiles() {
         let mut warp = command("warpfacing");
         warp.target_map = Some("EcruteakCity".to_string());
         warp.x = Some(27);
@@ -1130,7 +1130,7 @@ mod tests {
             resolve_script_map_command(warp, &maps()).expect("raw tile warpfacing"),
             ScriptMapAction::Warp {
                 target_map: "EcruteakCity".to_string(),
-                tile: TilePosition::new(54, 2),
+                tile: TilePosition::new(27, 1),
                 facing: Some(Direction::Right),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
@@ -1327,7 +1327,7 @@ mod tests {
             state.script_runtime.pending_script_warp,
             Some(ScriptWarpRequest {
                 target_map: "BattleTower1F".to_string(),
-                tile: TilePosition::new(14, 14),
+                tile: TilePosition::new(7, 7),
                 facing: Some(Direction::Up),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,

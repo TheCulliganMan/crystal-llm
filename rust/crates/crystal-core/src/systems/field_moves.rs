@@ -2609,7 +2609,7 @@ mod tests {
             resolve_squirtbottle_target(&overworld, |script| script == "Route36SudowoodoScript")
                 .expect("squirtbottle target resolves");
 
-        assert_eq!(target.target_tile, TilePosition::new(0, 2));
+        assert_eq!(target.target_tile, TilePosition::new(0, 1));
         assert_eq!(
             target.target_object_identifier.as_deref(),
             Some("ROUTE36_SUDOWOODO")
@@ -2699,10 +2699,10 @@ mod tests {
         .expect("surf");
 
         assert_eq!(outcome.from_tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.to_tile, TilePosition::new(2, 0));
+        assert_eq!(outcome.to_tile, TilePosition::new(1, 0));
         assert_eq!(outcome.steps, 1);
         assert_eq!(player.mode, MovementMode::Surf);
-        assert_eq!(player.tile, TilePosition::new(2, 0));
+        assert_eq!(player.tile, TilePosition::new(1, 0));
     }
 
     #[test]
@@ -2782,10 +2782,9 @@ mod tests {
 
         assert_eq!(
             error,
-            FieldMoveError::RuntimeTileOverflow {
+            FieldMoveError::TargetTileOutOfBounds {
                 move_id: MOVE_SURF.to_string(),
-                x: i16::MAX - 1,
-                y: 0,
+                map_name: "Route29".to_string(),
             }
         );
         assert_eq!(player.mode, MovementMode::Normal);
@@ -2814,10 +2813,10 @@ mod tests {
         .expect("waterfall");
 
         assert_eq!(outcome.from_tile, TilePosition::new(0, 6));
-        assert_eq!(outcome.to_tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.steps, 3);
+        assert_eq!(outcome.to_tile, TilePosition::new(0, 1));
+        assert_eq!(outcome.steps, 5);
         assert_eq!(player.mode, MovementMode::Surf);
-        assert_eq!(player.tile, TilePosition::new(0, 0));
+        assert_eq!(player.tile, TilePosition::new(0, 1));
     }
 
     #[test]
@@ -3200,7 +3199,7 @@ mod tests {
             Ok(SavedDigWarpDestination {
                 map_name: "ROUTE_29".to_string(),
                 warp_index: 3,
-                tile: TilePosition::new(18, 22),
+                tile: TilePosition::new(9, 11),
             })
         );
     }

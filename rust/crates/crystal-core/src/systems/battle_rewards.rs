@@ -841,7 +841,12 @@ mod tests {
     fn battle_reward_rules_issues_validate_declared_rules() {
         assert_eq!(
             battle_reward_rules_issues(&BattleRewardRules::default()),
-            []
+            vec![
+                BattleRewardRulesIssue::MissingMaxLevel,
+                BattleRewardRulesIssue::InvalidWildExpDivisor { value: 0 },
+                BattleRewardRulesIssue::InvalidTrainerExpNumerator { value: 0 },
+                BattleRewardRulesIssue::InvalidTrainerExpDenominator { value: 0 },
+            ]
         );
 
         let rules = BattleRewardRules {

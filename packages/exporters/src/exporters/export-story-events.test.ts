@@ -107,6 +107,37 @@ AzaleaTownRivalBattleScript:
     });
   });
 
+  it("materializes local script fallthrough into the next parent script label", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
+    const asmSource = path.join(tmpDir, "PlayersHouse1F.asm");
+    fs.writeFileSync(
+      asmSource,
+      `MeetMomRightScript:
+\tcheckevent EVENT_TEMPORARY_UNTIL_MAP_RELOAD_1
+\tiffalse .OnRight
+\tapplymovement PLAYERSHOUSE1F_MOM1, MomTurnsTowardPlayerMovement
+\tsjump MeetMomScript
+
+.OnRight:
+\tapplymovement PLAYERSHOUSE1F_MOM1, MomWalksToPlayerMovement
+MeetMomScript:
+\topentext
+\twritetext ElmsLookingForYouText
+\twaitbutton
+\tclosetext
+\tend
+`,
+      "utf8"
+    );
+
+    const scripts = parseAsmFile(asmSource);
+
+    expect(scripts[".OnRight@MeetMomRightScript"].at(-1)).toEqual({
+      command: "sjump",
+      args: ["MeetMomScript"],
+    });
+  });
+
   it("exports warpfacing in canonical pack order", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-events-"));
     const asmSource = path.join(tmpDir, "Route29.asm");

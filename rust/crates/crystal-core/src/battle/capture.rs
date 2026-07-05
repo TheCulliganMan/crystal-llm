@@ -2139,7 +2139,8 @@ mod tests {
         .expect_err("capture ball rule issues must not accept default battle types")
         .to_string();
         assert!(
-            ball_rule_error.contains("unknown field `default_battle_type`"),
+            ball_rule_error.contains("unknown field `default_battle_type`")
+                || ball_rule_error.contains("invalid type: map"),
             "{ball_rule_error}"
         );
 

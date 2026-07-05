@@ -81,17 +81,17 @@ use crystal_core::state::{
     EventFlagMemory, FishingMemory, GameState, ItemUseRuntimeEvent, LinkSessionState,
     MagikarpRecordState, MysteryGiftState, Options, OverworldMemory, OverworldObjectMapMemory,
     PendingMoveLearn, RoamingPokemonState, SavedTrainerBattleFields, SceneMemory,
-    ScriptAudioRuntimeEvent, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
-    ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest, ScriptMapRefreshRequest,
-    ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade, ScriptReturnFrame,
-    ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
-    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
-    ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
-    ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRuntimeEvent, ScriptTextRuntimeEvent,
-    ScriptTextWait, ScriptWarpRequest, ScriptYesNoPrompt, SwarmMemory,
-    saved_audio_runtime_event_command_args, saved_map_runtime_event_command_args,
-    saved_pending_text_wait_command_args, saved_script_end_command,
-    saved_text_runtime_event_command_args,
+    ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, ScriptControlRuntimeEvent,
+    ScriptControlRuntimeKind, ScriptEndState, ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest,
+    ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade,
+    ScriptReturnFrame, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription,
+    ScriptRuntimeDelay, ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor,
+    ScriptRuntimeEmote, ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand,
+    ScriptRuntimeStoneTableEntry, ScriptRuntimeVariableWrite, ScriptScreenFade,
+    ScriptShopRuntimeEvent, ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait,
+    ScriptWarpRequest, ScriptYesNoPrompt, SwarmMemory, saved_audio_runtime_event_command_args,
+    saved_map_runtime_event_command_args, saved_pending_text_wait_command_args,
+    saved_script_end_command, saved_text_runtime_event_command_args,
     validate_saved_audio_reference as core_validate_saved_audio_reference,
     validate_saved_block_overrides as core_validate_saved_block_overrides,
     validate_saved_bug_contest_references as core_validate_saved_bug_contest_references,
@@ -169,7 +169,8 @@ use crystal_core::systems::field_items::{
     SCRIPT_FIELD_HIDDEN_ITEM_PICKUP_COMMANDS, SCRIPT_FIELD_ITEM_PICKUP_COMMANDS,
     SCRIPT_FIELD_ITEMBALL_PICKUP_COMMANDS, ScriptFieldPickup, ScriptFieldPickupIssue,
     find_itemfinder_hidden_item as core_find_itemfinder_hidden_item, fruit_tree_catalog_issues,
-    pickup_script_field_item as core_pickup_script_field_item, script_field_pickup_issues,
+    fruit_tree_collected_flag, pickup_script_field_item as core_pickup_script_field_item,
+    script_field_pickup_issues,
 };
 use crystal_core::systems::field_moves::{
     FieldEscapeItemRule, FieldItemRule, FieldMoveBlockOutcome, FieldMoveBlockRule,
@@ -314,9 +315,10 @@ use crystal_core::systems::scripted_battles::{
 use crystal_core::systems::shop::{
     MartCatalog, MartCatalogIssue, SCRIPT_SHOP_COMMANDS, ScriptShopCommand, ScriptShopCommandIssue,
     ScriptShopOutcome, ShopError, ShopResult,
-    apply_script_shop_command as core_apply_script_shop_command, buy_item as core_buy_item,
-    mart_catalog_issues, require_active_shop_item as core_require_active_shop_item,
-    script_shop_command_issues, sell_item as core_sell_item,
+    apply_script_shop_command as core_apply_script_shop_command,
+    buy_active_shop_item as core_buy_active_shop_item, close_active_shop as core_close_active_shop,
+    mart_catalog_issues, script_shop_command_issues,
+    sell_active_shop_item as core_sell_active_shop_item,
 };
 #[cfg(test)]
 use crystal_core::systems::special_routines::BattleTowerBannedSpeciesRule;
@@ -359,8 +361,7 @@ use crystal_core::world::encounters::{
     ENCOUNTER_TIME_KEYS, EncounterMusicModifierIssue, EncounterMusicModifiers, EncounterSlotChance,
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
     FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, TimeOfDay, WildEncounter,
-    WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable,
-    apply_grass_level_variance,
+    WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable, apply_grass_level_variance,
     encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
     roll_headbutt_encounter as core_roll_headbutt_encounter,
     roll_rock_smash_encounter as core_roll_rock_smash_encounter,
@@ -382,6 +383,8 @@ use crystal_core::world::movement::{
     DEFAULT_RUNTIME_TILE_STRIDE, MovementMode, PlayerMovementState, StepOptions, StepOutcome,
     checked_move_by_stride,
 };
+#[cfg(test)]
+use crystal_core::world::session::warp_tile_position_checked;
 use crystal_core::world::session::{
     ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
     EncounterCheckOptions, OverworldInteraction, OverworldSession, OverworldSnapshot,
@@ -389,8 +392,6 @@ use crystal_core::world::session::{
     object_event_initial_facing, raw_event_tile_to_runtime_tile_checked,
     runtime_tile_to_raw_event_tile,
 };
-#[cfg(test)]
-use crystal_core::world::session::warp_tile_position_checked;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7342,6 +7343,15 @@ fn script_movement_direction_for_verifier(direction: &str) -> Option<Direction> 
     }
 }
 
+fn direction_script_token(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Down => "DOWN",
+        Direction::Up => "UP",
+        Direction::Left => "LEFT",
+        Direction::Right => "RIGHT",
+    }
+}
+
 fn verify_unique_script_command_positions<'a, I>(
     map_name: &str,
     category: &str,
@@ -11827,6 +11837,12 @@ fn script_event_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    flags.extend(
+        data.fruit_trees
+            .0
+            .keys()
+            .map(|tree_id| fruit_tree_collected_flag(tree_id)),
+    );
     for module in data.maps.values() {
         for command in &module.script_flag_commands {
             if command.flag_id.starts_with("EVENT_") {
@@ -13376,18 +13392,50 @@ fn connection_source_boundary_tiles(
     }
 }
 
-fn connection_source_component(
+fn connection_source_tile_for_target(
     context: &MapPlayabilityContext,
     connection: &MapConnection,
-) -> Option<usize> {
-    connection_source_tile(context, connection).and_then(|tile| context.component_at(tile))
+    target_attributes: &MapAttributes,
+) -> Option<TilePosition> {
+    let (width, height) = context.map.tile_bounds();
+    connection_source_boundary_tiles(
+        width,
+        height,
+        PLAYABILITY_RUNTIME_TILE_STRIDE,
+        &connection.direction,
+    )
+    .into_iter()
+    .find(|tile| {
+        if context.component_at(*tile).is_none() {
+            return false;
+        }
+        let Some(trigger_tile) = connection_trigger_tile_from_source(*tile, connection) else {
+            return false;
+        };
+        connection_destination_tile_in_bounds(
+            trigger_tile,
+            &connection.direction,
+            connection.offset,
+            target_attributes,
+        )
+        .unwrap_or(false)
+    })
 }
 
-fn connection_trigger_tile(
+fn connection_source_tile_and_component_for_target(
     context: &MapPlayabilityContext,
     connection: &MapConnection,
+    target_attributes: &MapAttributes,
+) -> Option<(TilePosition, usize)> {
+    let tile = connection_source_tile_for_target(context, connection, target_attributes)?;
+    let component = context.component_at(tile)?;
+    Some((tile, component))
+}
+
+fn connection_trigger_tile_from_source(
+    source: TilePosition,
+    connection: &MapConnection,
 ) -> Option<TilePosition> {
-    let source = connection_source_tile(context, connection)?;
     match connection.direction.as_str() {
         "north" => checked_move_by_stride(source, Direction::Up, PLAYABILITY_RUNTIME_TILE_STRIDE),
         "south" => checked_move_by_stride(source, Direction::Down, PLAYABILITY_RUNTIME_TILE_STRIDE),
@@ -13395,6 +13443,15 @@ fn connection_trigger_tile(
         "east" => checked_move_by_stride(source, Direction::Right, PLAYABILITY_RUNTIME_TILE_STRIDE),
         _ => Some(source),
     }
+}
+
+#[cfg(test)]
+fn connection_trigger_tile(
+    context: &MapPlayabilityContext,
+    connection: &MapConnection,
+) -> Option<TilePosition> {
+    let source = connection_source_tile(context, connection)?;
+    connection_trigger_tile_from_source(source, connection)
 }
 
 fn verify_maps(
@@ -13535,19 +13592,6 @@ fn verify_maps(
             let Some(source_context) = context.as_ref() else {
                 continue;
             };
-            let Some(source_component) = connection_source_component(source_context, connection)
-            else {
-                diagnostics.push(transition_diagnostic(
-                    rules,
-                    "unreachable_connection",
-                    map_name,
-                    format!(
-                        "connection to '{}' has no reachable walkable border tile",
-                        connection.target_map
-                    ),
-                ));
-                continue;
-            };
             let Some(target_module) = data.maps.get(&connection.target_map) else {
                 diagnostics.push(map_validation_diagnostic(
                     rules,
@@ -13557,7 +13601,28 @@ fn verify_maps(
                 ));
                 continue;
             };
-            let Some(trigger_tile) = connection_trigger_tile(source_context, connection) else {
+            let Some((source_tile, source_component)) =
+                connection_source_tile_and_component_for_target(
+                    source_context,
+                    connection,
+                    &target_module.attributes,
+                )
+            else {
+                if connection_source_tile(source_context, connection).is_none() {
+                    diagnostics.push(transition_diagnostic(
+                        rules,
+                        "unreachable_connection",
+                        map_name,
+                        format!(
+                            "connection to '{}' has no reachable walkable border tile",
+                            connection.target_map
+                        ),
+                    ));
+                }
+                continue;
+            };
+            let Some(trigger_tile) = connection_trigger_tile_from_source(source_tile, connection)
+            else {
                 diagnostics.push(transition_diagnostic(
                     rules,
                     "unreachable_connection",
@@ -14439,7 +14504,8 @@ fn wild_encounter_has_reachable_level(
     level: u8,
 ) -> bool {
     encounter.species == species
-        && (0..=u8::MAX).any(|roll| apply_grass_level_variance(encounter.level, surface, roll) == level)
+        && (0..=u8::MAX)
+            .any(|roll| apply_grass_level_variance(encounter.level, surface, roll) == level)
 }
 
 fn field_encounter_data_has(encounters: &FieldEncounterData, species: &str, level: u8) -> bool {
@@ -15511,6 +15577,9 @@ pub enum RuntimeMutationCommand {
         command: RuntimeScriptCommandRef,
         inputs: ScriptRuntimeInputs,
     },
+    ApplyStandardScript {
+        script: String,
+    },
     TakeNextScript,
     DrainScriptEventQueue(RuntimeScriptEventDrainCommand),
     DrainScriptRuntimeQueue(RuntimeScriptRuntimeQueueDrainCommand),
@@ -16271,6 +16340,72 @@ fn take_party_pokemon_compact(state: &mut GameState, party_index: usize) -> Resu
     Ok(pokemon)
 }
 
+fn apply_standard_script(
+    state: &mut GameState,
+    moves: &BTreeMap<String, Move>,
+    script: &str,
+) -> Result<String> {
+    match script {
+        "ReceiveItemScript" => {
+            let item_name = state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_4")
+                .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|value| !value.is_empty())
+                .context(
+                    "ReceiveItemScript requires STRING_BUFFER_4 to contain the received item name",
+                )?;
+            if state.player_name.is_empty() {
+                anyhow::bail!("ReceiveItemScript requires player_name before item presentation");
+            }
+            state.script_runtime.text_window_open = true;
+            state
+                .script_runtime
+                .audio_events
+                .push(ScriptAudioRuntimeEvent {
+                    command: "standard_receive_item".to_string(),
+                    kind: ScriptAudioRuntimeKind::SoundEffect,
+                    audio_id: Some("SFX_ITEM".to_string()),
+                    fade_frames: None,
+                    source_script: script.to_string(),
+                    command_index: 0,
+                });
+            state
+                .script_runtime
+                .text_events
+                .push(ScriptTextRuntimeEvent {
+                    command: "standard_receive_item".to_string(),
+                    kind: ScriptTextRuntimeKind::Write,
+                    text_label: None,
+                    face_player: false,
+                    closes_text: true,
+                    source_script: script.to_string(),
+                    command_index: 0,
+                });
+            state.script_runtime.pending_text_wait = Some(ScriptTextWait {
+                command: "standard_receive_item".to_string(),
+                source_script: script.to_string(),
+                command_index: 0,
+            });
+            Ok(format!("{} received\n{}.", state.player_name, item_name))
+        }
+        "PokecenterNurseScript" => {
+            let heal_indexes = (0..state.storage.party.pokemon.len())
+                .filter(|index| state.storage.party.pokemon[*index].is_some())
+                .collect::<Vec<_>>();
+            if heal_indexes.is_empty() {
+                anyhow::bail!("PokecenterNurseScript requires at least one party Pokemon");
+            }
+            for party_index in heal_indexes {
+                full_heal_party_slot(state, moves, party_index)?;
+            }
+            Ok("PokecenterNurseScript healed the party".to_string())
+        }
+        other => anyhow::bail!("unsupported standard script {other}"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeMutationResult {
     OverworldInputApplied(OverworldInputFrame),
@@ -16293,6 +16428,7 @@ pub enum RuntimeMutationResult {
     ScriptObjectMutated(ScriptObjectMutationOutcome),
     ScriptMovementApplied(ScriptMovementOutcome),
     ScriptRuntimeApplied(ScriptRuntimeCommand, ScriptRuntimeOutcome),
+    StandardScriptApplied(String),
     NextScriptTaken(String),
     ScriptEventQueueDrained(RuntimeScriptEventDrainResult),
     ScriptRuntimeQueueDrained(RuntimeScriptRuntimeQueueDrainResult),
@@ -16500,6 +16636,7 @@ impl RuntimeMutationResult {
             Self::ScriptObjectMutated(_) => "script_object_mutated",
             Self::ScriptMovementApplied(_) => "script_movement_applied",
             Self::ScriptRuntimeApplied(_, _) => "script_runtime_applied",
+            Self::StandardScriptApplied(_) => "standard_script_applied",
             Self::NextScriptTaken(_) => "next_script_taken",
             Self::ScriptEventQueueDrained(_) => "script_event_queue_drained",
             Self::ScriptRuntimeQueueDrained(_) => "script_runtime_queue_drained",
@@ -16730,6 +16867,20 @@ fn set_script_battle_result_accumulator(state: &mut GameState) {
         .insert("_value".to_string(), value);
 }
 
+fn set_script_trainer_battle_result_accumulator(state: &mut GameState, won: bool) {
+    let value = if won { "1" } else { "0" }.to_string();
+    state.script_runtime.script_value = Some(value.clone());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), value);
+}
+
+fn clear_transient_map_object_context(state: &mut GameState, session: &mut OverworldSession) {
+    state.script_runtime.last_talked_object = None;
+    session.last_talked_object_identifier = None;
+}
+
 fn ensure_runtime_command_rng_boundary(
     context: &str,
     actual_rng_seed_after: u32,
@@ -16821,6 +16972,27 @@ impl GameDataSet {
 
     pub fn runtime_spawn_points(&self) -> &BTreeMap<String, RuntimeSpawnPoint> {
         &self.runtime_spawn_points
+    }
+
+    pub fn runtime_spawn_point_for_map_constant(
+        &self,
+        map_constant: &str,
+    ) -> Result<&RuntimeSpawnPoint> {
+        let mut matches = self
+            .runtime_spawn_points
+            .values()
+            .filter(|spawn| spawn.map_constant == map_constant);
+        let spawn = matches
+            .next()
+            .with_context(|| format!("compiled game pack missing spawn point for {map_constant}"))?;
+        if let Some(other) = matches.next() {
+            anyhow::bail!(
+                "compiled game pack has multiple spawn points for {map_constant}: {} and {}",
+                spawn.identifier,
+                other.identifier
+            );
+        }
+        Ok(spawn)
     }
 
     pub fn map_module(&self, map_name: &str) -> Result<&MapModule> {
@@ -17180,6 +17352,7 @@ impl GameDataSet {
         if outcome.continued_after_battle {
             self.claim_active_battle_pay_day_money(state, pay_day_money)?;
             outcome.money_after = state.money;
+            set_script_trainer_battle_result_accumulator(state, won);
         }
         Ok(outcome)
     }
@@ -17931,14 +18104,18 @@ impl GameDataSet {
         } else {
             (None, source_scene_table)
         };
-        core_apply_script_scene_command(
+        let outcome = core_apply_script_scene_command(
             state,
             map_name,
             target_map_name.as_deref(),
             scene_table,
             command,
         )
-        .map_err(|error| anyhow::anyhow!("apply script scene command: {error:?}"))
+        .map_err(|error| anyhow::anyhow!("apply script scene command: {error:?}"))?;
+        if outcome.command == "checkscene" {
+            state.script_runtime.script_value = Some(outcome.scene_index.to_string());
+        }
+        Ok(outcome)
     }
 
     pub fn apply_script_scene_command_in_session(
@@ -18167,6 +18344,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
+        clear_transient_map_object_context(state, session);
         self.complete_pending_script_warp(state, session)?;
         self.apply_saved_overworld_overrides(session, state)?;
         self.sync_current_map_music(state, &request.target_map, music_ids)?;
@@ -18312,6 +18490,13 @@ impl GameDataSet {
         source_script: &str,
         command_index: usize,
     ) -> Result<ScriptVariableOutcome> {
+        let command = self.script_variable_command(map_name, source_script, command_index)?;
+        if command.command == "readvar" && command.target.as_deref() == Some("VAR_FACING") {
+            state.script_runtime.variables.insert(
+                "VAR_FACING".to_string(),
+                direction_script_token(session.player.facing).to_string(),
+            );
+        }
         self.apply_script_variable_command_now(
             state,
             &session.map.name,
@@ -18618,8 +18803,18 @@ impl GameDataSet {
                         "elevfloor command {}:{} did not enqueue an elevator floor",
                         command.source_script, command.command_index
                     )
-                })?;
+            })?;
             floor.target_map = target_map;
+        }
+        if command.command == "blackoutmod" {
+            let map_constant = command.args.first().with_context(|| {
+                format!(
+                    "blackoutmod command {}:{} missing target map argument",
+                    command.source_script, command.command_index
+                )
+            })?;
+            let spawn = self.runtime_spawn_point_for_map_constant(map_constant)?;
+            next_state.last_spawn_identifier = Some(spawn.identifier);
         }
         if command.command == "setlasttalked" {
             next_overworld.last_talked_object_identifier = command.args.first().cloned();
@@ -19315,6 +19510,13 @@ impl GameDataSet {
                 )?;
                 RuntimeMutationResult::ScriptRuntimeApplied(command, outcome)
             }
+            RuntimeMutationCommand::ApplyStandardScript { script } => {
+                RuntimeMutationResult::StandardScriptApplied(apply_standard_script(
+                    state,
+                    &self.moves,
+                    &script,
+                )?)
+            }
             RuntimeMutationCommand::TakeNextScript => {
                 let Some(script) = state.script_runtime.next_script.take() else {
                     anyhow::bail!("cannot take next script because no next script is queued");
@@ -19596,7 +19798,9 @@ impl GameDataSet {
                                 "cannot consume map music requested flag because it is not set"
                             );
                         }
+                        let map_music = self.checked_map_music(&session.map.name, music_ids)?;
                         state.script_runtime.map_music_requested = false;
+                        apply_map_music_context(state, map_music);
                         RuntimeScriptRuntimeFlagValue::MapMusicRequested
                     }
                     RuntimeScriptRuntimeFlag::WaitingForSoundEffect => {
@@ -19842,6 +20046,9 @@ impl GameDataSet {
                     anyhow::bail!("cannot close text window because no text window is open");
                 }
                 state.script_runtime.text_window_open = false;
+                state.script_runtime.pending_text_label = None;
+                state.script_runtime.pending_text_wait = None;
+                state.script_runtime.pending_yes_no = None;
                 RuntimeMutationResult::TextWindowClosed
             }
             RuntimeMutationCommand::ClearMenuCoords => {
@@ -19858,12 +20065,10 @@ impl GameDataSet {
                 };
                 RuntimeMutationResult::ActivePokemonPictureClosed(species)
             }
-            RuntimeMutationCommand::CloseScriptShop => {
-                let Some(shop) = state.script_runtime.pending_shop.take() else {
-                    anyhow::bail!("cannot close script shop because no runtime shop is pending");
-                };
-                RuntimeMutationResult::ScriptShopClosed(shop)
-            }
+            RuntimeMutationCommand::CloseScriptShop => RuntimeMutationResult::ScriptShopClosed(
+                core_close_active_shop(state)
+                    .map_err(|error| anyhow::anyhow!("close script shop: {error}"))?,
+            ),
             RuntimeMutationCommand::BuyShopItem(command) => RuntimeMutationResult::ShopItemBought(
                 self.buy_shop_item(state, &command.item_id, command.quantity)?,
             ),
@@ -21961,6 +22166,7 @@ impl GameDataSet {
                     healed.push(full_heal_party_slot(state, &self.moves, party_index)?);
                 }
                 deactivate_battle(state);
+                state.script_runtime.blackout_mod = None;
                 RuntimeMutationResult::BlackoutResolved(BlackoutRecoveryOutcome {
                     spawn_identifier,
                     map_name,
@@ -21974,7 +22180,9 @@ impl GameDataSet {
                 )
             }
         };
-        let state_checksum = game_state_checksum(state).context("checksum runtime mutation")?;
+        let result_tag = result.result_tag();
+        let state_checksum = game_state_checksum(state)
+            .with_context(|| format!("checksum runtime mutation {result_tag}"))?;
         Ok(RuntimeMutationOutcome {
             result,
             state_checksum,
@@ -21987,9 +22195,7 @@ impl GameDataSet {
         item_id: &str,
         quantity: u16,
     ) -> Result<ShopResult> {
-        core_require_active_shop_item(state, item_id)
-            .map_err(|error| anyhow::anyhow!("buy shop item {item_id}: {error}"))?;
-        core_buy_item(state, &self.items, item_id, quantity)
+        core_buy_active_shop_item(state, &self.items, item_id, quantity)
             .map_err(|error| anyhow::anyhow!("buy shop item {item_id}: {error:?}"))
     }
 
@@ -21999,7 +22205,7 @@ impl GameDataSet {
         item_id: &str,
         quantity: u16,
     ) -> Result<ShopResult> {
-        core_sell_item(
+        core_sell_active_shop_item(
             state,
             &self.items,
             &self.currency_constants,
@@ -22092,7 +22298,7 @@ impl GameDataSet {
         )
     }
 
-    fn overworld_session_for_traversal(
+    pub fn overworld_session_for_traversal(
         &self,
         map_name: &str,
         player_tile: TilePosition,
@@ -22120,13 +22326,9 @@ impl GameDataSet {
                 player_tile.y
             );
         }
-        if !can_enter_tile(
-            &map,
-            &tileset,
-            player_tile,
-            Direction::Down,
-            traversal_state,
-        ) {
+        if !Self::can_occupy_runtime_tile(&map, &tileset, player_tile, traversal_state)
+            && !self.runtime_tile_is_connection_source(module, player_tile)?
+        {
             anyhow::bail!(
                 "runtime player tile ({}, {}) is not walkable on compiled map {map_name}",
                 player_tile.x,
@@ -22142,6 +22344,45 @@ impl GameDataSet {
         );
         session.frame = frame;
         Ok(session)
+    }
+
+    fn can_occupy_runtime_tile(
+        map: &OverworldMapData,
+        tileset: &TilesetCollision,
+        player_tile: TilePosition,
+        traversal_state: PlayerTraversalState,
+    ) -> bool {
+        [
+            Direction::Down,
+            Direction::Up,
+            Direction::Left,
+            Direction::Right,
+        ]
+        .into_iter()
+        .any(|facing| can_enter_tile(map, tileset, player_tile, facing, traversal_state))
+    }
+
+    fn runtime_tile_is_connection_source(
+        &self,
+        module: &MapModule,
+        player_tile: TilePosition,
+    ) -> Result<bool> {
+        for connection in &module.attributes.connections {
+            let Some(trigger_tile) = connection_trigger_tile_from_source(player_tile, connection)
+            else {
+                continue;
+            };
+            let target_module = self.map_module(&connection.target_map)?;
+            if connection_destination_tile_in_bounds(
+                trigger_tile,
+                &connection.direction,
+                connection.offset,
+                &target_module.attributes,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn apply_saved_overworld_overrides(
@@ -22210,6 +22451,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
+        clear_transient_map_object_context(state, session);
         self.apply_saved_overworld_overrides(session, state)?;
         self.sync_current_map_music(state, destination_map, music_ids)?;
         self.sync_current_map_scene(state, destination_map)?;
@@ -22307,8 +22549,6 @@ impl GameDataSet {
             event => anyhow::bail!("joypad command produced unexpected event {event:?}"),
         };
 
-        let direction = direction_from_pad_mask(input_mask)
-            .map_err(|error| anyhow::anyhow!("apply overworld input: {error:?}"))?;
         let mut movement = None;
         let mut step_events = None;
         let mut coord_event = None;
@@ -22319,15 +22559,38 @@ impl GameDataSet {
         let mut wild_encounter = None;
         let mut wild_battle = None;
 
-        if let Some(direction) = direction {
-            let result = staged_session
-                .step_and_check_warp_checked(direction, StepOptions::default())
-                .with_context(|| {
-                    format!("apply overworld movement on {}", staged_session.map.name)
-                })?;
-            let moved = matches!(result.outcome, StepOutcome::Moved { .. });
-            movement = Some(result.outcome);
-            if let Some(trigger) = result.warp {
+        let overworld_input_locked = Self::game_state_blocks_overworld_input(&staged_state);
+        let direction = if overworld_input_locked {
+            None
+        } else {
+            direction_from_pad_mask(input_mask)
+                .map_err(|error| anyhow::anyhow!("apply overworld input: {error:?}"))?
+        };
+
+        if overworld_input_locked {
+            staged_session.frame += 1;
+        } else if let Some(direction) = direction {
+            let blocked_connection_edge =
+                self.blocked_connection_edge_target(&staged_session, direction)?;
+            let mut warp_trigger = None;
+            if let Some(target) = blocked_connection_edge {
+                staged_session.player.facing = direction;
+                staged_session.frame += 1;
+                movement = Some(StepOutcome::Blocked {
+                    at: target,
+                    facing: direction,
+                });
+            } else {
+                let result = staged_session
+                    .step_and_check_warp_checked(direction, StepOptions::default())
+                    .with_context(|| {
+                        format!("apply overworld movement on {}", staged_session.map.name)
+                    })?;
+                movement = Some(result.outcome);
+                warp_trigger = result.warp;
+            }
+            let moved = matches!(movement, Some(StepOutcome::Moved { .. }));
+            if let Some(trigger) = warp_trigger {
                 let transition = self.resolve_warp_transition(&trigger)?;
                 self.apply_dig_warp_memory_for_transition(&mut staged_state, &transition)?;
                 let destination = &transition.destination;
@@ -22384,7 +22647,7 @@ impl GameDataSet {
             staged_session.frame += 1;
         }
 
-        if direction.is_none() && pressed_mask & B_PAD_A != 0 {
+        if !overworld_input_locked && direction.is_none() && pressed_mask & B_PAD_A != 0 {
             interaction = staged_session
                 .check_interaction_checked(StepOptions::default().stride_tiles)
                 .with_context(|| {
@@ -22414,6 +22677,91 @@ impl GameDataSet {
             wild_encounter,
             wild_battle,
         })
+    }
+
+    fn blocked_connection_edge_target(
+        &self,
+        session: &OverworldSession,
+        direction: Direction,
+    ) -> Result<Option<TilePosition>> {
+        if session.player.facing != direction {
+            return Ok(None);
+        }
+        let Some(target) = checked_move_by_stride(
+            session.player.tile,
+            direction,
+            StepOptions::default().stride_tiles,
+        ) else {
+            return Ok(None);
+        };
+        let mut probe = session.clone();
+        probe.player.tile = target;
+        let Some(trigger) = probe
+            .check_connection_checked()
+            .with_context(|| format!("check connection on {}", probe.map.name))?
+        else {
+            return Ok(None);
+        };
+        if self.connection_trigger_has_destination(&trigger)? {
+            Ok(None)
+        } else {
+            Ok(Some(target))
+        }
+    }
+
+    fn connection_trigger_has_destination(&self, trigger: &ConnectionTrigger) -> Result<bool> {
+        let target_attributes = self
+            .map_attributes
+            .get(&trigger.connection.target_map)
+            .with_context(|| {
+                format!(
+                    "connection target '{}' missing attributes (referenced by {})",
+                    trigger.connection.target_map, trigger.map_name
+                )
+            })?;
+        connection_destination_tile_in_bounds(
+            trigger.tile,
+            &trigger.connection.direction,
+            trigger.connection.offset,
+            target_attributes,
+        )
+    }
+
+    fn game_state_blocks_overworld_input(state: &GameState) -> bool {
+        let runtime = &state.script_runtime;
+        !matches!(state.battle, BattleMemory::Inactive)
+            || runtime.player_input_locked
+            || runtime.all_input_locked
+            || !runtime.pending_delays.is_empty()
+            || !runtime.pending_earthquakes.is_empty()
+            || !runtime.pending_emotes.is_empty()
+            || !runtime.command_queue.is_empty()
+            || runtime.active_menu.is_some()
+            || runtime.active_pokemon_picture.is_some()
+            || runtime.window_open
+            || runtime.text_window_open
+            || !runtime.audio_events.is_empty()
+            || runtime.pending_music_fade.is_some()
+            || runtime.waiting_for_sound_effect
+            || !runtime.graphics_events.is_empty()
+            || runtime.pending_screen_fade.is_some()
+            || !runtime.money_events.is_empty()
+            || !runtime.map_events.is_empty()
+            || runtime.pending_script_warp.is_some()
+            || runtime.pending_map_load.is_some()
+            || runtime.pending_map_refresh.is_some()
+            || runtime.warp_check_requested
+            || !runtime.text_events.is_empty()
+            || runtime.pending_text_label.is_some()
+            || runtime.pending_text_wait.is_some()
+            || runtime.pending_yes_no.is_some()
+            || !runtime.control_events.is_empty()
+            || runtime.next_script.is_some()
+            || !runtime.deferred_scripts.is_empty()
+            || runtime.script_ended.is_some()
+            || !runtime.shop_events.is_empty()
+            || runtime.pending_shop.is_some()
+            || !runtime.item_use_events.is_empty()
     }
 
     pub fn cry_by_species(&self) -> BTreeMap<String, String> {
@@ -23140,15 +23488,7 @@ impl GameDataSet {
             raw_tile.y.to_string(),
         ];
         let command = if let Some(facing) = warp.facing {
-            args.push(
-                match facing {
-                    Direction::Down => "DOWN",
-                    Direction::Up => "UP",
-                    Direction::Left => "LEFT",
-                    Direction::Right => "RIGHT",
-                }
-                .to_string(),
-            );
+            args.push(direction_script_token(facing).to_string());
             "warpfacing"
         } else {
             "warp"
@@ -23212,6 +23552,16 @@ impl GameDataSet {
         path: &str,
         event: &crystal_core::state::ScriptAudioRuntimeEvent,
     ) -> Result<()> {
+        if event.source_script == "ReceiveItemScript" && event.command == "standard_receive_item" {
+            if event.command_index != 0
+                || event.kind != ScriptAudioRuntimeKind::SoundEffect
+                || event.audio_id.as_deref() != Some("SFX_ITEM")
+                || event.fade_frames.is_some()
+            {
+                anyhow::bail!("saved {path} ReceiveItemScript audio event has invalid shape");
+            }
+            return Ok(());
+        }
         let Some(args) = saved_audio_runtime_event_command_args(path, event)
             .map_err(|error| anyhow::anyhow!("{error}"))?
         else {
@@ -23269,6 +23619,9 @@ impl GameDataSet {
         path: &str,
         event: &crystal_core::state::ScriptMapRuntimeEvent,
     ) -> Result<()> {
+        if self.saved_special_routine_exists(&event.source_script) {
+            return self.validate_saved_special_routine_reference(path, &event.source_script);
+        }
         let Some(args) = self.saved_map_runtime_event_command_args(path, event)? else {
             return self.validate_saved_script_command_name_reference(
                 path,
@@ -23328,6 +23681,17 @@ impl GameDataSet {
         path: &str,
         event: &crystal_core::state::ScriptTextRuntimeEvent,
     ) -> Result<()> {
+        if event.source_script == "ReceiveItemScript" && event.command == "standard_receive_item" {
+            if event.command_index != 0
+                || event.kind != ScriptTextRuntimeKind::Write
+                || event.text_label.is_some()
+                || event.face_player
+                || !event.closes_text
+            {
+                anyhow::bail!("saved {path} ReceiveItemScript text event has invalid shape");
+            }
+            return Ok(());
+        }
         let Some(args) = saved_text_runtime_event_command_args(path, event)
             .map_err(|error| anyhow::anyhow!("{error}"))?
         else {
@@ -23352,6 +23716,15 @@ impl GameDataSet {
         runtime: &crystal_core::state::ScriptRuntimeMemory,
         wait: &crystal_core::state::ScriptTextWait,
     ) -> Result<()> {
+        if wait.source_script == "ReceiveItemScript" && wait.command == "standard_receive_item" {
+            if wait.command_index != 0 {
+                anyhow::bail!("ReceiveItemScript pending text wait must use command index 0");
+            }
+            if !runtime.named_buffers.contains_key("STRING_BUFFER_4") {
+                anyhow::bail!("ReceiveItemScript pending text wait requires STRING_BUFFER_4");
+            }
+            return Ok(());
+        }
         let path = "script_runtime.pending_text_wait.source_script";
         let Some(args) =
             saved_pending_text_wait_command_args(path, wait, runtime.pending_text_label.as_deref())
@@ -25839,6 +26212,18 @@ impl GameDataSet {
         self.npc_trades.contains_key(trade_id)
     }
 
+    pub fn saved_catch_tutorial_battle_type_exists(&self, battle_type: &str) -> bool {
+        self.maps.values().any(|module| {
+            module.script_runtime_commands.iter().any(|command| {
+                command.command == "catchtutorial"
+                    && command
+                        .args
+                        .first()
+                        .is_some_and(|candidate| candidate == battle_type)
+            })
+        })
+    }
+
     pub fn map_name_for_constant(&self, map_constant: &str) -> Result<String> {
         self.maps
             .iter()
@@ -26365,6 +26750,11 @@ impl GameDataSet {
             .event_flags
             .iter()
             .any(|known| known == flag)
+            || self
+                .fruit_trees
+                .0
+                .keys()
+                .any(|tree_id| fruit_tree_collected_flag(tree_id) == flag)
             || self.saved_story_event_constant_declares_flag(flag)
             || self.bug_contest_config.as_ref().is_some_and(|config| {
                 config
@@ -28107,6 +28497,40 @@ fn connection_destination_tile(
     offset: i32,
     target_attributes: &MapAttributes,
 ) -> Result<crystal_core::world::map::TilePosition> {
+    let (target_x, target_y, max_x, max_y) =
+        connection_destination_tile_components(source_tile, direction, offset, target_attributes)?;
+    let min_tile = 0;
+    if target_x < min_tile || target_x > max_x || target_y < min_tile || target_y > max_y {
+        anyhow::bail!(
+            "connection destination tile ({target_x}, {target_y}) is outside target map tile bounds {min_tile}..={max_x}, {min_tile}..={max_y}"
+        );
+    }
+    let target_x = i16::try_from(target_x)
+        .with_context(|| format!("connection destination x {target_x} overflows runtime tile"))?;
+    let target_y = i16::try_from(target_y)
+        .with_context(|| format!("connection destination y {target_y} overflows runtime tile"))?;
+    Ok(crystal_core::world::map::TilePosition::new(
+        target_x, target_y,
+    ))
+}
+
+fn connection_destination_tile_in_bounds(
+    source_tile: crystal_core::world::map::TilePosition,
+    direction: &str,
+    offset: i32,
+    target_attributes: &MapAttributes,
+) -> Result<bool> {
+    let (target_x, target_y, max_x, max_y) =
+        connection_destination_tile_components(source_tile, direction, offset, target_attributes)?;
+    Ok(target_x >= 0 && target_x <= max_x && target_y >= 0 && target_y <= max_y)
+}
+
+fn connection_destination_tile_components(
+    source_tile: crystal_core::world::map::TilePosition,
+    direction: &str,
+    offset: i32,
+    target_attributes: &MapAttributes,
+) -> Result<(i32, i32, i32, i32)> {
     let metatile_width = i32::from(METATILE_WIDTH);
     let offset_tiles = offset
         .checked_mul(metatile_width)
@@ -28160,21 +28584,9 @@ fn connection_destination_tile(
         ),
         other => anyhow::bail!("unsupported connection direction '{other}'"),
     };
-    let min_tile = 0;
     let max_x = width - 1;
     let max_y = height - 1;
-    if target_x < min_tile || target_x > max_x || target_y < min_tile || target_y > max_y {
-        anyhow::bail!(
-            "connection destination tile ({target_x}, {target_y}) is outside target map tile bounds {min_tile}..={max_x}, {min_tile}..={max_y}"
-        );
-    }
-    let target_x = i16::try_from(target_x)
-        .with_context(|| format!("connection destination x {target_x} overflows runtime tile"))?;
-    let target_y = i16::try_from(target_y)
-        .with_context(|| format!("connection destination y {target_y} overflows runtime tile"))?;
-    Ok(crystal_core::world::map::TilePosition::new(
-        target_x, target_y,
-    ))
+    Ok((target_x, target_y, max_x, max_y))
 }
 
 fn read_json_file<T>(path: &Path) -> Result<T>
@@ -34086,7 +34498,7 @@ fn parse_script_economy_commands(
                     commands.push(ScriptEconomyCommand {
                         command: command_name.to_string(),
                         account: Some(args[0].to_string()),
-                        amount_tokens: args[1..].iter().map(|arg| (*arg).to_string()).collect(),
+                        amount_tokens: script_economy_amount_tokens(&args[1..]),
                         source_script: script_name.clone(),
                         command_index: index,
                     });
@@ -34104,7 +34516,7 @@ fn parse_script_economy_commands(
                     commands.push(ScriptEconomyCommand {
                         command: command_name.to_string(),
                         account: None,
-                        amount_tokens: args.iter().map(|arg| (*arg).to_string()).collect(),
+                        amount_tokens: script_economy_amount_tokens(&args),
                         source_script: script_name.clone(),
                         command_index: index,
                     });
@@ -34114,6 +34526,13 @@ fn parse_script_economy_commands(
         }
     }
     Ok(commands)
+}
+
+fn script_economy_amount_tokens(args: &[&str]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| arg.split_ascii_whitespace())
+        .map(str::to_string)
+        .collect()
 }
 
 fn parse_gift_pokemon_scripts(
@@ -35938,11 +36357,13 @@ fn parse_map_scene_table(map_name: &str, payload: &Value) -> Result<MapSceneTabl
         serde_json::from_value(payload.clone()).context("parse map scene command list")?;
     let mut in_scene_section = false;
     let mut scenes = Vec::new();
+    let mut last_scene_script: Option<String> = None;
 
     for command in commands {
         match command.command.as_str() {
             "def_scene_scripts" => {
                 in_scene_section = true;
+                last_scene_script = None;
             }
             "scene_script" if in_scene_section => {
                 if command.args.len() != 1 && command.args.len() != 2 {
@@ -35951,6 +36372,7 @@ fn parse_map_scene_table(map_name: &str, payload: &Value) -> Result<MapSceneTabl
                         command.args.len()
                     );
                 }
+                last_scene_script = Some(command.args[0].clone());
                 if command.args.len() == 1 {
                     continue;
                 }
@@ -35968,12 +36390,13 @@ fn parse_map_scene_table(map_name: &str, payload: &Value) -> Result<MapSceneTabl
                 }
                 scenes.push(MapScene {
                     scene_id: command.args[0].clone(),
-                    script_name: None,
+                    script_name: last_scene_script.clone(),
                 });
             }
             "def_callbacks" | "def_warp_events" | "def_coord_events" | "def_bg_events"
             | "def_object_events" => {
                 in_scene_section = false;
+                last_scene_script = None;
             }
             _ => {}
         }
@@ -36670,7 +37093,7 @@ mod tests {
         BaseStats, Item, ability, egg_group, growth_rate, item_pocket, pokemon_type,
     };
     use crystal_core::random::Random;
-    use crystal_core::state::GameState;
+    use crystal_core::state::{GameState, ScriptRuntimeMemory};
     use crystal_core::systems::economy::{
         AmountComparison, MoneyAccount, check_coins, check_money, take_money,
     };
@@ -37653,6 +38076,100 @@ mod tests {
                 .contains("attempt active wild battle escape rng_seed_after 0 does not match")
         );
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn runtime_blackout_recovery_consumes_blackout_marker() {
+        let mut data = GameDataSet::default();
+        data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
+        data.runtime_spawn_points.insert(
+            "2".to_string(),
+            test_runtime_spawn_point(2, "PlayersHouse2F"),
+        );
+        data.runtime_map_metadata.insert(
+            "ROUTE_29".to_string(),
+            test_runtime_map_metadata("ROUTE_29", "PlayersHouse2F"),
+        );
+        data.special_routines = special_routine_rules(["WarpToSpawnPoint"]);
+        let player = crystal_core::models::Pokemon::new_for_tests(
+            species(),
+            5,
+            crystal_core::models::Dv::default(),
+        );
+        let mut state = GameState {
+            last_spawn_identifier: Some(2),
+            script_runtime: ScriptRuntimeMemory {
+                blackout_mod: Some("DARK_CAVE".to_string()),
+                ..ScriptRuntimeMemory::default()
+            },
+            battle: BattleMemory::Wild {
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                map_name: "Route30".to_string(),
+                enemy_pokemon: player.clone(),
+                enemy_party: vec![player.clone()],
+            },
+            battle_active_party_index: Some(0),
+            battle_active_enemy_party_index: Some(0),
+            ..GameState::default()
+        };
+        state.storage.party.pokemon[0] = Some(player);
+        state.sync_party_from_storage();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "Route30".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("resolve blackout");
+
+        let RuntimeMutationResult::BlackoutResolved(recovery) = outcome.result else {
+            panic!("expected blackout recovery result");
+        };
+        assert_eq!(recovery.spawn_identifier, 2);
+        assert_eq!(recovery.map_name, "PlayersHouse2F");
+        assert_eq!(state.script_runtime.blackout_mod, None);
+        assert!(matches!(state.battle, BattleMemory::Inactive));
+        assert_eq!(
+            state
+                .script_runtime
+                .pending_script_warp
+                .as_ref()
+                .map(|warp| (warp.target_map.as_str(), warp.tile)),
+            Some(("PlayersHouse2F", TilePosition::new(0, 0)))
+        );
+        assert_eq!(
+            state.overworld,
+            OverworldMemory::Active {
+                map_name: "PlayersHouse2F".to_string(),
+                tile: TilePosition::new(0, 0),
+                facing: Direction::Down,
+                mode: MovementMode::Normal
+            }
+        );
     }
 
     #[test]
@@ -41214,6 +41731,47 @@ mod tests {
                 .as_ref()
                 .map(|interaction| interaction.script.as_str()),
             Some("ObjectScript")
+        );
+    }
+
+    #[test]
+    fn overworld_input_does_not_move_or_interact_while_script_runtime_is_blocking() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        module.objects = vec![test_object("ROUTE29_TEACHER", "-1", 1, 0)];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.script_runtime.next_script = Some("BlockingScript".to_string());
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::A, GameButton::Right],
+                &BTreeSet::new(),
+            )
+            .expect("locked overworld input");
+
+        assert_eq!(
+            frame.input_mask & (B_PAD_A | crystal_core::input::B_PAD_RIGHT),
+            B_PAD_A | crystal_core::input::B_PAD_RIGHT
+        );
+        assert_eq!(frame.movement, None);
+        assert_eq!(frame.interaction, None);
+        assert_eq!(session.player.tile, TilePosition::new(0, 0));
+        assert_eq!(session.frame, 1);
+        assert_eq!(
+            state.script_runtime.next_script.as_deref(),
+            Some("BlockingScript")
         );
     }
 
@@ -50834,7 +51392,9 @@ mod tests {
             )
             .expect_err("item effects must be exact tokens");
         assert!(
-            format!("{error:#}").contains("item 'POTION' has invalid effect 'HEAL HP'"),
+            format!("{error:#}").contains(
+                "item token must be exact ASCII alphanumeric/underscore, found \"HEAL HP\""
+            ),
             "{error:#}"
         );
 
@@ -66519,9 +67079,11 @@ mod tests {
                 && diagnostic.message.contains("fadeoutmusic")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_script_special_routine"
+            diagnostic.code == "malformed_script_runtime_command"
                 && diagnostic.subject == "Start:StartScript:1"
-                && diagnostic.message.contains("$FadeOutMusic")
+                && diagnostic
+                    .message
+                    .contains("special requires exact nonempty args")
         }));
         assert!(!report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unknown_script_special_routine"
@@ -67966,7 +68528,11 @@ mod tests {
             ScriptEconomyCommand {
                 command: "checkmoney".to_string(),
                 account: Some("YOUR_MONEY".to_string()),
-                amount_tokens: vec!["ROUTE43GATE_TOLL - 1".to_string()],
+                amount_tokens: vec![
+                    "ROUTE43GATE_TOLL".to_string(),
+                    "-".to_string(),
+                    "1".to_string(),
+                ],
                 source_script: "TollScript".to_string(),
                 command_index: 2,
             },
@@ -70387,7 +70953,10 @@ mod tests {
             module.scenes.scenes[6].scene_id,
             "SCENE_ELMSLAB_AIDE_GIVES_POKE_BALLS"
         );
-        assert_eq!(module.scenes.scenes[6].script_name, None);
+        assert_eq!(
+            module.scenes.scenes[6].script_name.as_deref(),
+            Some("ElmsLabAideScript")
+        );
         assert!(module
             .map_script_section_commands
             .iter()
@@ -70421,6 +70990,29 @@ mod tests {
             command.command == "scene_script" && command.args == vec!["AzaleaPokecenter1FNoopScene"]
         }));
         assert!(module.scenes.scenes.is_empty());
+    }
+
+    #[test]
+    fn scene_const_binds_to_previous_one_arg_scene_script() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+
+        let module = data
+            .map_module("CherrygroveCity")
+            .expect("assemble CherrygroveCity module");
+        let rival_scene = module
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.scene_id == "SCENE_CHERRYGROVECITY_MEET_RIVAL")
+            .expect("Cherrygrove rival scene");
+
+        assert_eq!(
+            rival_scene.script_name.as_deref(),
+            Some("CherrygroveCityRivalScene")
+        );
     }
 
     #[test]
@@ -72329,6 +72921,229 @@ mod tests {
     }
 
     #[test]
+    fn blackoutmod_updates_last_spawn_from_compiled_spawn_table() {
+        let mut module = test_map_module("RuntimeBlackoutMap", "RUNTIME_BLACKOUT_MAP", None);
+        module.script_runtime_commands = vec![ScriptRuntimeCommand {
+            command: "blackoutmod".to_string(),
+            args: vec!["ROUTE_29".to_string()],
+            source_script: "RuntimeBlackoutScript".to_string(),
+            command_index: 0,
+        }];
+        let mut spawn = test_runtime_spawn_point(15, "Route29");
+        spawn.map_constant = "ROUTE_29".to_string();
+        let data = GameDataSet {
+            maps: [("RuntimeBlackoutMap".to_string(), module.clone())]
+                .into_iter()
+                .collect(),
+            runtime_spawn_points: [("15".to_string(), spawn)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            last_spawn_identifier: Some(0),
+            ..GameState::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeBlackoutMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            module.events.clone(),
+            module.objects.clone(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "RuntimeBlackoutMap",
+            "RuntimeBlackoutScript",
+            0,
+            ScriptRuntimeInputs::default(),
+        )
+        .expect("blackoutmod applies against compiled spawn table");
+
+        assert_eq!(state.script_runtime.blackout_mod.as_deref(), Some("ROUTE_29"));
+        assert_eq!(state.last_spawn_identifier, Some(15));
+
+        let mut missing_spawn_state = GameState {
+            last_spawn_identifier: Some(0),
+            ..GameState::default()
+        };
+        let before_missing = missing_spawn_state.clone();
+        let mut missing_spawn_session = session.clone();
+        let missing_spawn_data = GameDataSet {
+            maps: [("RuntimeBlackoutMap".to_string(), module.clone())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let error = missing_spawn_data
+            .apply_script_runtime_command_in_session(
+                &mut missing_spawn_state,
+                &mut missing_spawn_session,
+                "RuntimeBlackoutMap",
+                "RuntimeBlackoutScript",
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect_err("blackoutmod requires an exact compiled spawn target");
+        assert!(
+            error
+                .to_string()
+                .contains("compiled game pack missing spawn point for ROUTE_29"),
+            "{error:#}"
+        );
+        assert_eq!(missing_spawn_state, before_missing);
+
+        let mut first_spawn = test_runtime_spawn_point(15, "Route29");
+        first_spawn.map_constant = "ROUTE_29".to_string();
+        let mut second_spawn = test_runtime_spawn_point(16, "Route29");
+        second_spawn.map_constant = "ROUTE_29".to_string();
+        let ambiguous_data = GameDataSet {
+            maps: [("RuntimeBlackoutMap".to_string(), module)]
+                .into_iter()
+                .collect(),
+            runtime_spawn_points: [
+                ("15".to_string(), first_spawn),
+                ("16".to_string(), second_spawn),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+        let mut ambiguous_state = GameState {
+            last_spawn_identifier: Some(0),
+            ..GameState::default()
+        };
+        let before_ambiguous = ambiguous_state.clone();
+        let mut ambiguous_session = session;
+        let error = ambiguous_data
+            .apply_script_runtime_command_in_session(
+                &mut ambiguous_state,
+                &mut ambiguous_session,
+                "RuntimeBlackoutMap",
+                "RuntimeBlackoutScript",
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect_err("blackoutmod rejects ambiguous compiled spawn target");
+        assert!(
+            error
+                .to_string()
+                .contains("compiled game pack has multiple spawn points for ROUTE_29: 15 and 16"),
+            "{error:#}"
+        );
+        assert_eq!(ambiguous_state, before_ambiguous);
+    }
+
+    #[test]
+    fn consuming_map_music_requested_restores_current_map_music() {
+        let mut module = test_map_module("RuntimeMusicMap", "RUNTIME_MUSIC_MAP", None);
+        module.attributes.music = Some("MUSIC_RUNTIME_MAP".to_string());
+        let data = GameDataSet {
+            maps: [("RuntimeMusicMap".to_string(), module.clone())]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState {
+            script_runtime: ScriptRuntimeMemory {
+                current_music: Some("MUSIC_SCRIPTED_TOUR".to_string()),
+                map_music_requested: true,
+                ..ScriptRuntimeMemory::default()
+            },
+            ..GameState::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeMusicMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            module.events,
+            module.objects,
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let music_ids = BTreeSet::from(["MUSIC_RUNTIME_MAP".to_string()]);
+        let empty_audio = BTreeSet::new();
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(
+                    RuntimeScriptRuntimeFlagCommand {
+                        flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
+                    },
+                ),
+                &music_ids,
+                &empty_audio,
+                &empty_audio,
+            )
+            .expect("consume map music request");
+
+        assert!(matches!(
+            outcome.result,
+            RuntimeMutationResult::ScriptRuntimeFlagConsumed(
+                RuntimeScriptRuntimeFlagValue::MapMusicRequested
+            )
+        ));
+        assert!(!state.script_runtime.map_music_requested);
+        assert_eq!(
+            state.script_runtime.current_music.as_deref(),
+            Some("MUSIC_RUNTIME_MAP")
+        );
+
+        let mut missing_music_state = GameState {
+            script_runtime: ScriptRuntimeMemory {
+                current_music: Some("MUSIC_SCRIPTED_TOUR".to_string()),
+                map_music_requested: true,
+                ..ScriptRuntimeMemory::default()
+            },
+            ..GameState::default()
+        };
+        let before_missing_music = missing_music_state.clone();
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut missing_music_state,
+                &mut session,
+                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(
+                    RuntimeScriptRuntimeFlagCommand {
+                        flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
+                    },
+                ),
+                &BTreeSet::from(["MUSIC_OTHER_MAP".to_string()]),
+                &empty_audio,
+                &empty_audio,
+            )
+            .expect_err("missing compiled map music id rejects consumption");
+        assert!(
+            error.to_string().contains(
+                "saved maps.RuntimeMusicMap.attributes.music MUSIC_RUNTIME_MAP is missing from compiled pack audio"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(missing_music_state, before_missing_music);
+    }
+
+    #[test]
     fn execute_next_queued_script_command_enters_target_script_runtime() {
         let data = GameDataSet::default();
         let mut state = GameState::default();
@@ -72502,7 +73317,7 @@ mod tests {
             .expect("Route43 toll checkmoney");
 
         assert_eq!(check.account.as_deref(), Some("YOUR_MONEY"));
-        assert_eq!(check.amount_tokens, vec!["ROUTE43GATE_TOLL - 1"]);
+        assert_eq!(check.amount_tokens, vec!["ROUTE43GATE_TOLL", "-", "1"]);
         assert_eq!(check.command_index, 9);
 
         let mut state = GameState {
@@ -72809,6 +73624,18 @@ mod tests {
             }
         );
         assert_eq!(state.bag.items["BERRY"], 1);
+        assert_eq!(
+            state
+                .flags
+                .is_event_flag_set("FRUITTREE_ROUTE_29_COLLECTED"),
+            Ok(true)
+        );
+        assert!(
+            data.saved_event_flag_exists("FRUITTREE_ROUTE_29_COLLECTED"),
+            "fruit tree collected flags must be declared by the compiled fruit tree catalog"
+        );
+        data.validate_saved_flag_references(&state.flags)
+            .expect("fruit tree collected flag validates against compiled pack");
     }
 
     #[test]
@@ -73016,10 +73843,22 @@ mod tests {
             .expect("load johto collision");
         let warp = module.events.warps[0].clone();
         let warp_tile = warp_tile_position_checked(&warp).expect("Route29 warp coordinate");
-        let mut session =
-            OverworldSession::with_events(map, module.events.clone(), tileset, warp_tile);
+        let start_tile = checked_move_by_stride(
+            warp_tile,
+            Direction::Right,
+            StepOptions::default().stride_tiles,
+        )
+        .expect("Route29 warp test tile must have an in-bounds rightward start");
+        let mut session = OverworldSession::with_events(
+            map.clone(),
+            module.events.clone(),
+            tileset.clone(),
+            start_tile,
+        );
 
-        let trigger = session
+        let standing_session =
+            OverworldSession::with_events(map, module.events.clone(), tileset, warp_tile);
+        let trigger = standing_session
             .check_warp_checked()
             .expect("checked Route29 warp")
             .expect("Route29 warp trigger");
@@ -73041,17 +73880,16 @@ mod tests {
             .expect("checked Route29 step and warp");
         assert_eq!(
             result.outcome,
-            StepOutcome::Blocked {
-                at: checked_move_by_stride(
-                    warp_tile,
-                    Direction::Left,
-                    StepOptions::default().stride_tiles
-                )
-                .expect("Route29 warp test tile must have an in-bounds leftward target"),
-                facing: Direction::Left,
+            StepOutcome::Moved {
+                from: start_tile,
+                to: warp_tile,
+                speed_multiplier: 1,
             }
         );
-        assert_eq!(result.warp.expect("warp remains active").tile, warp_tile);
+        assert_eq!(
+            result.warp.expect("warp fires after movement").tile,
+            warp_tile
+        );
     }
 
     #[test]
@@ -73335,6 +74173,257 @@ mod tests {
         assert_eq!(session.snapshot().map_name, "NewBarkTown");
         assert_eq!(session.snapshot().tile, TilePosition::new(0, 4));
         assert_eq!(session.snapshot().frame, 1);
+    }
+
+    #[test]
+    fn route29_declared_connections_resolve_from_reachable_pack_edges() {
+        let root = repository_root_for_tests();
+        let asset_root = AssetRoot::new(root);
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load base game data");
+        let module = data.map_module("Route29").expect("assemble route module");
+        let map = data.overworld_map("Route29").expect("assemble route map");
+        let tileset = asset_root
+            .load_tileset_collision("johto")
+            .expect("load johto collision");
+        let mut diagnostics = Vec::new();
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks.clone(),
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("Route29 playability diagnostics: {diagnostics:#?}"));
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        let mut resolved = BTreeMap::new();
+        for connection in &module.attributes.connections {
+            let target_module = data
+                .map_module(&connection.target_map)
+                .expect("load destination module");
+            let Some(source) =
+                connection_source_tile_for_target(&context, connection, &target_module.attributes)
+            else {
+                assert_eq!(connection.direction, "north");
+                continue;
+            };
+            let direction = match connection.direction.as_str() {
+                "north" => Direction::Up,
+                "south" => Direction::Down,
+                "west" => Direction::Left,
+                "east" => Direction::Right,
+                other => panic!("unsupported Route29 direction {other}"),
+            };
+            let mut session = OverworldSession::with_events(
+                map.clone(),
+                module.events.clone(),
+                tileset.clone(),
+                source,
+            );
+            let outcome = session.step(
+                direction,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+            );
+            let trigger_tile = connection_trigger_tile_from_source(source, connection)
+                .unwrap_or_else(|| panic!("missing trigger tile for {connection:?}"));
+            assert_eq!(
+                outcome,
+                StepOutcome::Moved {
+                    from: source,
+                    to: trigger_tile,
+                    speed_multiplier: 1,
+                },
+                "Route29 {} connection should step from the reachable border tile",
+                connection.direction
+            );
+
+            let trigger = session
+                .check_connection_checked()
+                .expect("checked Route29 connection")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Route29 {} connection did not trigger",
+                        connection.direction
+                    )
+                });
+            assert_eq!(trigger.connection, *connection);
+            assert_eq!(trigger.tile, trigger_tile);
+
+            let transition = data
+                .resolve_connection_transition(&trigger)
+                .expect("resolve Route29 connection");
+            let destination_module = data
+                .map_module(&transition.destination.map_name)
+                .expect("load destination module");
+            let destination_map = data
+                .overworld_map(&transition.destination.map_name)
+                .expect("load destination map");
+            let destination_tileset = asset_root
+                .load_tileset_collision(&destination_module.attributes.tileset_name)
+                .expect("load destination tileset");
+            let destination_session = transition.apply_to(
+                destination_map,
+                destination_module.events.clone(),
+                destination_module.objects.clone(),
+                destination_tileset,
+                session.frame,
+                MovementMode::Normal,
+            );
+            assert_eq!(
+                destination_session.snapshot().map_name,
+                connection.target_map
+            );
+            assert_eq!(
+                destination_session.snapshot().tile,
+                transition.destination.tile
+            );
+            assert_eq!(destination_session.snapshot().frame, 1);
+            resolved.insert(
+                connection.direction.clone(),
+                (
+                    connection.target_map.clone(),
+                    source,
+                    trigger_tile,
+                    transition.destination.tile,
+                ),
+            );
+        }
+
+        assert_eq!(
+            resolved.keys().cloned().collect::<Vec<_>>(),
+            vec!["east".to_string(), "west".to_string()]
+        );
+        assert_eq!(resolved["east"].0, "NewBarkTown");
+        assert_eq!(resolved["west"].0, "CherrygroveCity");
+    }
+
+    #[test]
+    fn compiled_core_pack_route29_east_connection_uses_reachable_runtime_edge() {
+        let root = repository_root_for_tests();
+        let pack =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack");
+        let data = pack.data;
+        data.overworld_session("Route29", TilePosition::new(59, 4), 0)
+            .expect("compiled pack Route29 east source starts a runtime session");
+        let module = data.map_module("Route29").expect("assemble route module");
+        let map = data.overworld_map("Route29").expect("assemble route map");
+        let tileset = data
+            .tileset_collision("johto")
+            .expect("load compiled johto collision");
+        let mut session = OverworldSession::with_events(
+            map,
+            module.events.clone(),
+            tileset,
+            TilePosition::new(59, 4),
+        );
+
+        let outcome = session.step(
+            Direction::Right,
+            StepOptions {
+                force_step_after_turn: true,
+                ..StepOptions::default()
+            },
+        );
+        assert_eq!(
+            outcome,
+            StepOutcome::Moved {
+                from: TilePosition::new(59, 4),
+                to: TilePosition::new(60, 4),
+                speed_multiplier: 1,
+            }
+        );
+
+        let trigger = session
+            .check_connection_checked()
+            .expect("checked Route29 connection")
+            .expect("Route29 east connection");
+        assert_eq!(trigger.connection.direction, "east");
+        assert_eq!(trigger.connection.target_map, "NewBarkTown");
+    }
+
+    #[test]
+    fn route29_input_blocks_reachable_connection_edge_outside_target_overlap() {
+        let root = repository_root_for_tests();
+        let asset_root = AssetRoot::new(root);
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load base game data");
+        let module = data.map_module("Route29").expect("assemble route module");
+        let map = data.overworld_map("Route29").expect("assemble route map");
+        let tileset = asset_root
+            .load_tileset_collision("johto")
+            .expect("load johto collision");
+        let mut diagnostics = Vec::new();
+        let context = map_playability_context_from_parts(
+            &data,
+            &module.id,
+            &module.attributes,
+            module.blocks.clone(),
+            &PlayabilityRules::default(),
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("Route29 playability diagnostics: {diagnostics:#?}"));
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let north = module
+            .attributes
+            .connections
+            .iter()
+            .find(|connection| connection.direction == "north")
+            .expect("Route29 north connection");
+        let route46 = data.map_module("Route46").expect("assemble Route46 module");
+        let first_reachable_source =
+            connection_source_tile(&context, north).expect("reachable north edge tile");
+        assert_eq!(
+            connection_source_tile_for_target(&context, north, &route46.attributes),
+            None
+        );
+        let blocked_target = connection_trigger_tile_from_source(first_reachable_source, north)
+            .expect("north trigger tile");
+        assert!(
+            !connection_destination_tile_in_bounds(
+                blocked_target,
+                &north.direction,
+                north.offset,
+                &route46.attributes,
+            )
+            .expect("check north destination bounds")
+        );
+
+        let mut state = GameState::default();
+        let mut session = OverworldSession::with_events(
+            map,
+            module.events.clone(),
+            tileset,
+            first_reachable_source,
+        );
+        session.player.facing = Direction::Up;
+        let music_ids = data
+            .audio
+            .iter()
+            .map(|asset| asset.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let frame = data
+            .apply_overworld_input(&mut state, &mut session, [GameButton::Up], &music_ids)
+            .expect("apply blocked out-of-overlap connection input");
+
+        assert_eq!(
+            frame.movement,
+            Some(StepOutcome::Blocked {
+                at: blocked_target,
+                facing: Direction::Up,
+            })
+        );
+        assert_eq!(frame.connection, None);
+        assert_eq!(session.player.tile, first_reachable_source);
+        assert_eq!(session.frame, 1);
     }
 
     #[test]

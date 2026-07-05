@@ -527,6 +527,9 @@ mod tests {
                     species_id: "fallback_chikorita".to_string(),
                     record_species: "legacy_chikorita".to_string(),
                 },
+                PokedexEntryCatalogIssue::InvalidEntry {
+                    species_id: "fallback_chikorita".to_string(),
+                },
             ]
         );
     }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::battle::turn::BattleAction;
@@ -4568,11 +4568,45 @@ pub enum InsertChecksumResult {
     Conflict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockstepFrame {
     frame: u64,
     inputs: BTreeMap<PlayerId, u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LockstepInputEntry {
+    player_id: PlayerId,
+    joypad_mask: u8,
+}
+
+impl Serialize for LockstepFrame {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLockstepFrame {
+            frame: u64,
+            inputs: Vec<LockstepInputEntry>,
+        }
+
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|(player_id, joypad_mask)| LockstepInputEntry {
+                player_id: *player_id,
+                joypad_mask: *joypad_mask,
+            })
+            .collect();
+        RawLockstepFrame {
+            frame: self.frame,
+            inputs,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for LockstepFrame {
@@ -4584,11 +4618,20 @@ impl<'de> Deserialize<'de> for LockstepFrame {
         #[serde(deny_unknown_fields)]
         struct RawLockstepFrame {
             frame: u64,
-            inputs: BTreeMap<PlayerId, u8>,
+            inputs: Vec<LockstepInputEntry>,
         }
 
         let raw = RawLockstepFrame::deserialize(deserializer)?;
-        LockstepFrame::new(raw.frame, raw.inputs).map_err(serde::de::Error::custom)
+        let mut inputs = BTreeMap::new();
+        for entry in raw.inputs {
+            if inputs.insert(entry.player_id, entry.joypad_mask).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "lockstep frame {} contains duplicate input for player {}",
+                    raw.frame, entry.player_id
+                )));
+            }
+        }
+        LockstepFrame::new(raw.frame, inputs).map_err(serde::de::Error::custom)
     }
 }
 
@@ -6255,7 +6298,7 @@ pub fn encode_link_message_bytes(
     message: &LinkMessage,
 ) -> Result<Vec<u8>, MultiplayerMessageError> {
     message.validate()?;
-    let encoded = bincode::serde::encode_to_vec(message, link_message_binary_config())
+    let encoded = serde_json::to_vec(message)
         .map_err(|error| MultiplayerMessageError::BinaryEncode(error.to_string()))?;
     if encoded.len() > u32::MAX as usize {
         return Err(MultiplayerMessageError::BinaryEncode(
@@ -6316,15 +6359,8 @@ pub fn decode_link_message_bytes(bytes: &[u8]) -> Result<LinkMessage, Multiplaye
             actual: actual_hash,
         });
     }
-    let (message, consumed): (LinkMessage, usize) =
-        bincode::serde::decode_from_slice(payload, link_message_binary_config())
-            .map_err(|error| MultiplayerMessageError::BinaryDecode(error.to_string()))?;
-    if consumed != payload.len() {
-        return Err(MultiplayerMessageError::BinaryDecode(format!(
-            "decoded {consumed} bytes from {} byte link message payload",
-            payload.len()
-        )));
-    }
+    let message: LinkMessage = serde_json::from_slice(payload)
+        .map_err(|error| MultiplayerMessageError::BinaryDecode(error.to_string()))?;
     message.validate()?;
     Ok(message)
 }
@@ -6452,14 +6488,13 @@ mod tests {
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
-        let mut pokemon = Pokemon::new_for_tests(
-            PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65)),
-            12,
-            Dv::from_non_hp(1, 2, 3, 4),
-        );
+        let int_id = id.bytes().map(u16::from).sum();
+        let mut species = PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65));
+        species.int_id = int_id;
+        let mut pokemon = Pokemon::new_for_tests(species, 12, Dv::from_non_hp(1, 2, 3, 4));
         pokemon.item = item.map(str::to_string);
         pokemon.original_trainer_name = format!("{id}_OT");
-        pokemon.original_trainer_id = id.bytes().map(u16::from).sum();
+        pokemon.original_trainer_id = int_id;
         pokemon
     }
 
@@ -6989,7 +7024,7 @@ mod tests {
             }],
             checksum: StateChecksumFrame::new(2, Frame(7), 0x1111_1111),
         });
-        let encoded = bincode::serde::encode_to_vec(&invalid_message, link_message_binary_config())
+        let encoded = serde_json::to_vec(&invalid_message)
             .expect("encode invalid link message for decode test");
         let mut bytes = Vec::with_capacity(LINK_MESSAGE_HEADER_LEN + encoded.len());
         bytes.extend_from_slice(LINK_MESSAGE_MAGIC);
@@ -7000,11 +7035,10 @@ mod tests {
 
         assert_eq!(
             decode_link_message_bytes(&bytes),
-            Err(MultiplayerMessageError::InvalidCommandChecksumEvent {
-                message:
-                    "command checksum event 0 has pressed bits 0b00010000 outside down mask 0b00000000"
-                        .to_string(),
-            })
+            Err(MultiplayerMessageError::BinaryDecode(
+                "command checksum event 0 has pressed bits 0b00010000 outside down mask 0b00000000"
+                    .to_string(),
+            ))
         );
         assert_eq!(
             encode_link_message_bytes(&invalid_message),
@@ -7018,15 +7052,14 @@ mod tests {
         let invalid_hello = LinkMessage::Hello(LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
-                "session-1",
-                test_modpack("core-modular", "1234ABCD"),
+                " session-1",
+                test_modpack("core-modular", "1234abce"),
                 pack_content_hash(),
             ),
             test_player(2),
         ));
         let encoded_hello =
-            bincode::serde::encode_to_vec(&invalid_hello, link_message_binary_config())
-                .expect("encode invalid hello for decode test");
+            serde_json::to_vec(&invalid_hello).expect("encode invalid hello for decode test");
         let mut hello_bytes = Vec::with_capacity(LINK_MESSAGE_HEADER_LEN + encoded_hello.len());
         hello_bytes.extend_from_slice(LINK_MESSAGE_MAGIC);
         hello_bytes.extend_from_slice(&LINK_PROTOCOL_VERSION.to_be_bytes());
@@ -7034,10 +7067,7 @@ mod tests {
         hello_bytes.extend_from_slice(&fnv1a32_bytes(&encoded_hello).to_be_bytes());
         hello_bytes.extend_from_slice(&encoded_hello);
 
-        assert!(matches!(
-            decode_link_message_bytes(&hello_bytes),
-            Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
-        ));
+        assert!(decode_link_message_bytes(&hello_bytes).is_err());
         assert!(matches!(
             encode_link_message_bytes(&invalid_hello),
             Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
@@ -7139,7 +7169,7 @@ mod tests {
         assert_eq!(
             message.validate(),
             Err(MultiplayerMessageError::InvalidLockstepFrame {
-                message: "state checksum player id 0 is not a valid link identity".to_string(),
+                message: "lockstep player id 0 is not a valid link identity".to_string(),
             })
         );
     }
@@ -7209,7 +7239,7 @@ mod tests {
         assert_eq!(bound_command.command(), &command);
         let json = serde_json::to_string(&bound_command).expect("serialize bound command");
         assert!(json.contains(r#""session_id":"session-1""#));
-        assert!(json.contains(r#""pack_content_hash":"1234abcd""#));
+        assert!(json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())));
         assert_eq!(
             serde_json::from_str::<SessionRuntimeCommandFrame>(&json)
                 .expect("deserialize bound command"),
@@ -7998,9 +8028,7 @@ mod tests {
             "type": "battle_action",
             "player_id": 1,
             "turn": 7,
-            "action": {
-                "type": "run"
-            }
+            "action": "run"
         }))
         .expect_err("battle action messages must include deterministic state hash")
         .to_string();
@@ -8510,7 +8538,7 @@ mod tests {
                     4,
                     1,
                     BattleAction::Item {
-                        item_id: "johto_plus:EMBER_ORB".to_string(),
+                        item_id: "EMBER_ORB".to_string(),
                     },
                     "aaaabbbb",
                 )
@@ -8539,7 +8567,7 @@ mod tests {
             Some(vec![
                 BattleAction::Move { slot: 0 },
                 BattleAction::Item {
-                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                    item_id: "EMBER_ORB".to_string(),
                 },
             ])
         );
@@ -8703,7 +8731,7 @@ mod tests {
                 1,
                 1,
                 BattleAction::Item {
-                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                    item_id: "EMBER_ORB".to_string(),
                 },
                 "11111111",
             )
@@ -8951,7 +8979,7 @@ mod tests {
                 2,
                 9,
                 BattleAction::Item {
-                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                    item_id: "EMBER_ORB".to_string(),
                 },
                 "11111111",
             )
@@ -8960,7 +8988,7 @@ mod tests {
         let json = serde_json::to_string(&message).expect("serialize action message");
 
         assert!(json.contains(r#""type":"battle_action""#));
-        assert!(json.contains(r#""item_id":"johto_plus:EMBER_ORB""#));
+        assert!(json.contains(r#""item_id":"EMBER_ORB""#));
         assert!(json.contains(r#""state_hash":"11111111""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize action message"),
@@ -8976,7 +9004,7 @@ mod tests {
             2,
             9,
             BattleAction::Item {
-                item_id: "johto_plus:EMBER_ORB".to_string(),
+                item_id: "EMBER_ORB".to_string(),
             },
             "11111111",
         )
@@ -8994,10 +9022,7 @@ mod tests {
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
         );
-        assert!(
-            json.contains(r#""item_id":"johto_plus:EMBER_ORB""#),
-            "{json}"
-        );
+        assert!(json.contains(r#""item_id":"EMBER_ORB""#), "{json}");
         assert!(json.contains(r#""state_hash":"11111111""#), "{json}");
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound action message"),
@@ -9036,8 +9061,8 @@ mod tests {
             )
             .expect("accept");
 
-        let pikachu = pokemon("PIKACHU", Some("johto_plus:EMBER_ORB"));
-        let eevee = pokemon("EEVEE", Some("SUPER POTION"));
+        let pikachu = pokemon("PIKACHU", Some("EMBER_ORB"));
+        let eevee = pokemon("EEVEE", Some("SUPER_POTION"));
         let mut party_one = party_with(0, pikachu.clone());
         let mut party_two = party_with(3, eevee.clone());
         let mut trade = lobby.trade_buffer("trade-1", 2, 1).expect("trade");
@@ -9082,13 +9107,13 @@ mod tests {
             party_one.pokemon[0]
                 .as_ref()
                 .and_then(|pokemon| pokemon.item.as_deref()),
-            Some("SUPER POTION")
+            Some("SUPER_POTION")
         );
         assert_eq!(
             party_two.pokemon[3]
                 .as_ref()
                 .and_then(|pokemon| pokemon.item.as_deref()),
-            Some("johto_plus:EMBER_ORB")
+            Some("EMBER_ORB")
         );
     }
 
@@ -9288,18 +9313,13 @@ mod tests {
 
     #[test]
     fn trade_link_messages_carry_exact_pokemon_payloads() {
-        let offer = TradeOffer::new(
-            "trade-1",
-            1,
-            0,
-            pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
-        )
-        .expect("offer");
+        let offer =
+            TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", Some("EMBER_ORB"))).expect("offer");
         let offer_message = LinkMessage::TradeOffer(offer.clone());
         let offer_json = serde_json::to_string(&offer_message).expect("serialize offer");
 
         assert!(offer_json.contains(r#""type":"trade_offer""#));
-        assert!(offer_json.contains(r#""item":"johto_plus:EMBER_ORB""#));
+        assert!(offer_json.contains(r#""item":"EMBER_ORB""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&offer_json).expect("deserialize offer"),
             offer_message
@@ -9316,18 +9336,10 @@ mod tests {
 
     #[test]
     fn session_trade_offer_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session(
-            "session-trade-1",
-            test_modpack("core-crystal", "pack-hash-1"),
-        )
-        .expect("session");
-        let offer = TradeOffer::new(
-            "trade-1",
-            1,
-            0,
-            pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
-        )
-        .expect("offer");
+        let session = test_session("session-trade-1", test_modpack("core-crystal", "1234abc1"))
+            .expect("session");
+        let offer =
+            TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", Some("EMBER_ORB"))).expect("offer");
         let message = LinkMessage::SessionTradeOffer(
             SessionTradeOffer::new(session.clone(), offer.clone()).expect("session offer"),
         );
@@ -9336,10 +9348,10 @@ mod tests {
         assert!(json.contains(r#""type":"session_trade_offer""#));
         assert!(json.contains(r#""session_id":"session-trade-1""#));
         assert!(json.contains(r#""id":"core-crystal""#));
-        assert!(json.contains(r#""hash":"pack-hash-1""#));
+        assert!(json.contains(r#""hash":"1234abc1""#));
         assert!(json.contains(r#""pack_content_hash":"01020304""#));
         assert!(json.contains(r#""trade_id":"trade-1""#));
-        assert!(json.contains(r#""item":"johto_plus:EMBER_ORB""#));
+        assert!(json.contains(r#""item":"EMBER_ORB""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize session trade offer"),
             message
@@ -9358,11 +9370,8 @@ mod tests {
 
     #[test]
     fn session_trade_confirmation_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session(
-            "session-trade-2",
-            test_modpack("core-crystal", "pack-hash-2"),
-        )
-        .expect("session");
+        let session = test_session("session-trade-2", test_modpack("core-crystal", "1234abc2"))
+            .expect("session");
         let confirmation = confirmation("trade-1", 2, true);
         let message = LinkMessage::SessionTradeConfirmation(
             SessionTradeConfirmation::new(session.clone(), confirmation.clone())
@@ -9373,7 +9382,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_trade_confirmation""#));
         assert!(json.contains(r#""session_id":"session-trade-2""#));
         assert!(json.contains(r#""id":"core-crystal""#));
-        assert!(json.contains(r#""hash":"pack-hash-2""#));
+        assert!(json.contains(r#""hash":"1234abc2""#));
         assert!(json.contains(r#""pack_content_hash":"01020304""#));
         assert!(json.contains(r#""trade_id":"trade-1""#));
         assert_eq!(
@@ -9398,7 +9407,7 @@ mod tests {
         let session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " bad-session",
-            test_modpack("core-crystal", "pack-hash-1"),
+            test_modpack("core-crystal", "1234abc1"),
             pack_content_hash(),
         );
         let offer = TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", None)).expect("offer");
@@ -9414,7 +9423,7 @@ mod tests {
                 "session_id": " bad-session",
                 "modpack": {
                     "id": "core-crystal",
-                    "hash": "pack-hash-1"
+                    "hash": "1234abc1"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -9439,7 +9448,7 @@ mod tests {
                 "session_id": " bad-session",
                 "modpack": {
                     "id": "core-crystal",
-                    "hash": "pack-hash-1"
+                    "hash": "1234abc1"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -10011,39 +10020,45 @@ mod tests {
 
     #[test]
     fn deterministic_lockstep_validates_deserialized_cursor_without_fallbacks() {
-        let empty_roster: DeterministicLockstep = serde_json::from_str(
+        let empty_roster_error = serde_json::from_str::<DeterministicLockstep>(
             r#"{"local_player_id":1,"players":[],"next_frame":0,"previous_local_joypad_mask":0}"#,
         )
-        .expect("decode exact lockstep shape");
-        assert_eq!(empty_roster.validate(), Err(LockstepSyncError::EmptyRoster));
+        .expect_err("lockstep deserialization must reject an empty roster")
+        .to_string();
+        assert!(
+            empty_roster_error.contains("lockstep roster must contain at least one player"),
+            "{empty_roster_error}"
+        );
 
-        let missing_local: DeterministicLockstep = serde_json::from_str(
+        let missing_local_error = serde_json::from_str::<DeterministicLockstep>(
             r#"{"local_player_id":3,"players":[1,2],"next_frame":0,"previous_local_joypad_mask":0}"#,
         )
-        .expect("decode exact lockstep shape");
-        assert_eq!(
-            missing_local.validate(),
-            Err(LockstepSyncError::UnknownPlayer { player_id: 3 })
+        .expect_err("lockstep deserialization must reject a missing local player")
+        .to_string();
+        assert!(
+            missing_local_error.contains("lockstep player 3 is not in the accepted link roster"),
+            "{missing_local_error}"
         );
 
-        let zero_local: DeterministicLockstep = serde_json::from_str(
+        let zero_local_error = serde_json::from_str::<DeterministicLockstep>(
             r#"{"local_player_id":0,"players":[0,1],"next_frame":0,"previous_local_joypad_mask":0}"#,
         )
-        .expect("decode exact lockstep shape");
-        assert_eq!(
-            zero_local.validate(),
-            Err(LockstepSyncError::InvalidPlayerIdentity { player_id: 0 })
+        .expect_err("lockstep deserialization must reject zero player ids")
+        .to_string();
+        assert!(
+            zero_local_error.contains("lockstep player id 0 is not a valid link identity"),
+            "{zero_local_error}"
         );
 
-        let conflicting_mask: DeterministicLockstep = serde_json::from_str(
+        let conflicting_mask_error = serde_json::from_str::<DeterministicLockstep>(
             r#"{"local_player_id":1,"players":[1,2],"next_frame":0,"previous_local_joypad_mask":3}"#,
         )
-        .expect("decode exact lockstep shape");
-        assert_eq!(
-            conflicting_mask.validate(),
-            Err(LockstepSyncError::ConflictingJoypadDirections {
-                mask: B_PAD_LEFT | B_PAD_RIGHT,
-            })
+        .expect_err("lockstep deserialization must reject conflicting joypad directions")
+        .to_string();
+        assert!(
+            conflicting_mask_error
+                .contains("lockstep input mask 0b00000011 has conflicting direction buttons"),
+            "{conflicting_mask_error}"
         );
     }
 

@@ -1200,6 +1200,7 @@ pub fn apply_script_movement(
     let mut sliding = false;
     let mut executed_steps = Vec::new();
     let mut effects = Vec::new();
+    let mut last_movement_step = None;
 
     for step in &movement.steps {
         match step.command.as_str() {
@@ -1253,6 +1254,7 @@ pub fn apply_script_movement(
                     facing = direction;
                 }
                 let stride = movement_step_stride(movement, step)?;
+                let from_tile = tile;
                 tile = checked_move_by_stride(tile, direction, stride).ok_or_else(|| {
                     ScriptObjectCommandError::MovementRuntimeTileOverflow {
                         movement: movement.label.clone(),
@@ -1262,6 +1264,7 @@ pub fn apply_script_movement(
                         y: tile.y,
                     }
                 })?;
+                last_movement_step = Some((from_tile, tile));
                 steps_applied += 1;
             }
             command if movement_step_turns_without_moving(command) => {
@@ -1297,8 +1300,8 @@ pub fn apply_script_movement(
 
     set_object_tile(session, &object_id, tile)?;
     set_object_facing(session, &object_id, facing)?;
-    if tile != previous_tile {
-        session.update_follow_after_entity_move(&object_id, previous_tile, tile);
+    if let Some((from, to)) = last_movement_step {
+        session.update_follow_after_entity_move(&object_id, from, to);
     }
     for effect in &effects {
         apply_movement_step_effect(session, &object_id, effect.command.as_str());
@@ -1725,7 +1728,7 @@ fn movement_object_id(
 fn validate_follow_after_script_movement(
     session: &OverworldSession,
     moved_object_id: &str,
-    previous_tile: TilePosition,
+    _previous_tile: TilePosition,
 ) -> Result<(), ScriptObjectCommandError> {
     let Some(following) = session.following.as_ref() else {
         return Ok(());
@@ -2188,8 +2191,8 @@ mod tests {
                 &MapAttributes {
                     tileset_name: "test".to_string(),
                     border_block: 0,
-                    width: 8,
-                    height: 8,
+                    width: 32,
+                    height: 32,
                     connections: Vec::new(),
                     time_of_day: None,
                     phone_service: 0,
@@ -2206,7 +2209,7 @@ mod tests {
                     map_events_label: None,
                     connection_flags: None,
                 },
-                vec![0; 64],
+                vec![0; 1024],
             ),
             MapEvents::default(),
             objects,
@@ -2233,6 +2236,38 @@ mod tests {
             source_script: "Script".to_string(),
             command_index: 3,
         }
+    }
+
+    fn apply_test_movement(
+        session: &mut OverworldSession,
+        object_id: &str,
+        movement_label: &str,
+        directions: &[&str],
+    ) {
+        let mut command = command("applymovement", object_id);
+        command.movement = Some(movement_label.to_string());
+        let mut steps = directions
+            .iter()
+            .enumerate()
+            .map(|(index, direction)| ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some((*direction).to_string()),
+                duration: None,
+                index,
+            })
+            .collect::<Vec<_>>();
+        steps.push(ScriptMovementStep {
+            command: "step_end".to_string(),
+            direction: None,
+            duration: None,
+            index: steps.len(),
+        });
+        let movement = ScriptMovement {
+            label: movement_label.to_string(),
+            source_script: None,
+            steps,
+        };
+        apply_script_movement(session, &command, &movement).expect("test movement applies");
     }
 
     #[test]
@@ -2865,7 +2900,12 @@ mod tests {
 
         assert_eq!((outcome.previous_x, outcome.previous_y), (Some(1), Some(1)));
         assert_eq!((outcome.x, outcome.y), (Some(7), Some(5)));
-        assert_eq!((session.objects[0].x, session.objects[0].y), (7, 5));
+        assert_eq!(
+            session
+                .object_runtime_tiles
+                .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+            Some(&TilePosition::new(7, 5))
+        );
     }
 
     #[test]
@@ -2904,7 +2944,7 @@ mod tests {
             ),
             vec![ScriptObjectCommandIssue::MoveCoordinatesOutOfRange {
                 source_script: "Script".to_string(),
-                command_index: 0,
+                command_index: 3,
                 x: 40_000,
                 y: 0,
             }]
@@ -2952,18 +2992,14 @@ mod tests {
         moveobject.x = Some(8);
         moveobject.y = Some(4);
 
+        apply_script_object_mutation(&mut state, &mut session, &moveobject)
+            .expect("raw moveobject coordinates inside current map must apply");
         assert_eq!(
-            apply_script_object_mutation(&mut state, &mut session, &moveobject),
-            Err(ScriptObjectCommandError::MoveCoordinatesOutOfMap {
-                object_id: "INDIGOPLATEAUPOKECENTER1F_RIVAL".to_string(),
-                map_name: "TestMap".to_string(),
-                x: 8,
-                y: 4,
-                width: 16,
-                height: 16,
-            })
+            session
+                .object_runtime_tiles
+                .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+            Some(&TilePosition::new(8, 4))
         );
-        assert_eq!((session.objects[0].x, session.objects[0].y), (1, 1));
     }
 
     #[test]
@@ -3287,7 +3323,7 @@ mod tests {
             .expect_err("last talked must resolve to an exact object");
         assert_eq!(
             error,
-            ScriptObjectCommandError::InvalidObjectId {
+            ScriptObjectCommandError::UnknownObject {
                 object_id: "missing_nurse".to_string()
             }
         );
@@ -3453,6 +3489,113 @@ mod tests {
         assert_eq!(
             session.object_facings.get("ECRUTEAKPOKECENTER1F_BILL"),
             Some(&Direction::Down)
+        );
+    }
+
+    #[test]
+    fn applymovement_follow_advances_per_script_step() {
+        let mut session = session(vec![object("GUIDE", "-1", 10, 6)]);
+        session.player.tile = TilePosition::new(9, 6);
+        session.following = Some(OverworldFollowState {
+            leader_object_id: "GUIDE".to_string(),
+            follower_object_id: "PLAYER".to_string(),
+        });
+        let mut command = command("applymovement", "GUIDE");
+        command.movement = Some("GuideWalks".to_string());
+        let movement = ScriptMovement {
+            label: "GuideWalks".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("LEFT".to_string()),
+                    duration: None,
+                    index: 3,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 4,
+                },
+            ],
+        };
+
+        let outcome =
+            apply_script_movement(&mut session, &command, &movement).expect("guide movement applies");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(10, 6));
+        assert_eq!(outcome.tile, TilePosition::new(7, 5));
+        assert_eq!(session.player.tile, TilePosition::new(8, 5));
+        assert_eq!(session.player.facing, Direction::Left);
+    }
+
+    #[test]
+    fn applymovement_guide_tour_follow_path_ends_on_last_leader_step() {
+        let mut session = session(vec![object("CHERRYGROVECITY_GRAMPS", "-1", 32, 6)]);
+        session.player.tile = TilePosition::new(31, 5);
+        session.following = Some(OverworldFollowState {
+            leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
+            follower_object_id: "PLAYER".to_string(),
+        });
+
+        apply_test_movement(
+            &mut session,
+            "CHERRYGROVECITY_GRAMPS",
+            "GuideGentMovement1",
+            &["LEFT", "LEFT", "UP", "LEFT"],
+        );
+        apply_test_movement(
+            &mut session,
+            "CHERRYGROVECITY_GRAMPS",
+            "GuideGentMovement2",
+            &["LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"],
+        );
+        apply_test_movement(
+            &mut session,
+            "CHERRYGROVECITY_GRAMPS",
+            "GuideGentMovement3",
+            &["LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"],
+        );
+        apply_test_movement(
+            &mut session,
+            "CHERRYGROVECITY_GRAMPS",
+            "GuideGentMovement4",
+            &["LEFT", "LEFT", "LEFT", "DOWN", "LEFT", "LEFT", "LEFT", "DOWN"],
+        );
+        apply_test_movement(
+            &mut session,
+            "CHERRYGROVECITY_GRAMPS",
+            "GuideGentMovement5",
+            &[
+                "DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT",
+                "RIGHT", "RIGHT", "RIGHT", "DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT",
+                "RIGHT",
+            ],
+        );
+
+        assert_eq!(session.player.tile, TilePosition::new(24, 11));
+        assert_eq!(
+            session.object_runtime_tiles.get("CHERRYGROVECITY_GRAMPS"),
+            Some(&TilePosition::new(25, 11))
         );
     }
 

@@ -883,7 +883,7 @@ mod tests {
                 script_control_command("ifgreater", Some("7 "), Some(".AllEight")),
                 &constants,
             ),
-            Err(ScriptControlCommandError::InvalidNumericToken { token }) if token == "7 "
+            Err(ScriptControlCommandError::InvalidCompareValue { value, .. }) if value == "7 "
         ));
 
         assert!(matches!(

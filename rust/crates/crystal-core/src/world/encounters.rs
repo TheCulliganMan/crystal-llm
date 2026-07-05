@@ -2203,6 +2203,18 @@ mod tests {
                     map_name: "fallback_route_29".to_string(),
                     time_key: "fallback_morning".to_string(),
                 },
+                WildEncounterCatalogIssue::EmptyGrassSlots {
+                    map_name: "fallback_route_29".to_string(),
+                    time_key: "night",
+                },
+                WildEncounterCatalogIssue::EmptyWaterSlots {
+                    map_name: "fallback_route_29".to_string(),
+                    time_key: "day",
+                },
+                WildEncounterCatalogIssue::EmptyWaterSlots {
+                    map_name: "fallback_route_29".to_string(),
+                    time_key: "night",
+                },
             ]
         );
 
@@ -2935,7 +2947,10 @@ mod tests {
                 serde_json::json!({
                     "map_name": "Route29",
                     "tables": {
-                        "head butt": {"common": [], "rare": []}
+                        "head butt": {
+                            "common": [{"weight": 100, "species": "AIPOM", "level": 10}],
+                            "rare": []
+                        }
                     }
                 }),
             ),

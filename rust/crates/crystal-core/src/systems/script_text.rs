@@ -630,6 +630,7 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             source_script,
             command_index,
         } => {
+            state.script_runtime.text_window_open = true;
             state.script_runtime.pending_text_wait = Some(ScriptTextWait {
                 command: command.clone(),
                 source_script: source_script.clone(),
@@ -652,6 +653,7 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             source_script,
             command_index,
         } => {
+            state.script_runtime.text_window_open = true;
             state.script_runtime.pending_text_label = None;
             state.script_runtime.pending_yes_no = Some(ScriptYesNoPrompt {
                 source_script: source_script.clone(),

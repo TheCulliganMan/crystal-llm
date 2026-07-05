@@ -870,6 +870,12 @@ pub fn validate_script_runtime_command(
             });
         }
     }
+    if command.command == "special" && !is_exact_nonempty_runtime_pack_id(&command.args[0]) {
+        return Err(ScriptRuntimeCommandError::PaddedArg {
+            command: command.command.clone(),
+            arg: command.args[0].clone(),
+        });
+    }
     Ok(())
 }
 
@@ -1523,14 +1529,20 @@ mod tests {
                 &command("getitemname", &["BUFFER_1", "legacy_POTION"]),
                 &catalog
             ),
-            vec![ScriptRuntimeCommandIssue::InvalidItem {
-                item_id: "legacy_POTION".to_string()
+            vec![ScriptRuntimeCommandIssue::InvalidCommand {
+                error: ScriptRuntimeCommandError::PaddedArg {
+                    command: "getitemname".to_string(),
+                    arg: "legacy_POTION".to_string(),
+                }
             }]
         );
         assert_eq!(
             script_runtime_command_issues(&command("callasm", &["fallbackMainScript"]), &catalog),
-            vec![ScriptRuntimeCommandIssue::InvalidTarget {
-                target_label: "fallbackMainScript".to_string()
+            vec![ScriptRuntimeCommandIssue::InvalidCommand {
+                error: ScriptRuntimeCommandError::PaddedArg {
+                    command: "callasm".to_string(),
+                    arg: "fallbackMainScript".to_string(),
+                }
             }]
         );
     }
@@ -1559,8 +1571,11 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(&command("special", &["$FadeOutMusic"]), &catalog),
-            vec![ScriptRuntimeCommandIssue::InvalidSpecialRoutine {
-                special_id: "$FadeOutMusic".to_string()
+            vec![ScriptRuntimeCommandIssue::InvalidCommand {
+                error: ScriptRuntimeCommandError::PaddedArg {
+                    command: "special".to_string(),
+                    arg: "$FadeOutMusic".to_string(),
+                }
             }]
         );
         assert_eq!(
@@ -2597,9 +2612,9 @@ mod tests {
 
         assert_eq!(
             error,
-            ScriptRuntimeCommandError::InvalidNumericToken {
+            ScriptRuntimeCommandError::PaddedArg {
                 command: "menu_coords".to_string(),
-                token: "SCREEN_WIDTH\t-\t1".to_string(),
+                arg: "SCREEN_WIDTH\t-\t1".to_string(),
             }
         );
         assert_eq!(state.script_runtime.menu_coords, None);

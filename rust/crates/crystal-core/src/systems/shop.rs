@@ -719,7 +719,7 @@ mod tests {
             battle_stat_boost_stages: None,
             battle_escape_mode: None,
             battle_capture_ball: None,
-battle_focus_energy: None,
+            battle_focus_energy: None,
             battle_stat_drop_guard: None,
             battle_stat_drop_guard_turns: None,
             confusion_heal: None,
@@ -976,7 +976,7 @@ battle_focus_energy: None,
                 .expect_err("malformed mart catalog tokens must fail during JSON load")
                 .to_string();
             assert!(
-                error.contains("mart") && error.contains("exact ASCII alphanumeric/underscore"),
+                error.contains("mart") && error.contains("exact ASCII alphanumeric or underscore"),
                 "{label} produced unexpected error: {error}"
             );
         }

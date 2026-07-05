@@ -105,7 +105,116 @@ const applyKnownImplicitFallthroughs = (scripts: StoryScripts): void => {
   );
 };
 
-const isMovementDataLabel = (label: string): boolean => label.startsWith("MovementData_");
+const isMovementDataLabel = (label: string): boolean =>
+  label.startsWith("MovementData_") || /Movement\d*$/.test(label);
+const isMapSectionLabel = (label: string): boolean => /_Map(?:Scripts|Events)$/.test(label);
+
+const SCRIPT_TERMINATORS = new Set([
+  "end",
+  "endcallback",
+  "jump",
+  "jumpstd",
+  "sjump",
+  "return",
+]);
+
+const TEXT_COMMANDS = new Set(["text", "line", "para", "cont", "done"]);
+const DATA_COMMANDS = new Set(["db", "dw", "ds", "dn", "menu_coords"]);
+const MOVEMENT_COMMANDS = new Set([
+  "step",
+  "slow_step",
+  "fast_step",
+  "big_step",
+  "turn_step",
+  "jump_step",
+  "fast_jump_step",
+  "slow_jump_step",
+  "slide_step",
+  "fast_slide_step",
+  "slow_slide_step",
+  "step_bump",
+  "turn_head",
+  "turn_away",
+  "turn_in",
+  "turn_waterfall",
+  "step_sleep",
+  "step_sleep_1",
+  "step_sleep_2",
+  "step_sleep_3",
+  "step_sleep_4",
+  "step_sleep_5",
+  "step_sleep_6",
+  "step_sleep_7",
+  "step_sleep_8",
+  "step_sleep_9",
+  "step_sleep_10",
+  "step_sleep_11",
+  "step_sleep_12",
+  "step_sleep_13",
+  "step_sleep_14",
+  "step_sleep_15",
+  "step_sleep_16",
+  "step_wait_end",
+  "step_end",
+  "step_loop",
+  "step_stop",
+  "fix_facing",
+  "remove_fixed_facing",
+  "set_sliding",
+  "remove_sliding",
+  "teleport_from",
+  "teleport_to",
+  "skyfall",
+  "skyfall_top",
+  "step_dig",
+  "fish_got_bite",
+  "fish_cast_rod",
+  "hide_emote",
+  "show_emote",
+  "step_shake",
+  "tree_shake",
+  "rock_smash",
+  "return_dig",
+  "remove_object",
+  "hide_object",
+  "show_object",
+]);
+
+const hasTextCommands = (commands: readonly StoryCommand[]): boolean =>
+  commands.some((command) => TEXT_COMMANDS.has(command.command));
+const hasDataCommands = (commands: readonly StoryCommand[]): boolean =>
+  commands.some((command) => DATA_COMMANDS.has(command.command));
+const hasOnlyMovementCommands = (commands: readonly StoryCommand[]): boolean =>
+  commands.length > 0 && commands.every((command) => MOVEMENT_COMMANDS.has(command.command));
+
+const scriptCanFallThrough = (label: string, commands: readonly StoryCommand[]): boolean => {
+  if (
+    !commands.length ||
+    isMapSectionLabel(label) ||
+    isMovementDataLabel(label) ||
+    hasOnlyMovementCommands(commands) ||
+    hasDataCommands(commands) ||
+    hasTextCommands(commands)
+  ) {
+    return false;
+  }
+  return !SCRIPT_TERMINATORS.has(commands.at(-1)?.command ?? "");
+};
+
+const materializeScriptFallthroughs = (scripts: StoryScripts): void => {
+  const entries = Object.entries(scripts);
+  for (let index = 0; index < entries.length - 1; index += 1) {
+    const [label, commands] = entries[index];
+    if (!scriptCanFallThrough(label, commands)) {
+      continue;
+    }
+    const [nextLabel, nextCommands] = entries[index + 1];
+    if (!nextCommands.length || isMovementDataLabel(nextLabel) || hasTextCommands(nextCommands)) {
+      continue;
+    }
+    appendJumpIfMissing(scripts, label, nextLabel);
+  }
+};
 
 const materializeMovementFallthroughs = (scripts: StoryScripts): void => {
   const entries = Object.entries(scripts);
@@ -354,6 +463,7 @@ export function parseAsmFile(filePath: string): StoryScripts {
   const result = Object.fromEntries(
     Object.entries(orderedScripts).filter(([, value]) => value.length > 0)
   );
+  materializeScriptFallthroughs(result);
   materializeMovementFallthroughs(result);
   applyKnownImplicitFallthroughs(result);
   return result;

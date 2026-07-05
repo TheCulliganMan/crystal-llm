@@ -19,7 +19,9 @@ use crystal_bevy::{
     core::systems::script_runtime::ScriptRuntimeInputs,
     core::systems::script_text::ScriptTextAction,
     core::systems::script_warps::ScriptMapAction,
+    core::world::collision::{Terrain, describe_collision, sample_collision},
     core::world::encounters::EncounterSurface,
+    core::world::map::{OverworldMapData, TilePosition},
 };
 
 const DEFAULT_PACK_PATH: &str = "content-packs/core-modular.crystalpack";
@@ -57,6 +59,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.list_script_scene_commands {
+        print_script_scene_commands(&runtime);
+        return Ok(());
+    }
+
     if args.list_script_battles {
         print_script_battles(&runtime);
         return Ok(());
@@ -69,6 +76,11 @@ fn main() -> Result<()> {
 
     if let Some(map_name) = args.list_map_objects.as_deref() {
         print_map_objects(&runtime, map_name)?;
+        return Ok(());
+    }
+
+    if let Some(map_name) = args.list_map_events.as_deref() {
+        print_map_events(&runtime, map_name)?;
         return Ok(());
     }
 
@@ -365,7 +377,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(save_path) = args.smoke_save.as_ref() {
+    if let Some(save_path) = args
+        .smoke_save
+        .as_ref()
+        .filter(|_| !args.smoke_visible_overworld)
+    {
         let spawn_identifier = args
             .spawn
             .context("--smoke-save requires --spawn <id> for a new-game smoke")?;
@@ -576,12 +592,22 @@ fn main() -> Result<()> {
     }
 
     if args.smoke_visible_overworld {
-        let spawn_identifier = args
-            .spawn
-            .context("--smoke-visible-overworld requires --spawn <id>")?;
-        if args.load_save.is_some() || args.save_path.is_some() {
-            bail!("--smoke-visible-overworld cannot be combined with --load-save or --save-path");
+        if args.save_path.is_some() {
+            bail!("--smoke-visible-overworld cannot be combined with --save-path");
         }
+        let start = match (args.spawn, args.load_save.as_ref()) {
+            (Some(spawn_identifier), None) => bevy_shell_start_from_smoke_start_map(
+                spawn_identifier,
+                args.smoke_start_map.as_ref(),
+            ),
+            (None, Some(save_path)) => BevyShellStart::LoadSave {
+                save_path: save_path.clone(),
+            },
+            (Some(_), Some(_)) => {
+                bail!("--smoke-visible-overworld cannot combine --spawn and --load-save");
+            }
+            (None, None) => bail!("--smoke-visible-overworld requires --spawn <id> or --load-save"),
+        };
         if args.smoke_buttons.is_empty() && args.smoke_script.is_empty() {
             bail!("--smoke-visible-overworld requires --smoke-buttons or --smoke-script");
         }
@@ -592,18 +618,21 @@ fn main() -> Result<()> {
         let smoke = crystal_bevy::smoke_visible_shell_overworld(
             asset_root,
             runtime,
-            BevyShellStart::NewGame { spawn_identifier },
+            start,
             BevyShellConfig::default(),
             &input_frames,
+            args.smoke_save.as_ref(),
         )?;
         println!(
-            "visible_overworld start={}@({}, {}) final={}@({}, {}) frames={} interactions={} coord_events={} trainer_sight={} warps={} connections={} wild_battles={} active_music={} pending_audio={} audio=[{}] checksum={:?}",
+            "visible_overworld start={}@({}, {}) start_scene={} final={}@({}, {}) final_scene={} frames={} interactions={} coord_events={} trainer_sight={} warps={} connections={} wild_battles={} last_movement={} active_music={} pending_audio={} frame_events=[{}] audio=[{}] checksum={:?}",
             smoke.start_map,
             smoke.start_tile_x,
             smoke.start_tile_y,
+            smoke.start_scene.as_deref().unwrap_or("none"),
             smoke.final_map,
             smoke.final_tile_x,
             smoke.final_tile_y,
+            smoke.final_scene.as_deref().unwrap_or("none"),
             smoke.frames,
             smoke.interactions,
             smoke.coord_events,
@@ -611,8 +640,10 @@ fn main() -> Result<()> {
             smoke.warps,
             smoke.connections,
             smoke.wild_battles,
+            smoke.last_movement.as_deref().unwrap_or("none"),
             smoke.active_music.as_deref().unwrap_or("none"),
             smoke.pending_audio,
+            smoke.frame_events.join("|"),
             smoke.audio_events.join("|"),
             smoke.state_hash
         );
@@ -756,9 +787,11 @@ struct Args {
     help: bool,
     list_spawns: bool,
     list_script_map_commands: bool,
+    list_script_scene_commands: bool,
     list_script_battles: bool,
     list_script: Option<String>,
     list_map_objects: Option<String>,
+    list_map_events: Option<String>,
     repo: Option<PathBuf>,
     pack: Option<String>,
     spawn: Option<u16>,
@@ -965,6 +998,7 @@ fn parse_args() -> Result<Args> {
             "-h" | "--help" => args.help = true,
             "--list-spawns" => args.list_spawns = true,
             "--list-script-map-commands" => args.list_script_map_commands = true,
+            "--list-script-scene-commands" => args.list_script_scene_commands = true,
             "--list-script-battles" => args.list_script_battles = true,
             "--list-script" => {
                 args.list_script = Some(
@@ -981,6 +1015,15 @@ fn parse_args() -> Result<Args> {
                     bail!("--list-map-objects map name cannot be empty");
                 }
                 args.list_map_objects = Some(value);
+            }
+            "--list-map-events" => {
+                let value = values
+                    .next()
+                    .context("--list-map-events requires MapName")?;
+                if value.is_empty() {
+                    bail!("--list-map-events map name cannot be empty");
+                }
+                args.list_map_events = Some(value);
             }
             "--repo" => {
                 let value = values.next().context("--repo requires a path")?;
@@ -1751,6 +1794,7 @@ fn bevy_shell_start_from_smoke_start_map(
 ) -> BevyShellStart {
     if let Some(start_map) = smoke_start_map {
         BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier,
             map_name: start_map.map_name.clone(),
             tile_x: start_map.tile_x,
             tile_y: start_map.tile_y,
@@ -1901,10 +1945,16 @@ fn print_usage() {
         "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --list-script-map-commands"
     );
     println!(
+        "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --list-script-scene-commands"
+    );
+    println!(
         "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --list-script-battles"
     );
     println!(
         "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --list-map-objects MapName"
+    );
+    println!(
+        "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --list-map-events MapName"
     );
     println!(
         "       crystal-bevy --repo <repo-root> --pack <assets/data relative .crystalpack> --spawn <id> --smoke-save <path> [--smoke-buttons right,a] [--smoke-script 'right*8;down;down']"
@@ -2003,6 +2053,7 @@ fn smoke_script_shop(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -2352,6 +2403,7 @@ fn smoke_field_move_use(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             start_map.map_name.clone(),
             start_map.tile_x,
             start_map.tile_y,
@@ -2631,6 +2683,7 @@ fn smoke_fishing(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -2879,6 +2932,7 @@ fn smoke_interaction(
             quick_save_path: smoke_save.cloned(),
         },
         &input_frames,
+        smoke_save,
     )
     .context("run visible interaction smoke through Bevy runtime shell")?;
     if smoke.interactions == 0 {
@@ -3014,6 +3068,7 @@ fn smoke_elevfloor_command(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3113,6 +3168,7 @@ fn smoke_script_warp_command(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3273,6 +3329,7 @@ fn smoke_script_map_pending_command(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3482,6 +3539,7 @@ fn smoke_script_text_pending_command(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3679,6 +3737,7 @@ fn smoke_wild_battle(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3760,10 +3819,11 @@ fn smoke_wild_battle(
         let player_action = player_action.context("missing battle player action")?;
         let enemy_action = enemy_action.context("missing battle enemy action")?;
         let rng_seed_after = shell
-            .snapshot()
-            .context("snapshot runtime shell before fixed battle command")?
-            .progression
-            .rng_seed;
+            .preview_active_battle_command_rng_seed_after(
+                player_action.clone(),
+                enemy_action.clone(),
+            )
+            .context("preview fixed battle command rng boundary")?;
         let command = shell
             .resolve_active_battle_command(
                 player_action.clone(),
@@ -3839,6 +3899,7 @@ fn smoke_trainer_battle(
         RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
             runtime,
+            spawn_identifier,
             &start.map_name,
             start.tile_x,
             start.tile_y,
@@ -3870,10 +3931,11 @@ fn smoke_trainer_battle(
     let mut trainer_defeated = false;
     while battle_turns < 24 && !trainer_defeated {
         let rng_seed_after = shell
-            .snapshot()
-            .context("snapshot runtime shell before fixed trainer battle turn")?
-            .progression
-            .rng_seed;
+            .preview_active_battle_turn_rng_seed_after(
+                BattleAction::Move { slot: 0 },
+                BattleAction::Move { slot: 0 },
+            )
+            .context("preview fixed trainer battle turn rng boundary")?;
         let turn = shell
             .resolve_active_battle_turn(
                 BattleAction::Move { slot: 0 },
@@ -4248,6 +4310,21 @@ fn print_script_map_commands(runtime: &CrystalRuntime) {
     }
 }
 
+fn print_script_scene_commands(runtime: &CrystalRuntime) {
+    println!("script_scene_commands:");
+    for key in runtime.script_scene_command_keys() {
+        println!(
+            "  map={} command={} map_id={} scene_id={} source_script={} command_index={}",
+            key.map_name,
+            key.command,
+            key.map_id.as_deref().unwrap_or(""),
+            key.scene_id.as_deref().unwrap_or(""),
+            key.source_script,
+            key.command_index,
+        );
+    }
+}
+
 fn print_script_battles(runtime: &CrystalRuntime) {
     println!("scripted_wild_battles:");
     for battle in runtime.scripted_wild_battle_keys() {
@@ -4310,6 +4387,102 @@ fn print_map_objects(runtime: &CrystalRuntime, map_name: &str) -> Result<()> {
             object.move_range_y,
             object.sightline_direction_override.as_deref().unwrap_or(""),
         );
+    }
+    Ok(())
+}
+
+fn print_map_events(runtime: &CrystalRuntime, map_name: &str) -> Result<()> {
+    let module = runtime.data().map_module(map_name)?;
+    println!("map_events map={map_name}:");
+    println!(
+        "  attributes: size={}x{} constant={} group={} tileset={} environment={} music={} connections={}",
+        module.attributes.width,
+        module.attributes.height,
+        module.attributes.map_constant.as_deref().unwrap_or(""),
+        module
+            .attributes
+            .map_group_constant
+            .as_deref()
+            .unwrap_or(""),
+        module.attributes.tileset_name,
+        module.attributes.environment.as_deref().unwrap_or(""),
+        module.attributes.music.as_deref().unwrap_or(""),
+        module.attributes.connections.len()
+    );
+    println!("  connections:");
+    for connection in &module.attributes.connections {
+        println!(
+            "    direction={} target={} offset={}",
+            connection.direction, connection.target_map, connection.offset
+        );
+    }
+    println!("  warps:");
+    for warp in &module.events.warps {
+        println!(
+            "    tile=({}, {}) target={} warp_id={}",
+            warp.x, warp.y, warp.target_map, warp.target_warp_id
+        );
+    }
+    println!("  coord_events:");
+    for event in &module.events.coord_events {
+        println!(
+            "    tile=({}, {}) scene={} script={}",
+            event.x, event.y, event.scene_id, event.script_name
+        );
+    }
+    println!("  bg_events:");
+    for event in &module.events.bg_events {
+        println!(
+            "    tile=({}, {}) type={} script={}",
+            event.x, event.y, event.event_type, event.script
+        );
+    }
+    println!("  passability:");
+    let map_data = OverworldMapData {
+        name: map_name.to_string(),
+        width: module.attributes.width,
+        height: module.attributes.height,
+        border_block: u16::from(module.attributes.border_block),
+        connections: module.attributes.connections.clone(),
+        metatile_ids: module.blocks.clone(),
+    };
+    let tileset = runtime
+        .data()
+        .tileset_collision(&module.attributes.tileset_name)?;
+    let runtime_width = i16::try_from(module.attributes.width)
+        .context("map width exceeds runtime coordinate range")?
+        .saturating_mul(2);
+    let runtime_height = i16::try_from(module.attributes.height)
+        .context("map height exceeds runtime coordinate range")?
+        .saturating_mul(2);
+    for y in 0..runtime_height {
+        let mut row = String::new();
+        for x in 0..runtime_width {
+            let tile = TilePosition::new(x, y);
+            let marker = if module.objects.iter().any(|object| {
+                i16::try_from(object.x).ok() == Some(x) && i16::try_from(object.y).ok() == Some(y)
+            }) {
+                'O'
+            } else if module.events.warps.iter().any(|warp| {
+                i16::try_from(warp.x).ok() == Some(x) && i16::try_from(warp.y).ok() == Some(y)
+            }) {
+                'W'
+            } else if module.events.coord_events.iter().any(|event| {
+                i16::try_from(event.x).ok() == Some(x) && i16::try_from(event.y).ok() == Some(y)
+            }) {
+                'C'
+            } else {
+                match sample_collision(&map_data, &tileset, tile)
+                    .map(|sample| describe_collision(sample.permission).terrain)
+                {
+                    Some(Terrain::Wall) | None => '#',
+                    Some(Terrain::Water) => '~',
+                    Some(Terrain::Land) => '.',
+                }
+            };
+            row.push(marker);
+        }
+        println!("    y={y:02} {row}");
     }
     Ok(())
 }

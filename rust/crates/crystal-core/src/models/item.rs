@@ -18,7 +18,7 @@ pub struct Item {
     pub description: String,
     #[serde(deserialize_with = "required_item_token")]
     pub effect: String,
-    #[serde(deserialize_with = "required_item_token_vec")]
+    #[serde(deserialize_with = "required_status_token_vec")]
     pub status_heals: Vec<String>,
     #[serde(deserialize_with = "required_nullable_u8")]
     pub revive_hp_percent: Option<u8>,
@@ -62,7 +62,7 @@ pub struct Item {
     #[serde(deserialize_with = "required_item_token")]
     pub held_effect: String,
     pub parameter: i16,
-    #[serde(deserialize_with = "required_empty_or_item_token")]
+    #[serde(deserialize_with = "required_empty_or_item_property_expression")]
     pub property: String,
     #[serde(deserialize_with = "required_item_token")]
     pub pocket: ItemPocket,
@@ -93,7 +93,7 @@ impl<'de> Deserialize<'de> for Item {
             description: String,
             #[serde(deserialize_with = "required_item_token")]
             effect: String,
-            #[serde(deserialize_with = "required_item_token_vec")]
+            #[serde(deserialize_with = "required_status_token_vec")]
             status_heals: Vec<String>,
             #[serde(deserialize_with = "required_nullable_u8")]
             revive_hp_percent: Option<u8>,
@@ -137,7 +137,7 @@ impl<'de> Deserialize<'de> for Item {
             #[serde(deserialize_with = "required_item_token")]
             held_effect: String,
             parameter: i16,
-            #[serde(deserialize_with = "required_empty_or_item_token")]
+            #[serde(deserialize_with = "required_empty_or_item_property_expression")]
             property: String,
             #[serde(deserialize_with = "required_item_token")]
             pocket: ItemPocket,
@@ -270,6 +270,25 @@ where
     Ok(value)
 }
 
+fn required_empty_or_item_property_expression<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Ok(value);
+    }
+    if !is_exact_item_property_expression(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "item property must be empty or exact ASCII token/pipe expression, found {value:?}"
+        )));
+    }
+    for token in value.split('|').map(str::trim) {
+        validate_no_reserved_item_token(token).map_err(serde::de::Error::custom)?;
+    }
+    Ok(value)
+}
+
 fn required_nullable_item_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -304,12 +323,48 @@ where
     }
 }
 
+fn required_status_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    for token in &values {
+        if !is_exact_status_token(token) {
+            return Err(serde::de::Error::custom(format!(
+                "item token must be exact ASCII uppercase/underscore syntax, found {token:?}"
+            )));
+        }
+        validate_no_reserved_item_token(token).map_err(serde::de::Error::custom)?;
+    }
+    Ok(values)
+}
+
+fn is_exact_status_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn is_exact_item_token(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'|' | b' '))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'|'))
+}
+
+fn is_exact_item_property_expression(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.split('|').all(|token| {
+            let token = token.trim();
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
 }
 
 fn validate_no_reserved_item_token(value: &str) -> Result<(), String> {
@@ -382,6 +437,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -468,6 +524,7 @@ mod tests {
               "battle_stat_boost_stages":null,
               "battle_escape_mode":null,
               "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
               "battle_stat_drop_guard_turns":null,
               "confusion_heal":null,
@@ -602,6 +659,7 @@ mod tests {
               "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -651,6 +709,7 @@ mod tests {
               "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -769,6 +828,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -968,6 +1028,7 @@ mod tests {
               "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -1060,6 +1121,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -1108,6 +1170,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -1153,6 +1216,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -1199,6 +1263,7 @@ mod tests {
 		              "battle_stat_boost_stages":null,
 		              "battle_escape_mode":null,
 		              "battle_focus_energy":null,
+              "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
 		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
@@ -1246,6 +1311,7 @@ mod tests {
             "battle_stat_boost_stages": null,
             "battle_escape_mode": null,
             "battle_focus_energy": null,
+            "battle_capture_ball": null,
             "battle_stat_drop_guard": null,
             "battle_stat_drop_guard_turns": null,
             "confusion_heal": null,
@@ -1308,6 +1374,7 @@ mod tests {
 
             assert!(
                 error.contains("item token must be")
+                    || error.contains("item property must be")
                     || error.contains("uses reserved modpack payload prefix"),
                 "{field} produced unexpected error: {error}"
             );
@@ -1319,6 +1386,7 @@ mod tests {
         for field in [
             "battle_stat_drop_guard",
             "battle_stat_drop_guard_turns",
+            "battle_capture_ball",
             "field_menu",
             "field_usable",
             "battle_menu",
@@ -1359,6 +1427,7 @@ mod tests {
             "battle_stat_boost_stages": null,
             "battle_escape_mode": null,
             "battle_focus_energy": null,
+            "battle_capture_ball": null,
             "battle_stat_drop_guard": null,
             "battle_stat_drop_guard_turns": null,
             "confusion_heal": null,

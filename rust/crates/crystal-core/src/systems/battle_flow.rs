@@ -3,16 +3,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::battle::capture::{
-    CaptureAttemptContext, CaptureOutcome, CaptureRules, CaptureUseError,
-    CaptureWobbleProbability, StoredCapture, complete_active_wild_capture, throw_ball_from_bag,
+    CaptureAttemptContext, CaptureOutcome, CaptureRules, CaptureUseError, CaptureWobbleProbability,
+    StoredCapture, complete_active_wild_capture, throw_ball_from_bag,
 };
 use crate::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
 use crate::battle::start::deactivate_battle;
 use crate::battle::stats::BattleStatMultiplierTables;
 use crate::battle::turn::{
-    BattleAction, BattleEvent, BattleSide, BattleTurnCommitError, BattleTurnError,
-    BattleTurnInput, BattleTurnOutcome, MovePriorityTable, active_battle_combat_state,
-    commit_battle_turn_outcome, resolve_battle_turn_with_items, resolve_wild_battle_turn_with_items,
+    BattleAction, BattleEvent, BattleSide, BattleTurnCommitError, BattleTurnError, BattleTurnInput,
+    BattleTurnOutcome, MovePriorityTable, active_battle_combat_state, commit_battle_turn_outcome,
+    resolve_battle_turn_with_items, resolve_wild_battle_turn_with_items,
 };
 use crate::models::{Item, Move};
 use crate::random::Random;
@@ -105,8 +105,10 @@ pub fn resolve_active_battle_choice(
         player: player_action,
         enemy: enemy_action,
     };
-    let turn = if matches!(state.battle, BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. })
-    {
+    let turn = if matches!(
+        state.battle,
+        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. }
+    ) {
         resolve_wild_battle_turn_with_items(
             combat,
             input,
@@ -229,8 +231,14 @@ fn resolve_active_battle_capture_or_escape_item(
 fn active_capture_context(
     state: &GameState,
     ball_id: &str,
-) -> Result<(crate::models::Pokemon, crate::models::Pokemon, CaptureAttemptContext), ActiveBattleFlowError>
-{
+) -> Result<
+    (
+        crate::models::Pokemon,
+        crate::models::Pokemon,
+        CaptureAttemptContext,
+    ),
+    ActiveBattleFlowError,
+> {
     let active_party_index = state
         .battle_active_party_index
         .ok_or(ActiveBattleFlowError::InactiveBattle)?;
@@ -310,7 +318,8 @@ fn battle_flow_end_from_turn(turn: &BattleTurnOutcome) -> ActiveBattleFlowEnd {
 pub fn force_end_active_battle_to_overworld(state: &mut GameState) -> ActiveBattleFlowEnd {
     let end = match &state.battle {
         BattleMemory::Inactive => ActiveBattleFlowEnd::Ongoing,
-        BattleMemory::Wild { enemy_pokemon, .. } | BattleMemory::StaticWild { enemy_pokemon, .. } => {
+        BattleMemory::Wild { enemy_pokemon, .. }
+        | BattleMemory::StaticWild { enemy_pokemon, .. } => {
             if enemy_pokemon.hp == 0 {
                 ActiveBattleFlowEnd::EnemyFainted
             } else {

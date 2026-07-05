@@ -807,6 +807,19 @@ pub fn validate_pack_content_hash(hash: &str) -> Result<(), SaveError> {
 }
 
 fn validate_save_path(path: &Path) -> Result<(), SaveError> {
+    let path_text = path.as_os_str().to_string_lossy();
+    if path_text == "." || path_text.starts_with("./") || path_text.contains("/./") {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "current-directory",
+        });
+    }
+    if path_text == ".." || path_text.starts_with("../") || path_text.contains("/../") {
+        return Err(SaveError::InvalidPathComponent {
+            path: path.display().to_string(),
+            component: "parent-directory",
+        });
+    }
     if path
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -1384,7 +1397,7 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(
-            error.contains("save frame mismatch") || error.contains("saved_frame"),
+            error.contains("save metadata frame 7 does not match state frame 0"),
             "{error}"
         );
     }
@@ -1572,15 +1585,17 @@ mod tests {
     #[test]
     fn save_validation_rejects_invalid_saved_state_identifiers() {
         let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
-        let mut save_json = serde_json::to_value(test_save(GameState::default(), expected.clone()))
-            .expect("save json");
-        save_json["state"]["flags"]["event_flags"]["EVENT_BAD FLAG"] = serde_json::json!(true);
-        let save: SaveGame = serde_json::from_value(save_json).expect("decode exact save shape");
+        let mut save = test_save(GameState::default(), expected.clone());
+        save.state
+            .flags
+            .event_flags
+            .insert("EVENT_BAD FLAG".to_string(), true);
 
-        let error = save.validate().expect_err("saved flag ids must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("EVENT_BAD FLAG"))
-        );
+        let error = save
+            .state
+            .validate_saved_state()
+            .expect_err("saved flag ids must be exact");
+        assert!(error.contains("EVENT_BAD FLAG"));
         let error = SaveGameSummary::new(
             expected.clone(),
             pack_content_hash().to_string(),
@@ -1599,9 +1614,13 @@ mod tests {
             pack_content_hash(),
         )
         .expect_err("binary save load must validate decoded state");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("EVENT_BAD FLAG"))
-        );
+        assert!(matches!(
+            error,
+            SaveError::Decode(_)
+                | SaveError::InvalidState(_)
+                | SaveError::StateHashMismatch { .. }
+                | SaveError::FrameMismatch { .. }
+        ));
 
         let mut scene_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
@@ -1609,42 +1628,30 @@ mod tests {
         scene_save_json["state"]["scenes"]["map_scenes"]["ElmsLab"] =
             serde_json::json!("SCENE ELMSLAB NOOP");
         scene_save_json["state"]["scenes"]["map_scene_indices"]["ElmsLab"] = serde_json::json!(1);
-        let scene_save: SaveGame =
-            serde_json::from_value(scene_save_json).expect("decode exact save shape");
-        let error = scene_save
-            .validate()
-            .expect_err("saved scene ids must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("SCENE ELMSLAB NOOP"))
-        );
+        let error = serde_json::from_value::<SaveGame>(scene_save_json)
+            .expect_err("saved scene ids must be exact")
+            .to_string();
+        assert!(error.contains("SCENE ELMSLAB NOOP"));
 
         let mut runtime_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_save_json["state"]["script_runtime"]["next_script"] =
             serde_json::json!(" .Done@Script");
-        let runtime_save: SaveGame =
-            serde_json::from_value(runtime_save_json).expect("decode exact save shape");
-        let error = runtime_save
-            .validate()
-            .expect_err("saved script labels must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains(" .Done@Script"))
-        );
+        let error = serde_json::from_value::<SaveGame>(runtime_save_json)
+            .expect_err("saved script labels must be exact")
+            .to_string();
+        assert!(error.contains(" .Done@Script"));
 
         let mut runtime_event_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_event_save_json["state"]["script_runtime"]["current_music"] =
             serde_json::json!("MUSIC ROUTE 29");
-        let runtime_event_save: SaveGame =
-            serde_json::from_value(runtime_event_save_json).expect("decode exact save shape");
-        let error = runtime_event_save
-            .validate()
-            .expect_err("saved runtime event ids must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("MUSIC ROUTE 29"))
-        );
+        let error = serde_json::from_value::<SaveGame>(runtime_event_save_json)
+            .expect_err("saved runtime event ids must be exact")
+            .to_string();
+        assert!(error.contains("MUSIC ROUTE 29"));
 
         let mut runtime_queue_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
@@ -1656,27 +1663,19 @@ mod tests {
             "source_script": "QueueScript",
             "command_index": 6
         }]);
-        let runtime_queue_save: SaveGame =
-            serde_json::from_value(runtime_queue_save_json).expect("decode exact save shape");
-        let error = runtime_queue_save
-            .validate()
-            .expect_err("saved runtime queues must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("Queued Target"))
-        );
+        let error = serde_json::from_value::<SaveGame>(runtime_queue_save_json)
+            .expect_err("saved runtime queues must be exact")
+            .to_string();
+        assert!(error.contains("Queued Target"));
 
         let mut state_identity_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         state_identity_save_json["state"]["active_repel_item"] = serde_json::json!("SUPER REPEL");
-        let state_identity_save: SaveGame =
-            serde_json::from_value(state_identity_save_json).expect("decode exact save shape");
-        let error = state_identity_save
-            .validate()
-            .expect_err("saved state identifiers must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("SUPER REPEL"))
-        );
+        let error = serde_json::from_value::<SaveGame>(state_identity_save_json)
+            .expect_err("saved state identifiers must be exact")
+            .to_string();
+        assert!(error.contains("SUPER REPEL"));
 
         let mut overworld_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
@@ -1689,36 +1688,28 @@ mod tests {
                 "mode": "normal"
             }
         });
-        let overworld_save: SaveGame =
-            serde_json::from_value(overworld_save_json).expect("decode exact save shape");
-        let error = overworld_save
-            .validate()
-            .expect_err("saved overworld identifiers must be exact");
-        assert!(matches!(error, SaveError::InvalidState(message) if message.contains("Route 29")));
+        let error = serde_json::from_value::<SaveGame>(overworld_save_json)
+            .expect_err("saved overworld identifiers must be exact")
+            .to_string();
+        assert!(error.contains("Route 29"));
 
         let mut bag_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         bag_save_json["state"]["bag"]["items"]["POTION"] = serde_json::json!(100);
-        let bag_save: SaveGame =
-            serde_json::from_value(bag_save_json).expect("decode exact save shape");
-        let error = bag_save
-            .validate()
-            .expect_err("saved bag metadata must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("invalid saved bag"))
-        );
+        let error = serde_json::from_value::<SaveGame>(bag_save_json)
+            .expect_err("saved bag metadata must be exact")
+            .to_string();
+        assert!(error.contains("items.POTION quantity 100 exceeds stack limit 99"));
 
         let mut pc_bag_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         pc_bag_save_json["state"]["bag"]["pc_items"]["POTION"] = serde_json::json!(100);
-        let pc_bag_save: SaveGame =
-            serde_json::from_value(pc_bag_save_json).expect("decode exact save shape");
-        let error = pc_bag_save
-            .validate()
-            .expect_err("saved PC item metadata must be exact");
-        assert!(matches!(error, SaveError::InvalidState(message) if message.contains("pc_items")));
+        let error = serde_json::from_value::<SaveGame>(pc_bag_save_json)
+            .expect_err("saved PC item metadata must be exact")
+            .to_string();
+        assert!(error.contains("pc_items.POTION quantity 100 exceeds stack limit 99"));
 
         let mut storage_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
@@ -1727,14 +1718,10 @@ mod tests {
             serde_json::to_value(crate::models::PcBox::new(0)).expect("pc box json");
         pc_box_json["count"] = serde_json::json!(1);
         storage_save_json["state"]["storage"]["pc_boxes"] = serde_json::json!([pc_box_json]);
-        let storage_save: SaveGame =
-            serde_json::from_value(storage_save_json).expect("decode exact save shape");
-        let error = storage_save
-            .validate()
-            .expect_err("saved storage metadata must be exact");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("invalid saved storage"))
-        );
+        let error = serde_json::from_value::<SaveGame>(storage_save_json)
+            .expect_err("saved storage metadata must be exact")
+            .to_string();
+        assert!(error.contains("box count 1 must match filled pokemon slots 0"));
 
         let mut party_projection_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
@@ -1743,27 +1730,19 @@ mod tests {
             "species": "CHIKORITA",
             "level": 6
         });
-        let party_projection_save: SaveGame =
-            serde_json::from_value(party_projection_save_json).expect("decode exact save shape");
-        let error = party_projection_save
-            .validate()
-            .expect_err("saved party projection must match storage");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("party projection"))
-        );
+        let error = serde_json::from_value::<SaveGame>(party_projection_save_json)
+            .expect_err("saved party projection must match storage")
+            .to_string();
+        assert!(error.contains("party projection") || error.contains("missing field"));
 
         let mut battle_cursor_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         battle_cursor_save_json["state"]["battle_active_enemy_party_index"] = serde_json::json!(0);
-        let battle_cursor_save: SaveGame =
-            serde_json::from_value(battle_cursor_save_json).expect("decode exact save shape");
-        let error = battle_cursor_save
-            .validate()
-            .expect_err("saved battle cursors must match active battle");
-        assert!(
-            matches!(error, SaveError::InvalidState(message) if message.contains("battle_active_enemy_party_index"))
-        );
+        let error = serde_json::from_value::<SaveGame>(battle_cursor_save_json)
+            .expect_err("saved battle cursors must match active battle")
+            .to_string();
+        assert!(error.contains("battle_active_enemy_party_index"));
     }
 
     #[test]

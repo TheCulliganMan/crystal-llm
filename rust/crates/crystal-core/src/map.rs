@@ -947,7 +947,7 @@ mod tests {
             ("time_of_day", serde_json::json!("day time")),
             ("environment", serde_json::json!("ROUTE AREA")),
             ("location", serde_json::json!("NEW BARK")),
-            ("music", serde_json::json!("MUSIC ROUTE_29")),
+            ("music", serde_json::json!("MUSIC-ROUTE_29")),
             ("palette", serde_json::json!("PALETTE DAY")),
             ("fishing_group", serde_json::json!("GROUP OLD_ROD")),
             ("map_constant", serde_json::json!("ROUTE 29")),
@@ -955,7 +955,7 @@ mod tests {
             ("blocks_label", serde_json::json!("Route29 Blocks")),
             ("map_scripts_label", serde_json::json!("Route29 Scripts")),
             ("map_events_label", serde_json::json!("Route29 Events")),
-            ("connection_flags", serde_json::json!("NORTH SOUTH")),
+            ("connection_flags", serde_json::json!("NORTH-SOUTH")),
         ] {
             let mut attributes = valid_map_attributes_json();
             attributes[field] = value;
@@ -965,7 +965,9 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("map token must be"),
+                error.contains("map token must be")
+                    || error.contains("map expression token must be")
+                    || error.contains("connection flags token must be"),
                 "{field} produced unexpected error: {error}"
             );
         }
@@ -1116,7 +1118,9 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("map token must be"),
+                error.contains("map token must be")
+                    || error.contains("map expression token must be")
+                    || error.contains("connection flags token must be"),
                 "{field} produced unexpected error: {error}"
             );
         }

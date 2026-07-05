@@ -443,7 +443,7 @@ pub fn apply_audio_cue_to_state(state: &mut GameState, cue: &ScriptAudioCue) {
 }
 
 fn reject_invalid_source_script(command: &ScriptAudioCommand) -> Result<(), ScriptAudioError> {
-    if is_exact_audio_token(&command.source_script) {
+    if is_exact_audio_source_token(&command.source_script) {
         Ok(())
     } else {
         Err(ScriptAudioError::InvalidSourceScript {
@@ -658,6 +658,32 @@ mod tests {
                 .to_string()
                 .contains("unknown field `legacy_audio_id`"),
             "{error_error}"
+        );
+    }
+
+    #[test]
+    fn script_audio_resolves_commands_from_local_script_labels() {
+        let music = BTreeSet::from(["MUSIC_RIVAL_AFTER".to_string()]);
+        let sfx = BTreeSet::new();
+        let cries = BTreeSet::new();
+        let species = BTreeMap::new();
+        let cry_by_species = BTreeMap::new();
+        let mut command = command("playmusic", Some("MUSIC_RIVAL_AFTER"), None);
+        command.source_script = ".AfterVictorious@CherrygroveRivalSceneNorth".to_string();
+
+        let cue =
+            resolve_script_audio_command(command, &music, &sfx, &cries, &species, &cry_by_species)
+                .expect("local-label script audio command resolves");
+
+        assert_eq!(
+            cue,
+            ScriptAudioCue::Play {
+                command: "playmusic".to_string(),
+                kind: ScriptAudioKind::Music,
+                audio_id: "MUSIC_RIVAL_AFTER".to_string(),
+                source_script: ".AfterVictorious@CherrygroveRivalSceneNorth".to_string(),
+                command_index: 7,
+            }
         );
     }
 

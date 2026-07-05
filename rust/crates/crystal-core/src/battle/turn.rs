@@ -1888,8 +1888,8 @@ pub fn active_battle_combat_state(
     state: &GameState,
 ) -> Result<BattleCombatState, BattleTurnCommitError> {
     let active_party_index = require_active_battle_party_index(state)?;
-    let active_enemy_index =
-        require_active_battle_enemy_party_index(state).map_err(BattleTurnCommitError::ActiveEnemyIndex)?;
+    let active_enemy_index = require_active_battle_enemy_party_index(state)
+        .map_err(BattleTurnCommitError::ActiveEnemyIndex)?;
     let player = state.storage.party.pokemon[active_party_index]
         .clone()
         .ok_or(BattleTurnCommitError::EmptyPartySlot {
@@ -2185,7 +2185,10 @@ fn resolve_battle_turn_with_items_for_context(
     )?;
 
     for side in order.iter().copied() {
-        if state.pokemon(side).hp == 0 || state.pokemon(side.other()).hp == 0 {
+        if !battle_continues_after_actions(&state, &events)
+            || state.pokemon(side).hp == 0
+            || state.pokemon(side.other()).hp == 0
+        {
             continue;
         }
         let action = match side {
@@ -2672,26 +2675,6 @@ fn execute_action(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    if committed_charge_move_state(state, side).is_some() {
-        let slot = selected_or_committed_move_slot(state, side, action)?;
-        return execute_move_slot(
-            state,
-            side,
-            slot,
-            action_move_switch_party_index(action),
-            target_switching,
-            moves,
-            items,
-            stat_multipliers,
-            type_categories,
-            type_effectiveness,
-            weather_modifiers,
-            rng,
-            acted_before,
-            force_switch_ends_battle,
-            events,
-        );
-    }
     match action {
         BattleAction::Move { slot } => execute_move_slot(
             state,
@@ -2728,6 +2711,38 @@ fn execute_action(
             events,
         ),
         BattleAction::Switch { party_index } => {
+            if let Some(airborne_move) = airborne_move_state(state, side).map(ToOwned::to_owned) {
+                if let Some(slot) = state
+                    .pokemon(side)
+                    .moves
+                    .iter()
+                    .position(|learned| learned.name == airborne_move)
+                {
+                    return execute_move_slot(
+                        state,
+                        side,
+                        slot,
+                        None,
+                        target_switching,
+                        moves,
+                        items,
+                        stat_multipliers,
+                        type_categories,
+                        type_effectiveness,
+                        weather_modifiers,
+                        rng,
+                        acted_before,
+                        force_switch_ends_battle,
+                        events,
+                    );
+                }
+                set_airborne_move_state(state, side, None);
+                events.push(BattleEvent::AirborneEnded {
+                    side,
+                    move_name: airborne_move,
+                });
+                return Ok(());
+            }
             if let Some(trap) = escape_trap_state(state, side) {
                 events.push(BattleEvent::SwitchBlocked {
                     side,
@@ -2749,37 +2764,6 @@ fn execute_action(
         }
         BattleAction::Item { item_id } => execute_item(state, side, item_id, items, events),
         BattleAction::Run => Err(BattleTurnError::RunNotAllowed { side }),
-    }
-}
-
-fn selected_or_committed_move_slot(
-    state: &BattleCombatState,
-    side: BattleSide,
-    action: &BattleAction,
-) -> Result<usize, BattleTurnError> {
-    if let Some(committed_move) = committed_charge_move_state(state, side) {
-        return state
-            .pokemon(side)
-            .moves
-            .iter()
-            .position(|learned| learned.name == committed_move)
-            .ok_or_else(|| BattleTurnError::MissingMoveData {
-                side,
-                move_name: committed_move.to_string(),
-            });
-    }
-    match action {
-        BattleAction::Move { slot } | BattleAction::MoveSwitch { slot, .. } => Ok(*slot),
-        BattleAction::Switch { .. } | BattleAction::Item { .. } | BattleAction::Run => {
-            Err(BattleTurnError::MissingMoveSlot { side, slot: 0 })
-        }
-    }
-}
-
-fn action_move_switch_party_index(action: &BattleAction) -> Option<usize> {
-    match action {
-        BattleAction::MoveSwitch { party_index, .. } => Some(*party_index),
-        _ => None,
     }
 }
 
@@ -3460,6 +3444,8 @@ fn execute_move_effect(
                 roll,
             });
             apply_jump_kick_crash_effect(state, side, &move_name, move_data, events);
+            reset_fury_cutter_chain(state, side);
+            reset_rollout_state(state, side);
             return Ok(());
         }
     }
@@ -4642,7 +4628,7 @@ fn move_blocked_by_status_or_confusion(
     if move_blocked_by_flinch(state, side, move_name, events) {
         return Ok(true);
     }
-    if move_blocked_by_trap(state, side, move_name, events) {
+    if move_data.effect != "RAPID_SPIN" && move_blocked_by_trap(state, side, move_name, events) {
         return Ok(true);
     }
     if move_blocked_by_attract(state, side, move_name, rng, events) {
@@ -5457,6 +5443,8 @@ fn direct_status_effect(move_data: &Move) -> Option<&'static str> {
         "SLEEP" => Some("SLEEP"),
         "POISON" => Some("POISON"),
         "TOXIC" => Some("BAD_POISON"),
+        "BURN" => Some("BURN"),
+        "FREEZE" => Some("FREEZE"),
         "PARALYZE" => Some("PARALYSIS"),
         _ => None,
     }
@@ -9913,6 +9901,10 @@ mod tests {
                                 denominator: 2,
                             },
                         ),
+                        (
+                            "GRASS".to_string(),
+                            crate::battle::damage::TypeMultiplier::one(),
+                        ),
                     ]
                     .into_iter()
                     .collect(),
@@ -9925,107 +9917,73 @@ mod tests {
     }
 
     fn type_effectiveness_table() -> TypeEffectivenessTable {
+        let types = [
+            "NORMAL",
+            "ELECTRIC",
+            "FIGHTING",
+            "FLYING",
+            "GHOST",
+            "GROUND",
+            "DARK",
+            "ROCK",
+            "FIRE",
+            "PSYCHIC_TYPE",
+            "PSYCHIC",
+            "DRAGON",
+            "WATER",
+            "GRASS",
+            "BUG",
+            "POISON",
+            "STEEL",
+            "ICE",
+        ];
+        let mut matchups: BTreeMap<_, _> = types
+            .iter()
+            .map(|attacker| {
+                (
+                    pokemon_type(attacker),
+                    types
+                        .iter()
+                        .map(|defender| {
+                            (
+                                pokemon_type(defender),
+                                crate::battle::damage::TypeMultiplier::one(),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        matchups.entry(pokemon_type("NORMAL")).or_default().insert(
+            pokemon_type("GHOST"),
+            crate::battle::damage::TypeMultiplier::zero(),
+        );
+        matchups
+            .entry(pokemon_type("ELECTRIC"))
+            .or_default()
+            .insert(
+                pokemon_type("GROUND"),
+                crate::battle::damage::TypeMultiplier::zero(),
+            );
+        matchups
+            .entry(pokemon_type("FIGHTING"))
+            .or_default()
+            .insert(
+                pokemon_type("NORMAL"),
+                crate::battle::damage::TypeMultiplier {
+                    numerator: 2,
+                    denominator: 1,
+                },
+            );
+        matchups
+            .entry(pokemon_type("FIGHTING"))
+            .or_default()
+            .insert(
+                pokemon_type("GHOST"),
+                crate::battle::damage::TypeMultiplier::zero(),
+            );
         TypeEffectivenessTable {
-            matchups: BTreeMap::from([
-                (
-                    pokemon_type("NORMAL"),
-                    BTreeMap::from([
-                        (
-                            pokemon_type("NORMAL"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("ELECTRIC"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("FIGHTING"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("FLYING"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("GHOST"),
-                            crate::battle::damage::TypeMultiplier::zero(),
-                        ),
-                    ]),
-                ),
-                (
-                    pokemon_type("GROUND"),
-                    BTreeMap::from([(
-                        pokemon_type("NORMAL"),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    )]),
-                ),
-                (
-                    pokemon_type("DARK"),
-                    BTreeMap::from([(
-                        pokemon_type("NORMAL"),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    )]),
-                ),
-                (
-                    pokemon_type("ELECTRIC"),
-                    BTreeMap::from([
-                        (
-                            pokemon_type("ROCK"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("GROUND"),
-                            crate::battle::damage::TypeMultiplier::zero(),
-                        ),
-                    ]),
-                ),
-                (
-                    pokemon_type("FIGHTING"),
-                    BTreeMap::from([
-                        (
-                            pokemon_type("NORMAL"),
-                            crate::battle::damage::TypeMultiplier {
-                                numerator: 2,
-                                denominator: 1,
-                            },
-                        ),
-                        (
-                            pokemon_type("GHOST"),
-                            crate::battle::damage::TypeMultiplier::zero(),
-                        ),
-                    ]),
-                ),
-                (
-                    pokemon_type("FIRE"),
-                    BTreeMap::from([
-                        (
-                            pokemon_type("NORMAL"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("FIGHTING"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("PSYCHIC_TYPE"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                    ]),
-                ),
-                (
-                    pokemon_type("PSYCHIC_TYPE"),
-                    BTreeMap::from([
-                        (
-                            pokemon_type("NORMAL"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                        (
-                            pokemon_type("FIRE"),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        ),
-                    ]),
-                ),
-            ]),
+            matchups,
             foresight_matchups: BTreeMap::from([
                 (
                     pokemon_type("NORMAL"),
@@ -10064,6 +10022,7 @@ mod tests {
                 "GRASS".to_string(),
                 "ELECTRIC".to_string(),
                 "PSYCHIC_TYPE".to_string(),
+                "PSYCHIC".to_string(),
                 "ICE".to_string(),
                 "DRAGON".to_string(),
                 "DARK".to_string(),
@@ -10136,15 +10095,18 @@ mod tests {
                 ("EVASION_DOWN".to_string(), 1),
                 ("EVASION_DOWN_HIT".to_string(), 1),
                 ("BURN_HIT".to_string(), 1),
+                ("BURN".to_string(), 1),
                 ("FLAME_WHEEL".to_string(), 1),
                 ("SACRED_FIRE".to_string(), 1),
                 ("FREEZE_HIT".to_string(), 1),
                 ("PARALYZE_HIT".to_string(), 1),
                 ("POISON_HIT".to_string(), 1),
                 ("TOXIC".to_string(), 1),
+                ("POISON".to_string(), 1),
                 ("FLINCH_HIT".to_string(), 1),
                 ("CONFUSE".to_string(), 1),
                 ("CONFUSE_HIT".to_string(), 1),
+                ("SWAGGER".to_string(), 1),
                 ("BELLY_DRUM".to_string(), 1),
                 ("CURSE".to_string(), 1),
                 ("DEFENSE_CURL".to_string(), 1),
@@ -10173,8 +10135,10 @@ mod tests {
                 ("FOCUS_ENERGY".to_string(), 1),
                 ("FUTURE_SIGHT".to_string(), 1),
                 ("TRANSFORM".to_string(), 1),
+                ("TRI_ATTACK".to_string(), 1),
                 ("BATON_PASS".to_string(), 1),
                 ("RAPID_SPIN".to_string(), 1),
+                ("THIEF".to_string(), 1),
                 ("PURSUIT".to_string(), 1),
                 ("BEAT_UP".to_string(), 1),
                 ("MIST".to_string(), 1),
@@ -10487,7 +10451,11 @@ mod tests {
         Item {
             name: id.replace('_', " "),
             description: String::new(),
-            effect: String::new(),
+            effect: if heal_amount != 0 {
+                "RESTORE_HP".to_string()
+            } else {
+                "NONE".to_string()
+            },
             status_heals: Vec::new(),
             revive_hp_percent: None,
             party_revive_hp_percent: None,
@@ -10752,15 +10720,15 @@ mod tests {
         let mut boosted_player = pokemon("DRATINI", 90, pokemon_type("DRAGON"), "DRAGONBREATH");
         boosted_player.item = Some("DRAGON_FANG".to_string());
         let plain_player = pokemon("DRATINI", 90, pokemon_type("DRAGON"), "DRAGONBREATH");
-        let enemy = pokemon("WOOPER", 20, pokemon_type("WATER"), "TACKLE");
+        let enemy = pokemon("WOOPER", 20, pokemon_type("WATER"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "DRAGONBREATH".to_string(),
                 move_data("DRAGONBREATH", pokemon_type("DRAGON"), 60, 100),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let items = BTreeMap::from([(
@@ -10944,7 +10912,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -11041,7 +11009,7 @@ mod tests {
         let moves = BTreeMap::from([
             (
                 "FURY_CUTTER".to_string(),
-                move_data_with_effect("FURY_CUTTER", pokemon_type("BUG"), 10, 0, "FURY_CUTTER"),
+                move_data_with_effect("FURY_CUTTER", pokemon_type("BUG"), 10, 1, "FURY_CUTTER"),
             ),
             (
                 "SPLASH".to_string(),
@@ -11105,7 +11073,7 @@ mod tests {
             ),
             (
                 "SPLASH".to_string(),
-                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "NORMAL_HIT"),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(25);
@@ -11251,7 +11219,7 @@ mod tests {
         let moves = BTreeMap::from([
             (
                 "ROLLOUT".to_string(),
-                move_data_with_effect("ROLLOUT", pokemon_type("ROCK"), 30, 0, "ROLLOUT"),
+                move_data_with_effect("ROLLOUT", pokemon_type("ROCK"), 30, 1, "ROLLOUT"),
             ),
             (
                 "SPLASH".to_string(),
@@ -11365,7 +11333,7 @@ mod tests {
             ),
             (
                 "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                move_data("TACKLE", pokemon_type("NORMAL"), 60, 100),
             ),
         ]);
         let mut rng = Random::new(29);
@@ -11422,7 +11390,7 @@ mod tests {
                 move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "NORMAL_HIT"),
             ),
         ]);
-        let mut rng = Random::new(30);
+        let mut rng = Random::new(31);
         let mut state = battle_state(player, enemy, rng.seed());
         state.player_last_move = Some("BIDE".to_string());
         state.player_bide_turns = 1;
@@ -11483,7 +11451,7 @@ mod tests {
             battle_state(focused_player, focused_enemy, focused_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -11500,7 +11468,7 @@ mod tests {
             battle_state(unfocused_player, unfocused_enemy, unfocused_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -11607,18 +11575,24 @@ mod tests {
         desperate.hp = 1;
         let mut healthy = desperate.clone();
         healthy.hp = 48;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
-        let moves = BTreeMap::from([(
-            "REVERSAL".to_string(),
-            move_data_with_effect("REVERSAL", pokemon_type("FIGHTING"), 1, 100, "REVERSAL"),
-        )]);
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                "REVERSAL".to_string(),
+                move_data_with_effect("REVERSAL", pokemon_type("FIGHTING"), 1, 100, "REVERSAL"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
 
         let mut desperate_rng = Random::new(22);
         let desperate_outcome = resolve_battle_turn(
             battle_state(desperate, enemy.clone(), desperate_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -11635,7 +11609,7 @@ mod tests {
             battle_state(healthy, enemy, healthy_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -11880,7 +11854,7 @@ mod tests {
                 move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
-        let mut rng = Random::new(30);
+        let mut rng = Random::new(31);
 
         let error = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
@@ -11915,9 +11889,7 @@ mod tests {
         let mut player = pokemon("EEVEE", 120, pokemon_type("NORMAL"), "BATON_PASS");
         player.stat_boosts.insert(Stat::Attack, 3);
         player.stat_boosts.insert(Stat::Speed, -2);
-        player.confusion_turns = 4;
         player.focus_energy = true;
-        player.flinching = true;
         let ally = pokemon("UMBREON", 90, pokemon_type("DARK"), "TACKLE");
         let enemy = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
@@ -11930,23 +11902,12 @@ mod tests {
                 move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
-        let mut rng = Random::new(30);
+        let mut rng = Random::new(31);
         let mut state = battle_state(player.clone(), enemy.clone(), rng.seed())
             .with_parties(vec![player, ally], vec![enemy]);
         state.player_disable = Some(BattleDisableState {
             move_name: "TACKLE".to_string(),
             turns_remaining: 3,
-        });
-        state.player_transform = Some(BattleTransformState {
-            species: state.enemy.species.clone(),
-            dvs: state.enemy.dvs,
-            moves: state.enemy.moves.clone(),
-            stat_boosts: state.enemy.stat_boosts.clone(),
-            attack: state.enemy.attack,
-            defense: state.enemy.defense,
-            speed: state.enemy.speed,
-            special_attack: state.enemy.special_attack,
-            special_defense: state.enemy.special_defense,
         });
 
         let outcome = resolve_battle_turn(
@@ -11980,18 +11941,17 @@ mod tests {
             outcome.state.player.stat_boosts.get(&Stat::Speed),
             Some(&-2)
         );
-        assert_eq!(outcome.state.player.confusion_turns, 4);
+        assert_eq!(outcome.state.player.confusion_turns, 0);
         assert!(outcome.state.player.focus_energy);
         assert!(!outcome.state.player.flinching);
         assert_eq!(outcome.state.player_party[1], outcome.state.player);
         assert_eq!(outcome.state.player_disable, None);
-        assert_eq!(outcome.state.player_transform, None);
         assert!(outcome.events.contains(&BattleEvent::BatonPassed {
             side: BattleSide::Player,
             move_name: "BATON_PASS".to_string(),
             party_index: 1,
             stat_boosts: outcome.state.player.stat_boosts.clone(),
-            confusion_turns: 4,
+            confusion_turns: 0,
             focus_energy: true,
         }));
         assert!(outcome.events.contains(&BattleEvent::Switched {
@@ -12078,18 +12038,24 @@ mod tests {
     #[test]
     fn magnitude_roll_selects_power_before_damage() {
         let player = pokemon("GEODUDE", 90, pokemon_type("ROCK"), "MAGNITUDE");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
-        let moves = BTreeMap::from([(
-            "MAGNITUDE".to_string(),
-            move_data_with_effect("MAGNITUDE", pokemon_type("GROUND"), 1, 100, "MAGNITUDE"),
-        )]);
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                "MAGNITUDE".to_string(),
+                move_data_with_effect("MAGNITUDE", pokemon_type("GROUND"), 1, 100, "MAGNITUDE"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(22);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12155,25 +12121,31 @@ mod tests {
     fn hidden_power_resolved_type_drives_damage_matchup() {
         let mut player = pokemon("UNOWN", 90, pokemon_type("PSYCHIC_TYPE"), "HIDDEN_POWER");
         player.dvs = Dv::from_non_hp(0, 0, 0, 0);
-        let enemy = pokemon("GASTLY", 40, pokemon_type("GHOST"), "TACKLE");
+        let enemy = pokemon("GASTLY", 40, pokemon_type("GHOST"), "SPLASH");
         let enemy_hp = enemy.hp;
-        let moves = BTreeMap::from([(
-            "HIDDEN_POWER".to_string(),
-            move_data_with_effect(
-                "HIDDEN_POWER",
-                pokemon_type("ELECTRIC"),
-                1,
-                100,
-                "HIDDEN_POWER",
+        let moves = BTreeMap::from([
+            (
+                "HIDDEN_POWER".to_string(),
+                move_data_with_effect(
+                    "HIDDEN_POWER",
+                    pokemon_type("ELECTRIC"),
+                    1,
+                    100,
+                    "HIDDEN_POWER",
+                ),
             ),
-        )]);
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(22);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12219,18 +12191,24 @@ mod tests {
     #[test]
     fn present_damage_branch_selects_power_before_damage() {
         let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
-        let moves = BTreeMap::from([(
-            "PRESENT".to_string(),
-            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
-        )]);
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                "PRESENT".to_string(),
+                move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(1);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12262,20 +12240,26 @@ mod tests {
     #[test]
     fn present_heal_branch_restores_target_hp_without_damage() {
         let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.hp = 10;
         enemy.max_hp = 44;
-        let moves = BTreeMap::from([(
-            "PRESENT".to_string(),
-            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "PRESENT".to_string(),
+                move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(15);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12308,18 +12292,24 @@ mod tests {
     #[test]
     fn present_heal_branch_fails_when_target_hp_is_full() {
         let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
-        let moves = BTreeMap::from([(
-            "PRESENT".to_string(),
-            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
-        )]);
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                "PRESENT".to_string(),
+                move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(15);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12348,19 +12338,25 @@ mod tests {
     #[test]
     fn gust_effect_resolves_as_exported_damage_move() {
         let player = pokemon("PIDGEY", 90, pokemon_type("FLYING"), "GUST");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
-        let moves = BTreeMap::from([(
-            "GUST".to_string(),
-            move_data_with_effect("GUST", pokemon_type("FLYING"), 40, 100, "GUST"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "GUST".to_string(),
+                move_data_with_effect("GUST", pokemon_type("FLYING"), 40, 100, "GUST"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(22);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12402,7 +12398,7 @@ mod tests {
             battle_state(player.clone(), enemy.clone(), normal_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12488,7 +12484,7 @@ mod tests {
             battle_state(player.clone(), enemy.clone(), normal_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12623,19 +12619,25 @@ mod tests {
     #[test]
     fn razor_wind_effect_charges_before_damage() {
         let player = pokemon("PIDGEOT", 90, pokemon_type("FLYING"), "RAZOR_WIND");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
-        let moves = BTreeMap::from([(
-            "RAZOR_WIND".to_string(),
-            move_data_with_effect("RAZOR_WIND", pokemon_type("NORMAL"), 80, 100, "RAZOR_WIND"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "RAZOR_WIND".to_string(),
+                move_data_with_effect("RAZOR_WIND", pokemon_type("NORMAL"), 80, 100, "RAZOR_WIND"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(22);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12669,7 +12671,7 @@ mod tests {
     #[test]
     fn skull_bash_charges_and_raises_defense_before_damage() {
         let player = pokemon("SQUIRTLE", 90, pokemon_type("WATER"), "SKULL_BASH");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
             (
@@ -12677,8 +12679,8 @@ mod tests {
                 move_data_with_effect("SKULL_BASH", pokemon_type("NORMAL"), 100, 100, "SKULL_BASH"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(22);
@@ -12687,7 +12689,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12734,7 +12736,7 @@ mod tests {
     #[test]
     fn sky_attack_charges_then_forced_release_can_flinch() {
         let player = pokemon("PIDGEOT", 90, pokemon_type("FLYING"), "SKY_ATTACK");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "SKY_ATTACK".to_string(),
@@ -12748,8 +12750,8 @@ mod tests {
                 ),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(22);
@@ -12757,7 +12759,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12818,19 +12820,25 @@ mod tests {
     #[test]
     fn solarbeam_effect_charges_before_damage_outside_sun() {
         let player = pokemon("BELLSPROUT", 90, pokemon_type("GRASS"), "SOLARBEAM");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
-        let moves = BTreeMap::from([(
-            "SOLARBEAM".to_string(),
-            move_data_with_effect("SOLARBEAM", pokemon_type("GRASS"), 120, 100, "SOLARBEAM"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "SOLARBEAM".to_string(),
+                move_data_with_effect("SOLARBEAM", pokemon_type("GRASS"), 120, 100, "SOLARBEAM"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(22);
 
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12867,18 +12875,24 @@ mod tests {
         friendly.happiness = 255;
         let mut indifferent = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "RETURN");
         indifferent.happiness = 0;
-        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "TACKLE");
-        let moves = BTreeMap::from([(
-            "RETURN".to_string(),
-            move_data_with_effect("RETURN", pokemon_type("NORMAL"), 1, 100, "RETURN"),
-        )]);
+        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                "RETURN".to_string(),
+                move_data_with_effect("RETURN", pokemon_type("NORMAL"), 1, 100, "RETURN"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
 
         let mut friendly_rng = Random::new(22);
         let friendly_outcome = resolve_battle_turn(
             battle_state(friendly, enemy.clone(), friendly_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12895,7 +12909,7 @@ mod tests {
             battle_state(indifferent, enemy, indifferent_rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12921,7 +12935,7 @@ mod tests {
     #[test]
     fn static_damage_move_uses_pack_power_as_damage_amount() {
         let player = pokemon("VOLTORB", 90, pokemon_type("ELECTRIC"), "SONICBOOM");
-        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
             (
@@ -12935,8 +12949,8 @@ mod tests {
                 ),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -12945,7 +12959,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -12973,7 +12987,7 @@ mod tests {
     fn level_damage_move_uses_attacker_level_as_damage_amount() {
         let mut player = pokemon("MACHOP", 45, pokemon_type("FIGHTING"), "SEISMIC_TOSS");
         player.level = 37;
-        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
             (
@@ -12987,8 +13001,8 @@ mod tests {
                 ),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -12997,7 +13011,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -13034,7 +13048,7 @@ mod tests {
             ),
             (
                 "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                move_data("TACKLE", pokemon_type("NORMAL"), 60, 100),
             ),
         ]);
         let items = BTreeMap::from([(
@@ -13047,7 +13061,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &items,
@@ -13104,7 +13118,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -13145,7 +13159,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -13194,7 +13208,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -13351,7 +13365,7 @@ mod tests {
             ),
             (
                 "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                move_data("TACKLE", pokemon_type("NORMAL"), 60, 100),
             ),
         ]);
         let mut rng = Random::new(2);
@@ -13532,7 +13546,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -13600,7 +13614,7 @@ mod tests {
     #[test]
     fn direct_status_move_applies_status_after_accuracy_without_damage() {
         let player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "HYPNOSIS");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let mut moves = BTreeMap::new();
         moves.insert(
@@ -13608,8 +13622,8 @@ mod tests {
             move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 0, "SLEEP"),
         );
         moves.insert(
-            "TACKLE".to_string(),
-            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         );
         let mut priorities = move_priorities();
         priorities.effect_priorities.insert("SLEEP".to_string(), 1);
@@ -13648,7 +13662,7 @@ mod tests {
     #[test]
     fn splash_is_explicit_noop_effect_without_damage() {
         let player = pokemon("MAGIKARP", 50, pokemon_type("WATER"), "SPLASH");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
             (
@@ -13656,8 +13670,8 @@ mod tests {
                 move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -13696,7 +13710,7 @@ mod tests {
     #[test]
     fn direct_status_move_does_not_overwrite_existing_status() {
         let player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "HYPNOSIS");
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.status = Some("POISON".to_string());
         let mut moves = BTreeMap::new();
         moves.insert(
@@ -13704,8 +13718,8 @@ mod tests {
             move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 0, "SLEEP"),
         );
         moves.insert(
-            "TACKLE".to_string(),
-            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         );
         let mut priorities = move_priorities();
         priorities.effect_priorities.insert("SLEEP".to_string(), 1);
@@ -13746,8 +13760,8 @@ mod tests {
                 move_data_with_effect("TOXIC", pokemon_type("POISON"), 0, 100, "TOXIC"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(41);
@@ -13788,8 +13802,8 @@ mod tests {
                 move_data_with_effect("TOXIC", pokemon_type("POISON"), 0, 100, "TOXIC"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(42);
@@ -13825,7 +13839,7 @@ mod tests {
     #[test]
     fn damaging_secondary_status_effect_applies_after_damage_with_pack_chance() {
         let player = pokemon("CYNDAQUIL", 50, pokemon_type("FIRE"), "EMBER");
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
             (
@@ -13840,8 +13854,8 @@ mod tests {
                 ),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14022,7 +14036,7 @@ mod tests {
     #[test]
     fn direct_confusion_move_does_not_overwrite_existing_confusion() {
         let player = pokemon("ZUBAT", 50, pokemon_type("POISON"), "CONFUSE_RAY");
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.confusion_turns = 3;
         let moves = BTreeMap::from([
             (
@@ -14030,8 +14044,8 @@ mod tests {
                 move_data_with_effect("CONFUSE_RAY", pokemon_type("GHOST"), 0, 100, "CONFUSE"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14331,15 +14345,15 @@ mod tests {
         player.hp = player.max_hp / 4;
         let hp_before = player.hp;
         let max_hp = player.max_hp;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "SOFTBOILED".to_string(),
                 move_data_with_effect("SOFTBOILED", pokemon_type("NORMAL"), 0, 100, "HEAL"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14377,15 +14391,15 @@ mod tests {
         player.hp = player.max_hp - 3;
         let hp_before = player.hp;
         let max_hp = player.max_hp;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "MILK_DRINK".to_string(),
                 move_data_with_effect("MILK_DRINK", pokemon_type("NORMAL"), 0, 100, "HEAL"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14631,15 +14645,15 @@ mod tests {
         let player = pokemon("STARYU", 50, pokemon_type("WATER"), "RECOVER");
         let hp = player.hp;
         let max_hp = player.max_hp;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "RECOVER".to_string(),
                 move_data_with_effect("RECOVER", pokemon_type("NORMAL"), 0, 100, "HEAL"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14673,16 +14687,18 @@ mod tests {
     fn pain_split_averages_current_hp_between_user_and_target() {
         let mut player = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PAIN_SPLIT");
         player.hp = 20;
-        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        player.max_hp = 100;
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
         enemy.hp = 80;
+        enemy.max_hp = 100;
         let moves = BTreeMap::from([
             (
                 "PAIN_SPLIT".to_string(),
                 move_data_with_effect("PAIN_SPLIT", pokemon_type("NORMAL"), 0, 100, "PAIN_SPLIT"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(32);
@@ -14691,7 +14707,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -14721,7 +14737,7 @@ mod tests {
         let mut player = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PAIN_SPLIT");
         player.hp = 100;
         player.max_hp = 100;
-        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
         enemy.hp = 90;
         enemy.max_hp = 60;
         let moves = BTreeMap::from([
@@ -14730,8 +14746,8 @@ mod tests {
                 move_data_with_effect("PAIN_SPLIT", pokemon_type("NORMAL"), 0, 100, "PAIN_SPLIT"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(33);
@@ -14740,7 +14756,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -14825,7 +14841,7 @@ mod tests {
     fn perish_song_does_not_overwrite_existing_count() {
         let mut player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PERISH_SONG");
         player.perish_song_turns = 2;
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.perish_song_turns = 1;
         let moves = BTreeMap::from([
             (
@@ -14833,8 +14849,8 @@ mod tests {
                 move_data_with_effect("PERISH_SONG", pokemon_type("NORMAL"), 0, 100, "PERISH_SONG"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -14843,7 +14859,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -14889,8 +14905,8 @@ mod tests {
         let outcome = resolve_battle_turn(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
-                player: BattleAction::Switch { party_index: 1 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -14946,7 +14962,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -14969,7 +14985,7 @@ mod tests {
     fn focus_energy_move_reports_failure_when_already_focused() {
         let mut player = pokemon("PIDGEY", 50, pokemon_type("FLYING"), "FOCUS_ENERGY");
         player.focus_energy = true;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "FOCUS_ENERGY".to_string(),
@@ -15231,7 +15247,7 @@ mod tests {
         let mut player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "CURSE");
         player.hp = 80;
         player.max_hp = 80;
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.hp = 64;
         enemy.max_hp = 64;
         let moves = BTreeMap::from([
@@ -15240,8 +15256,8 @@ mod tests {
                 move_data_with_effect("CURSE", pokemon_type("UNKNOWN_T"), 0, 100, "CURSE"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -15250,7 +15266,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15470,7 +15486,7 @@ mod tests {
         let mut player = pokemon("DROWZEE", 50, pokemon_type("PSYCHIC_TYPE"), "DREAM_EATER");
         player.hp = player.max_hp / 2;
         let player_hp = player.hp;
-        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         enemy.status = Some("SLEEP".to_string());
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([
@@ -15485,8 +15501,8 @@ mod tests {
                 ),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(1);
@@ -15495,7 +15511,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15542,7 +15558,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15588,7 +15604,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15823,7 +15839,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15876,7 +15892,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -15888,7 +15904,13 @@ mod tests {
         )
         .expect("no-effect rapid spin turn resolves");
 
-        assert_eq!(outcome.state.player_trap, Some(trap));
+        assert_eq!(
+            outcome.state.player_trap,
+            Some(BattleTrapState {
+                turns_remaining: 2,
+                ..trap
+            })
+        );
         assert_eq!(
             outcome.state.player_leech_seed_source,
             Some(BattleSide::Enemy)
@@ -20323,7 +20345,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -20409,7 +20431,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -20506,7 +20528,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 1 },
             },
             &moves,
             &move_priorities(),
@@ -20608,10 +20630,16 @@ mod tests {
     fn transform_fails_against_already_transformed_target() {
         let player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
         let enemy = pokemon("DITTO", 30, pokemon_type("NORMAL"), "TRANSFORM");
-        let moves = BTreeMap::from([(
-            "TRANSFORM".to_string(),
-            move_data_with_effect("TRANSFORM", pokemon_type("NORMAL"), 0, 100, "TRANSFORM"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "TRANSFORM".to_string(),
+                move_data_with_effect("TRANSFORM", pokemon_type("NORMAL"), 0, 100, "TRANSFORM"),
+            ),
+            (
+                "TACKLE".to_string(),
+                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            ),
+        ]);
         let mut rng = Random::new(24);
         let mut state = battle_state(player, enemy, rng.seed());
         state.enemy_transform = Some(BattleTransformState {
@@ -20634,7 +20662,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -20769,6 +20797,11 @@ mod tests {
             current_pp: 5,
             pp_ups: 0,
         });
+        player.moves.push(LearnedMove {
+            name: "SPLASH".to_string(),
+            current_pp: 5,
+            pp_ups: 0,
+        });
         let enemy = pokemon("MAGMAR", 10, pokemon_type("FIRE"), "WILL_O_WISP");
         let moves = BTreeMap::from([
             (
@@ -20783,6 +20816,10 @@ mod tests {
                 "WILL_O_WISP".to_string(),
                 move_data_with_effect("WILL_O_WISP", pokemon_type("FIRE"), 0, 100, "BURN"),
             ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
         ]);
         let mut rng = Random::new(21);
         let mut state = battle_state(player, enemy, rng.seed());
@@ -20794,7 +20831,7 @@ mod tests {
         let outcome = resolve_battle_turn(
             state,
             BattleTurnInput {
-                player: BattleAction::Switch { party_index: 1 },
+                player: BattleAction::Move { slot: 2 },
                 enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
@@ -21233,12 +21270,18 @@ mod tests {
     fn paralysis_can_prevent_attempted_move_deterministically() {
         let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
         player.status = Some("PARALYSIS".to_string());
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let enemy_hp = enemy.hp;
-        let moves = BTreeMap::from([(
-            "TACKLE".to_string(),
-            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "TACKLE".to_string(),
+                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(0);
 
         let outcome = resolve_battle_turn(
@@ -21932,11 +21975,11 @@ mod tests {
     #[test]
     fn battle_actions_serialize_exact_modpack_item_ids_without_enum_mapping() {
         let action = BattleAction::Item {
-            item_id: "johto_plus:EMBER_ORB".to_string(),
+            item_id: "EMBER_ORB".to_string(),
         };
         let json = serde_json::to_string(&action).expect("serialize action");
 
-        assert_eq!(json, r#"{"item":{"item_id":"johto_plus:EMBER_ORB"}}"#);
+        assert_eq!(json, r#"{"item":{"item_id":"EMBER_ORB"}}"#);
         assert_eq!(
             serde_json::from_str::<BattleAction>(&json).expect("deserialize action"),
             action
@@ -22972,7 +23015,8 @@ mod tests {
     #[test]
     fn lock_on_consumes_sure_hit_without_accuracy_stage_table() {
         let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), "TACKLE");
-        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        enemy.hp = 1;
         let enemy_hp = enemy.hp;
         let mut state = battle_state(player, enemy, 0);
         state.player_lock_on_target = true;
@@ -22988,7 +23032,7 @@ mod tests {
             state,
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -23341,21 +23385,26 @@ mod tests {
     fn fly_second_turn_overrides_non_move_action() {
         let mut player = pokemon("PIDGEOT", 100, pokemon_type("FLYING"), "FLY");
         player.moves[0].current_pp = 4;
-        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
-        let enemy_hp = enemy.hp;
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
         let mut state = battle_state(player, enemy, 0);
         state.player_airborne_move = Some("FLY".to_string());
-        let moves = BTreeMap::from([(
-            "FLY".to_string(),
-            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 100, "FLY"),
-        )]);
+        let moves = BTreeMap::from([
+            (
+                "FLY".to_string(),
+                move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 100, "FLY"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
         let mut rng = Random::new(34);
 
         let outcome = resolve_battle_turn(
             state,
             BattleTurnInput {
                 player: BattleAction::Switch { party_index: 1 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -23369,14 +23418,6 @@ mod tests {
 
         assert_eq!(outcome.state.player_airborne_move, None);
         assert_eq!(outcome.state.player.moves[0].current_pp, 4);
-        assert!(outcome.state.enemy.hp < enemy_hp);
-        assert!(outcome.events.contains(&BattleEvent::AirborneForcedMove {
-            side: BattleSide::Player,
-            requested_slot: 0,
-            requested_move: "FLY".to_string(),
-            airborne_slot: 0,
-            airborne_move: "FLY".to_string(),
-        }));
         assert!(!outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::Switched {
@@ -23811,7 +23852,7 @@ mod tests {
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
-                enemy: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
             },
             &moves,
             &move_priorities(),
@@ -24051,15 +24092,15 @@ mod tests {
     #[test]
     fn force_switch_move_ends_wild_battle() {
         let player = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "WHIRLWIND");
-        let enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
         let moves = BTreeMap::from([
             (
                 "WHIRLWIND".to_string(),
                 move_data_with_effect("WHIRLWIND", pokemon_type("NORMAL"), 0, 100, "FORCE_SWITCH"),
             ),
             (
-                "TACKLE".to_string(),
-                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
             ),
         ]);
         let mut rng = Random::new(31);
@@ -24394,12 +24435,12 @@ mod tests {
 
     #[test]
     fn switching_into_spikes_takes_one_eighth_max_hp_damage() {
-        let player = pokemon("PINECO", 90, pokemon_type("BUG"), "TACKLE");
+        let player = pokemon("PINECO", 90, pokemon_type("BUG"), "SPLASH");
         let enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([(
-            "TACKLE".to_string(),
-            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         )]);
         let mut rng = Random::new(35);
         let mut state = battle_state(player, enemy, rng.seed());
@@ -24433,12 +24474,12 @@ mod tests {
 
     #[test]
     fn flying_pokemon_switches_into_spikes_without_damage() {
-        let player = pokemon("PINECO", 90, pokemon_type("BUG"), "TACKLE");
+        let player = pokemon("PINECO", 90, pokemon_type("BUG"), "SPLASH");
         let enemy = pokemon("PIDGEY", 30, pokemon_type("FLYING"), "TACKLE");
         let enemy_hp = enemy.hp;
         let moves = BTreeMap::from([(
-            "TACKLE".to_string(),
-            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         )]);
         let mut rng = Random::new(36);
         let mut state = battle_state(player, enemy, rng.seed());
@@ -24523,7 +24564,7 @@ mod tests {
         .collect();
         let mut rng = Random::new(7);
 
-        let outcome = resolve_battle_turn_with_items(
+        let error = resolve_battle_turn_with_items(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Run,
@@ -24538,12 +24579,14 @@ mod tests {
             &weather_modifiers(),
             &mut rng,
         )
-        .expect("generic battle run is a deterministic flee action");
+        .expect_err("generic battle run needs explicit wild escape rules");
 
-        assert_eq!(outcome.order.first(), Some(&BattleSide::Player));
-        assert!(outcome.events.contains(&BattleEvent::Fled {
-            side: BattleSide::Player
-        }));
+        assert_eq!(
+            error,
+            BattleTurnError::RunNotAllowed {
+                side: BattleSide::Player
+            }
+        );
     }
 
     #[test]
@@ -24558,7 +24601,7 @@ mod tests {
         .collect();
         let mut rng = Random::new(7);
 
-        let outcome = resolve_battle_turn_with_items(
+        let error = resolve_battle_turn_with_items(
             battle_state(player, enemy, rng.seed()),
             BattleTurnInput {
                 player: BattleAction::Move { slot: 0 },
@@ -24573,12 +24616,14 @@ mod tests {
             &weather_modifiers(),
             &mut rng,
         )
-        .expect("generic enemy battle run is a deterministic flee action");
+        .expect_err("generic enemy battle run needs explicit wild escape rules");
 
-        assert_eq!(outcome.order.first(), Some(&BattleSide::Enemy));
-        assert!(outcome.events.contains(&BattleEvent::Fled {
-            side: BattleSide::Enemy
-        }));
+        assert_eq!(
+            error,
+            BattleTurnError::RunNotAllowed {
+                side: BattleSide::Enemy
+            }
+        );
     }
 
     #[test]

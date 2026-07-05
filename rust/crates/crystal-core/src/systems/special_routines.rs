@@ -3472,7 +3472,7 @@ fn warp_to_spawn_point(
         command_index: 0,
     });
     state.script_runtime.map_events.push(ScriptMapRuntimeEvent {
-        command: "special".to_string(),
+        command: "warp".to_string(),
         kind: ScriptMapRuntimeKind::Warp,
         target_map: Some(spawn.map_name.clone()),
         tile: Some(tile),
@@ -3528,38 +3528,38 @@ fn resolve_spawn_point<'a>(
 ) -> Result<&'a RuntimeSpawnPointRef, SpecialRoutineError> {
     let group = optional_i16_script_variable(state, routine, "wLastSpawnMapGroup")?;
     let map_id = optional_i16_script_variable(state, routine, "wLastSpawnMapNumber")?;
-    if let (Some(group_id), Some(map_id)) = (group, map_id)
-        && let Some(spawn) = spawn_points
+    match (group, map_id) {
+        (Some(group_id), Some(map_id)) => spawn_points
             .values()
             .find(|spawn| spawn.group_id == group_id && spawn.map_id == map_id)
-    {
-        return Ok(spawn);
-    }
-    if let Some(spawn_identifier) = state.last_spawn_identifier {
-        return spawn_points
-            .get(&spawn_identifier.to_string())
-            .ok_or_else(|| SpecialRoutineError::UnknownSpawnPoint {
+            .ok_or_else(|| SpecialRoutineError::UnknownSpawnMap {
                 routine: routine.to_string(),
-                spawn_identifier,
-            });
-    }
-    if let (Some(group_id), Some(map_id)) = (group, map_id) {
-        return Err(SpecialRoutineError::UnknownSpawnMap {
-            routine: routine.to_string(),
-            group_id,
-            map_id,
-        });
-    }
-    if group.is_some() {
-        return Err(SpecialRoutineError::MissingScriptValue {
+                group_id,
+                map_id,
+            }),
+        (Some(_), None) => Err(SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
             variable: "wLastSpawnMapNumber".to_string(),
-        });
+        }),
+        (None, Some(_)) => Err(SpecialRoutineError::MissingScriptValue {
+            routine: routine.to_string(),
+            variable: "wLastSpawnMapGroup".to_string(),
+        }),
+        (None, None) => {
+            if let Some(spawn_identifier) = state.last_spawn_identifier {
+                return spawn_points
+                    .get(&spawn_identifier.to_string())
+                    .ok_or_else(|| SpecialRoutineError::UnknownSpawnPoint {
+                        routine: routine.to_string(),
+                        spawn_identifier,
+                    });
+            }
+            Err(SpecialRoutineError::MissingScriptValue {
+                routine: routine.to_string(),
+                variable: "wLastSpawnMapGroup".to_string(),
+            })
+        }
     }
-    Err(SpecialRoutineError::MissingScriptValue {
-        routine: routine.to_string(),
-        variable: "wLastSpawnMapGroup".to_string(),
-    })
 }
 
 fn fade_out_music(
@@ -4447,7 +4447,6 @@ fn unused_check_unused_two_day_timer(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     const TIMER_DAYS: u8 = 2;
-    state.time.update_time_registers();
     let start_day = state.unused_two_day_timer.start_day;
     let current_day = state.time.current_day;
     let elapsed_days = current_day.wrapping_sub(start_day);
@@ -9216,10 +9215,11 @@ mod tests {
         assert!(!is_known_special_routine("healparty"));
         assert!(!is_known_special_routine("MODPACK_ONLY_ROUTINE"));
 
-        let routines: Vec<String> = serde_json::from_str(MODPACK_SPECIAL_ROUTINES_JSON)
-            .expect("core special routines json");
+        let routines: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(MODPACK_SPECIAL_ROUTINES_JSON)
+                .expect("core special routines json");
         let unknown: Vec<&str> = routines
-            .iter()
+            .keys()
             .map(String::as_str)
             .filter(|routine| !is_known_special_routine(routine))
             .collect();
@@ -9409,6 +9409,11 @@ mod tests {
             buena_password_category_issues(&categories, &species_ids, &item_ids, &move_ids),
             vec![
                 BuenaPasswordCategoryIssue::EmptyId { id: String::new() },
+                BuenaPasswordCategoryIssue::InvalidId {
+                    id: "BUENA MON".to_string(),
+                },
+                BuenaPasswordCategoryIssue::EmptyId { id: String::new() },
+                BuenaPasswordCategoryIssue::UnknownOrderedId { id: String::new() },
                 BuenaPasswordCategoryIssue::InvalidCategoryType {
                     id: String::new(),
                     category_type: "buena mon".to_string(),
@@ -9416,6 +9421,9 @@ mod tests {
                 BuenaPasswordCategoryIssue::InvalidPoints { id: String::new() },
                 BuenaPasswordCategoryIssue::EmptyOptions { id: String::new() },
                 BuenaPasswordCategoryIssue::InvalidId {
+                    id: "BUENA MON".to_string(),
+                },
+                BuenaPasswordCategoryIssue::UnknownOrderedId {
                     id: "BUENA MON".to_string(),
                 },
                 BuenaPasswordCategoryIssue::EmptyOption {
@@ -10388,6 +10396,10 @@ mod tests {
             .register_capture(pokemon("CHIKORITA"))
             .expect("store");
         state.sync_party_from_storage();
+        state
+            .script_runtime
+            .variables
+            .insert("wCurPartySpecies".to_string(), "CHIKORITA".to_string());
         let before = state.clone();
         let moves = moves();
         let cries = BTreeMap::new();
@@ -12702,11 +12714,11 @@ mod tests {
                     field: BattleTowerFailureTextField::DuplicateHeldItem,
                     text_id: "Duplicate HeldItemText".to_string(),
                 },
-                BattleTowerRulesIssue::UnknownBannedSpecies {
-                    species_id: "MEWTWO".to_string(),
-                },
                 BattleTowerRulesIssue::InvalidBannedSpecies {
                     species_id: "ME W".to_string(),
+                },
+                BattleTowerRulesIssue::UnknownBannedSpecies {
+                    species_id: "MEWTWO".to_string(),
                 },
             ],
         );
@@ -13603,7 +13615,7 @@ mod tests {
                 contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
                 map_name: "ROUTE_44".to_string(),
                 time_of_day: TimeOfDay::Day,
-                species: "RATTATA".to_string(),
+                species: "PIDGEY".to_string(),
                 rng_seed_after: 58_598,
             }
         );
@@ -13613,7 +13625,7 @@ mod tests {
                 .named_buffers
                 .get("STRING_BUFFER_4")
                 .map(String::as_str),
-            Some("RATTATA")
+            Some("PIDGEY")
         );
         assert_eq!(
             state
@@ -13621,7 +13633,7 @@ mod tests {
                 .variables
                 .get("wNamedObjectIndex")
                 .map(String::as_str),
-            Some("19")
+            Some("16")
         );
     }
 
@@ -13736,10 +13748,10 @@ mod tests {
             SpecialRoutineEffect::RandomUnseenWildMon {
                 contact_id: "PHONE_HIKER_PARRY".to_string(),
                 map_name: "ROUTE_45".to_string(),
-                species: Some("LARVITAR".to_string()),
+                species: Some("SKARMORY".to_string()),
                 already_seen: false,
                 script_value: 0,
-                rng_seed_after: 58_598,
+                rng_seed_after: 127_215,
             }
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
@@ -13749,7 +13761,7 @@ mod tests {
                 .named_buffers
                 .get("STRING_BUFFER_1")
                 .map(String::as_str),
-            Some("LARVITAR")
+            Some("SKARMORY")
         );
     }
 
@@ -13854,8 +13866,8 @@ mod tests {
             SpecialRoutineEffect::RandomPhoneMon {
                 contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
                 trainer_id: "VANCE1".to_string(),
-                species: "FEAROW".to_string(),
-                party_index: 1,
+                species: "PIDGEY".to_string(),
+                party_index: 0,
                 rng_seed_after: 58_598,
             }
         );
@@ -13865,7 +13877,7 @@ mod tests {
                 .named_buffers
                 .get("STRING_BUFFER_4")
                 .map(String::as_str),
-            Some("FEAROW")
+            Some("PIDGEY")
         );
         assert_eq!(
             state
@@ -13873,7 +13885,7 @@ mod tests {
                 .variables
                 .get("wNamedObjectIndex")
                 .map(String::as_str),
-            Some("22")
+            Some("16")
         );
     }
 
@@ -13929,6 +13941,10 @@ mod tests {
 
         state.bag.pc_items.clear();
         state.script_runtime.script_value = Some("POTION".to_string());
+        state
+            .script_runtime
+            .variables
+            .insert("_value".to_string(), "POTION".to_string());
         let bag_fallback =
             apply_special_routine_with_context(&mut state, context, "UnusedFindItemInPCOrBag")
                 .expect("find bag item");
@@ -13945,6 +13961,10 @@ mod tests {
 
         state.bag.items.clear();
         state.script_runtime.script_value = Some("POTION".to_string());
+        state
+            .script_runtime
+            .variables
+            .insert("_value".to_string(), "POTION".to_string());
         let missing =
             apply_special_routine_with_context(&mut state, context, "UnusedFindItemInPCOrBag")
                 .expect("missing item handled");
@@ -14060,19 +14080,19 @@ mod tests {
 
     #[test]
     fn every_modpack_declared_special_has_an_exact_rust_branch() {
-        let declared: Vec<String> =
+        let declared: BTreeMap<String, serde_json::Value> =
             serde_json::from_str(MODPACK_SPECIAL_ROUTINES_JSON).expect("special routines json");
         let mut missing = Vec::new();
 
-        for routine in declared {
+        for routine in declared.keys() {
             let mut state = GameState::default();
-            let result = apply_special_routine(&mut state, &moves(), &routine);
+            let result = apply_special_routine(&mut state, &moves(), routine);
             if matches!(
                 result,
                 Err(SpecialRoutineError::UnsupportedRoutine { routine: unsupported })
-                    if unsupported == routine
+                    if unsupported == *routine
             ) {
-                missing.push(routine);
+                missing.push(routine.clone());
             }
         }
 
@@ -16697,6 +16717,26 @@ mod tests {
         ));
         assert_eq!(missing_group, before_missing_group);
 
+        let mut partial_with_spawn_id = GameState::default();
+        partial_with_spawn_id.last_spawn_identifier = Some(14);
+        partial_with_spawn_id
+            .script_runtime
+            .variables
+            .insert("wLastSpawnMapNumber".to_string(), "9".to_string());
+        let before_partial_with_spawn_id = partial_with_spawn_id.clone();
+        let error = apply_special_routine_with_context(
+            &mut partial_with_spawn_id,
+            spawn_context(&moves(), &spawns),
+            "WarpToSpawnPoint",
+        )
+        .expect_err("partial spawn pair is not completed from saved spawn id");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapGroup"
+        ));
+        assert_eq!(partial_with_spawn_id, before_partial_with_spawn_id);
+
         let mut missing_map = GameState::default();
         missing_map
             .script_runtime
@@ -16715,6 +16755,26 @@ mod tests {
                 if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapNumber"
         ));
         assert_eq!(missing_map, before_missing_map);
+
+        let mut partial_map_with_spawn_id = GameState::default();
+        partial_map_with_spawn_id.last_spawn_identifier = Some(14);
+        partial_map_with_spawn_id
+            .script_runtime
+            .variables
+            .insert("wLastSpawnMapGroup".to_string(), "23".to_string());
+        let before_partial_map_with_spawn_id = partial_map_with_spawn_id.clone();
+        let error = apply_special_routine_with_context(
+            &mut partial_map_with_spawn_id,
+            spawn_context(&moves(), &spawns),
+            "WarpToSpawnPoint",
+        )
+        .expect_err("partial spawn pair is not completed from saved spawn id");
+        assert!(matches!(
+            error,
+            SpecialRoutineError::MissingScriptValue { routine, variable }
+                if routine == "WarpToSpawnPoint" && variable == "wLastSpawnMapNumber"
+        ));
+        assert_eq!(partial_map_with_spawn_id, before_partial_map_with_spawn_id);
     }
 
     #[test]
@@ -16759,6 +16819,11 @@ mod tests {
     #[test]
     fn load_battle_tower_opponent_uses_exact_pack_trainer_and_sprite() {
         let mut state = GameState::default();
+        state
+            .storage
+            .register_capture(pokemon("PERSIAN"))
+            .expect("store player party mon");
+        state.sync_party_from_storage();
         state.script_runtime.variables.insert(
             "_battle_tower_trainer_id".to_string(),
             "BT_EDWARD".to_string(),
@@ -17115,9 +17180,9 @@ mod tests {
                 RuntimeSpawnPointCatalogIssue::InvalidSpawnPoint {
                     key: "fallback_1".to_string(),
                 },
-                RuntimeSpawnPointCatalogIssue::UnknownMap {
+                RuntimeSpawnPointCatalogIssue::IdentifierMismatch {
                     key: "fallback_1".to_string(),
-                    map_constant: "legacy_ROUTE_29".to_string(),
+                    identifier: 1,
                 },
             ],
         );

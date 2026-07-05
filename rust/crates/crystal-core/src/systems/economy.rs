@@ -348,16 +348,6 @@ fn is_exact_economy_amount_token(value: &str) -> bool {
         || value == "-"
         || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
         || is_exact_economy_token(value)
-        || is_exact_economy_amount_expression(value)
-}
-
-fn is_exact_economy_amount_expression(value: &str) -> bool {
-    !value.is_empty()
-        && value.trim() == value
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'-' | b' '))
-        && !has_reserved_pack_prefix(value)
 }
 
 fn required_economy_command_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -516,17 +506,6 @@ pub fn resolve_amount(
     amount_tokens: &[String],
     constants: &CurrencyCatalog,
 ) -> Result<u32, EconomyError> {
-    let expanded_tokens;
-    let amount_tokens = if amount_tokens.len() == 1 && amount_tokens[0].contains(' ') {
-        expanded_tokens = amount_tokens[0]
-            .split(' ')
-            .filter(|token| !token.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        expanded_tokens.as_slice()
-    } else {
-        amount_tokens
-    };
     let expression = amount_tokens.join(" ");
     let Some(first) = amount_tokens.first() else {
         return Err(EconomyError::EmptyAmountExpression);
@@ -832,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_amounts_from_exact_constants_and_expressions() {
+    fn resolves_amounts_from_exact_tokenized_constants() {
         let constants = CurrencyCatalog(
             [
                 ("ROUTE43GATE_TOLL".to_string(), 1_000),
@@ -847,12 +826,14 @@ mod tests {
             Ok(999)
         );
         assert_eq!(
-            resolve_amount(&tokens(&["MAX_COINS - 1"]), &constants),
-            Ok(u32::from(TEST_MAX_COINS) - 1)
-        );
-        assert_eq!(
             resolve_amount(&tokens(&["MAX_COINS", "-", "1"]), &constants),
             Ok(9_998)
+        );
+        assert_eq!(
+            resolve_amount(&tokens(&["MAX_COINS - 1"]), &constants),
+            Err(EconomyError::InvalidAmountToken {
+                token: "MAX_COINS - 1".to_string()
+            })
         );
         assert_eq!(
             resolve_amount(&tokens(&["route43gate_toll"]), &constants),
@@ -985,7 +966,7 @@ mod tests {
             .to_string();
         assert!(
             error.contains("currency constant")
-                && error.contains("exact ASCII alphanumeric/underscore"),
+                && error.contains("exact ASCII alphanumeric or underscore"),
             "{error}"
         );
     }

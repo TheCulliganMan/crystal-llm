@@ -597,9 +597,11 @@ mod tests {
 
         assert_eq!(
             error,
-            ScriptSceneError::UnknownSceneToken {
-                map_name: "Route43".to_string(),
-                scene_id: "1".to_string(),
+            ScriptSceneError::Scene {
+                error: SceneError::UnknownScene {
+                    map_name: "Route43".to_string(),
+                    scene_name: "1".to_string(),
+                },
             }
         );
     }

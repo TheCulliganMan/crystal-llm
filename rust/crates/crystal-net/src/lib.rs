@@ -14,7 +14,6 @@ use crystal_core::multiplayer::{
 };
 #[cfg(test)]
 use crystal_core::multiplayer::{RuntimeCommandPayload, StateChecksum};
-#[cfg(test)]
 use crystal_core::state::GameEvent;
 use thiserror::Error;
 
@@ -461,7 +460,7 @@ enum WireLinkMessage {
     SaveSummary(SessionSaveSummaryFrame),
     SaveCheckpoint(SessionSaveCheckpointFrame),
     StateHash(StateChecksumFrame),
-    CommandChecksum(CommandChecksumResult),
+    CommandChecksum(WireCommandChecksumResult),
     RuntimeCommand(SessionRuntimeCommandFrame),
     RuntimeCommandResult(SessionRuntimeCommandResultFrame),
     Presence(OverworldPresence),
@@ -475,6 +474,65 @@ enum WireLinkMessage {
 struct WireLinkFrame {
     session: LinkSessionIdentity,
     message: WireLinkMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCommandChecksumResult {
+    events: Vec<WireGameEvent>,
+    checksum: StateChecksumFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+enum WireGameEvent {
+    FrameAdvanced { frame: u64 },
+    JoypadChanged { pressed: u8, down: u8 },
+    MenuOpened,
+    MenuClosed,
+}
+
+impl From<&GameEvent> for WireGameEvent {
+    fn from(event: &GameEvent) -> Self {
+        match event {
+            GameEvent::FrameAdvanced { frame } => Self::FrameAdvanced { frame: *frame },
+            GameEvent::JoypadChanged { pressed, down } => Self::JoypadChanged {
+                pressed: *pressed,
+                down: *down,
+            },
+            GameEvent::MenuOpened => Self::MenuOpened,
+            GameEvent::MenuClosed => Self::MenuClosed,
+        }
+    }
+}
+
+impl From<WireGameEvent> for GameEvent {
+    fn from(event: WireGameEvent) -> Self {
+        match event {
+            WireGameEvent::FrameAdvanced { frame } => Self::FrameAdvanced { frame },
+            WireGameEvent::JoypadChanged { pressed, down } => Self::JoypadChanged { pressed, down },
+            WireGameEvent::MenuOpened => Self::MenuOpened,
+            WireGameEvent::MenuClosed => Self::MenuClosed,
+        }
+    }
+}
+
+impl From<&CommandChecksumResult> for WireCommandChecksumResult {
+    fn from(result: &CommandChecksumResult) -> Self {
+        Self {
+            events: result.events.iter().map(WireGameEvent::from).collect(),
+            checksum: result.checksum.clone(),
+        }
+    }
+}
+
+impl From<WireCommandChecksumResult> for CommandChecksumResult {
+    fn from(result: WireCommandChecksumResult) -> Self {
+        Self {
+            events: result.events.into_iter().map(GameEvent::from).collect(),
+            checksum: result.checksum,
+        }
+    }
 }
 
 impl WireLinkMessage {
@@ -577,7 +635,7 @@ impl WireLinkMessage {
                     .map_err(session_mismatch_error)?;
                 Ok(Self::StateHash(checksum.checksum().clone()))
             }
-            LinkMessage::CommandChecksum(result) => Ok(Self::CommandChecksum(result.clone())),
+            LinkMessage::CommandChecksum(result) => Ok(Self::CommandChecksum(result.into())),
             LinkMessage::RuntimeCommand(command) => Ok(Self::RuntimeCommand(
                 SessionRuntimeCommandFrame::new(session.clone(), command.clone()).map_err(
                     |error| TransportError::InvalidMessage {
@@ -661,7 +719,7 @@ impl From<WireLinkMessage> for LinkMessage {
             WireLinkMessage::SaveSummary(summary) => Self::SessionSaveSummary(summary),
             WireLinkMessage::SaveCheckpoint(checkpoint) => Self::SessionSaveCheckpoint(checkpoint),
             WireLinkMessage::StateHash(checksum) => Self::StateHash(checksum),
-            WireLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result),
+            WireLinkMessage::CommandChecksum(result) => Self::CommandChecksum(result.into()),
             WireLinkMessage::RuntimeCommand(command) => Self::SessionRuntimeCommand(command),
             WireLinkMessage::RuntimeCommandResult(result) => {
                 Self::SessionRuntimeCommandResult(result)
@@ -796,11 +854,8 @@ impl LinkFrameCodec {
         }
 
         let (wire_frame, bytes_read): (WireLinkFrame, usize) =
-            bincode::serde::decode_from_slice(payload, link_frame_binary_config()).map_err(
-                |error| TransportError::InvalidPayload {
-                    message: error.to_string(),
-                },
-            )?;
+            bincode::serde::decode_from_slice(payload, link_frame_binary_config())
+                .map_err(binary_decode_error)?;
         if bytes_read != declared {
             return Err(TransportError::LengthMismatch {
                 declared,
@@ -842,6 +897,17 @@ fn link_frame_binary_config() -> impl bincode::config::Config {
     bincode::config::standard()
         .with_little_endian()
         .with_fixed_int_encoding()
+}
+
+fn binary_decode_error(error: bincode::error::DecodeError) -> TransportError {
+    match error {
+        bincode::error::DecodeError::OtherString(message) => {
+            TransportError::InvalidMessage { message }
+        }
+        error => TransportError::InvalidPayload {
+            message: error.to_string(),
+        },
+    }
 }
 
 fn message_session(
@@ -1178,8 +1244,17 @@ mod tests {
     }
 
     fn pokemon(id: &str, item: Option<&str>) -> Pokemon {
+        let int_id = match id {
+            "PIKACHU" => 25,
+            _ => 1,
+        };
         let mut pokemon = Pokemon::new_for_tests(
-            PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65)),
+            {
+                let mut species =
+                    PokemonSpecies::new_for_tests(id, BaseStats::new(45, 49, 49, 45, 65, 65));
+                species.int_id = int_id;
+                species
+            },
             12,
             Dv::from_non_hp(1, 2, 3, 4),
         );
@@ -1572,7 +1647,7 @@ mod tests {
                 2,
                 12,
                 BattleAction::Item {
-                    item_id: "johto_plus:EMBER_ORB".to_string(),
+                    item_id: "MASTER_BALL".to_string(),
                 },
                 "aaaabbbb",
             )
@@ -1587,13 +1662,8 @@ mod tests {
     fn binary_link_frame_round_trips_trade_messages() {
         let codec = session_codec();
         let offer = LinkMessage::TradeOffer(
-            TradeOffer::new(
-                "trade-1",
-                1,
-                0,
-                pokemon("PIKACHU", Some("johto_plus:EMBER_ORB")),
-            )
-            .expect("offer"),
+            TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", Some("MASTER_BALL")))
+                .expect("offer"),
         );
         let offer_frame = codec.encode(&offer).expect("encode offer");
         assert_eq!(codec.decode(&offer_frame).expect("decode offer"), offer);
@@ -1797,56 +1867,36 @@ mod tests {
     #[test]
     fn binary_link_codec_rejects_messages_that_bypass_protocol_constructors() {
         let codec = LinkFrameCodec::default();
-        let invalid_hello = LinkMessage::Hello(
-            serde_json::from_value(serde_json::json!({
-                "session": {
-                    "protocol_version": LINK_FRAME_VERSION,
-                    "session_id": "",
-                    "modpack": modpack(),
-                    "pack_content_hash": pack_content_hash(),
-                },
-                "player": {
-                    "id": 7,
-                    "display_name": "P7",
-                },
-            }))
-            .expect("deserialize invalid hello"),
+        let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
+            LINK_FRAME_VERSION,
+            "",
+            modpack(),
+            pack_content_hash(),
         );
+        let invalid_hello = LinkMessage::Hello(LinkHello::new_unchecked_for_tests(
+            invalid_session.clone(),
+            PlayerIdentity::new_unchecked_for_tests(7, "P7"),
+        ));
         assert!(matches!(
             codec.encode(&invalid_hello),
             Err(TransportError::InvalidMessage { .. })
         ));
 
-        let invalid_wire_frame = frame_from_wire_message(WireLinkMessage::Hello(
-            serde_json::from_value(serde_json::json!({
-                "session": {
-                    "protocol_version": LINK_FRAME_VERSION,
-                    "session_id": "",
-                    "modpack": modpack(),
-                    "pack_content_hash": pack_content_hash(),
-                },
-                "player": {
-                    "id": 7,
-                    "display_name": "P7",
-                },
-            }))
-            .expect("deserialize invalid wire hello"),
-        ));
+        let invalid_wire_frame =
+            frame_from_wire_message(WireLinkMessage::Hello(LinkHello::new_unchecked_for_tests(
+                invalid_session,
+                PlayerIdentity::new_unchecked_for_tests(7, "P7"),
+            )));
         assert!(matches!(
             codec.decode(&invalid_wire_frame),
             Err(TransportError::InvalidMessage { .. })
         ));
 
-        let empty_player_frame = frame_from_wire_message(WireLinkMessage::Hello(
-            serde_json::from_value(serde_json::json!({
-                "session": session(),
-                "player": {
-                    "id": 7,
-                    "display_name": "",
-                },
-            }))
-            .expect("deserialize empty-player hello"),
-        ));
+        let empty_player_frame =
+            frame_from_wire_message(WireLinkMessage::Hello(LinkHello::new_unchecked_for_tests(
+                session(),
+                PlayerIdentity::new_unchecked_for_tests(7, ""),
+            )));
         assert_eq!(
             codec.decode(&empty_player_frame),
             Err(TransportError::InvalidMessage {
@@ -1884,19 +1934,23 @@ mod tests {
         assert_eq!(
             codec.decode(&padded_hash_frame),
             Err(TransportError::InvalidMessage {
-                message: "battle sync state hash  2222 must be exact and untrimmed".to_string()
+                message: "battle sync state hash  2222 must be an exact 8-character lowercase FNV hex hash"
+                    .to_string()
             })
         );
 
         let invalid_command_checksum_frame =
-            frame_from_wire_message(WireLinkMessage::CommandChecksum(CommandChecksumResult {
-                events: Vec::new(),
-                checksum: StateChecksumFrame::new(0, Frame(7), 0x1111_1111),
-            }));
+            frame_from_wire_message(WireLinkMessage::CommandChecksum(
+                (&CommandChecksumResult {
+                    events: Vec::new(),
+                    checksum: StateChecksumFrame::new(0, Frame(7), 0x1111_1111),
+                })
+                    .into(),
+            ));
         assert_eq!(
             codec.decode(&invalid_command_checksum_frame),
             Err(TransportError::InvalidMessage {
-                message: "state checksum player id 0 is not a valid link identity".to_string()
+                message: "lockstep player id 0 is not a valid link identity".to_string()
             })
         );
 
@@ -2174,7 +2228,7 @@ mod tests {
 
         assert!(matches!(
             codec.decode(&frame),
-            Err(TransportError::SessionMismatch { .. })
+            Err(TransportError::InvalidMessage { .. })
         ));
     }
 
@@ -2334,7 +2388,7 @@ mod tests {
 
         let (_, mut peer) =
             MemoryLinkTransport::pair_for_session(session()).expect("session transport");
-        peer.push_inbound_frame_for_tests(br#"{"type":"hello"}"#.to_vec());
+        peer.push_inbound_frame_for_tests(vec![b'X'; HEADER_LEN]);
         assert_eq!(peer.poll(), Err(TransportError::InvalidMagic));
     }
 
@@ -2444,12 +2498,10 @@ mod tests {
             StateChecksumFrame::new(2, Frame(144), 0xbbcc_ddee),
         )
         .expect("wrong-pack checkpoint");
-        peer.send(LinkMessage::SaveCheckpoint(wrong_pack_checkpoint))
-            .expect("bare wrong-pack checkpoint send after hello");
         assert!(matches!(
-            host.poll(),
+            peer.send(LinkMessage::SaveCheckpoint(wrong_pack_checkpoint)),
             Err(EndpointError::Transport(
-                TransportError::SessionMismatch { .. }
+                TransportError::InvalidMessage { .. }
             ))
         ));
         assert!(!host.has_peer_checkpoint(2));
@@ -2470,12 +2522,10 @@ mod tests {
             StateChecksumFrame::new(2, Frame(144), 0xbbcc_ddee),
         )
         .expect("wrong-content-hash checkpoint");
-        peer.send(LinkMessage::SaveCheckpoint(wrong_content_hash_checkpoint))
-            .expect("bare wrong-content-hash checkpoint send after hello");
         assert!(matches!(
-            host.poll(),
+            peer.send(LinkMessage::SaveCheckpoint(wrong_content_hash_checkpoint)),
             Err(EndpointError::Transport(
-                TransportError::SessionMismatch { .. }
+                TransportError::InvalidMessage { .. }
             ))
         ));
         assert!(!host.has_peer_checkpoint(2));

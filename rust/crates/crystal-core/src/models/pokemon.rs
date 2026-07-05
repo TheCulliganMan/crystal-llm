@@ -1049,7 +1049,10 @@ mod tests {
     use super::*;
 
     fn chikorita() -> PokemonSpecies {
-        PokemonSpecies::new_for_tests("CHIKORITA", BaseStats::new(45, 49, 65, 45, 49, 65))
+        let mut species =
+            PokemonSpecies::new_for_tests("CHIKORITA", BaseStats::new(45, 49, 65, 45, 49, 65));
+        species.int_id = 152;
+        species
     }
 
     #[test]

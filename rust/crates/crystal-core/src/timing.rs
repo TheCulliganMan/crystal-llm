@@ -5,7 +5,7 @@ pub const GB_FRAME_DURATION_MS: f64 =
     (GB_CYCLES_PER_FRAME as f64 * 1000.0) / GB_CPU_CYCLES_PER_SECOND as f64;
 pub const GB_FRAME_DURATION_SECONDS: f64 = GB_FRAME_DURATION_MS / 1000.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Frame(pub u64);
 
 impl Frame {
@@ -48,3 +48,4 @@ mod tests {
         assert_eq!(Frame(u64::MAX).checked_next(), None);
     }
 }
+use serde::{Deserialize, Serialize};

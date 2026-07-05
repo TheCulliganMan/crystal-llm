@@ -861,11 +861,11 @@ mod tests {
                 "ROUTE_29",
                 &[hidden_event(5, 4, "Route29HiddenPotion")],
                 &[pickup],
-                TilePosition::new(12, 10),
+                TilePosition::new(7, 6),
             ),
             Ok(Some(ItemfinderHiddenItem {
                 map_name: "ROUTE_29".to_string(),
-                tile: TilePosition::new(10, 8),
+                tile: TilePosition::new(5, 4),
                 source_script: "Route29HiddenPotion".to_string(),
                 event_flag: "EVENT_GOT_ROUTE_29_HIDDEN_POTION".to_string(),
                 item_id: "POTION".to_string(),
@@ -952,7 +952,7 @@ mod tests {
                 "ROUTE_29",
                 &[hidden_event(5, 4, "Route29HiddenPotion")],
                 &[],
-                TilePosition::new(12, 10),
+                TilePosition::new(7, 6),
             ),
             Err(FieldItemError::MissingHiddenItemPickup {
                 source_script: "Route29HiddenPotion".to_string(),
@@ -989,13 +989,13 @@ mod tests {
                 FruitTreeCatalogIssue::InvalidFruitTreeId {
                     fruit_tree_id: "ROUTE 29_FRUIT_TREE".to_string(),
                 },
-                FruitTreeCatalogIssue::InvalidItem {
-                    fruit_tree_id: "ROUTE_30_FRUIT_TREE".to_string(),
-                    item_id: "GOLD BERRY".to_string(),
-                },
                 FruitTreeCatalogIssue::UnknownItem {
                     fruit_tree_id: "ROUTE_29_FRUIT_TREE".to_string(),
                     item_id: "berry".to_string(),
+                },
+                FruitTreeCatalogIssue::InvalidItem {
+                    fruit_tree_id: "ROUTE_30_FRUIT_TREE".to_string(),
+                    item_id: "GOLD BERRY".to_string(),
                 },
             ]
         );
@@ -1022,7 +1022,7 @@ mod tests {
                 .to_string();
             assert!(
                 error.contains("fruit tree")
-                    && error.contains("exact ASCII alphanumeric/underscore"),
+                    && error.contains("exact ASCII alphanumeric or underscore"),
                 "{label} produced unexpected error: {error}"
             );
         }
@@ -1043,12 +1043,12 @@ mod tests {
         assert_eq!(
             fruit_tree_catalog_issues(&fruit_trees, &items),
             vec![
-                FruitTreeCatalogIssue::InvalidFruitTreeId {
-                    fruit_tree_id: "fallback_tree".to_string(),
-                },
                 FruitTreeCatalogIssue::InvalidItem {
                     fruit_tree_id: "FRUITTREE_ROUTE_30".to_string(),
                     item_id: "legacy_berry".to_string(),
+                },
+                FruitTreeCatalogIssue::InvalidFruitTreeId {
+                    fruit_tree_id: "fallback_tree".to_string(),
                 },
             ]
         );
@@ -1062,7 +1062,7 @@ mod tests {
                 .to_string();
             assert!(
                 error.contains("fruit tree")
-                    && error.contains("exact ASCII alphanumeric/underscore"),
+                    && error.contains("exact ASCII alphanumeric or underscore"),
                 "{label} produced unexpected error: {error}"
             );
         }
@@ -1383,7 +1383,7 @@ mod tests {
 
         let mut bad_event = script_pickup("hiddenitem");
         bad_event.item_id = Some("BERRY".to_string());
-        bad_event.event_flag = Some("fallback_event".to_string());
+        bad_event.event_flag = Some("0".to_string());
         assert_eq!(
             script_field_pickup_issues(&bad_event, &items, &fruit_trees),
             vec![ScriptFieldPickupIssue::InvalidCollectibleFlag]

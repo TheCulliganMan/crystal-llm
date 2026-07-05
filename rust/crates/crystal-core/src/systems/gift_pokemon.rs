@@ -583,14 +583,14 @@ mod tests {
         assert_eq!(
             gift_pokemon_script_issues(&gift, &species_map, &items, &labels),
             vec![
+                GiftPokemonScriptIssue::InvalidSourceScript {
+                    source_script: "fallback_script".to_string(),
+                },
                 GiftPokemonScriptIssue::InvalidSpeciesId {
                     species_id: "CYNDA QUIL".to_string(),
                 },
                 GiftPokemonScriptIssue::InvalidHeldItemId {
                     item_id: "BERRY JUICE".to_string(),
-                },
-                GiftPokemonScriptIssue::InvalidSourceScript {
-                    source_script: "fallback_script".to_string(),
                 },
                 GiftPokemonScriptIssue::InvalidLabel {
                     field: "nickname",

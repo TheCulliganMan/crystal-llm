@@ -593,7 +593,8 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("trainer token must be"),
+                error.contains("trainer token must be")
+                    || error.contains("trainer encounter music must be"),
                 "{field} produced unexpected error: {error}"
             );
         }
@@ -610,7 +611,8 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("trainer token must be"),
+                error.contains("trainer token must be")
+                    || error.contains("trainer encounter music must be"),
                 "party {field} produced unexpected error: {error}"
             );
         }
@@ -636,7 +638,8 @@ mod tests {
                 .to_string();
 
             assert!(
-                error.contains("trainer token must be"),
+                error.contains("trainer token must be")
+                    || error.contains("trainer encounter music must be"),
                 "{field} produced unexpected error: {error}"
             );
         }

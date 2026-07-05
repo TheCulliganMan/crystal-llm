@@ -2301,6 +2301,10 @@ mod tests {
         item
     }
 
+    fn test_battle_payload_item(effect: &str) -> Item {
+        test_item(effect, 20)
+    }
+
     fn status_item(status_heals: Vec<&str>) -> Item {
         let mut item = test_item("STATUS_HEAL", 0);
         item.status_heals = status_heals
@@ -2450,7 +2454,10 @@ mod tests {
         item.battle_stat_drop_guard_turns = Some(5);
         assert_eq!(
             item_payload_issues(&item),
-            vec![ItemPayloadIssue::MissingBattleStatDropGuard]
+            vec![
+                ItemPayloadIssue::MissingBattleStatDropGuard,
+                ItemPayloadIssue::MissingBattleItemPayload,
+            ]
         );
     }
 
@@ -2574,7 +2581,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_tmhm_move_whitespace_without_reference_lookup() {
-        let mut tm = test_item("TM_MUD_SLAP", 0);
+        let mut tm = test_battle_payload_item("TM_MUD_SLAP");
         tm.pocket = ITEM_POCKET_TM_HM.to_string();
         tm.tmhm_index = Some(30);
         tm.tmhm_move = Some("MUD SLAP".to_string());
@@ -2589,7 +2596,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_script_name_whitespace_without_coercion() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.script_name = " MOD_ITEM".to_string();
 
         assert_eq!(
@@ -2610,7 +2617,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_reserved_pack_prefix_tokens() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.script_name = "fallback_item_script".to_string();
         item.effect = "legacy_restore_hp".to_string();
         item.status_heals = vec!["fallback_poison".to_string()];
@@ -2640,7 +2647,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_display_name_without_inference() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.name = " Flash Step Charm".to_string();
 
         assert_eq!(
@@ -2662,7 +2669,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_description_without_inference() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.description = " A charm with exact text.".to_string();
 
         assert_eq!(
@@ -2684,7 +2691,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_pocket_without_enum_restriction() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.pocket = "BATTLE PASS".to_string();
 
         assert_eq!(
@@ -2706,7 +2713,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_effect_without_enum_restriction() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.effect = "MODDED FLASH_STEP".to_string();
 
         assert_eq!(
@@ -2728,7 +2735,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_held_effect_without_enum_restriction() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.held_effect = "HELD MODDED".to_string();
 
         assert_eq!(
@@ -2750,7 +2757,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_property_without_requiring_property() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.property = " CANT_SELECT".to_string();
 
         assert_eq!(
@@ -2777,7 +2784,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_malformed_menus_without_enum_restriction() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.field_menu = "ITEMMENU MODDED".to_string();
         item.battle_menu = String::new();
 
@@ -2799,7 +2806,7 @@ mod tests {
 
     #[test]
     fn item_payload_issues_reject_menu_usability_contradictions() {
-        let mut item = test_item("MOD_ITEM", 0);
+        let mut item = test_battle_payload_item("MOD_ITEM");
         item.field_menu = "ITEMMENU_NOUSE".to_string();
         item.field_usable = true;
         item.battle_menu = "ITEMMENU_PARTY".to_string();
@@ -2829,12 +2836,16 @@ mod tests {
         town_map.effect = "TOWN_MAP".to_string();
         town_map.field_menu = "ITEMMENU_NOUSE".to_string();
         town_map.field_usable = true;
+        town_map.battle_menu = "ITEMMENU_NOUSE".to_string();
+        town_map.battle_usable = false;
         assert_eq!(item_payload_issues(&town_map), Vec::new());
 
         let mut bad_map = test_item("BAD_MAP", 0);
         bad_map.effect = "MOD_TOWN_MAP".to_string();
         bad_map.field_menu = "ITEMMENU_NOUSE".to_string();
         bad_map.field_usable = true;
+        bad_map.battle_menu = "ITEMMENU_NOUSE".to_string();
+        bad_map.battle_usable = false;
         assert_eq!(
             item_payload_issues(&bad_map),
             vec![ItemPayloadIssue::InvalidFieldUsableMenu {
@@ -4463,7 +4474,8 @@ mod tests {
 
     #[test]
     fn battle_items_reject_unsupported_payload_less_effect_without_mutation() {
-        let item = test_item("MOD_UNDECLARED", 0);
+        let mut item = test_item("MOD_UNDECLARED", 0);
+        item.script_name = "MOD_UNDECLARED".to_string();
         let mut pokemon = test_pokemon(17, 35);
         let before = pokemon.clone();
 

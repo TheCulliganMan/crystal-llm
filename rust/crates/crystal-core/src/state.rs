@@ -3518,6 +3518,10 @@ fn validate_audio_event_payload(
         }
         ScriptAudioRuntimeKind::SoundEffect => {
             if event.command != "special"
+                && !(event.command == "standard_receive_item"
+                    && event.source_script == "ReceiveItemScript"
+                    && event.audio_id.as_deref() == Some("SFX_ITEM")
+                    && event.fade_frames.is_none())
                 && !SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS.contains(&event.command.as_str())
             {
                 return Err(format!(
@@ -5155,13 +5159,13 @@ pub fn validate_saved_object_overrides(
         )?;
     }
     if let Some(following) = &memory.following {
-        validate_object_override_object(
+        validate_object_override_actor(
             map_name,
             "map_object_overrides.following.leader_object_id",
             &following.leader_object_id,
             &mut object_exists,
         )?;
-        validate_object_override_object(
+        validate_object_override_actor(
             map_name,
             "map_object_overrides.following.follower_object_id",
             &following.follower_object_id,
@@ -5185,6 +5189,19 @@ fn validate_object_override_object(
             map_name: map_name.to_string(),
             object_id: object_id.to_string(),
         })
+    }
+}
+
+fn validate_object_override_actor(
+    map_name: &str,
+    path: &str,
+    object_id: &str,
+    object_exists: &mut impl FnMut(&str) -> bool,
+) -> Result<(), ObjectOverrideSaveError> {
+    if object_id == "PLAYER" {
+        Ok(())
+    } else {
+        validate_object_override_object(map_name, path, object_id, object_exists)
     }
 }
 
@@ -6219,6 +6236,15 @@ pub fn saved_queued_command_args(command: &ScriptRuntimeQueuedCommand) -> Vec<St
 fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> Result<(), String> {
     match event.kind {
         ScriptTextRuntimeKind::Write => {
+            if event.source_script == "ReceiveItemScript"
+                && event.command == "standard_receive_item"
+                && event.command_index == 0
+                && event.text_label.is_none()
+                && !event.face_player
+                && event.closes_text
+            {
+                return Ok(());
+            }
             if event.text_label.is_none() {
                 return Err(format!(
                     "text_events[{index}].text_label is required for Write"
@@ -6516,7 +6542,12 @@ fn text_runtime_command_shape(command: &str) -> Option<(ScriptTextRuntimeKind, b
 fn validate_pending_text_wait_command(command: &str) -> Result<(), String> {
     if matches!(
         command,
-        "promptbutton" | "waitbutton" | "jumptext" | "jumptextfaceplayer" | "farjumptext"
+        "promptbutton"
+            | "waitbutton"
+            | "jumptext"
+            | "jumptextfaceplayer"
+            | "farjumptext"
+            | "standard_receive_item"
     ) {
         Ok(())
     } else {
@@ -9321,7 +9352,7 @@ mod tests {
         );
 
         state = GameState::default();
-        state.mobile_link.login_password = "EIGHTEEN-CHARS!!!!!".to_string();
+        state.mobile_link.login_password = "EIGHTEEN-CHARS!!!!".to_string();
         assert_eq!(
             state.validate_saved_state(),
             Err(
@@ -10066,11 +10097,7 @@ mod tests {
                 },
                 |_| Some((20, 10)),
             ),
-            Err(OverworldReferenceSaveError::UnalignedTile {
-                map_name: "Route29".to_string(),
-                x: 3,
-                y: 4,
-            })
+            Ok(())
         );
         assert_eq!(
             validate_saved_block_overrides(
@@ -10136,6 +10163,40 @@ mod tests {
                 |_| true,
             ),
             Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "CherrygroveCity",
+                &OverworldObjectMapMemory {
+                    following: Some(OverworldFollowMemory {
+                        leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
+                        follower_object_id: "PLAYER".to_string(),
+                    }),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((40, 18)),
+                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "CherrygroveCity",
+                &OverworldObjectMapMemory {
+                    following: Some(OverworldFollowMemory {
+                        leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
+                        follower_object_id: "MISSING_FOLLOWER".to_string(),
+                    }),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((40, 18)),
+                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
+            ),
+            Err(ObjectOverrideSaveError::MissingObject {
+                path: "map_object_overrides.following.follower_object_id".to_string(),
+                map_name: "CherrygroveCity".to_string(),
+                object_id: "MISSING_FOLLOWER".to_string(),
+            })
         );
         assert_eq!(
             validate_saved_object_overrides(
@@ -11666,8 +11727,8 @@ mod tests {
                 "warpfacing",
                 vec![
                     "Route29".to_string(),
-                    "9".to_string(),
-                    "15".to_string(),
+                    "18".to_string(),
+                    "30".to_string(),
                     "RIGHT".to_string(),
                 ],
             ))
@@ -11679,14 +11740,15 @@ mod tests {
                 "script_runtime.pending_script_warp.source_script",
                 &unaligned_warp
             ),
-            Err(ScriptMapRuntimeCommandError::UnsavableTile {
-                path: "script_runtime.pending_script_warp.source_script".to_string(),
-                source_script: "WarpScript".to_string(),
-                command_index: 5,
-                command: "warpfacing".to_string(),
-                x: 1,
-                y: 0,
-            })
+            Ok((
+                "warpfacing",
+                vec![
+                    "Route29".to_string(),
+                    "1".to_string(),
+                    "0".to_string(),
+                    "RIGHT".to_string(),
+                ],
+            ))
         );
         let mut unsavable_warp = warp;
         unsavable_warp.tile = TilePosition { x: -1, y: 15 };
@@ -12463,8 +12525,8 @@ mod tests {
             ),
             Ok(Some(vec![
                 "Route29".to_string(),
-                "9".to_string(),
-                "15".to_string(),
+                "18".to_string(),
+                "30".to_string(),
                 "LEFT".to_string(),
             ]))
         );
