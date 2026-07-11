@@ -198,6 +198,52 @@ describe("export-core-content-pack", () => {
     ).toThrow("Content pack file stem must be a single exact path segment");
   });
 
+  it("declares field box decoration flags as saveable story constants", () => {
+    mockStrictIndexAndEmptyMapBlocks();
+
+    exportCoreContentPack({
+      pokemonData: [],
+      movesData: {},
+      learnsetsData: {},
+      levelUpMovesData: {},
+      eggMovesData: {},
+      evolutions: [],
+      wildEncounters: [],
+      fieldBoxItems: {
+        NORMAL_BOX: {
+          item_id: "NORMAL_BOX",
+          effect: "NORMAL_BOX",
+          decoration_flag: "EVENT_DECO_SILVER_TROPHY",
+        },
+      },
+      mapDimensions: {},
+      mapAttributes: {},
+      items: [],
+      runtimeSpawnPoints: titleRuntimeSpawnPoints,
+      storyEventScriptConstants: {
+        global: { EVENT_EXISTING: 1 },
+        maps: {},
+      },
+      audioAssets: titleMusicAudioAsset,
+      trainers: [],
+      pokedex: [],
+      npcData: {},
+      pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
+    });
+
+    expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
+      "content-packs/core-modular/story_event_script_constants/constants.json",
+      {
+        global: {
+          EVENT_DECO_SILVER_TROPHY: 0,
+          EVENT_EXISTING: 1,
+        },
+        maps: {},
+      },
+      { indent: 2 },
+    );
+  });
+
   it("rejects audio asset keys that do not match record ids", () => {
     mockStrictIndexAndEmptyMapBlocks();
 

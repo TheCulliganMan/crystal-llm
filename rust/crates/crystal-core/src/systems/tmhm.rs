@@ -135,7 +135,7 @@ pub fn teach_tmhm_move(
 
 pub fn validate_saved_tmhm_references(
     items: &BTreeMap<String, Item>,
-    tm_hm: &[bool],
+    tm_hm: &[u8],
 ) -> Result<(), TmHmLearnError> {
     let max_index = items
         .values()
@@ -165,7 +165,7 @@ pub fn validate_saved_tmhm_references(
             .values()
             .filter(|item| item.pocket == ITEM_POCKET_TM_HM && item.tmhm_index == Some(index))
             .count();
-        if tm_hm[index] && matches == 0 {
+        if tm_hm[index] > 0 && matches == 0 {
             return Err(TmHmLearnError::SavedTmHmMissingCompiledItem { index });
         }
         if matches > 1 {

@@ -94,6 +94,16 @@ pub enum AudioProgramSource {
     Pcm {
         bytes: Vec<u8>,
         format: AudioPcmFormat,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
+    },
+    PcmFile {
+        path: PathBuf,
+        format: AudioPcmFormat,
+        byte_len: usize,
+        payload_hash: String,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
     },
 }
 
@@ -639,7 +649,9 @@ mod tests {
         assert!(!program.cache_key.contains(".mp3"));
         match program.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
+            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+                panic!("MIDI repository must not emit PCM")
+            }
         }
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -654,7 +666,9 @@ mod tests {
         assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
         match sfx.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
+            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+                panic!("MIDI repository must not emit PCM")
+            }
         }
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -670,7 +684,9 @@ mod tests {
         assert!(!cry.cache_key.contains(".mp3"));
         match cry.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } => panic!("MIDI repository must not emit PCM"),
+            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+                panic!("MIDI repository must not emit PCM")
+            }
         }
         let _ = std::fs::remove_dir_all(temp);
     }

@@ -1385,7 +1385,9 @@ pub fn choose_slot_from_percent(
 }
 
 pub fn apply_grass_level_variance(base_level: u8, surface: EncounterSurface, roll_byte: u8) -> u8 {
-    if surface != EncounterSurface::Grass {
+    // Crystal applies the same four-step level variance to grass and surfing
+    // encounters. Fishing tables do not pass through this selector.
+    if !matches!(surface, EncounterSurface::Grass | EncounterSurface::Water) {
         return base_level;
     }
     let mut extra = 0;
@@ -2385,7 +2387,7 @@ mod tests {
     fn grass_level_variance_uses_same_thresholds_as_typescript() {
         assert_eq!(
             apply_grass_level_variance(5, EncounterSurface::Water, 255),
-            5
+            9
         );
         assert_eq!(apply_grass_level_variance(5, EncounterSurface::Grass, 0), 5);
         assert_eq!(

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const Module = require("node:module");
 const childProcess = require("node:child_process");
 const ts = require("typescript");
@@ -40,6 +41,34 @@ require.extensions[".ts"] = function registerTs(module, filename) {
   });
   module._compile(outputText, filename);
 };
+
+const asmCheck = childProcess.spawnSync(
+  process.execPath,
+  [path.join(repoRoot, "scripts", "verify-asm-source.mjs")],
+  {
+    cwd: repoRoot,
+    env: { ...process.env, CRYSTAL_CANONICAL_EXPORT: "1" },
+    stdio: "inherit",
+  },
+);
+if (asmCheck.error) {
+  throw asmCheck.error;
+}
+if (asmCheck.status !== 0) {
+  process.exit(asmCheck.status ?? 1);
+}
+
+const runtimeAssetExport = childProcess.spawnSync(
+  process.execPath,
+  [path.join(repoRoot, "apps", "web", "scripts", "export-runtime-fallbacks.js")],
+  { cwd: repoRoot, stdio: "inherit" },
+);
+if (runtimeAssetExport.error) {
+  throw runtimeAssetExport.error;
+}
+if (runtimeAssetExport.status !== 0) {
+  process.exit(runtimeAssetExport.status ?? 1);
+}
 
 require(path.join(packageRoot, "src", "exporters")).exportCoreData();
 
@@ -80,3 +109,36 @@ const compiledAssetPack = path.join(repoRoot, "apps", "web", "assets", "data", c
 const trackedPack = path.join(repoRoot, compiledPackRelativePath);
 fs.mkdirSync(path.dirname(trackedPack), { recursive: true });
 fs.copyFileSync(compiledAssetPack, trackedPack);
+
+const packSha256 = crypto
+  .createHash("sha256")
+  .update(fs.readFileSync(trackedPack))
+  .digest("hex");
+const sourceLock = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, "asm-source.lock.json"), "utf8"),
+);
+const provenancePath = `${trackedPack}.provenance.json`;
+fs.writeFileSync(
+  provenancePath,
+  `${JSON.stringify(
+    {
+      schema: 2,
+      pack_format: 3,
+      pack: path.relative(repoRoot, trackedPack).split(path.sep).join("/"),
+      pack_sha256: packSha256,
+      asm: {
+        repository: sourceLock.repository,
+        commit: sourceLock.commit,
+        tree: sourceLock.tree,
+        input_manifest_sha256: sourceLock.input_manifest_sha256,
+        rom_sha1: sourceLock.rom.sha1,
+      },
+      toolchain: {
+        rgbds: sourceLock.rgbds.version,
+        exporter: "packages/exporters/scripts/export-core.js",
+      },
+    },
+    null,
+    2,
+  )}\n`,
+);

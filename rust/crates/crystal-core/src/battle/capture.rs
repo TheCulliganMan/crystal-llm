@@ -335,6 +335,10 @@ pub struct CaptureOutcome {
     pub animation_shakes: u8,
     pub final_catch_rate: u8,
     pub rng_seed_after: u32,
+    /// The ball used by the bag-facing capture path. Direct oracle outcomes
+    /// may leave this unset because they exercise only catch resolution.
+    #[serde(default)]
+    pub ball_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +346,13 @@ pub struct CaptureOutcome {
 pub struct StoredCapture {
     pub pokemon: Pokemon,
     pub location: CaptureStorageLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureCompletion {
+    pub stored: Option<StoredCapture>,
+    pub contest_pokemon: Option<Pokemon>,
 }
 
 pub fn resolve_capture_attempt(
@@ -362,6 +373,7 @@ pub fn resolve_capture_attempt(
             animation_shakes: 0,
             final_catch_rate: 0,
             rng_seed_after: rng.seed(),
+            ball_id: None,
         });
     }
 
@@ -373,11 +385,12 @@ pub fn resolve_capture_attempt(
             animation_shakes: 4,
             final_catch_rate: 255,
             rng_seed_after: rng.seed(),
+            ball_id: None,
         });
     }
 
     let final_catch_rate = compute_final_catch_rate(player, enemy, context, rules)?;
-    let roll = rng.randrange(256) as u8;
+    let roll = rng.battle_random_byte();
     if roll <= final_catch_rate {
         return Ok(CaptureOutcome {
             caught: true,
@@ -386,13 +399,14 @@ pub fn resolve_capture_attempt(
             animation_shakes: 4,
             final_catch_rate,
             rng_seed_after: rng.seed(),
+            ball_id: None,
         });
     }
 
     let wobble_chance = wobble_chance_for_rate(final_catch_rate, wobble_probabilities)?;
     let mut wobble_count = 0;
     for _ in 0..3 {
-        if (rng.randrange(256) as u8) < wobble_chance {
+        if rng.battle_random_byte() < wobble_chance {
             wobble_count += 1;
         } else {
             break;
@@ -406,6 +420,7 @@ pub fn resolve_capture_attempt(
         animation_shakes: wobble_count,
         final_catch_rate,
         rng_seed_after: rng.seed(),
+        ball_id: None,
     })
 }
 
@@ -425,26 +440,30 @@ pub fn throw_ball_from_bag(
         if bag.quantity(ball) == 0 {
             return Ok(None);
         }
-        return Ok(Some(resolve_capture_attempt(
+        let mut outcome = resolve_capture_attempt(
             player,
             enemy,
             &context,
             rules,
             wobble_probabilities,
             rng,
-        )?));
+        )?;
+        outcome.ball_id = Some(context.ball_id);
+        return Ok(Some(outcome));
     }
     if !bag.consume_ball(ball).map_err(CaptureUseError::Bag)? {
         return Ok(None);
     }
-    Ok(Some(resolve_capture_attempt(
+    let mut outcome = resolve_capture_attempt(
         player,
         enemy,
         &context,
         rules,
         wobble_probabilities,
         rng,
-    )?))
+    )?;
+    outcome.ball_id = Some(context.ball_id);
+    Ok(Some(outcome))
 }
 
 pub fn validate_capture_ball_item(rules: &CaptureRules, ball: &Item) -> Result<(), CaptureError> {
@@ -712,6 +731,13 @@ pub fn complete_active_wild_capture(
     state: &mut GameState,
     outcome: &CaptureOutcome,
 ) -> Result<Option<StoredCapture>, String> {
+    Ok(complete_active_wild_capture_result(state, outcome)?.stored)
+}
+
+pub fn complete_active_wild_capture_result(
+    state: &mut GameState,
+    outcome: &CaptureOutcome,
+) -> Result<CaptureCompletion, String> {
     if !outcome.caught {
         return Err("cannot complete capture from an uncaught capture outcome".to_string());
     }
@@ -724,9 +750,17 @@ pub fn complete_active_wild_capture(
             outcome.rng_seed_after, state.rng_seed
         ));
     }
-    let enemy_pokemon = match &state.battle {
-        BattleMemory::Wild { enemy_pokemon, .. }
-        | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
+    let (mut enemy_pokemon, battle_type) = match &state.battle {
+        BattleMemory::Wild {
+            enemy_pokemon,
+            battle_type,
+            ..
+        }
+        | BattleMemory::StaticWild {
+            enemy_pokemon,
+            battle_type,
+            ..
+        } => (enemy_pokemon.clone(), battle_type.clone()),
         BattleMemory::Trainer { trainer_id, .. } => {
             return Err(format!("cannot capture during trainer battle {trainer_id}"));
         }
@@ -734,6 +768,41 @@ pub fn complete_active_wild_capture(
             return Err("cannot complete capture without an active wild battle".to_string());
         }
     };
+    if let Some(ball_id) = outcome.ball_id.as_deref() {
+        enemy_pokemon.caught_data = Some(crate::models::pokemon::CaughtData {
+            level: enemy_pokemon.level,
+            ball: caught_ball_item_id(ball_id),
+            // The map-specific caught location is resolved by the pack-facing
+            // adapter; zero is Crystal's explicit "no location" value.
+            location: 0,
+        });
+    }
+    if battle_type == "BATTLETYPE_BUG_CONTEST" {
+        let mut contest_pokemon = enemy_pokemon;
+        contest_pokemon.status = None;
+        contest_pokemon.original_trainer_name = state.player_name.clone();
+        contest_pokemon.original_trainer_id = state.player_id;
+        state.pokedex.record_caught_pokemon(&contest_pokemon);
+        if state.bug_contest.caught_mon.is_some() {
+            state.bug_contest.pending_caught_mon = Some(contest_pokemon.clone());
+            state.script_runtime.text_window_open = true;
+            state.script_runtime.pending_yes_no = Some(crate::state::ScriptYesNoPrompt {
+                source_script: "BugContestSetCaughtContestMon".to_string(),
+                command_index: 0,
+            });
+        } else {
+            state.bug_contest.caught_species = Some(contest_pokemon.species.id.clone());
+            state.bug_contest.caught_level = Some(contest_pokemon.level);
+            state.bug_contest.caught_mon = Some(contest_pokemon.clone());
+        }
+        state.battle_result |= 1 << 6;
+        deactivate_battle(state);
+        state.sync_party_from_storage();
+        return Ok(CaptureCompletion {
+            stored: None,
+            contest_pokemon: Some(contest_pokemon),
+        });
+    }
     let stored = complete_captured_pokemon(
         outcome,
         &mut state.storage,
@@ -745,7 +814,29 @@ pub fn complete_active_wild_capture(
         deactivate_battle(state);
     }
     state.sync_party_from_storage();
-    Ok(stored)
+    Ok(CaptureCompletion {
+        stored,
+        contest_pokemon: None,
+    })
+}
+
+fn caught_ball_item_id(ball_id: &str) -> u8 {
+    match ball_id {
+        "MASTER_BALL" => 0x01,
+        "ULTRA_BALL" => 0x02,
+        "GREAT_BALL" => 0x04,
+        "POKE_BALL" => 0x05,
+        "SAFARI_BALL" => 0x08,
+        "HEAVY_BALL" => 0x9d,
+        "LEVEL_BALL" => 0x9f,
+        "LURE_BALL" => 0xa0,
+        "FAST_BALL" => 0xa1,
+        "FRIEND_BALL" => 0xa4,
+        "MOON_BALL" => 0xa5,
+        "LOVE_BALL" => 0xa6,
+        "PARK_BALL" => 0xb1,
+        _ => 0,
+    }
 }
 
 pub fn compute_final_catch_rate(
@@ -1749,6 +1840,7 @@ mod tests {
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
             rng_seed_after: 1,
+            ball_id: Some("ULTRA_BALL".to_string()),
         };
 
         let stored = complete_active_wild_capture(&mut state, &outcome)
@@ -1756,6 +1848,10 @@ mod tests {
             .expect("stored capture");
 
         assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(
+            stored.pokemon.caught_data.as_ref().map(|data| data.ball),
+            Some(0x02)
+        );
         assert!(state.pokedex.has_seen("PIDGEY"));
         assert!(state.pokedex.has_caught("PIDGEY"));
         assert_eq!(state.battle_result & (1 << 6), 1 << 6);
@@ -1770,6 +1866,54 @@ mod tests {
     }
 
     #[test]
+    fn bug_contest_capture_stays_in_contest_state_instead_of_storage() {
+        let enemy = pokemon("SCYTHER", 255, 12, 1, 20);
+        let mut state = GameState::default();
+        state.player_name = "CHRIS".to_string();
+        state.player_id = 0x1234;
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_BUG_CONTEST".to_string(),
+            battle_music: "MUSIC_BUG_CATCHING_CONTEST".to_string(),
+            map_name: "NATIONAL_PARK_BUG_CONTEST".to_string(),
+            enemy_pokemon: enemy,
+            enemy_party: Vec::new(),
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        let outcome = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: 1,
+            ball_id: None,
+        };
+
+        let completion = complete_active_wild_capture_result(&mut state, &outcome)
+            .expect("complete Bug Contest capture");
+        assert!(completion.stored.is_none());
+        assert_eq!(
+            completion
+                .contest_pokemon
+                .as_ref()
+                .map(|pokemon| pokemon.species.id.as_str()),
+            Some("SCYTHER")
+        );
+        let caught = state
+            .bug_contest
+            .caught_mon
+            .as_ref()
+            .expect("contest capture should be retained");
+        assert_eq!(caught.original_trainer_name, "CHRIS");
+        assert_eq!(caught.original_trainer_id, 0x1234);
+        assert_eq!(state.bug_contest.caught_species.as_deref(), Some("SCYTHER"));
+        assert!(state.pokedex.has_caught("SCYTHER"));
+        assert_eq!(state.battle, BattleMemory::Inactive);
+        assert!(state.storage.party.pokemon.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn failed_capture_does_not_register_pokedex_caught() {
         let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
         let outcome = CaptureOutcome {
@@ -1779,6 +1923,7 @@ mod tests {
             animation_shakes: 0,
             final_catch_rate: 1,
             rng_seed_after: 1,
+            ball_id: None,
         };
         let mut storage = PokemonStorage::default();
         let mut pokedex = PokedexState::default();
@@ -1896,6 +2041,7 @@ mod tests {
 
         assert!(outcome.blocked);
         assert!(!outcome.caught);
+        assert_eq!(outcome.ball_id.as_deref(), Some("POKE_BALL"));
         assert_eq!(outcome.rng_seed_after, rng.seed());
         assert_eq!(bag.quantity(&ball), 1);
 

@@ -18,12 +18,15 @@ bevy = { version = "0.14", optional = true, default-features = false, features =
     "bevy_ui",
     "bevy_winit",
     "multi_threaded",
+    "wav",
     "x11",
 ] }
 crystal-assets = { path = "../crystal-assets" }
 crystal-audio = { path = "../crystal-audio" }
 crystal-core = { path = "../crystal-core" }
 crystal-net = { path = "../crystal-net" }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
 serde_json.workspace = true
 thiserror.workspace = true
 

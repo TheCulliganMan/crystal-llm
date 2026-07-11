@@ -150,13 +150,26 @@ describe("exportMapAttributes", () => {
     });
   });
 
-  it("rejects map attribute rows that omit explicit connection flags", () => {
+  it("derives connection flags for current three-argument map attribute rows", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "data", "maps", "attributes.asm"),
-      ["\tmap_attributes NewBarkTown, NEW_BARK_TOWN, $05", ""].join("\n")
+      [
+        "\tmap_attributes Route29, ROUTE_29, $05",
+        "\tconnection north, NewBarkTown, NEW_BARK_TOWN, 0",
+        "",
+      ].join("\n")
     );
 
-    expect(() => exportMapAttributes()).toThrow("Malformed map_attributes row");
+    const attributes = exportMapAttributes();
+
+    expect(attributes.Route29.connection_flags).toBe("NORTH");
+    expect(attributes.Route29.connections).toEqual([
+      {
+        direction: "north",
+        target_map: "NewBarkTown",
+        offset: 0,
+      },
+    ]);
   });
 
   it("rejects truncated connection tables instead of exporting partial connections", () => {

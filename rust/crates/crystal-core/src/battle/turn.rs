@@ -1,26 +1,25 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 use crate::battle::damage::{
+    calculate_damage, calculate_type_effectiveness_multiplier_with_foresight, is_physical_type,
     DamageCalculationError, DamageContext, DamageResult, TypeCategories, TypeEffectivenessTable,
-    Weather, WeatherModifiers, calculate_damage,
-    calculate_type_effectiveness_multiplier_with_foresight, is_physical_type,
+    Weather, WeatherModifiers,
 };
 use crate::battle::start::{
-    ActiveBattleEnemyError, ActiveBattlePartyError, deactivate_battle,
-    require_active_battle_enemy_party_index, require_active_battle_party_index,
-    update_active_battle_enemy,
+    deactivate_battle, require_active_battle_enemy_party_index, require_active_battle_party_index,
+    update_active_battle_enemy, ActiveBattleEnemyError, ActiveBattlePartyError,
 };
-use crate::battle::stats::{BattleStatMultiplierTables, accuracy_stage_multiplier, apply_stage};
+use crate::battle::stats::{accuracy_stage_multiplier, apply_stage, BattleStatMultiplierTables};
 use crate::models::pokemon::default_stat_boosts;
 use crate::models::{Dv, Item, LearnedMove, Move, Pokemon, PokemonSpecies, PokemonType, Stat};
 use crate::random::Random;
 use crate::state::{BattleMemory, GameState};
 use crate::systems::battle_escape::{
-    BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
+    attempt_wild_battle_escape, BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules,
 };
-use crate::systems::battle_items::{BattleItemOutcome, apply_active_battle_item_effect};
+use crate::systems::battle_items::{apply_active_battle_item_effect, BattleItemOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -212,6 +211,10 @@ pub struct BattleCombatState {
     pub weather_turns: u8,
     pub turn: u32,
     pub rng_seed_after: u32,
+    #[serde(default)]
+    pub obedience_trainer_id: Option<u16>,
+    #[serde(default)]
+    pub obedience_badges: [bool; 8],
 }
 
 impl BattleCombatState {
@@ -301,6 +304,8 @@ impl BattleCombatState {
             weather_turns: 0,
             turn: 0,
             rng_seed_after: rng_seed,
+            obedience_trainer_id: None,
+            obedience_badges: [false; 8],
         }
     }
 
@@ -331,6 +336,12 @@ impl BattleCombatState {
     ) -> Self {
         self.player_party_index = player_party_index;
         self.enemy_party_index = enemy_party_index;
+        self
+    }
+
+    pub fn with_obedience(mut self, trainer_id: u16, johto_badges: [bool; 8]) -> Self {
+        self.obedience_trainer_id = Some(trainer_id);
+        self.obedience_badges = johto_badges;
         self
     }
 }
@@ -743,6 +754,9 @@ pub enum BattleEvent {
         side: BattleSide,
         slot: usize,
         move_name: String,
+    },
+    Disobeyed {
+        side: BattleSide,
     },
     NoPp {
         side: BattleSide,
@@ -1887,6 +1901,9 @@ pub enum BattleTurnCommitError {
 pub fn active_battle_combat_state(
     state: &GameState,
 ) -> Result<BattleCombatState, BattleTurnCommitError> {
+    if let Some(combat) = state.script_runtime.active_battle_combat.clone() {
+        return Ok(combat);
+    }
     let active_party_index = require_active_battle_party_index(state)?;
     let active_enemy_index = require_active_battle_enemy_party_index(state)
         .map_err(BattleTurnCommitError::ActiveEnemyIndex)?;
@@ -1966,6 +1983,7 @@ pub fn commit_battle_turn_outcome(
     state.battle_active_enemy_party_index = Some(outcome.state.enemy_party_index);
     update_active_battle_enemy(state, outcome.state.enemy.clone())?;
     commit_pay_day_money(state, outcome);
+    state.script_runtime.active_battle_combat = Some(outcome.state.clone());
     if outcome
         .events
         .iter()
@@ -2230,6 +2248,9 @@ fn resolve_battle_turn_with_items_for_context(
         apply_held_status_healing(&mut state, items, &mut events)?;
     }
     if battle_continues_after_actions(&state, &events) {
+        apply_end_turn_leftovers(&mut state, items, &mut events)?;
+    }
+    if battle_continues_after_actions(&state, &events) {
         apply_end_turn_residual_status(&mut state, &mut events);
     }
     if battle_continues_after_actions(&state, &events) {
@@ -2405,6 +2426,9 @@ pub fn resolve_wild_battle_turn_with_items(
         apply_held_status_healing(&mut state, items, &mut events)?;
     }
     if battle_continues_after_actions(&state, &events) {
+        apply_end_turn_leftovers(&mut state, items, &mut events)?;
+    }
+    if battle_continues_after_actions(&state, &events) {
         apply_end_turn_residual_status(&mut state, &mut events);
     }
     if battle_continues_after_actions(&state, &events) {
@@ -2558,6 +2582,9 @@ pub fn resolve_battle_enemy_action_with_items(
         apply_held_status_healing(&mut state, items, &mut events)?;
     }
     if battle_continues_after_actions(&state, &events) {
+        apply_end_turn_leftovers(&mut state, items, &mut events)?;
+    }
+    if battle_continues_after_actions(&state, &events) {
         apply_end_turn_residual_status(&mut state, &mut events);
     }
     if battle_continues_after_actions(&state, &events) {
@@ -2675,6 +2702,12 @@ fn execute_action(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
+    if side == BattleSide::Player
+        && matches!(action, BattleAction::Move { .. } | BattleAction::MoveSwitch { .. })
+        && apply_player_obedience(state, rng, events)
+    {
+        return Ok(());
+    }
     match action {
         BattleAction::Move { slot } => execute_move_slot(
             state,
@@ -2767,6 +2800,115 @@ fn execute_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObedienceResult {
+    Obey,
+    DoNothing,
+    Nap,
+    Confusion,
+}
+
+fn apply_player_obedience(
+    state: &mut BattleCombatState,
+    rng: &mut Random,
+    events: &mut Vec<BattleEvent>,
+) -> bool {
+    let result = obedience_result(state, rng);
+    if result == ObedienceResult::Obey {
+        return false;
+    }
+    match result {
+        ObedienceResult::Nap => {
+            let sleep_roll = loop {
+                let roll = rng.battle_random_byte().wrapping_mul(2) >> 4;
+                let turns = roll & 0x07;
+                if turns != 0 {
+                    break turns;
+                }
+            };
+            state.player.status = Some("SLEEP".to_string());
+            state.player.sleep_turns = sleep_roll;
+        }
+        ObedienceResult::Confusion => {
+            state.player.confusion_turns = 2 + (rng.battle_random_byte() & 0x03);
+        }
+        ObedienceResult::DoNothing | ObedienceResult::Obey => {}
+    }
+    events.push(BattleEvent::Disobeyed {
+        side: BattleSide::Player,
+    });
+    true
+}
+
+fn player_disobeys(
+    state: &BattleCombatState,
+    rng: &mut Random,
+    events: &mut Vec<BattleEvent>,
+) -> bool {
+    let disobeyed = obedience_result(state, rng) != ObedienceResult::Obey;
+    if disobeyed {
+        events.push(BattleEvent::Disobeyed {
+            side: BattleSide::Player,
+        });
+    }
+    disobeyed
+}
+
+fn obedience_result(state: &BattleCombatState, rng: &mut Random) -> ObedienceResult {
+    let Some(player_id) = state.obedience_trainer_id else {
+        return ObedienceResult::Obey;
+    };
+    let pokemon = &state.player;
+    if pokemon.original_trainer_id == player_id {
+        return ObedienceResult::Obey;
+    }
+    let obedience_level: u16 = if state.obedience_badges[7] {
+        101
+    } else if state.obedience_badges[4] {
+        70
+    } else if state.obedience_badges[3] {
+        50
+    } else if state.obedience_badges[2] {
+        30
+    } else {
+        10
+    };
+    if u16::from(pokemon.level) <= obedience_level {
+        return ObedienceResult::Obey;
+    }
+    let total = obedience_level.saturating_add(u16::from(pokemon.level));
+    // Crystal's first check uses the high nibble of BattleRandom and rejects
+    // values outside the exact 0..(obedience + level) range.
+    let first = loop {
+        let roll = u16::from(rng.battle_random_byte() >> 4);
+        if roll < total {
+            break roll;
+        }
+    };
+    if first < obedience_level.min(16) {
+        return ObedienceResult::Obey;
+    }
+    let second = loop {
+        let roll = u16::from(rng.battle_random_byte());
+        if roll < total {
+            break roll;
+        }
+    };
+    if second < obedience_level {
+        return ObedienceResult::Obey;
+    }
+    let levels_over = i16::from(pokemon.level) - obedience_level as i16;
+    let nap_roll = i16::from(rng.battle_random_byte() >> 4) - levels_over;
+    if nap_roll < 0 {
+        return ObedienceResult::Nap;
+    }
+    if nap_roll < levels_over {
+        ObedienceResult::Confusion
+    } else {
+        ObedienceResult::DoNothing
+    }
+}
+
 fn quick_claw_activates(
     state: &BattleCombatState,
     side: BattleSide,
@@ -2800,7 +2942,7 @@ fn quick_claw_activates(
             parameter: item.parameter,
         });
     }
-    Ok((rng.randrange(256) as i16) < item.parameter)
+    Ok((rng.battle_random_byte() as i16) < item.parameter)
 }
 
 fn execute_item(
@@ -3193,13 +3335,25 @@ fn execute_move_slot(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    let Some(requested_move_name) = battle_moves(state, side)
+    let Some(selected_move_name) = battle_moves(state, side)
         .get(slot)
         .map(|learned| learned.name.clone())
     else {
         return Err(BattleTurnError::MissingMoveSlot { side, slot });
     };
-    validate_battle_turn_move_name(side, &requested_move_name)?;
+    validate_battle_turn_move_name(side, &selected_move_name)?;
+    let no_legal_moves = battle_moves(state, side)
+        .iter()
+        .all(|learned| learned.current_pp == 0);
+    // Synthetic unit catalogs may omit the canonical STRUGGLE entry; the
+    // definitive pack always contains it, so retain the legacy NoPp error only
+    // for those incomplete test catalogs.
+    let automatic_struggle = no_legal_moves && moves.contains_key("STRUGGLE");
+    let requested_move_name = if automatic_struggle {
+        "STRUGGLE".to_string()
+    } else {
+        selected_move_name
+    };
     let Some(requested_move_data) = moves.get(&requested_move_name) else {
         return Err(BattleTurnError::MissingMoveData {
             side,
@@ -3258,14 +3412,14 @@ fn execute_move_slot(
     };
     let forced_move =
         bide_forced || rollout_forced || rampage_forced || airborne_forced || charge_forced;
-    if !forced_move && learned_move.current_pp == 0 {
+    if !forced_move && !automatic_struggle && learned_move.current_pp == 0 {
         events.push(BattleEvent::NoPp {
             side,
             move_name: move_name.clone(),
         });
         return Ok(());
     }
-    if !forced_move {
+    if !forced_move && !automatic_struggle {
         learned_move.current_pp = learned_move.current_pp.saturating_sub(1);
     }
     events.push(BattleEvent::MoveUsed {
@@ -3398,7 +3552,7 @@ fn execute_move_effect(
         }
     }
     let lock_on_active = lock_on_target_state(state, side) && !direct_lock_on_effect(move_data);
-    let accuracy = if lock_on_active {
+    let mut accuracy = if lock_on_active {
         u8::MAX
     } else {
         let (attacker, defender) = match side {
@@ -3414,6 +3568,9 @@ fn execute_move_effect(
             state.weather,
         )?
     };
+    if accuracy < u8::MAX {
+        accuracy = apply_brightpowder_accuracy(state, side.other(), items, accuracy)?;
+    }
     if lock_on_active {
         set_lock_on_target_state(state, side, false);
         events.push(BattleEvent::LockOnConsumed {
@@ -3435,7 +3592,7 @@ fn execute_move_effect(
         }
     }
     if accuracy < u8::MAX {
-        let roll = rng.randrange(256) as u8;
+        let roll = rng.battle_random_byte();
         if roll >= accuracy {
             events.push(BattleEvent::Missed {
                 side,
@@ -3823,6 +3980,34 @@ fn execute_move_effect(
     Ok(())
 }
 
+fn apply_metal_powder_defense(
+    state: &BattleCombatState,
+    side: BattleSide,
+    defender: &mut Pokemon,
+    items: &BTreeMap<String, Item>,
+) -> Result<(), BattleTurnError> {
+    if defender.species.id != "DITTO" {
+        return Ok(());
+    }
+    let Some(item_id) = state.pokemon(side).item.as_deref() else {
+        return Ok(());
+    };
+    let item = items
+        .get(item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side,
+            item_id: item_id.to_string(),
+        })?;
+    if item.held_effect == "HELD_METAL_POWDER" {
+        // Crystal's 16-bit stat routine computes a 3/2 defense multiplier;
+        // retain the byte-sized cap used by the original battle math.
+        defender.defense = (u32::from(defender.defense) * 3 / 2).min(u32::from(u16::MAX)) as u16;
+        defender.special_defense = (u32::from(defender.special_defense) * 3 / 2)
+            .min(u32::from(u16::MAX)) as u16;
+    }
+    Ok(())
+}
+
 fn apply_held_item_damage_boost(
     state: &BattleCombatState,
     side: BattleSide,
@@ -3929,8 +4114,10 @@ fn apply_damage_hit(
         events,
     );
     let attacker = effective_battle_pokemon(state, side);
-    let defender = effective_battle_pokemon(state, side.other());
-    let (critical, critical_roll, critical_threshold) = roll_critical_hit(&attacker, rng);
+    let mut defender = effective_battle_pokemon(state, side.other());
+    apply_metal_powder_defense(state, side.other(), &mut defender, items)?;
+    let (critical, critical_roll, critical_threshold) =
+        roll_critical_hit(side, move_name, &attacker, items, rng)?;
     let damage_roll = 217 + rng.randrange(39) as u8;
     let result = calculate_damage(
         &attacker,
@@ -4012,6 +4199,19 @@ fn apply_damage_hit(
             });
         }
     }
+    if damage >= defender_hp_before
+        && defender_hp_before > 1
+        && focus_band_survives(state, side.other(), items, rng)?
+    {
+        let lethal_damage = damage;
+        damage = defender_hp_before - 1;
+        events.push(BattleEvent::EnduredHit {
+            side,
+            move_name: move_name.to_string(),
+            target: side.other(),
+            raw_damage: lethal_damage,
+        });
+    }
     let applied_result = DamageResult {
         damage: raw_damage,
         type_multiplier: result.type_multiplier,
@@ -4090,7 +4290,49 @@ fn apply_damage_hit(
     } else if !secondary_stat_handled {
         apply_secondary_stat_stage_effect(state, side, move_name, move_data, rng, events)?;
     }
+    apply_kings_rock_flinch(
+        state, side, move_name, move_data, damage, items, rng, events,
+    )?;
     Ok(DamageHitResult::Continue)
+}
+
+fn apply_kings_rock_flinch(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    move_data: &Move,
+    damage: u16,
+    items: &BTreeMap<String, Item>,
+    rng: &mut Random,
+    events: &mut Vec<BattleEvent>,
+) -> Result<(), BattleTurnError> {
+    // Crystal uses a separate 8-bit BattleRandom roll with a fixed 12.5%
+    // threshold. Moves that already have a flinch effect do not roll twice.
+    if damage == 0 || secondary_flinch_effect(move_data).is_some() {
+        return Ok(());
+    }
+    let target = side.other();
+    let Some(item_id) = state.pokemon(side).item.as_deref() else {
+        return Ok(());
+    };
+    let item = items
+        .get(item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side,
+            item_id: item_id.to_string(),
+        })?;
+    if item.held_effect != "HELD_FLINCH" || state.pokemon(target).hp == 0 {
+        return Ok(());
+    }
+    if rng.battle_random_byte() < 32 {
+        state.pokemon_mut(target).flinching = true;
+        events.push(BattleEvent::FlinchApplied {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+    }
+    Ok(())
 }
 
 fn apply_beat_up_effect(
@@ -4288,7 +4530,7 @@ fn apply_present_effect(
         return Ok(PresentEffectOutcome::Handled(DamageHitResult::NoEffect));
     }
 
-    let roll = rng.randrange(256) as u8;
+    let roll = rng.battle_random_byte();
     match present_roll(roll) {
         PresentRoll::Damage(power) => {
             events.push(BattleEvent::PresentPower {
@@ -4412,7 +4654,7 @@ fn apply_ohko_effect(
         .saturating_add(level_delta.saturating_mul(2))
         .min(100);
     let accuracy = ((u16::from(accuracy_percent) * 255) / 100).clamp(1, 255) as u8;
-    let roll = rng.randrange(256) as u8;
+    let roll = rng.battle_random_byte();
     if roll >= accuracy {
         events.push(BattleEvent::OhkoFailed {
             side,
@@ -4837,6 +5079,43 @@ fn apply_held_status_healing(
     Ok(())
 }
 
+fn apply_end_turn_leftovers(
+    state: &mut BattleCombatState,
+    items: &BTreeMap<String, Item>,
+    events: &mut Vec<BattleEvent>,
+) -> Result<(), BattleTurnError> {
+    for side in [BattleSide::Player, BattleSide::Enemy] {
+        let pokemon = state.pokemon(side);
+        if pokemon.hp == 0 || pokemon.hp >= pokemon.max_hp {
+            continue;
+        }
+        let Some(item_id) = pokemon.item.clone() else {
+            continue;
+        };
+        let item = items
+            .get(&item_id)
+            .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+                side,
+                item_id: item_id.clone(),
+            })?;
+        if item.held_effect != "HELD_LEFTOVERS" {
+            continue;
+        }
+        let hp_before = pokemon.hp;
+        let amount = (pokemon.max_hp / 16).max(1);
+        let hp_after = hp_before.saturating_add(amount).min(pokemon.max_hp);
+        state.pokemon_mut(side).hp = hp_after;
+        events.push(BattleEvent::HeldItemStatusHealed {
+            side,
+            item_id,
+            held_effect: item.held_effect.clone(),
+            status_before: None,
+            confusion_turns_before: 0,
+        });
+    }
+    Ok(())
+}
+
 fn held_item_heals_status(held_effect: &str, status: Option<&str>) -> bool {
     match (held_effect, status) {
         ("HELD_HEAL_PARALYZE", Some("PARALYSIS")) => true,
@@ -4850,6 +5129,48 @@ fn held_item_heals_status(held_effect: &str, status: Option<&str>) -> bool {
         ) => true,
         _ => false,
     }
+}
+
+fn focus_band_survives(
+    state: &BattleCombatState,
+    side: BattleSide,
+    items: &BTreeMap<String, Item>,
+    rng: &mut Random,
+) -> Result<bool, BattleTurnError> {
+    let Some(item_id) = state.pokemon(side).item.as_deref() else {
+        return Ok(false);
+    };
+    let item = items
+        .get(item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side,
+            item_id: item_id.to_string(),
+        })?;
+    if item.held_effect != "HELD_FOCUS_BAND" {
+        return Ok(false);
+    }
+    Ok(rng.battle_random_byte() < 32)
+}
+
+fn apply_brightpowder_accuracy(
+    state: &BattleCombatState,
+    target: BattleSide,
+    items: &BTreeMap<String, Item>,
+    accuracy: u8,
+) -> Result<u8, BattleTurnError> {
+    let Some(item_id) = state.pokemon(target).item.as_deref() else {
+        return Ok(accuracy);
+    };
+    let item = items
+        .get(item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side: target,
+            item_id: item_id.to_string(),
+        })?;
+    if item.held_effect != "HELD_BRIGHTPOWDER" {
+        return Ok(accuracy);
+    }
+    Ok(accuracy.saturating_sub(item.parameter.clamp(0, u8::MAX as i16) as u8))
 }
 
 fn held_escape_item(
@@ -5736,10 +6057,52 @@ fn secondary_stat_hit_effect(move_data: &Move) -> bool {
     )
 }
 
-fn roll_critical_hit(attacker: &Pokemon, rng: &mut Random) -> (bool, u8, u8) {
-    let threshold = if attacker.focus_energy { 32 } else { 17 };
-    let roll = rng.randrange(256) as u8;
-    (roll < threshold, roll, threshold)
+fn roll_critical_hit(
+    side: BattleSide,
+    move_name: &str,
+    attacker: &Pokemon,
+    items: &BTreeMap<String, Item>,
+    rng: &mut Random,
+) -> Result<(bool, u8, u8), BattleTurnError> {
+    // Crystal tallies critical-hit stages from the move table, Focus Energy,
+    // species-specific items, and Scope Lens, then indexes the ROM's chance
+    // table: 1/15, 1/8, 1/4, 1/3, and 1/2.
+    let mut stage = 0usize;
+    if attacker.focus_energy {
+        stage += 1;
+    }
+    if matches!(move_name, "KARATE_CHOP" | "RAZOR_LEAF" | "SLASH") {
+        stage += 2;
+    }
+    if matches!(attacker.species.id.as_str(), "CHANSEY" | "FARFETCH_D") {
+        if let Some(item_id) = attacker.item.as_deref() {
+            let _item = items
+                .get(item_id)
+                .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+                    side,
+                    item_id: item_id.to_string(),
+                })?;
+            let species_item = (attacker.species.id == "CHANSEY" && item_id == "LUCKY_PUNCH")
+                || (attacker.species.id == "FARFETCH_D" && item_id == "STICK");
+            if species_item {
+                stage += 2;
+            }
+        }
+    }
+    if let Some(item_id) = attacker.item.as_deref() {
+        let item = items
+            .get(item_id)
+            .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+                side,
+                item_id: item_id.to_string(),
+            })?;
+        if item.held_effect == "HELD_CRITICAL_UP" {
+            stage += 1;
+        }
+    }
+    let threshold = [17u8, 32, 64, 86, 128][stage.min(4)];
+    let roll = rng.battle_random_byte();
+    Ok((roll < threshold, roll, threshold))
 }
 
 fn move_hit_count(move_data: &Move, rng: &mut Random) -> (u8, Option<u8>) {
@@ -5858,7 +6221,7 @@ fn dynamic_move_power(
         "FRUSTRATION" => frustration_power(attacker.happiness),
         "REVERSAL" => reversal_power(attacker.hp, attacker.max_hp),
         "MAGNITUDE" => {
-            let roll = rng.randrange(256) as u8;
+            let roll = rng.battle_random_byte();
             let power = magnitude_power(roll);
             events.push(BattleEvent::MagnitudePower {
                 side,
@@ -5954,7 +6317,7 @@ fn fixed_damage_amount(
         "SUPER_FANG" => Some((defender.hp / 2).max(1)),
         "PSYWAVE" => {
             let level = attacker.level.max(1) as u32;
-            let roll = rng.randrange(256);
+            let roll = u32::from(rng.battle_random_byte());
             Some(((level * 255 + level * roll * 2) / 510).max(1) as u16)
         }
         _ => None,
@@ -6576,7 +6939,11 @@ fn apply_stat_stage_delta_to_target(
 }
 
 fn stat_effect_target(side: BattleSide, amount: i8) -> BattleSide {
-    if amount > 0 { side } else { side.other() }
+    if amount > 0 {
+        side
+    } else {
+        side.other()
+    }
 }
 
 fn mist_turns(state: &BattleCombatState, side: BattleSide) -> u8 {
@@ -8766,7 +9133,7 @@ fn roll_protect_success(
 
     let divisor_shift = counter_before.min(8);
     let threshold = 255u16 / (1u16 << divisor_shift);
-    let roll = rng.randrange(256) as u8;
+    let roll = rng.battle_random_byte();
     if u16::from(roll) < threshold {
         set_protect_counter(state, side, counter_before.saturating_add(1));
         (true, counter_before, Some(roll))
@@ -9108,6 +9475,7 @@ fn switch_battle_combat_pokemon(
         return Err(BattleTurnError::SwitchTargetFainted { side, party_index });
     }
     clear_switch_in_pokemon_battle_state(&mut switched);
+    switched.turns_in_battle = switched.turns_in_battle.saturating_add(1).max(1);
     *state.pokemon_mut(side) = switched;
     match side {
         BattleSide::Player => state.player_party_index = party_index,
@@ -9649,7 +10017,7 @@ mod tests {
     use super::*;
     use crate::battle::stats::BattleStatMultiplier;
     use crate::models::{
-        BaseStats, Dv, Item, LearnedMove, PokemonSpecies, PokemonType, item_pocket, pokemon_type,
+        item_pocket, pokemon_type, BaseStats, Dv, Item, LearnedMove, PokemonSpecies, PokemonType,
     };
 
     #[test]
@@ -10281,6 +10649,10 @@ mod tests {
         assert_eq!(state.battle_pay_day_money, 35);
         assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 31);
         assert_eq!(
+            state.script_runtime.active_battle_combat,
+            Some(outcome.state.clone())
+        );
+        assert_eq!(
             state.party.pokemon[0].as_ref().unwrap().species,
             "CHIKORITA"
         );
@@ -10716,6 +11088,49 @@ mod tests {
     }
 
     #[test]
+    fn zero_pp_party_automatically_uses_struggle() {
+        let mut player = pokemon("PIKACHU", 90, pokemon_type("ELECTRIC"), "TACKLE");
+        let mut enemy = pokemon("GEODUDE", 20, pokemon_type("ROCK"), "TACKLE");
+        player.moves[0].current_pp = 0;
+        enemy.moves[0].current_pp = 0;
+        let mut moves = BTreeMap::new();
+        moves.insert(
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        );
+        moves.insert(
+            "STRUGGLE".to_string(),
+            move_data("STRUGGLE", pokemon_type("NORMAL"), 50, 100),
+        );
+        let mut rng = Random::new(7);
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("struggle turn resolves");
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(event, BattleEvent::MoveUsed { move_name, .. } if move_name == "STRUGGLE")
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::NoPp { .. })));
+        assert_eq!(outcome.state.player.moves[0].current_pp, 0);
+        assert_eq!(outcome.state.enemy.moves[0].current_pp, 0);
+    }
+
+    #[test]
     fn held_type_boost_item_increases_matching_move_damage_from_item_catalog() {
         let mut boosted_player = pokemon("DRATINI", 90, pokemon_type("DRAGON"), "DRAGONBREATH");
         boosted_player.item = Some("DRAGON_FANG".to_string());
@@ -11037,12 +11452,10 @@ mod tests {
         .expect("missed fury cutter turn resolves");
 
         assert_eq!(outcome.state.player_fury_cutter_chain, 0);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::FuryCutterPower { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::FuryCutterPower { .. })));
         assert!(outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::Missed {
@@ -11495,6 +11908,81 @@ mod tests {
     }
 
     #[test]
+    fn high_critical_moves_use_the_asm_two_stage_bonus() {
+        let attacker = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SLASH");
+        let mut rng = Random::new(7);
+        let (_, _, threshold) = roll_critical_hit(
+            BattleSide::Player,
+            "SLASH",
+            &attacker,
+            &BTreeMap::new(),
+            &mut rng,
+        )
+        .expect("critical roll resolves");
+        assert_eq!(threshold, 64);
+    }
+
+    #[test]
+    fn traded_overlevel_pokemon_can_disobey_until_badges_raise_the_cap() {
+        let mut player = pokemon("RATTATA", 50, pokemon_type("NORMAL"), "TACKLE");
+        player.original_trainer_id = 2;
+        let mut state = battle_state(
+            player.clone(),
+            pokemon("PIDGEY", 20, pokemon_type("NORMAL"), "TACKLE"),
+            0,
+        )
+        .with_obedience(1, [false; 8]);
+        let mut disobeyed = false;
+        for seed in 0..256 {
+            let mut rng = Random::new(seed);
+            let mut events = Vec::new();
+            if player_disobeys(&state, &mut rng, &mut events) {
+                disobeyed = events.contains(&BattleEvent::Disobeyed {
+                    side: BattleSide::Player,
+                });
+                if disobeyed {
+                    break;
+                }
+            }
+        }
+        assert!(disobeyed, "an overlevel traded Pokemon should sometimes disobey");
+        state.obedience_badges[7] = true;
+        let mut rng = Random::new(7);
+        let mut events = Vec::new();
+        assert!(!player_disobeys(&state, &mut rng, &mut events));
+    }
+
+    #[test]
+    fn disobedience_can_nap_or_confuse_the_player_pokemon() {
+        let mut player = pokemon("RATTATA", 50, pokemon_type("NORMAL"), "TACKLE");
+        player.original_trainer_id = 2;
+        let base = battle_state(
+            player,
+            pokemon("PIDGEY", 20, pokemon_type("NORMAL"), "TACKLE"),
+            0,
+        )
+        .with_obedience(1, [false; 8]);
+        let mut saw_nap = false;
+        let mut saw_confusion = false;
+        for seed in 0..4096 {
+            let mut state = base.clone();
+            let mut rng = Random::new(seed);
+            let mut events = Vec::new();
+            apply_player_obedience(&mut state, &mut rng, &mut events);
+            saw_nap |= state.player.status.as_deref() == Some("SLEEP");
+            saw_confusion |= state.player.confusion_turns != 0;
+            if saw_nap && saw_confusion {
+                break;
+            }
+        }
+        assert!(saw_nap, "overlevel traded Pokemon should sometimes nap");
+        assert!(
+            saw_confusion,
+            "overlevel traded Pokemon should sometimes become confused"
+        );
+    }
+
+    #[test]
     fn return_and_frustration_power_use_exact_happiness_formula() {
         assert_eq!(return_power(255), 102);
         assert_eq!(return_power(70), 28);
@@ -11711,12 +12199,10 @@ mod tests {
         )
         .expect("normal pursuit resolves");
 
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::PursuitPower { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PursuitPower { .. })));
         assert!(outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::Damage {
@@ -12168,12 +12654,10 @@ mod tests {
             side: BattleSide::Player,
             move_name: "HIDDEN_POWER".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Damage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Damage { .. })));
     }
 
     #[test]
@@ -12281,12 +12765,10 @@ mod tests {
             hp_after: 21,
             amount: 11,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Damage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Damage { .. })));
     }
 
     #[test]
@@ -12327,12 +12809,10 @@ mod tests {
             target: BattleSide::Enemy,
             roll: 207,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Damage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Damage { .. })));
     }
 
     #[test]
@@ -12548,12 +13028,10 @@ mod tests {
             move_name: "TWISTER".to_string(),
             target: BattleSide::Enemy,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::AirborneAvoided { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::AirborneAvoided { .. })));
     }
 
     #[test]
@@ -13926,18 +14404,16 @@ mod tests {
         .expect("secondary status miss turn resolves");
 
         assert_eq!(outcome.state.enemy.status, None);
-        assert!(
-            outcome
-                .events
-                .contains(&BattleEvent::SecondaryStatusMissed {
-                    side: BattleSide::Player,
-                    move_name: "POISON_STING".to_string(),
-                    target: BattleSide::Enemy,
-                    status: "POISON".to_string(),
-                    chance_percent: 1,
-                    roll: 34,
-                })
-        );
+        assert!(outcome
+            .events
+            .contains(&BattleEvent::SecondaryStatusMissed {
+                side: BattleSide::Player,
+                move_name: "POISON_STING".to_string(),
+                target: BattleSide::Enemy,
+                status: "POISON".to_string(),
+                chance_percent: 1,
+                roll: 34,
+            }));
     }
 
     #[test]
@@ -15369,12 +15845,10 @@ mod tests {
 
         assert_eq!(outcome.state.player_curse_source, None);
         assert_eq!(outcome.state.enemy_curse_source, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::CurseDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::CurseDamage { .. })));
     }
 
     #[test]
@@ -15916,12 +16390,10 @@ mod tests {
             Some(BattleSide::Enemy)
         );
         assert!(outcome.state.player_spikes);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::RapidSpinCleared { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::RapidSpinCleared { .. })));
     }
 
     #[test]
@@ -16039,12 +16511,10 @@ mod tests {
                 move_name
             } if move_name == "COUNTER"
         )));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::CounterDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::CounterDamage { .. })));
     }
 
     #[test]
@@ -16371,12 +16841,10 @@ mod tests {
             side: BattleSide::Player,
             move_name: "ANCIENTPOWER".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::StatStageChanged { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::StatStageChanged { .. })));
     }
 
     #[test]
@@ -16576,12 +17044,10 @@ mod tests {
         .expect("ineffective selfdestruct turn resolves");
 
         assert_eq!(outcome.state.player.hp, player_hp);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::SelfdestructDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SelfdestructDamage { .. })));
     }
 
     #[test]
@@ -18173,12 +18639,10 @@ mod tests {
 
         assert_eq!(outcome.state.player_nightmare_source, None);
         assert_eq!(outcome.state.enemy_nightmare_source, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::NightmareDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::NightmareDamage { .. })));
     }
 
     #[test]
@@ -18210,12 +18674,10 @@ mod tests {
         .expect("switch clears leech seed");
 
         assert_eq!(outcome.state.player_leech_seed_source, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::LeechSeedDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::LeechSeedDamage { .. })));
     }
 
     #[test]
@@ -18418,12 +18880,10 @@ mod tests {
         .expect("switch clears sourced trap");
 
         assert_eq!(outcome.state.enemy_trap, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::TrapDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::TrapDamage { .. })));
     }
 
     #[test]
@@ -18836,12 +19296,10 @@ mod tests {
 
         assert_eq!(outcome.state.enemy_last_move, None);
         assert_eq!(outcome.state.enemy_disable, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::DisableCount { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::DisableCount { .. })));
     }
 
     #[test]
@@ -19174,22 +19632,18 @@ mod tests {
         )
         .expect("reset stats turn resolves");
 
-        assert!(
-            outcome
-                .state
-                .player
-                .stat_boosts
-                .values()
-                .all(|stage| *stage == 0)
-        );
-        assert!(
-            outcome
-                .state
-                .enemy
-                .stat_boosts
-                .values()
-                .all(|stage| *stage == 0)
-        );
+        assert!(outcome
+            .state
+            .player
+            .stat_boosts
+            .values()
+            .all(|stage| *stage == 0));
+        assert!(outcome
+            .state
+            .enemy
+            .stat_boosts
+            .values()
+            .all(|stage| *stage == 0));
         assert!(outcome.events.contains(&BattleEvent::StatsReset {
             side: BattleSide::Player,
             move_name: "HAZE".to_string(),
@@ -19417,12 +19871,10 @@ mod tests {
         assert_eq!(outcome.state.weather_turns, 4);
         assert_eq!(outcome.state.player.hp, player.hp);
         assert_eq!(outcome.state.enemy.hp, enemy.hp);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::SandstormDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SandstormDamage { .. })));
     }
 
     #[test]
@@ -19604,12 +20056,10 @@ mod tests {
             move_name: "HEADBUTT".to_string(),
             target: BattleSide::Enemy,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Flinched { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Flinched { .. })));
     }
 
     #[test]
@@ -19946,12 +20396,10 @@ mod tests {
             target: BattleSide::Player,
             status_before: "FREEZE".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::FrozenTurn { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::FrozenTurn { .. })));
     }
 
     #[test]
@@ -20261,12 +20709,10 @@ mod tests {
             side: BattleSide::Player,
             move_name: "SLEEP_TALK".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::SleepTalkSelected { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SleepTalkSelected { .. })));
         assert!(!outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::Damage {
@@ -21387,18 +21833,157 @@ mod tests {
         assert_eq!(outcome.state.player.hp, player_hp);
         assert_eq!(outcome.state.player.status, None);
         assert_eq!(outcome.state.player.item, None);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::ResidualStatusDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::ResidualStatusDamage { .. })));
         assert!(outcome.events.contains(&BattleEvent::HeldItemStatusHealed {
             side: BattleSide::Player,
             item_id: "PSNCURE_BERRY".to_string(),
             held_effect: "HELD_HEAL_POISON".to_string(),
             status_before: Some("POISON".to_string()),
             confusion_turns_before: 0,
+        }));
+    }
+
+    #[test]
+    fn leftovers_recovers_one_sixteenth_at_end_of_turn() {
+        let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
+        player.item = Some("LEFTOVERS".to_string());
+        player.hp = player.max_hp.saturating_sub(20);
+        let player_hp = player.hp;
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        enemy.moves[0].current_pp = 0;
+        let moves = BTreeMap::from([(
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        )]);
+        let items = BTreeMap::from([(
+            "LEFTOVERS".to_string(),
+            held_boost_item("LEFTOVERS", "HELD_LEFTOVERS"),
+        )]);
+        let mut rng = Random::new(23);
+        let outcome = resolve_battle_turn_with_items(
+            battle_state(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &items,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("leftovers turn resolves");
+        assert_eq!(
+            outcome.state.player.hp,
+            player_hp.saturating_add((outcome.state.player.max_hp / 16).max(1))
+        );
+    }
+
+    #[test]
+    fn focus_band_uses_the_crystal_one_eighth_survival_window() {
+        let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
+        player.item = Some("FOCUS_BAND".to_string());
+        let state = battle_state(
+            player,
+            pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE"),
+            0,
+        );
+        let items = BTreeMap::from([(
+            "FOCUS_BAND".to_string(),
+            held_boost_item("FOCUS_BAND", "HELD_FOCUS_BAND"),
+        )]);
+        let mut success_rng = Random::new(20);
+        let mut failure_rng = Random::new(1);
+        assert!(
+            focus_band_survives(&state, BattleSide::Player, &items, &mut success_rng)
+                .expect("focus band lookup")
+        );
+        assert!(
+            !focus_band_survives(&state, BattleSide::Player, &items, &mut failure_rng)
+                .expect("focus band lookup")
+        );
+    }
+
+    #[test]
+    fn brightpowder_subtracts_its_asm_accuracy_penalty() {
+        let mut target = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
+        target.item = Some("BRIGHTPOWDER".to_string());
+        let state = battle_state(
+            pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE"),
+            target,
+            0,
+        );
+        let mut item = held_boost_item("BRIGHTPOWDER", "HELD_BRIGHTPOWDER");
+        item.parameter = 20;
+        let items = BTreeMap::from([("BRIGHTPOWDER".to_string(), item)]);
+        assert_eq!(
+            apply_brightpowder_accuracy(&state, BattleSide::Enemy, &items, 100)
+                .expect("brightpowder lookup"),
+            80
+        );
+    }
+
+    #[test]
+    fn metal_powder_boosts_only_ditto_defense_before_damage() {
+        let mut defender = pokemon("DITTO", 20, pokemon_type("NORMAL"), "TACKLE");
+        defender.item = Some("METAL_POWDER".to_string());
+        let base_defense = defender.defense;
+        let state = battle_state(
+            pokemon("RATTATA", 20, pokemon_type("NORMAL"), "TACKLE"),
+            defender.clone(),
+            0,
+        );
+        let items = BTreeMap::from([(
+            "METAL_POWDER".to_string(),
+            held_boost_item("METAL_POWDER", "HELD_METAL_POWDER"),
+        )]);
+        apply_metal_powder_defense(&state, BattleSide::Enemy, &mut defender, &items)
+            .expect("metal powder lookup");
+        assert_eq!(defender.defense, (u32::from(base_defense) * 3 / 2) as u16);
+
+        let mut non_ditto = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "TACKLE");
+        non_ditto.item = Some("METAL_POWDER".to_string());
+        let base_non_ditto = non_ditto.defense;
+        apply_metal_powder_defense(&state, BattleSide::Enemy, &mut non_ditto, &items)
+            .expect("non-Ditto should ignore metal powder");
+        assert_eq!(non_ditto.defense, base_non_ditto);
+    }
+
+    #[test]
+    fn kings_rock_uses_the_crystal_fixed_one_eighth_flinch_roll() {
+        let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
+        player.item = Some("KINGS_ROCK".to_string());
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut state = battle_state(player, enemy, 0);
+        let items = BTreeMap::from([(
+            "KINGS_ROCK".to_string(),
+            held_boost_item("KINGS_ROCK", "HELD_FLINCH"),
+        )]);
+        let move_data = move_data("TACKLE", pokemon_type("NORMAL"), 35, 100);
+        let mut events = Vec::new();
+        let mut rng = Random::new(20);
+        apply_kings_rock_flinch(
+            &mut state,
+            BattleSide::Player,
+            "TACKLE",
+            &move_data,
+            1,
+            &items,
+            &mut rng,
+            &mut events,
+        )
+        .expect("kings rock lookup");
+        assert!(state.enemy.flinching);
+        assert!(events.contains(&BattleEvent::FlinchApplied {
+            side: BattleSide::Player,
+            move_name: "TACKLE".to_string(),
+            target: BattleSide::Enemy,
         }));
     }
 
@@ -21588,12 +22173,10 @@ mod tests {
         assert!(outcome.events.contains(&BattleEvent::Fainted {
             side: BattleSide::Enemy,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::ResidualStatusDamage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::ResidualStatusDamage { .. })));
     }
 
     #[test]
@@ -22551,12 +23134,10 @@ mod tests {
                 && outcome.attempts_before == 3
                 && outcome.attempts_after == 3
         ));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::MoveSelected { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::MoveSelected { .. })));
     }
 
     #[test]
@@ -22609,12 +23190,10 @@ mod tests {
             source: BattleSide::Enemy,
             move_name: "MEAN_LOOK".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::HeldItemEscape { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::HeldItemEscape { .. })));
     }
 
     #[test]
@@ -22704,12 +23283,10 @@ mod tests {
                 ..
             } if move_name == "JUMP_KICK"
         )));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::JumpKickCrash { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::JumpKickCrash { .. })));
     }
 
     #[test]
@@ -23579,12 +24156,10 @@ mod tests {
             target: BattleSide::Player,
             airborne_move: "FLY".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::EarthquakePower { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::EarthquakePower { .. })));
     }
 
     #[test]
@@ -23731,12 +24306,10 @@ mod tests {
 
         assert_eq!(outcome.state.player_charging_move, None);
         assert!(outcome.state.enemy.hp < enemy_hp);
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::ChargeStarted { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::ChargeStarted { .. })));
     }
 
     #[test]
@@ -24073,12 +24646,10 @@ mod tests {
                 move_name,
             } if move_name == "MEAN_LOOK"
         )));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::RunAttempt { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::RunAttempt { .. })));
         assert!(outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::MoveSelected {
@@ -24137,12 +24708,10 @@ mod tests {
         assert!(outcome.events.contains(&BattleEvent::Fled {
             side: BattleSide::Enemy,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Damage { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Damage { .. })));
     }
 
     #[test]
@@ -24182,12 +24751,10 @@ mod tests {
             move_name: "WHIRLWIND".to_string(),
             target: BattleSide::Enemy,
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Fled { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Fled { .. })));
     }
 
     #[test]
@@ -24278,12 +24845,10 @@ mod tests {
             side: BattleSide::Player,
             move_name: "TELEPORT".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Fled { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Fled { .. })));
     }
 
     #[test]
@@ -24336,12 +24901,10 @@ mod tests {
             source: BattleSide::Enemy,
             move_name: "MEAN_LOOK".to_string(),
         }));
-        assert!(
-            !outcome
-                .events
-                .iter()
-                .any(|event| matches!(event, BattleEvent::Fled { .. }))
-        );
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Fled { .. })));
         assert!(outcome.events.iter().any(|event| matches!(
             event,
             BattleEvent::MoveSelected {

@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use crystal_core::battle::capture::{
-    CaptureAttemptContext, CaptureBallRule, CaptureBallRuleIssue, CaptureOutcome,
-    CaptureRulesIssue, CaptureWobbleProbability, CaptureWobbleProbabilityIssue, StoredCapture,
-    capture_rules_issues, capture_wobble_probability_issues,
-    complete_active_wild_capture as core_complete_active_wild_capture,
+    CaptureAttemptContext, CaptureBallRule, CaptureBallRuleIssue, CaptureCompletion,
+    CaptureOutcome, CaptureRulesIssue, CaptureWobbleProbability, CaptureWobbleProbabilityIssue,
+    StoredCapture, capture_rules_issues, capture_wobble_probability_issues,
+    complete_active_wild_capture_result as core_complete_active_wild_capture,
     throw_ball_from_bag as core_throw_ball_from_bag, validate_capture_ball_item,
 };
 use crystal_core::battle::damage::{
@@ -114,7 +114,7 @@ use crystal_core::state::{
     validate_saved_object_overrides as core_validate_saved_object_overrides,
     validate_saved_optional_catalog_reference,
     validate_saved_overworld_references as core_validate_saved_overworld_references,
-    validate_saved_pending_screen_fade_shape,
+    validate_saved_pending_screen_fade_shape, validate_saved_player_gender,
     validate_saved_pokemon_party_references as core_validate_saved_pokemon_party_references,
     validate_saved_pokemon_reference as core_validate_saved_pokemon_reference,
     validate_saved_roaming_references as core_validate_saved_roaming_references,
@@ -337,10 +337,10 @@ use crystal_core::systems::special_routines::{
     buena_prize_definition_issues, bug_contest_config_issues, checked_runtime_spawn_expected_tile,
     dratini_move_set_issues, happiness_data_issues, is_known_special_routine,
     kurt_apricorn_recipe_issues, magikarp_length_table_issues, oak_rating_table_issues,
-    odd_egg_definition_issues, roaming_pokemon_definition_issues, runtime_spawn_expected_tile,
-    runtime_spawn_point_catalog_issues, runtime_spawn_subtiles_are_valid,
-    saved_battle_tower_state_is_active, saved_special_battle_type_builtin_routine,
-    shuckie_gift_issues, special_routine_catalog_issues,
+    odd_egg_definition_issues, resolve_bug_contest_caught_mon, roaming_pokemon_definition_issues,
+    runtime_spawn_expected_tile, runtime_spawn_point_catalog_issues,
+    runtime_spawn_subtiles_are_valid, saved_battle_tower_state_is_active,
+    saved_special_battle_type_builtin_routine, shuckie_gift_issues, special_routine_catalog_issues,
     validate_saved_battle_tower_state as core_validate_saved_battle_tower_state,
     validate_saved_buena_password_references, validate_saved_magikarp_record_references,
     validate_saved_pending_special_battle_type,
@@ -467,7 +467,7 @@ pub mod modpack {
 
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
 pub const COMPILED_GAME_PACK_EXTENSION: &str = "crystalpack";
-pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 2;
+pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 3;
 const COMPILED_GAME_PACK_VERSION_OFFSET: usize = COMPILED_GAME_PACK_MAGIC.len();
 const COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET: usize = COMPILED_GAME_PACK_VERSION_OFFSET + 2;
 const COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET: usize = COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 4;
@@ -1832,6 +1832,14 @@ pub struct ModpackAudioAsset {
     pub source: ModpackAudioSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_format: Option<ModpackPcmAudioFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcm_frame_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_start_sample: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_end_sample: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for ModpackAudioAsset {
@@ -1847,6 +1855,10 @@ impl<'de> Deserialize<'de> for ModpackAudioAsset {
             kind: ModpackAudioKind,
             source: ModpackAudioSource,
             pcm_format: Option<ModpackPcmAudioFormat>,
+            pcm_frame_count: Option<usize>,
+            payload_hash: Option<String>,
+            loop_start_sample: Option<usize>,
+            loop_end_sample: Option<usize>,
         }
 
         let raw = RawModpackAudioAsset::deserialize(deserializer)?;
@@ -1856,6 +1868,10 @@ impl<'de> Deserialize<'de> for ModpackAudioAsset {
             kind: raw.kind,
             source: raw.source,
             pcm_format: raw.pcm_format,
+            pcm_frame_count: raw.pcm_frame_count,
+            payload_hash: raw.payload_hash,
+            loop_start_sample: raw.loop_start_sample,
+            loop_end_sample: raw.loop_end_sample,
         };
         asset.validate().map_err(serde::de::Error::custom)?;
         Ok(asset)
@@ -1870,6 +1886,10 @@ impl ModpackAudioAsset {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1882,6 +1902,10 @@ impl ModpackAudioAsset {
             kind: ModpackAudioKind::Cry,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1894,6 +1918,10 @@ impl ModpackAudioAsset {
             kind: ModpackAudioKind::SoundEffect,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1911,6 +1939,10 @@ impl ModpackAudioAsset {
             kind,
             source: ModpackAudioSource::Pcm,
             pcm_format: Some(pcm_format),
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1945,14 +1977,30 @@ impl ModpackAudioAsset {
             })?;
         match self.source {
             ModpackAudioSource::Midi if extension == "mid" => {
-                if self.pcm_format.is_some() {
-                    anyhow::bail!("MIDI audio asset '{}' must not declare pcm_format", self.id);
+                if self.pcm_format.is_some()
+                    || self.pcm_frame_count.is_some()
+                    || self.payload_hash.is_some()
+                    || self.loop_start_sample.is_some()
+                    || self.loop_end_sample.is_some()
+                {
+                    anyhow::bail!(
+                        "MIDI audio asset '{}' must not declare PCM metadata",
+                        self.id
+                    );
                 }
                 Ok(())
             }
             ModpackAudioSource::Midi => {
-                if self.pcm_format.is_some() {
-                    anyhow::bail!("MIDI audio asset '{}' must not declare pcm_format", self.id);
+                if self.pcm_format.is_some()
+                    || self.pcm_frame_count.is_some()
+                    || self.payload_hash.is_some()
+                    || self.loop_start_sample.is_some()
+                    || self.loop_end_sample.is_some()
+                {
+                    anyhow::bail!(
+                        "MIDI audio asset '{}' must not declare PCM metadata",
+                        self.id
+                    );
                 }
                 anyhow::bail!("MIDI audio asset '{}' must use a .mid file", self.id)
             }
@@ -1960,7 +2008,18 @@ impl ModpackAudioAsset {
                 let Some(format) = &self.pcm_format else {
                     anyhow::bail!("PCM audio asset '{}' must declare pcm_format", self.id);
                 };
-                format.validate(&self.id)
+                format.validate(&self.id)?;
+                validate_optional_pcm_payload_metadata(
+                    &self.id,
+                    self.pcm_frame_count,
+                    self.payload_hash.as_deref(),
+                )?;
+                validate_pcm_loop_metadata(
+                    &self.id,
+                    self.pcm_frame_count,
+                    self.loop_start_sample,
+                    self.loop_end_sample,
+                )
             }
             ModpackAudioSource::Pcm => {
                 if self.pcm_format.is_none() {
@@ -1970,6 +2029,59 @@ impl ModpackAudioAsset {
             }
         }
     }
+}
+
+fn validate_pcm_loop_metadata(
+    id: &str,
+    frame_count: Option<usize>,
+    loop_start_sample: Option<usize>,
+    loop_end_sample: Option<usize>,
+) -> Result<()> {
+    if loop_start_sample.is_some() != loop_end_sample.is_some() {
+        anyhow::bail!(
+            "PCM audio asset '{id}' must declare both loop_start_sample and loop_end_sample"
+        );
+    }
+    let Some(loop_start_sample) = loop_start_sample else {
+        return Ok(());
+    };
+    let loop_end_sample = loop_end_sample.expect("validated paired PCM loop metadata");
+    let frame_count = frame_count.with_context(|| {
+        format!("PCM audio asset '{id}' loop metadata requires pcm_frame_count")
+    })?;
+    if loop_start_sample >= loop_end_sample || loop_end_sample > frame_count {
+        anyhow::bail!(
+            "PCM audio asset '{id}' loop range [{loop_start_sample}, {loop_end_sample}) is outside {frame_count} frames"
+        );
+    }
+    Ok(())
+}
+
+fn validate_optional_pcm_payload_metadata(
+    id: &str,
+    frame_count: Option<usize>,
+    payload_hash: Option<&str>,
+) -> Result<()> {
+    if frame_count.is_some() != payload_hash.is_some() {
+        anyhow::bail!("PCM audio asset '{id}' must declare both pcm_frame_count and payload_hash");
+    }
+    if let Some(frame_count) = frame_count {
+        if frame_count == 0 {
+            anyhow::bail!("PCM audio asset '{id}' pcm_frame_count must be positive");
+        }
+    }
+    if let Some(payload_hash) = payload_hash {
+        if payload_hash.len() != 8
+            || !payload_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!(
+                "PCM audio asset '{id}' payload_hash must be exact lowercase 8-digit hex"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1985,6 +2097,10 @@ pub struct ModpackAudioManifestEntry {
     pub payload_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_frame_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_start_sample: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_end_sample: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
@@ -2003,6 +2119,8 @@ impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
             byte_len: usize,
             payload_hash: String,
             pcm_frame_count: Option<usize>,
+            loop_start_sample: Option<usize>,
+            loop_end_sample: Option<usize>,
         }
 
         let raw = RawModpackAudioManifestEntry::deserialize(deserializer)?;
@@ -2015,6 +2133,8 @@ impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
             byte_len: raw.byte_len,
             payload_hash: raw.payload_hash,
             pcm_frame_count: raw.pcm_frame_count,
+            loop_start_sample: raw.loop_start_sample,
+            loop_end_sample: raw.loop_end_sample,
         };
         entry.validate().map_err(serde::de::Error::custom)?;
         Ok(entry)
@@ -2029,6 +2149,10 @@ impl ModpackAudioManifestEntry {
             kind: self.kind,
             source: self.source,
             pcm_format: self.pcm_format.clone(),
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         };
         asset.validate()?;
         if self.byte_len == 0 {
@@ -2050,7 +2174,10 @@ impl ModpackAudioManifestEntry {
         }
         match self.source {
             ModpackAudioSource::Midi => {
-                if self.pcm_frame_count.is_some() {
+                if self.pcm_frame_count.is_some()
+                    || self.loop_start_sample.is_some()
+                    || self.loop_end_sample.is_some()
+                {
                     anyhow::bail!(
                         "MIDI audio manifest entry '{}' must not declare pcm_frame_count",
                         self.id
@@ -2092,6 +2219,12 @@ impl ModpackAudioManifestEntry {
                         frame_size
                     );
                 }
+                validate_pcm_loop_metadata(
+                    &self.id,
+                    self.pcm_frame_count,
+                    self.loop_start_sample,
+                    self.loop_end_sample,
+                )?;
             }
         }
         Ok(())
@@ -2126,24 +2259,53 @@ impl ModpackAudioManifest {
         }
         for asset in assets {
             asset.validate()?;
-            let bytes = compiled_audio.get(&asset.id).with_context(|| {
-                format!(
-                    "compiled audio manifest missing payload for definitive asset '{}'",
-                    asset.id
-                )
-            })?;
-            validate_compiled_audio_payload(asset, bytes)?;
-            let pcm_frame_count = match asset.source {
-                ModpackAudioSource::Midi => None,
-                ModpackAudioSource::Pcm => {
-                    let format = asset.pcm_format.as_ref().with_context(|| {
+            let embedded = compiled_audio.get(&asset.id);
+            let (byte_len, payload_hash, pcm_frame_count) = match (asset.source, embedded) {
+                (_, Some(bytes)) => {
+                    validate_compiled_audio_payload(asset, bytes)?;
+                    let frame_count = match asset.source {
+                        ModpackAudioSource::Midi => None,
+                        ModpackAudioSource::Pcm => {
+                            let format = asset.pcm_format.as_ref().with_context(|| {
+                                format!(
+                                    "PCM audio asset '{}' missing validated pcm_format",
+                                    asset.id
+                                )
+                            })?;
+                            Some(bytes.len() / format.frame_size_bytes(&asset.id)?)
+                        }
+                    };
+                    (
+                        bytes.len(),
+                        format!("{:08x}", fnv1a32_bytes(bytes)),
+                        frame_count,
+                    )
+                }
+                (ModpackAudioSource::Pcm, None) => {
+                    let frame_count = asset.pcm_frame_count.with_context(|| {
                         format!(
-                            "PCM audio asset '{}' missing validated pcm_format",
+                            "external PCM audio asset '{}' missing pcm_frame_count",
                             asset.id
                         )
                     })?;
-                    Some(bytes.len() / format.frame_size_bytes(&asset.id)?)
+                    let payload_hash = asset.payload_hash.clone().with_context(|| {
+                        format!(
+                            "external PCM audio asset '{}' missing payload_hash",
+                            asset.id
+                        )
+                    })?;
+                    let format = asset.pcm_format.as_ref().with_context(|| {
+                        format!("external PCM audio asset '{}' missing pcm_format", asset.id)
+                    })?;
+                    let byte_len = frame_count
+                        .checked_mul(format.frame_size_bytes(&asset.id)?)
+                        .context("external PCM byte length overflow")?;
+                    (byte_len, payload_hash, Some(frame_count))
                 }
+                (ModpackAudioSource::Midi, None) => anyhow::bail!(
+                    "compiled audio manifest missing payload for definitive MIDI asset '{}'",
+                    asset.id
+                ),
             };
             let entry = ModpackAudioManifestEntry {
                 id: asset.id.clone(),
@@ -2151,9 +2313,11 @@ impl ModpackAudioManifest {
                 kind: asset.kind,
                 source: asset.source,
                 pcm_format: asset.pcm_format.clone(),
-                byte_len: bytes.len(),
-                payload_hash: format!("{:08x}", fnv1a32_bytes(bytes)),
+                byte_len,
+                payload_hash,
                 pcm_frame_count,
+                loop_start_sample: asset.loop_start_sample,
+                loop_end_sample: asset.loop_end_sample,
             };
             manifest.insert(entry)?;
         }
@@ -2644,7 +2808,8 @@ fn canonicalize_core_modular_test_report(
 
 impl CompiledGamePack {
     #[cfg(any(test, feature = "test-fixtures"))]
-    pub fn new_unchecked_for_tests(data: GameDataSet, report: ModpackCompileReport) -> Self {
+    pub fn new_unchecked_for_tests(mut data: GameDataSet, report: ModpackCompileReport) -> Self {
+        normalize_test_pcm_audio_metadata(&mut data);
         let compiled_audio = synthetic_compiled_audio_for_tests(&data);
         let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
@@ -2664,10 +2829,11 @@ impl CompiledGamePack {
 
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn new_unchecked_with_audio_for_tests(
-        data: GameDataSet,
+        mut data: GameDataSet,
         compiled_audio: BTreeMap<String, Vec<u8>>,
         report: ModpackCompileReport,
     ) -> Self {
+        normalize_test_pcm_audio_metadata(&mut data);
         let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
             COMPILED_GAME_PACK_FORMAT_VERSION,
@@ -3136,6 +3302,9 @@ fn compile_audio_payloads(
         audio_asset
             .validate()
             .with_context(|| format!("validate audio asset {}", audio_asset.id))?;
+        if matches!(audio_asset.source, ModpackAudioSource::Pcm) {
+            continue;
+        }
         let path = asset_root
             .resolve_data_path(&audio_asset.path)
             .with_context(|| format!("resolve audio asset {}", audio_asset.id))?;
@@ -3182,6 +3351,23 @@ fn synthetic_compiled_audio_for_tests(data: &GameDataSet) -> BTreeMap<String, Ve
             (asset.id.clone(), bytes)
         })
         .collect()
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+fn normalize_test_pcm_audio_metadata(data: &mut GameDataSet) {
+    for asset in &mut data.audio {
+        if matches!(asset.source, ModpackAudioSource::Pcm) {
+            let frame_size = asset
+                .pcm_format
+                .as_ref()
+                .and_then(|format| format.frame_size_bytes(&asset.id).ok())
+                .unwrap_or(1);
+            asset.pcm_frame_count = Some(1);
+            asset.payload_hash = Some(format!("{:08x}", fnv1a32_bytes(&vec![0; frame_size])));
+            asset.loop_start_sample = None;
+            asset.loop_end_sample = None;
+        }
+    }
 }
 
 pub fn validate_compiled_audio_payload(asset: &ModpackAudioAsset, bytes: &[u8]) -> Result<()> {
@@ -15280,6 +15466,12 @@ pub struct RuntimeTrainerIdentityCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimePlayerGenderCommand {
+    pub player_gender: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimePartyNicknameCommand {
     pub party_index: usize,
     pub nickname: String,
@@ -15289,6 +15481,15 @@ pub struct RuntimePartyNicknameCommand {
 #[serde(deny_unknown_fields)]
 pub struct RuntimePartySlotCommand {
     pub party_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePartyRecoverySetupCommand {
+    pub party_index: usize,
+    pub hp: u16,
+    pub status: Option<String>,
+    pub first_move_pp: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15608,6 +15809,9 @@ pub enum RuntimeMutationCommand {
         routine: String,
         rng_seed_after: Option<u32>,
     },
+    ResolveBugContestCaughtMon {
+        keep_new: bool,
+    },
     GrantScriptedGiftPokemon(RuntimeGiftPokemonCommand),
     AddPartyPokemon(RuntimePartyPokemonCommand),
     StartScriptedWildBattle(RuntimeScriptCommandRef),
@@ -15764,7 +15968,9 @@ pub enum RuntimeMutationCommand {
     CableClubCheckWhichChrisSpecial(RuntimeCableClubGenderCommand),
     SetOptions(RuntimeOptionsCommand),
     SetTrainerIdentity(RuntimeTrainerIdentityCommand),
+    SetPlayerGender(RuntimePlayerGenderCommand),
     RenamePartyPokemon(RuntimePartyNicknameCommand),
+    SetPartyPokemonRecoveryState(RuntimePartyRecoverySetupCommand),
     FullHealPartyPokemon(RuntimePartySlotCommand),
     FullHealWholeParty,
     ResolveBlackoutToLastSpawn,
@@ -16245,6 +16451,12 @@ pub struct RuntimeTrainerIdentityOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePlayerGenderOutcome {
+    pub player_gender_before: u8,
+    pub player_gender_after: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePartyNicknameOutcome {
     pub party_index: usize,
     pub species_id: String,
@@ -16261,6 +16473,19 @@ pub struct PartyRecoveryOutcome {
     pub status_before: Option<String>,
     pub status_after: Option<String>,
     pub pp_restored: Vec<(String, u8, u8)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePartyRecoverySetupOutcome {
+    pub party_index: usize,
+    pub species_id: String,
+    pub hp_before: u16,
+    pub hp_after: u16,
+    pub status_before: Option<String>,
+    pub status_after: Option<String>,
+    pub first_move: Option<String>,
+    pub first_move_pp_before: Option<u8>,
+    pub first_move_pp_after: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16495,7 +16720,7 @@ pub enum RuntimeMutationResult {
     BattlePartyPokemonItemUsed(ItemUseOutcome, BattleItemOutcome),
     BattlePartyMoveItemUsed(ItemUseOutcome, BattleItemOutcome),
     BallThrown(CaptureOutcome),
-    ActiveWildCaptureCompleted(Option<StoredCapture>),
+    ActiveWildCaptureCompleted(CaptureCompletion),
     ActiveBattlePartySwitched(usize),
     ActiveBattleTurnResolved(BattleTurnOutcome),
     ActiveBattleCommandResolved(ActiveBattleCommandOutcome),
@@ -16605,7 +16830,9 @@ pub enum RuntimeMutationResult {
     CableClubChrisChecked(SpecialRoutineOutcome),
     OptionsSet(RuntimeOptionsSetOutcome),
     TrainerIdentitySet(RuntimeTrainerIdentityOutcome),
+    PlayerGenderSet(RuntimePlayerGenderOutcome),
     PartyPokemonRenamed(RuntimePartyNicknameOutcome),
+    PartyPokemonRecoveryStateSet(RuntimePartyRecoverySetupOutcome),
     PartyPokemonFullHealed(PartyRecoveryOutcome),
     WholePartyFullHealed(Vec<PartyRecoveryOutcome>),
     BlackoutResolved(BlackoutRecoveryOutcome),
@@ -16817,7 +17044,9 @@ impl RuntimeMutationResult {
             Self::CableClubChrisChecked(_) => "cable_club_chris_checked",
             Self::OptionsSet(_) => "options_set",
             Self::TrainerIdentitySet(_) => "trainer_identity_set",
+            Self::PlayerGenderSet(_) => "player_gender_set",
             Self::PartyPokemonRenamed(_) => "party_pokemon_renamed",
+            Self::PartyPokemonRecoveryStateSet(_) => "party_pokemon_recovery_state_set",
             Self::PartyPokemonFullHealed(_) => "party_pokemon_full_healed",
             Self::WholePartyFullHealed(_) => "whole_party_full_healed",
             Self::BlackoutResolved(_) => "blackout_resolved",
@@ -16847,12 +17076,12 @@ pub fn runtime_mutation_result_frame(
         .map_err(|error| anyhow::anyhow!("build runtime mutation result frame: {error}"))
 }
 
-fn initial_tmhm_flags(items: &BTreeMap<String, Item>) -> Vec<bool> {
+fn initial_tmhm_flags(items: &BTreeMap<String, Item>) -> Vec<u8> {
     items
         .values()
         .filter_map(|item| item.tmhm_index)
         .max()
-        .map(|max_index| vec![false; max_index + 1])
+        .map(|max_index| vec![0; max_index + 1])
         .unwrap_or_default()
 }
 
@@ -16947,7 +17176,11 @@ impl GameDataSet {
         minute: u8,
         second: u8,
     ) {
+        let day_changed = state.time.current_date != date;
         state.time.update_from_datetime(date, hour, minute, second);
+        if day_changed {
+            state.apply_daily_reset();
+        }
     }
 
     pub fn set_manual_clock_time(
@@ -16982,9 +17215,9 @@ impl GameDataSet {
             .runtime_spawn_points
             .values()
             .filter(|spawn| spawn.map_constant == map_constant);
-        let spawn = matches
-            .next()
-            .with_context(|| format!("compiled game pack missing spawn point for {map_constant}"))?;
+        let spawn = matches.next().with_context(|| {
+            format!("compiled game pack missing spawn point for {map_constant}")
+        })?;
         if let Some(other) = matches.next() {
             anyhow::bail!(
                 "compiled game pack has multiple spawn points for {map_constant}: {} and {}",
@@ -18785,6 +19018,11 @@ impl GameDataSet {
         let outcome =
             core_apply_script_runtime_command(&mut next_state, command.clone(), inputs)
                 .map_err(|error| anyhow::anyhow!("apply script runtime command: {error:?}"))?;
+        if command.command == "givepokemail" {
+            self.apply_compiled_mail_definition(&mut next_state, &command.args[0])?;
+        } else if command.command == "checkpokemail" {
+            self.apply_compiled_mail_check(&mut next_state, &command.args[0])?;
+        }
         self.resolve_script_runtime_name_buffer(&mut next_state, &command)?;
         if command.command == "elevfloor" {
             let target_constant = command.args.get(2).with_context(|| {
@@ -18803,7 +19041,7 @@ impl GameDataSet {
                         "elevfloor command {}:{} did not enqueue an elevator floor",
                         command.source_script, command.command_index
                     )
-            })?;
+                })?;
             floor.target_map = target_map;
         }
         if command.command == "blackoutmod" {
@@ -18824,6 +19062,99 @@ impl GameDataSet {
         *state = next_state;
         *overworld = next_overworld;
         Ok((command, outcome))
+    }
+
+    fn apply_compiled_mail_definition(&self, state: &mut GameState, label: &str) -> Result<()> {
+        let body = self
+            .compiled_script_body(label)
+            .with_context(|| format!("mail definition '{label}' is missing from compiled ASM"))?;
+        let entries = body
+            .as_array()
+            .with_context(|| format!("mail definition '{label}' is not an array"))?;
+        let item_id = entries
+            .first()
+            .and_then(|entry| entry.get("args"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|args| args.first())
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("mail definition '{label}' has no item"))?
+            .to_string();
+        self.item(&item_id)
+            .with_context(|| format!("mail definition '{label}' references unknown item '{item_id}'"))?;
+        let message = compiled_mail_message(entries)?;
+        let Some(index) = state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .rposition(Option::is_some)
+        else {
+            anyhow::bail!("cannot give mail '{label}' without a party Pokémon");
+        };
+        let pokemon = state.storage.party.pokemon[index]
+            .as_mut()
+            .expect("party index selected from occupied slots");
+        pokemon.item = Some(item_id);
+        pokemon.mail = Some(crystal_core::models::pokemon::MailData {
+            message,
+            author: pokemon.original_trainer_name.clone(),
+            species: pokemon.species.id.clone(),
+        });
+        state.sync_party_from_storage();
+        Ok(())
+    }
+
+    fn apply_compiled_mail_check(&self, state: &mut GameState, label: &str) -> Result<()> {
+        let body = self
+            .compiled_script_body(label)
+            .with_context(|| format!("mail check definition '{label}' is missing from compiled ASM"))?;
+        let entries = body
+            .as_array()
+            .with_context(|| format!("mail check definition '{label}' is not an array"))?;
+        let expected = compiled_mail_message(entries)?;
+        let party_len = state.storage.party.pokemon.len();
+        let has_mail = state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .any(|pokemon| pokemon.mail.is_some());
+        let Some(index) = state.storage.party.pokemon.iter().position(|pokemon| {
+            pokemon.as_ref().is_some_and(|pokemon| {
+                pokemon
+                    .mail
+                    .as_ref()
+                    .is_some_and(|mail| strip_compiled_mail_text(&mail.message) == expected)
+            })
+        }) else {
+            state.script_runtime.script_value = Some(if has_mail {
+                "0".to_string()
+            } else {
+                "3".to_string()
+            });
+            return Ok(());
+        };
+        let other_conscious = state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .enumerate()
+            .any(|(other_index, pokemon)| {
+                other_index != index && pokemon.as_ref().is_some_and(|pokemon| pokemon.hp > 0)
+            });
+        if !other_conscious {
+            state.script_runtime.script_value = Some("4".to_string());
+            return Ok(());
+        }
+        for slot in index..(party_len - 1) {
+            state.storage.party.pokemon[slot] = state.storage.party.pokemon[slot + 1].take();
+        }
+        state.storage.party.pokemon[party_len - 1] = None;
+        state.sync_party_from_storage();
+        state.script_runtime.script_value = Some("1".to_string());
+        Ok(())
     }
 
     fn resolve_script_runtime_name_buffer(
@@ -20095,6 +20426,15 @@ impl GameDataSet {
                         "special routine {routine} command must not declare rng_seed_after"
                     );
                 }
+                *state = next_state;
+                RuntimeMutationResult::SpecialRoutineApplied(outcome)
+            }
+            RuntimeMutationCommand::ResolveBugContestCaughtMon { keep_new } => {
+                let mut next_state = state.clone();
+                let outcome =
+                    resolve_bug_contest_caught_mon(&mut next_state, keep_new).map_err(|error| {
+                        anyhow::anyhow!("resolve Bug Contest caught Pokemon: {error}")
+                    })?;
                 *state = next_state;
                 RuntimeMutationResult::SpecialRoutineApplied(outcome)
             }
@@ -21565,7 +21905,7 @@ impl GameDataSet {
                         music_ids,
                         |next_state| {
                             next_state.script_runtime.variables.insert(
-                                "_linked_friend_ready".to_string(),
+                                "_link_friend_ready".to_string(),
                                 u8::from(command.ready).to_string(),
                             );
                             Ok(())
@@ -21718,9 +22058,9 @@ impl GameDataSet {
                 };
                 let pokemon = pc_box
                     .pokemon
-                    .get_mut(command.box_slot)
+                    .get(command.box_slot)
                     .with_context(|| format!("box slot {} is outside PC box", command.box_slot))?
-                    .take()
+                    .clone()
                     .with_context(|| {
                         format!("box slot {} has no Pokemon to withdraw", command.box_slot)
                     })?;
@@ -22057,6 +22397,15 @@ impl GameDataSet {
                     player_id_after: state.player_id,
                 })
             }
+            RuntimeMutationCommand::SetPlayerGender(command) => {
+                validate_saved_player_gender(command.player_gender).map_err(anyhow::Error::msg)?;
+                let before = state.player_gender;
+                state.player_gender = command.player_gender;
+                RuntimeMutationResult::PlayerGenderSet(RuntimePlayerGenderOutcome {
+                    player_gender_before: before,
+                    player_gender_after: state.player_gender,
+                })
+            }
             RuntimeMutationCommand::RenamePartyPokemon(command) => {
                 let pokemon = state
                     .storage
@@ -22084,6 +22433,58 @@ impl GameDataSet {
                     nickname_before: before,
                     nickname_after,
                 })
+            }
+            RuntimeMutationCommand::SetPartyPokemonRecoveryState(command) => {
+                if let Some(status) = command.status.as_deref() {
+                    self.validate_saved_pokemon_status_reference(
+                        "runtime.party_recovery_setup.status",
+                        status,
+                    )?;
+                }
+                let pokemon = state
+                    .storage
+                    .party
+                    .pokemon
+                    .get_mut(command.party_index)
+                    .with_context(|| {
+                        format!("party index {} is outside party", command.party_index)
+                    })?
+                    .as_mut()
+                    .with_context(|| {
+                        format!(
+                            "party index {} has no Pokemon to set recovery state",
+                            command.party_index
+                        )
+                    })?;
+                let hp_before = pokemon.hp;
+                let status_before = pokemon.status.clone();
+                let first_move = pokemon.moves.first().map(|learned| learned.name.clone());
+                let first_move_pp_before = pokemon.moves.first().map(|learned| learned.current_pp);
+                pokemon.hp = command.hp.min(pokemon.max_hp);
+                pokemon.status = command.status;
+                if let (Some(learned), Some(pp)) =
+                    (pokemon.moves.first_mut(), command.first_move_pp)
+                {
+                    learned.current_pp = pp;
+                }
+                let species_id = pokemon.species.id.clone();
+                let hp_after = pokemon.hp;
+                let status_after = pokemon.status.clone();
+                let first_move_pp_after = pokemon.moves.first().map(|learned| learned.current_pp);
+                state.sync_party_from_storage();
+                RuntimeMutationResult::PartyPokemonRecoveryStateSet(
+                    RuntimePartyRecoverySetupOutcome {
+                        party_index: command.party_index,
+                        species_id,
+                        hp_before,
+                        hp_after,
+                        status_before,
+                        status_after,
+                        first_move,
+                        first_move_pp_before,
+                        first_move_pp_after,
+                    },
+                )
             }
             RuntimeMutationCommand::SwapPartyPokemon(command) => {
                 if command.first_party_index >= state.storage.party.pokemon.len()
@@ -22180,6 +22581,7 @@ impl GameDataSet {
                 )
             }
         };
+        session.sync_event_flag_memory(&state.flags);
         let result_tag = result.result_tag();
         let state_checksum = game_state_checksum(state)
             .with_context(|| format!("checksum runtime mutation {result_tag}"))?;
@@ -22549,6 +22951,72 @@ impl GameDataSet {
             event => anyhow::bail!("joypad command produced unexpected event {event:?}"),
         };
 
+        let mut bug_contest_timed_out = false;
+        if staged_state.bug_contest.timer_active
+            && staged_state
+                .flags
+                .is_engine_flag_set("ENGINE_BUG_CONTEST_TIMER")
+                .map_err(|error| anyhow::anyhow!("check Bug Contest timer flag: {error}"))?
+        {
+            let timer =
+                self.apply_internal_special_routine(&mut staged_state, "CheckBugContestTimer")?;
+            bug_contest_timed_out = matches!(
+                timer.effect,
+                SpecialRoutineEffect::BugContestTimer { active: false, .. }
+            ) && staged_session.map.name == "NationalParkBugContest";
+        }
+
+        if bug_contest_timed_out {
+            for index in 1..=10 {
+                let flag_a = format!("EVENT_BUG_CATCHING_CONTESTANT_{index}A");
+                let flag_b = format!("EVENT_BUG_CATCHING_CONTESTANT_{index}B");
+                let selected = staged_state
+                    .flags
+                    .is_event_flag_set(&flag_a)
+                    .map_err(|error| {
+                        anyhow::anyhow!("read Bug Contest contestant flag: {error}")
+                    })?;
+                if !selected {
+                    staged_state
+                        .flags
+                        .set_event_flag(&flag_b, false)
+                        .map_err(|error| {
+                            anyhow::anyhow!("clear Bug Contest contestant flag: {error}")
+                        })?;
+                }
+            }
+            staged_state
+                .flags
+                .set_event_flag(
+                    "EVENT_ROUTE_36_NATIONAL_PARK_GATE_OFFICER_CONTEST_DAY",
+                    true,
+                )
+                .map_err(|error| anyhow::anyhow!("set Bug Contest result flag: {error}"))?;
+            staged_state
+                .flags
+                .set_event_flag(
+                    "EVENT_ROUTE_36_NATIONAL_PARK_GATE_OFFICER_NOT_CONTEST_DAY",
+                    false,
+                )
+                .map_err(|error| anyhow::anyhow!("clear Bug Contest result flag: {error}"))?;
+            staged_state
+                .flags
+                .set_event_flag("EVENT_WARPED_FROM_ROUTE_35_NATIONAL_PARK_GATE", true)
+                .map_err(|error| anyhow::anyhow!("set Bug Contest warp flag: {error}"))?;
+            let destination_tile = raw_event_tile_to_runtime_tile_checked(0, 4)
+                .context("resolve Bug Contest results warp tile")?;
+            let mode = staged_session.player.mode;
+            self.transition_overworld_session_with_mode(
+                &mut staged_state,
+                &mut staged_session,
+                "Route36NationalParkGate",
+                destination_tile,
+                mode,
+                SpawnMemoryUpdate::Preserve,
+                music_ids,
+            )?;
+        }
+
         let mut movement = None;
         let mut step_events = None;
         let mut coord_event = None;
@@ -22559,7 +23027,8 @@ impl GameDataSet {
         let mut wild_encounter = None;
         let mut wild_battle = None;
 
-        let overworld_input_locked = Self::game_state_blocks_overworld_input(&staged_state);
+        let overworld_input_locked =
+            bug_contest_timed_out || Self::game_state_blocks_overworld_input(&staged_state);
         let direction = if overworld_input_locked {
             None
         } else {
@@ -22823,6 +23292,20 @@ impl GameDataSet {
         let context = self.special_routine_context(&cry_by_species);
         apply_special_routine_with_context(state, context, routine)
             .map_err(|error| anyhow::anyhow!("apply special routine {routine}: {error}"))
+    }
+
+    pub fn apply_internal_special_routine(
+        &self,
+        state: &mut GameState,
+        routine: &str,
+    ) -> Result<SpecialRoutineOutcome> {
+        if !matches!(routine, "StartBugContestTimer" | "CheckBugContestTimer") {
+            anyhow::bail!("unsupported internal special routine {routine}");
+        }
+        let cry_by_species = self.cry_by_species();
+        let context = self.special_routine_context(&cry_by_species);
+        apply_special_routine_with_context(state, context, routine)
+            .map_err(|error| anyhow::anyhow!("apply internal special routine {routine}: {error}"))
     }
 
     fn apply_special_routine_transactional<F>(
@@ -23893,8 +24376,6 @@ impl GameDataSet {
                 source_script,
             )
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-            self.validate_saved_optional_text_reference("battle.trainer.win_text", win_text)?;
-            self.validate_saved_optional_text_reference("battle.trainer.loss_text", loss_text)?;
             return Ok(());
         }
 
@@ -25505,7 +25986,7 @@ impl GameDataSet {
                 anyhow::bail!("cannot throw a ball without an active battle");
             }
         };
-        let mut rng = Random::new(state.rng_seed);
+        let mut rng = Random::new_crystal(state.rng_seed);
         let outcome =
             self.throw_ball_from_bag(&mut state.bag, ball_id, &player, &enemy, context, &mut rng)?;
         state.commit_rng_seed(rng.seed());
@@ -25516,16 +25997,61 @@ impl GameDataSet {
         &self,
         state: &mut GameState,
         outcome: &CaptureOutcome,
-    ) -> Result<Option<StoredCapture>> {
+    ) -> Result<CaptureCompletion> {
         let mut staged_state = state.clone();
+        let caught_map_name = match &staged_state.battle {
+            crystal_core::state::BattleMemory::Wild { map_name, .. } => Some(map_name.clone()),
+            crystal_core::state::BattleMemory::StaticWild { .. } => {
+                match &staged_state.overworld {
+                    crystal_core::state::OverworldMemory::Active { map_name, .. } => {
+                        Some(map_name.clone())
+                    }
+                    crystal_core::state::OverworldMemory::Inactive => None,
+                }
+            }
+            _ => None,
+        };
         let pay_day_money = staged_state.battle_pay_day_money;
-        let stored = core_complete_active_wild_capture(&mut staged_state, outcome)
+        let mut completion = core_complete_active_wild_capture(&mut staged_state, outcome)
             .map_err(|error| anyhow::anyhow!("complete captured Pokemon: {error}"))?;
-        if stored.is_some() {
+        if let (Some(map_name), Some(stored)) = (caught_map_name, completion.stored.as_mut()) {
+            if let Some(location) = self
+                .saved_map_id(&map_name)
+                .and_then(|map_id| map_id.parse::<u8>().ok())
+            {
+                if let Some(caught_data) = stored.pokemon.caught_data.as_mut() {
+                    caught_data.location = location;
+                }
+                match stored.location {
+                    crystal_core::models::CaptureStorageLocation::Party { slot } => {
+                        if let Some(Some(pokemon)) = staged_state.storage.party.pokemon.get_mut(slot)
+                        {
+                            if let Some(caught_data) = pokemon.caught_data.as_mut() {
+                                caught_data.location = location;
+                            }
+                        }
+                    }
+                    crystal_core::models::CaptureStorageLocation::Pc { box_index, slot } => {
+                        if let Some(Some(pokemon)) = staged_state
+                            .storage
+                            .pc_boxes
+                            .get_mut(box_index)
+                            .and_then(|pc_box| pc_box.pokemon.get_mut(slot))
+                        {
+                            if let Some(caught_data) = pokemon.caught_data.as_mut() {
+                                caught_data.location = location;
+                            }
+                        }
+                    }
+                }
+                staged_state.sync_party_from_storage();
+            }
+        }
+        if completion.stored.is_some() || completion.contest_pokemon.is_some() {
             self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
         }
         *state = staged_state;
-        Ok(stored)
+        Ok(completion)
     }
 
     pub fn battle_escape_item_mode(&self, item_id: &str) -> Result<String> {
@@ -25670,11 +26196,18 @@ impl GameDataSet {
                 anyhow::bail!("cannot resolve battle turn without an active battle");
             }
         };
-        let mut rng = Random::new(state.rng_seed);
+        let mut rng = Random::new_crystal(state.rng_seed);
         Self::require_active_enemy_in_battle_party(&enemy_party, active_enemy_index)?;
-        let combat = BattleCombatState::new(player, enemy, state.rng_seed)
-            .with_parties(player_party, enemy_party.to_vec())
-            .with_party_indices(active_index, active_enemy_index);
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .clone()
+            .unwrap_or_else(|| {
+                BattleCombatState::new(player, enemy, state.rng_seed)
+                    .with_parties(player_party, enemy_party.to_vec())
+                    .with_party_indices(active_index, active_enemy_index)
+                    .with_obedience(state.player_id, state.badges.johto)
+            });
         let input = BattleTurnInput {
             player: player_action,
             enemy: enemy_action,
@@ -25764,8 +26297,12 @@ impl GameDataSet {
                 anyhow::bail!("cannot escape without an active wild battle");
             }
         };
-        let mut rng = Random::new(staged_state.rng_seed);
-        let combat = BattleCombatState::new(player, enemy, staged_state.rng_seed);
+        let mut rng = Random::new_crystal(staged_state.rng_seed);
+        let combat = staged_state
+            .script_runtime
+            .active_battle_combat
+            .clone()
+            .unwrap_or_else(|| BattleCombatState::new(player, enemy, staged_state.rng_seed));
         let outcome =
             self.resolve_wild_battle_run(&combat, staged_state.battle_escape_attempts, &mut rng)?;
         let pay_day_money = staged_state.battle_pay_day_money;
@@ -25858,11 +26395,18 @@ impl GameDataSet {
                 anyhow::bail!("cannot resolve enemy battle action without an active battle");
             }
         };
-        let mut rng = Random::new(state.rng_seed);
+        let mut rng = Random::new_crystal(state.rng_seed);
         Self::require_active_enemy_in_battle_party(&enemy_party, active_enemy_index)?;
-        let combat = BattleCombatState::new(player, enemy, state.rng_seed)
-            .with_parties(player_party, enemy_party.to_vec())
-            .with_party_indices(active_index, active_enemy_index);
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .clone()
+            .unwrap_or_else(|| {
+                BattleCombatState::new(player, enemy, state.rng_seed)
+                    .with_parties(player_party, enemy_party.to_vec())
+                    .with_party_indices(active_index, active_enemy_index)
+                    .with_obedience(state.player_id, state.badges.johto)
+            });
         let outcome =
             self.resolve_battle_enemy_action_with_items(combat, enemy_action, &mut rng)?;
         let pay_day_money_after_turn = self.active_battle_pay_day_money_after_turn(state, &outcome);
@@ -26184,6 +26728,7 @@ impl GameDataSet {
 
     pub fn saved_special_routine_exists(&self, routine: &str) -> bool {
         self.special_routines.contains_key(routine)
+            || matches!(routine, "StartBugContestTimer" | "CheckBugContestTimer")
     }
 
     pub fn saved_sprite_exists(&self, sprite_id: &str) -> bool {
@@ -26674,13 +27219,23 @@ impl GameDataSet {
             EncounterCheckOptions {
                 time: state.time.time_of_day,
                 music_token: state.script_runtime.current_music.clone(),
-                has_cleanse_tag: false,
+                has_cleanse_tag: Self::party_has_cleanse_tag(state),
                 active_repel_item,
                 lead_party_level: leading_usable_party_level(state),
             },
         )?;
         state.commit_rng_seed(rng.seed());
         Ok(roll)
+    }
+
+    fn party_has_cleanse_tag(state: &GameState) -> bool {
+        state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .any(|pokemon| pokemon.item.as_deref() == Some("CLEANSE_TAG"))
     }
 
     pub fn start_resolved_wild_encounter_after_step(
@@ -28479,6 +29034,34 @@ impl GameDataSet {
     }
 }
 
+fn strip_compiled_mail_text(value: &str) -> String {
+    let trimmed = value.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    unquoted.trim_end_matches('@').to_string()
+}
+
+fn compiled_mail_message(entries: &[serde_json::Value]) -> Result<String> {
+    if entries.is_empty() {
+        anyhow::bail!("compiled mail definition has no entries");
+    }
+    Ok(entries
+        .iter()
+        .skip(1)
+        .filter_map(|entry| {
+            entry
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(strip_compiled_mail_text)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn required_map_attribute_label<'a>(
     map_name: &str,
     field_name: &str,
@@ -28793,13 +29376,29 @@ fn validate_compiled_audio_payloads(pack: &CompiledGamePack) -> Result<()> {
         .map(|asset| asset.id.as_str())
         .collect::<BTreeSet<_>>();
     for asset in &pack.data.audio {
-        let bytes = pack.compiled_audio.get(&asset.id).with_context(|| {
-            format!(
+        match pack.compiled_audio.get(&asset.id) {
+            Some(bytes) => validate_compiled_audio_payload(asset, bytes)?,
+            None if matches!(asset.source, ModpackAudioSource::Pcm) => {
+                let manifest =
+                    ModpackAudioManifest::from_assets(&pack.data.audio, &pack.compiled_audio)?;
+                let entry = manifest
+                    .music
+                    .get(&asset.id)
+                    .or_else(|| manifest.sound_effects.get(&asset.id))
+                    .or_else(|| manifest.cries.get(&asset.id))
+                    .with_context(|| {
+                        format!(
+                            "compiled game pack missing PCM manifest entry '{}'",
+                            asset.id
+                        )
+                    })?;
+                entry.validate()?;
+            }
+            None => anyhow::bail!(
                 "compiled game pack is missing embedded audio payload '{}'",
                 asset.id
-            )
-        })?;
-        validate_compiled_audio_payload(asset, bytes)?;
+            ),
+        }
     }
     for audio_id in pack.compiled_audio.keys() {
         if !declared_audio.contains(audio_id.as_str()) {
@@ -37111,6 +37710,12 @@ mod tests {
     use crystal_core::systems::script_objects::{
         apply_script_movement, apply_script_object_mutation,
     };
+
+    #[test]
+    fn compiled_mail_text_normalizes_asm_terminators() {
+        assert_eq!(strip_compiled_mail_text("\"DARK CAVE leads\""), "DARK CAVE leads");
+        assert_eq!(strip_compiled_mail_text("\"to another road@\""), "to another road");
+    }
     use crystal_core::systems::script_scenes::apply_script_scene_command;
     use crystal_core::systems::scripted_battles::{
         ScriptedBattleEffects, apply_scripted_battle_effects_to_session,
@@ -37953,7 +38558,23 @@ mod tests {
     ) -> ModpackCompileReport {
         let mut data = data.clone();
         add_complete_runtime_pack_fixture(&mut data);
-        verify_game_data(&AssetRoot::new(repository_root_for_tests()), &data, rules)
+        let root = repository_root_for_tests();
+        write_complete_runtime_audio_fixture(&root);
+        verify_game_data(&AssetRoot::new(root), &data, rules)
+    }
+
+    fn write_complete_runtime_audio_fixture(root: &Path) {
+        for path in [
+            "content-packs/test/music/MUSIC_TITLE.pcm",
+            "content-packs/test/sfx/SFX_ITEM.pcm",
+            "content-packs/test/cries/CRY_CHIKORITA.pcm",
+        ] {
+            let path = root.join("apps/web/assets/data").join(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create complete runtime audio fixture dir");
+            }
+            std::fs::write(path, [0_u8]).expect("write complete runtime audio fixture");
+        }
     }
 
     fn add_wild_encounter_marker(data: &mut GameDataSet) {
@@ -38466,6 +39087,7 @@ mod tests {
             animation_shakes: 3,
             final_catch_rate: u8::MAX,
             rng_seed_after: state.rng_seed,
+            ball_id: None,
         };
 
         let error = data
@@ -38642,6 +39264,10 @@ mod tests {
             kind: ModpackAudioKind::SoundEffect,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         });
 
         let report = verify_complete_test_game_data(&data, &PlayabilityRules::default());
@@ -38677,6 +39303,10 @@ mod tests {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         });
         let known_species_id = data.pokemon.keys().next().expect("runtime species").clone();
         let mut module = test_map_module("Start", "START_MAP", None);
@@ -39547,6 +40177,10 @@ mod tests {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         });
 
         let report = verify_game_data(
@@ -39615,6 +40249,10 @@ mod tests {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         });
 
         let report = verify_game_data(
@@ -39656,6 +40294,10 @@ mod tests {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         });
         data.encounter_music_modifiers = EncounterMusicModifiers {
             modifiers: BTreeMap::from([
@@ -44393,7 +45035,7 @@ mod tests {
                 .to_string();
             if field == "pcm_format" {
                 assert!(
-                    error.contains("must not declare pcm_format"),
+                    error.contains("must not declare PCM metadata"),
                     "{field} produced unexpected error: {error}"
                 );
             } else {
@@ -61461,6 +62103,10 @@ mod tests {
                     kind: ModpackAudioKind::Music,
                     source: ModpackAudioSource::Pcm,
                     pcm_format: None,
+                    pcm_frame_count: None,
+                    payload_hash: None,
+                    loop_start_sample: None,
+                    loop_end_sample: None,
                 },
                 ModpackAudioAsset {
                     id: "SFX_BAD".to_string(),
@@ -61468,6 +62114,10 @@ mod tests {
                     kind: ModpackAudioKind::SoundEffect,
                     source: ModpackAudioSource::Pcm,
                     pcm_format: None,
+                    pcm_frame_count: None,
+                    payload_hash: None,
+                    loop_start_sample: None,
+                    loop_end_sample: None,
                 },
                 ModpackAudioAsset {
                     id: "CRY_BAD".to_string(),
@@ -61475,6 +62125,10 @@ mod tests {
                     kind: ModpackAudioKind::Cry,
                     source: ModpackAudioSource::Pcm,
                     pcm_format: None,
+                    pcm_frame_count: None,
+                    payload_hash: None,
+                    loop_start_sample: None,
+                    loop_end_sample: None,
                 },
             ],
             ..GameDataSet::default()
@@ -65712,6 +66366,10 @@ mod tests {
                     kind: ModpackAudioKind::Music,
                     source: ModpackAudioSource::Midi,
                     pcm_format: None,
+                    pcm_frame_count: None,
+                    payload_hash: None,
+                    loop_start_sample: None,
+                    loop_end_sample: None,
                 },
                 ModpackAudioAsset {
                     id: "CRY_HO_OH".to_string(),
@@ -65719,6 +66377,10 @@ mod tests {
                     kind: ModpackAudioKind::Cry,
                     source: ModpackAudioSource::Midi,
                     pcm_format: None,
+                    pcm_frame_count: None,
+                    payload_hash: None,
+                    loop_start_sample: None,
+                    loop_end_sample: None,
                 },
             ],
             ..GameDataSet::default()
@@ -65827,6 +66489,10 @@ mod tests {
                 kind: ModpackAudioKind::Cry,
                 source: ModpackAudioSource::Midi,
                 pcm_format: None,
+                pcm_frame_count: None,
+                payload_hash: None,
+                loop_start_sample: None,
+                loop_end_sample: None,
             }],
             ..GameDataSet::default()
         };
@@ -65915,6 +66581,10 @@ mod tests {
                 kind: ModpackAudioKind::Music,
                 source: ModpackAudioSource::Midi,
                 pcm_format: None,
+                pcm_frame_count: None,
+                payload_hash: None,
+                loop_start_sample: None,
+                loop_end_sample: None,
             }],
             ..GameDataSet::default()
         };
@@ -65960,6 +66630,10 @@ mod tests {
                 kind: ModpackAudioKind::SoundEffect,
                 source: ModpackAudioSource::Midi,
                 pcm_format: None,
+                pcm_frame_count: None,
+                payload_hash: None,
+                loop_start_sample: None,
+                loop_end_sample: None,
             }],
             ..GameDataSet::default()
         };
@@ -70955,7 +71629,7 @@ mod tests {
         );
         assert_eq!(
             module.scenes.scenes[6].script_name.as_deref(),
-            Some("ElmsLabAideScript")
+            Some("ElmsLabNoop5Scene")
         );
         assert!(module
             .map_script_section_commands
@@ -70993,7 +71667,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_const_binds_to_previous_one_arg_scene_script() {
+    fn generated_scene_table_uses_current_cherrygrove_scene_script_binding() {
         let root = repository_root_for_tests();
         let data = AssetRoot::new(root)
             .load_base_game_data()
@@ -71011,7 +71685,7 @@ mod tests {
 
         assert_eq!(
             rival_scene.script_name.as_deref(),
-            Some("CherrygroveCityRivalScene")
+            Some("CherrygroveCityNoop2Scene")
         );
     }
 
@@ -72971,7 +73645,10 @@ mod tests {
         )
         .expect("blackoutmod applies against compiled spawn table");
 
-        assert_eq!(state.script_runtime.blackout_mod.as_deref(), Some("ROUTE_29"));
+        assert_eq!(
+            state.script_runtime.blackout_mod.as_deref(),
+            Some("ROUTE_29")
+        );
         assert_eq!(state.last_spawn_identifier, Some(15));
 
         let mut missing_spawn_state = GameState {
@@ -73088,11 +73765,9 @@ mod tests {
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
-                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(
-                    RuntimeScriptRuntimeFlagCommand {
-                        flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
-                    },
-                ),
+                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(RuntimeScriptRuntimeFlagCommand {
+                    flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
+                }),
                 &music_ids,
                 &empty_audio,
                 &empty_audio,
@@ -73124,11 +73799,9 @@ mod tests {
             .apply_runtime_mutation_command(
                 &mut missing_music_state,
                 &mut session,
-                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(
-                    RuntimeScriptRuntimeFlagCommand {
-                        flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
-                    },
-                ),
+                RuntimeMutationCommand::ConsumeScriptRuntimeFlag(RuntimeScriptRuntimeFlagCommand {
+                    flag: RuntimeScriptRuntimeFlag::MapMusicRequested,
+                }),
                 &BTreeSet::from(["MUSIC_OTHER_MAP".to_string()]),
                 &empty_audio,
                 &empty_audio,

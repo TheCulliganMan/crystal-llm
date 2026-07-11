@@ -1,0 +1,14 @@
+{
+  "repository": "vendor/pokecrystal",
+  "commit": "31880ea20ea44f79ebd459b1e735ae1f15db1671",
+  "tree": "7209c2b8f6510a1d7ca728142183f040543aec24",
+  "input_manifest_sha256": "9c9dd8379075f295ccbc5e86c3f6b92f2a5469ef6a3b2fe9ef398b2fcc58d068",
+  "target": "crystal",
+  "rom": {
+    "path": "pokecrystal.gbc",
+    "sha1": "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133"
+  },
+  "rgbds": {
+    "version": "1.0.1"
+  }
+}

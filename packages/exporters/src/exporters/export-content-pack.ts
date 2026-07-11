@@ -146,6 +146,11 @@ type ExportedRuntimeTitleScreen = {
   title_music: string | null;
 };
 
+type StoryEventScriptConstantsPayload = {
+  global?: Record<string, unknown>;
+  maps?: Record<string, Record<string, unknown>>;
+};
+
 export type CoreExportPayload = {
   pokemonData: PokemonSpecies[];
   movesData: Record<string, Move>;
@@ -221,6 +226,32 @@ export type CoreExportPayload = {
   playability?: PlayabilityRules;
   audioAssets?: Record<string, ExportedAudioAsset>;
 };
+
+function storyEventConstantsWithFieldBoxFlags(
+  constants: unknown,
+  fieldBoxItems: Record<string, ExportedFieldBoxItemRule> | undefined,
+): unknown {
+  if (!fieldBoxItems || Object.keys(fieldBoxItems).length === 0) {
+    return constants;
+  }
+  const payload =
+    constants && typeof constants === "object"
+      ? (constants as StoryEventScriptConstantsPayload)
+      : {};
+  const global = { ...(payload.global ?? {}) };
+  for (const rule of Object.values(fieldBoxItems).sort((a, b) =>
+    a.item_id.localeCompare(b.item_id),
+  )) {
+    if (rule.decoration_flag && global[rule.decoration_flag] === undefined) {
+      global[rule.decoration_flag] = 0;
+    }
+  }
+  return {
+    ...payload,
+    global,
+    maps: payload.maps ?? {},
+  };
+}
 
 const CORE_PACK_ID = "core-modular";
 const CORE_PACK_PATH = `content-packs/${CORE_PACK_ID}`;
@@ -630,17 +661,17 @@ const writeAudioAssetFile = (
 ): void => {
   assertExactAudioId(audioId);
   assertExactAudioId(asset.id);
-  if (asset.source !== "midi") {
-    throw new Error(`Audio asset ${asset.id} must use midi source`);
+  if (asset.source !== "pcm") {
+    throw new Error(`Audio asset ${asset.id} must use PCM source`);
   }
   if (audioId !== asset.id) {
     throw new Error(
       `Audio asset key ${audioId} does not match record id ${asset.id}`,
     );
   }
-  if (!asset.path.endsWith(".mid")) {
+  if (!asset.path.endsWith(".pcm")) {
     throw new Error(
-      `Audio asset ${asset.id} must use a .mid file: ${asset.path}`,
+      `Audio asset ${asset.id} must use a .pcm file: ${asset.path}`,
     );
   }
   if (!asset.path.startsWith(`${CORE_PACK_PATH}/`)) {
@@ -657,25 +688,35 @@ const writeAudioAssetFile = (
     );
   }
   const fileName = pathSegments.at(-1) ?? "";
-  const expectedFileName = `${asset.id}.mid`;
+  const expectedFileName = `${asset.id}.pcm`;
   if (fileName !== expectedFileName) {
     throw new Error(
       `Audio asset ${asset.id} path must end with ${expectedFileName}: ${asset.path}`,
     );
   }
+  const pcmFormat = asset.pcm_format;
+  if (
+    !pcmFormat ||
+    pcmFormat.sample_rate_hz <= 0 ||
+    pcmFormat.channels !== 2 ||
+    pcmFormat.bits_per_sample !== 16
+  ) {
+    throw new Error(`Audio asset ${asset.id} must declare exact stereo 16-bit PCM format`);
+  }
   const absolutePath = joinPath(getDataDir(), asset.path);
   if (!fs.existsSync(absolutePath)) {
     throw new Error(
-      `Audio asset ${asset.id} is missing generated MIDI file: ${asset.path}`,
+      `Audio asset ${asset.id} is missing generated PCM file: ${asset.path}`,
     );
   }
   const bytes = fs.readFileSync(absolutePath);
-  if (!bytes.subarray(0, 4).equals(Buffer.from("MThd"))) {
+  const frameBytes = pcmFormat.channels * (pcmFormat.bits_per_sample / 8);
+  if (bytes.length === 0 || bytes.length % frameBytes !== 0) {
     throw new Error(
-      `Audio asset ${asset.id} generated MIDI file must start with MThd: ${asset.path}`,
+      `Audio asset ${asset.id} generated PCM file must contain complete frames: ${asset.path}`,
     );
   }
-  const metadataPath = asset.path.replace(/\.mid$/, ".json");
+  const metadataPath = asset.path.replace(/\.pcm$/, ".json");
   writeJsonToTargets(metadataPath, { [asset.id]: asset }, { indent: 2 });
   files.push(metadataPath);
   writtenPayloads.set(metadataPath, { [asset.id]: asset });
@@ -926,7 +967,22 @@ const readPreservedPacks = (): ContentPack[] => {
       const id = isRecord(pack) && typeof pack.id === "string" ? pack.id : "";
       return id !== CORE_PACK_ID && !id.startsWith(`${MODULE_PREFIX}-`);
     })
-    .map(requireContentPack);
+    .map((pack, index) => {
+      if (isRecord(pack)) {
+        return requireContentPack(
+          {
+            ...pack,
+            compiled: "compiled" in pack ? pack.compiled : null,
+            files: {
+              ...emptyContentPackFiles(),
+              ...(isRecord(pack.files) ? pack.files : {}),
+            },
+          },
+          index,
+        );
+      }
+      return requireContentPack(pack, index);
+    });
 };
 
 const parentPathFor = (
@@ -1598,7 +1654,10 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       files.story_event_script_constants,
       "story_event_script_constants",
       "constants",
-      payload.storyEventScriptConstants,
+      storyEventConstantsWithFieldBoxFlags(
+        payload.storyEventScriptConstants,
+        payload.fieldBoxItems,
+      ),
     );
   }
   writeCorePackEntry(

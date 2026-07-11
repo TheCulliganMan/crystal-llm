@@ -32,16 +32,17 @@ use crystal_assets::{
     RuntimeMysteryGiftAction, RuntimeNameRivalCommand, RuntimeNoopSpecial, RuntimeOddEggCommand,
     RuntimeOptionsCommand, RuntimeOverworldInputCommand, RuntimePartyCheckCommand,
     RuntimePartyCheckSpecial, RuntimePartyItemCommand, RuntimePartyMoveItemCommand,
-    RuntimePartyNicknameCommand, RuntimePartyPokemonCommand, RuntimePartySlotCommand,
-    RuntimePartySwapCommand, RuntimePcBagItemCheckCommand, RuntimePcBoxCommand,
-    RuntimePcDepositCommand, RuntimePcItemCommand, RuntimePcReleaseCommand,
-    RuntimePcWithdrawCommand, RuntimePendingScriptRequest, RuntimePendingScriptRequestCommand,
+    RuntimePartyNicknameCommand, RuntimePartyPokemonCommand, RuntimePartyRecoverySetupCommand,
+    RuntimePartyRecoverySetupOutcome, RuntimePartySlotCommand, RuntimePartySwapCommand,
+    RuntimePcBagItemCheckCommand, RuntimePcBoxCommand, RuntimePcDepositCommand,
+    RuntimePcItemCommand, RuntimePcReleaseCommand, RuntimePcWithdrawCommand,
+    RuntimePendingScriptRequest, RuntimePendingScriptRequestCommand,
     RuntimePendingScriptRequestKind, RuntimePendingYesNoResolutionCommand,
-    RuntimePhoneCallerCommand, RuntimePhoneRandomSpecial, RuntimePlayerPaletteCommand,
-    RuntimePokedexCommand, RuntimeRegisteredKeyItemCommand, RuntimeRegisteredKeyItemOutcome,
-    RuntimeRememberPasswordCommand, RuntimeScriptCommandRef, RuntimeScriptEventDrainCommand,
-    RuntimeScriptEventDrainResult, RuntimeScriptEventQueue, RuntimeScriptRuntimeFlag,
-    RuntimeScriptRuntimeFlagCommand, RuntimeScriptRuntimeFlagValue,
+    RuntimePhoneCallerCommand, RuntimePhoneRandomSpecial, RuntimePlayerGenderCommand,
+    RuntimePlayerPaletteCommand, RuntimePokedexCommand, RuntimeRegisteredKeyItemCommand,
+    RuntimeRegisteredKeyItemOutcome, RuntimeRememberPasswordCommand, RuntimeScriptCommandRef,
+    RuntimeScriptEventDrainCommand, RuntimeScriptEventDrainResult, RuntimeScriptEventQueue,
+    RuntimeScriptRuntimeFlag, RuntimeScriptRuntimeFlagCommand, RuntimeScriptRuntimeFlagValue,
     RuntimeScriptRuntimeMemoryEntry, RuntimeScriptRuntimeMemoryEntryCommand,
     RuntimeScriptRuntimeMemoryEntryRemoved, RuntimeScriptRuntimeMemoryValue,
     RuntimeScriptRuntimeMemoryValueCommand, RuntimeScriptRuntimeMemoryValueTaken,
@@ -57,7 +58,7 @@ use crystal_assets::{
     runtime_special_routine_requires_rng_boundary, validate_compiled_audio_payload,
 };
 use crystal_audio::{AudioKind, AudioPcmFormat, AudioProgram, AudioProgramSource};
-use crystal_core::battle::capture::{CaptureOutcome, StoredCapture};
+use crystal_core::battle::capture::{CaptureCompletion, CaptureOutcome, StoredCapture};
 use crystal_core::battle::capture::{CaptureRules, CaptureWobbleProbability};
 use crystal_core::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
 use crystal_core::battle::start::{
@@ -99,12 +100,13 @@ use crystal_core::state::{
     ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
     ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRequest, ScriptShopRuntimeEvent,
     ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait, ScriptWarpRequest,
-    ScriptYesNoPrompt, saved_decoration_description_command_payload, saved_delay_command_payload,
-    saved_earthquake_command_payload, saved_emote_command_payload, saved_map_load_command_payload,
-    saved_map_refresh_command_payload, saved_music_fade_command_payload,
-    saved_numeric_buffer_write_command_payload, saved_queued_command_args,
-    saved_shop_event_command_payload, saved_shop_request_command_payload,
-    saved_stone_table_entry_command_payload, saved_variable_write_command_payload,
+    ScriptYesNoPrompt, is_engine_flag_name, saved_decoration_description_command_payload,
+    saved_delay_command_payload, saved_earthquake_command_payload, saved_emote_command_payload,
+    saved_map_load_command_payload, saved_map_refresh_command_payload,
+    saved_music_fade_command_payload, saved_numeric_buffer_write_command_payload,
+    saved_queued_command_args, saved_shop_event_command_payload,
+    saved_shop_request_command_payload, saved_stone_table_entry_command_payload,
+    saved_variable_write_command_payload,
     validate_saved_audio_reference as core_validate_saved_audio_reference,
     validate_saved_trainer_metadata,
 };
@@ -186,9 +188,10 @@ pub mod bevy_shell;
 pub use bevy_shell::{
     BevyShellConfig, BevyShellStart, VisibleShellBattleSmoke, VisibleShellBattleSmokeRef,
     VisibleShellOverworldSmoke, VisibleShellPartySmoke, VisibleShellSmokeItem,
-    VisibleShellSmokePokemon, VisibleShellStartMenuSmoke, VisibleShellTitleSmoke,
-    VisibleShellTrainerBattleSmoke, run_bevy_shell, smoke_visible_shell_overworld,
-    smoke_visible_shell_party, smoke_visible_shell_start_menu, smoke_visible_shell_title,
+    VisibleShellSmokePokemon, VisibleShellStartMenuSmoke, VisibleShellTitleNameInputSmoke,
+    VisibleShellTitleSmoke, VisibleShellTrainerBattleSmoke, run_bevy_shell,
+    smoke_visible_shell_overworld, smoke_visible_shell_party, smoke_visible_shell_start_menu,
+    smoke_visible_shell_title, smoke_visible_shell_title_name_input,
     smoke_visible_shell_trainer_battle, smoke_visible_shell_wild_battle,
 };
 
@@ -340,6 +343,15 @@ pub struct RuntimeShellSnapshot {
     pub phase: RuntimeShellPhase,
     pub trainer: RuntimeTrainerSnapshot,
     pub progression: RuntimeProgressionSnapshot,
+    pub roaming_pokemon: Vec<crystal_core::state::RoamingPokemonState>,
+    pub day_care: crystal_core::state::DayCareState,
+    pub bug_contest: crystal_core::state::BugContestState,
+    pub magikarp_record: crystal_core::state::MagikarpRecordState,
+    pub buenas_password: crystal_core::state::BuenasPasswordState,
+    pub mystery_gift: RuntimeMysteryGiftSnapshot,
+    pub link_session: RuntimeLinkSessionSnapshot,
+    pub battle_tower: crystal_core::state::BattleTowerState,
+    pub mobile_link: crystal_core::state::MobileLinkState,
     pub audio: RuntimeShellAudioState,
     pub audio_catalog: RuntimeAudioCatalogSnapshot,
     pub menu: Option<RuntimeMenuSnapshot>,
@@ -367,6 +379,26 @@ pub struct RuntimeShellSnapshot {
     pub script_events: RuntimeScriptEventsSnapshot,
     pub pending_shop: Option<ScriptShopRequest>,
     pub linked_menu_results: Vec<MenuChoiceResultFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeMysteryGiftSnapshot {
+    pub unlocked: bool,
+    pub stored_item: Option<String>,
+    pub backup_item: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLinkSessionSnapshot {
+    pub link_mode: u8,
+    pub player_link_action: u8,
+    pub chosen_cable_club_room: u8,
+    pub other_player_link_mode: u8,
+    pub friend_ready: bool,
+    pub last_result: bool,
+    pub failed_link_to_past: bool,
+    pub quick_save_requested: bool,
+    pub active_room: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,6 +491,16 @@ pub enum RuntimeAudioProgramSourceSnapshot {
     Pcm {
         byte_len: usize,
         format: AudioPcmFormat,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
+    },
+    PcmFile {
+        path: std::path::PathBuf,
+        byte_len: usize,
+        payload_hash: String,
+        format: AudioPcmFormat,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
     },
 }
 
@@ -466,6 +508,8 @@ pub enum RuntimeAudioProgramSourceSnapshot {
 pub struct RuntimeTrainerSnapshot {
     pub player_name: String,
     pub player_id: u16,
+    pub player_gender: u8,
+    pub player_palette_id: u8,
     pub money: u32,
     pub moms_money: u32,
     pub coins: u16,
@@ -483,6 +527,7 @@ pub struct RuntimeProgressionSnapshot {
     pub link_wins: u16,
     pub link_losses: u16,
     pub link_draws: u16,
+    pub pending_special_battle_type: Option<String>,
     pub repel_steps_remaining: u16,
     pub active_repel_item: Option<String>,
     pub registered_key_item: Option<String>,
@@ -1694,11 +1739,24 @@ pub struct RuntimeTrainerIdentitySet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePlayerGenderSet {
+    pub player_gender_before: u8,
+    pub player_gender_after: u8,
+    pub state_checksum: StateChecksum,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePartyNicknameSet {
     pub party_index: usize,
     pub species_id: String,
     pub nickname_before: String,
     pub nickname_after: String,
+    pub state_checksum: StateChecksum,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePartyRecoveryStateSet {
+    pub outcome: RuntimePartyRecoverySetupOutcome,
     pub state_checksum: StateChecksum,
 }
 
@@ -1982,6 +2040,7 @@ pub struct RuntimeTmHmSnapshot {
     pub item_id: String,
     pub tmhm_index: usize,
     pub move_id: Option<String>,
+    pub quantity: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2060,6 +2119,7 @@ pub struct RuntimeCompiledScriptStep {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCompiledScriptBoundary {
+    TextLabel(String),
     TextWait(ScriptTextWait),
     YesNo(ScriptYesNoPrompt),
     ActiveMenu(String),
@@ -2177,6 +2237,9 @@ fn buttons_from_joypad_mask(mask: u8) -> Vec<GameButton> {
 fn compiled_script_boundary(state: &GameState) -> Option<RuntimeCompiledScriptBoundary> {
     if let Some(wait) = &state.script_runtime.pending_text_wait {
         return Some(RuntimeCompiledScriptBoundary::TextWait(wait.clone()));
+    }
+    if let Some(label) = &state.script_runtime.pending_text_label {
+        return Some(RuntimeCompiledScriptBoundary::TextLabel(label.clone()));
     }
     if let Some(prompt) = &state.script_runtime.pending_yes_no {
         return Some(RuntimeCompiledScriptBoundary::YesNo(prompt.clone()));
@@ -3139,7 +3202,20 @@ impl RuntimeGameShell {
             let ended = step.ended;
             cursor = step.next_cursor.clone();
             steps.push(step);
-            if boundary.is_some() || ended {
+            // `writetext` publishes a transient label so the renderer can
+            // resolve the text payload.  In Crystal's normal compiled shape
+            // it is immediately followed by `waitbutton`; that command is
+            // the actual input boundary.  Keep stepping through this pair so
+            // callers receive the same modal boundary the game exposes.
+            let transient_text_label = matches!(
+                boundary,
+                Some(RuntimeCompiledScriptBoundary::TextLabel(_))
+            ) && cursor.as_ref().is_some_and(|next| {
+                self.runtime
+                    .compiled_script_command_name(&next.source_script, next.command_index)
+                    .is_ok_and(|command| command == "waitbutton")
+            });
+            if (boundary.is_some() && !transient_text_label) || ended {
                 return Ok(RuntimeCompiledScriptRun {
                     steps,
                     next_cursor: cursor,
@@ -8364,11 +8440,32 @@ impl RuntimeGameShell {
         let mutation = self.apply_runtime_mutation_command(
             RuntimeMutationCommand::CompleteActiveWildCapture(outcome.clone()),
         )?;
-        let RuntimeMutationResult::ActiveWildCaptureCompleted(stored) = mutation.result else {
+        let RuntimeMutationResult::ActiveWildCaptureCompleted(CaptureCompletion {
+            stored,
+            contest_pokemon,
+        }) = mutation.result
+        else {
             anyhow::bail!("runtime mutation returned non-capture-completion result");
         };
         Ok(RuntimeCaptureCompletion {
             stored,
+            contest_pokemon,
+            state_checksum: mutation.state_checksum,
+        })
+    }
+
+    pub fn resolve_bug_contest_caught_mon(
+        &mut self,
+        keep_new: bool,
+    ) -> Result<RuntimeSpecialRoutineUse> {
+        let mutation = self.apply_runtime_mutation_command(
+            RuntimeMutationCommand::ResolveBugContestCaughtMon { keep_new },
+        )?;
+        let RuntimeMutationResult::SpecialRoutineApplied(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-Bug Contest decision result");
+        };
+        Ok(RuntimeSpecialRoutineUse {
+            outcome,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -8951,6 +9048,38 @@ impl RuntimeGameShell {
         })
     }
 
+    pub fn remove_bag_item(
+        &mut self,
+        item_id: &str,
+        quantity: u16,
+    ) -> Result<RuntimeBagItemMutation> {
+        let item = self
+            .runtime
+            .data
+            .items
+            .get(item_id)
+            .cloned()
+            .with_context(|| format!("unknown bag item {item_id}"))?;
+        let quantity_before = self.session.state.bag.quantity(&item);
+        self.session
+            .state
+            .bag
+            .remove_item(&item, quantity)
+            .map_err(anyhow::Error::msg)?;
+        self.runtime
+            .validate_save_state_for_runtime_pack(&self.session.state)
+            .context("validate runtime state after bag item remove")?;
+        let item_id = item.script_name.clone();
+        Ok(RuntimeBagItemMutation {
+            item_id,
+            quantity,
+            added: false,
+            quantity_before,
+            quantity_after: self.session.state.bag.quantity(&item),
+            state_checksum: game_state_checksum(&self.session.state)?,
+        })
+    }
+
     pub fn record_link_battle_result(
         &mut self,
         result: RuntimeLinkBattleResult,
@@ -9234,6 +9363,23 @@ impl RuntimeGameShell {
         })
     }
 
+    pub fn set_player_gender(&mut self, player_gender: u8) -> Result<RuntimePlayerGenderSet> {
+        let mutation = self.apply_runtime_mutation_command(
+            RuntimeMutationCommand::SetPlayerGender(RuntimePlayerGenderCommand { player_gender }),
+        )?;
+        let RuntimeMutationResult::PlayerGenderSet(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-player-gender result");
+        };
+        self.runtime
+            .validate_save_state_for_runtime_pack(&self.session.state)
+            .context("validate runtime state after player gender set")?;
+        Ok(RuntimePlayerGenderSet {
+            player_gender_before: outcome.player_gender_before,
+            player_gender_after: outcome.player_gender_after,
+            state_checksum: mutation.state_checksum,
+        })
+    }
+
     pub fn rename_party_pokemon(
         &mut self,
         party_index: usize,
@@ -9256,6 +9402,35 @@ impl RuntimeGameShell {
             species_id: outcome.species_id,
             nickname_before: outcome.nickname_before,
             nickname_after: outcome.nickname_after,
+            state_checksum: mutation.state_checksum,
+        })
+    }
+
+    pub fn set_party_pokemon_recovery_state(
+        &mut self,
+        party_index: usize,
+        hp: u16,
+        status: Option<String>,
+        first_move_pp: Option<u8>,
+    ) -> Result<RuntimePartyRecoveryStateSet> {
+        let mutation = self.apply_runtime_mutation_command(
+            RuntimeMutationCommand::SetPartyPokemonRecoveryState(
+                RuntimePartyRecoverySetupCommand {
+                    party_index,
+                    hp,
+                    status,
+                    first_move_pp,
+                },
+            ),
+        )?;
+        let RuntimeMutationResult::PartyPokemonRecoveryStateSet(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-party-recovery-setup result");
+        };
+        self.runtime
+            .validate_save_state_for_runtime_pack(&self.session.state)
+            .context("validate runtime state after party recovery setup")?;
+        Ok(RuntimePartyRecoveryStateSet {
+            outcome,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -9410,6 +9585,19 @@ impl RuntimeGameShell {
             phase: RuntimeShellPhase::from_state(&self.session.state),
             trainer: RuntimeTrainerSnapshot::from_state(&self.session.state),
             progression: RuntimeProgressionSnapshot::from_state(&self.session.state),
+            roaming_pokemon: self.session.state.roaming_pokemon.clone(),
+            day_care: self.session.state.day_care.clone(),
+            bug_contest: self.session.state.bug_contest.clone(),
+            magikarp_record: self.session.state.magikarp_record.clone(),
+            buenas_password: self.session.state.buenas_password.clone(),
+            mystery_gift: RuntimeMysteryGiftSnapshot {
+                unlocked: self.session.state.mystery_gift_unlocked,
+                stored_item: self.session.state.mystery_gift.stored_item.clone(),
+                backup_item: self.session.state.mystery_gift.backup_item.clone(),
+            },
+            link_session: RuntimeLinkSessionSnapshot::from_state(&self.session.state),
+            battle_tower: self.session.state.battle_tower.clone(),
+            mobile_link: self.session.state.mobile_link.clone(),
             audio: RuntimeShellAudioState::from_state(&self.session.state),
             audio_catalog: self.runtime.audio_catalog_snapshot(),
             menu,
@@ -9448,6 +9636,28 @@ impl RuntimeGameShell {
 
     pub fn state_checksum(&self) -> Result<StateChecksum> {
         game_state_checksum(&self.session.state).context("checksum runtime game shell state")
+    }
+
+    pub fn set_script_flag_for_smoke(&mut self, flag_id: &str) -> Result<StateChecksum> {
+        if is_engine_flag_name(flag_id) {
+            self.runtime.require_engine_flag(flag_id)?;
+        } else {
+            self.runtime.require_event_flag(flag_id)?;
+        }
+        self.session
+            .state
+            .flags
+            .set_script_flag(flag_id, true)
+            .with_context(|| format!("set smoke script flag {flag_id}"))?;
+        self.state_checksum()
+    }
+
+    pub fn set_blue_card_balance_for_smoke(&mut self, balance: u8) -> Result<StateChecksum> {
+        self.session.state.blue_card_balance = balance;
+        self.runtime
+            .validate_save_state_for_runtime_pack(&self.session.state)
+            .context("validate runtime state after smoke Blue Card balance seed")?;
+        self.state_checksum()
     }
 
     pub fn current_map_name(&self) -> &str {
@@ -9579,6 +9789,8 @@ impl RuntimeTrainerSnapshot {
         Self {
             player_name: state.player_name.clone(),
             player_id: state.player_id,
+            player_gender: state.player_gender,
+            player_palette_id: state.player_palette_id,
             money: state.money,
             moms_money: state.moms_money,
             coins: state.coins,
@@ -9599,6 +9811,7 @@ impl RuntimeProgressionSnapshot {
             link_wins: state.link_battle_stats.wins,
             link_losses: state.link_battle_stats.losses,
             link_draws: state.link_battle_stats.draws,
+            pending_special_battle_type: state.pending_special_battle_type.clone(),
             repel_steps_remaining: state.repel_steps_remaining,
             active_repel_item: state.active_repel_item.clone(),
             registered_key_item: state.registered_key_item.clone(),
@@ -9611,6 +9824,23 @@ impl RuntimeProgressionSnapshot {
                 .iter()
                 .filter_map(|(flag, set)| set.then(|| flag.clone()))
                 .collect(),
+        }
+    }
+}
+
+impl RuntimeLinkSessionSnapshot {
+    fn from_state(state: &GameState) -> Self {
+        let link = &state.link_session;
+        Self {
+            link_mode: link.link_mode,
+            player_link_action: link.player_link_action,
+            chosen_cable_club_room: link.chosen_cable_club_room,
+            other_player_link_mode: link.other_player_link_mode,
+            friend_ready: link.friend_ready,
+            last_result: link.last_result,
+            failed_link_to_past: link.failed_link_to_past,
+            quick_save_requested: link.quick_save_requested,
+            active_room: link.active_room.clone(),
         }
     }
 }
@@ -10149,7 +10379,10 @@ impl RuntimeBagSnapshot {
             .collect()
     }
 
-    fn tm_hm(items: &BTreeMap<String, Item>, flags: &[bool]) -> Result<Vec<RuntimeTmHmSnapshot>> {
+    fn tm_hm(
+        items: &BTreeMap<String, Item>,
+        quantities: &[u8],
+    ) -> Result<Vec<RuntimeTmHmSnapshot>> {
         let mut entries = Vec::new();
         for (item_id, item) in items {
             if item.pocket != ITEM_POCKET_TM_HM {
@@ -10158,16 +10391,17 @@ impl RuntimeBagSnapshot {
             let Some(index) = item.tmhm_index else {
                 continue;
             };
-            let learned = flags.get(index).copied().with_context(|| {
+            let quantity = quantities.get(index).copied().with_context(|| {
                 format!(
                     "saved TM/HM flags missing index {index} required by compiled item {item_id}"
                 )
             })?;
-            if learned {
+            if quantity > 0 {
                 entries.push(RuntimeTmHmSnapshot {
                     item_id: item_id.clone(),
                     tmhm_index: index,
                     move_id: item.tmhm_move.clone(),
+                    quantity: u16::from(quantity),
                 });
             }
         }
@@ -10524,9 +10758,31 @@ impl RuntimeAudioProgramSourceSnapshot {
             AudioProgramSource::Midi(bytes) => Self::Midi {
                 byte_len: bytes.len(),
             },
-            AudioProgramSource::Pcm { bytes, format } => Self::Pcm {
+            AudioProgramSource::Pcm {
+                bytes,
+                format,
+                loop_start_sample,
+                loop_end_sample,
+            } => Self::Pcm {
                 byte_len: bytes.len(),
                 format: format.clone(),
+                loop_start_sample: *loop_start_sample,
+                loop_end_sample: *loop_end_sample,
+            },
+            AudioProgramSource::PcmFile {
+                path,
+                byte_len,
+                payload_hash,
+                format,
+                loop_start_sample,
+                loop_end_sample,
+            } => Self::PcmFile {
+                path: path.clone(),
+                byte_len: *byte_len,
+                payload_hash: payload_hash.clone(),
+                format: format.clone(),
+                loop_start_sample: *loop_start_sample,
+                loop_end_sample: *loop_end_sample,
             },
         }
     }
@@ -10568,6 +10824,7 @@ pub struct RuntimeScriptedBattleCompletion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCaptureCompletion {
     pub stored: Option<StoredCapture>,
+    pub contest_pokemon: Option<crystal_core::models::Pokemon>,
     pub state_checksum: StateChecksum,
 }
 
@@ -11158,7 +11415,7 @@ impl CrystalRuntime {
     }
 
     fn from_compiled_pack(
-        _asset_root: &AssetRoot,
+        asset_root: &AssetRoot,
         pack: CompiledGamePack,
         modpack: SaveModpackIdentity,
     ) -> Result<Self> {
@@ -11179,11 +11436,12 @@ impl CrystalRuntime {
         }
         let audio_manifest = ModpackAudioManifest::from_assets(&data.audio, &compiled_audio)?;
         let audio_playback = ModpackAudioPlaybackPlan::from_manifest(&audio_manifest)?;
-        let audio = RuntimeAudioCatalog::from_game_data(
+        let audio = RuntimeAudioCatalog::from_game_data_with_external_audio_root(
             &data,
-            &compiled_audio,
+            compiled_audio,
             audio_manifest,
             audio_playback,
+            asset_root,
         )?;
         Ok(Self {
             modpack,
@@ -16326,6 +16584,10 @@ impl RuntimeOverworldSession {
         &self.state
     }
 
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.state
+    }
+
     pub fn overworld(&self) -> &OverworldSession {
         &self.overworld
     }
@@ -16571,11 +16833,34 @@ impl RuntimeOverworldSession {
             runtime,
             RuntimeMutationCommand::CompleteActiveWildCapture(outcome.clone()),
         )?;
-        let RuntimeMutationResult::ActiveWildCaptureCompleted(stored) = mutation.result else {
+        let RuntimeMutationResult::ActiveWildCaptureCompleted(CaptureCompletion {
+            stored,
+            contest_pokemon,
+        }) = mutation.result
+        else {
             anyhow::bail!("runtime mutation returned non-capture-completion result");
         };
         Ok(RuntimeCaptureCompletion {
             stored,
+            contest_pokemon,
+            state_checksum: mutation.state_checksum,
+        })
+    }
+
+    pub fn resolve_bug_contest_caught_mon(
+        &mut self,
+        runtime: &CrystalRuntime,
+        keep_new: bool,
+    ) -> Result<RuntimeSpecialRoutineUse> {
+        let mutation = self.apply_runtime_mutation_command(
+            runtime,
+            RuntimeMutationCommand::ResolveBugContestCaughtMon { keep_new },
+        )?;
+        let RuntimeMutationResult::SpecialRoutineApplied(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-Bug Contest decision result");
+        };
+        Ok(RuntimeSpecialRoutineUse {
+            outcome,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -18340,6 +18625,155 @@ impl RuntimeOverworldSession {
 }
 
 impl RuntimeAudioCatalog {
+    fn from_game_data_with_external_audio_root(
+        data: &GameDataSet,
+        compiled_audio: BTreeMap<String, Vec<u8>>,
+        manifest: ModpackAudioManifest,
+        playback: ModpackAudioPlaybackPlan,
+        asset_root: &AssetRoot,
+    ) -> Result<Self> {
+        Self::from_game_data_inner(data, compiled_audio, manifest, playback, Some(asset_root))
+    }
+
+    fn from_game_data_owned(
+        data: &GameDataSet,
+        mut compiled_audio: BTreeMap<String, Vec<u8>>,
+        manifest: ModpackAudioManifest,
+        playback: ModpackAudioPlaybackPlan,
+    ) -> Result<Self> {
+        Self::from_game_data_inner(data, compiled_audio, manifest, playback, None)
+    }
+
+    fn from_game_data_inner(
+        data: &GameDataSet,
+        mut compiled_audio: BTreeMap<String, Vec<u8>>,
+        manifest: ModpackAudioManifest,
+        playback: ModpackAudioPlaybackPlan,
+        external_asset_root: Option<&AssetRoot>,
+    ) -> Result<Self> {
+        let declared_audio = data.audio_ids();
+        for audio_id in compiled_audio.keys() {
+            if !declared_audio.contains(audio_id.as_str()) {
+                anyhow::bail!(
+                    "runtime embedded audio payload {} is not declared by compiled pack data",
+                    audio_id
+                );
+            }
+        }
+
+        let derived_manifest = data.audio_manifest(&compiled_audio)?;
+        if manifest != derived_manifest {
+            anyhow::bail!(
+                "runtime audio manifest does not match embedded definitive audio payloads"
+            );
+        }
+        playback
+            .validate_for_manifest(&manifest)
+            .context("validate runtime audio playback plan")?;
+        let mut catalog = Self {
+            manifest: manifest.clone(),
+            playback,
+            music: BTreeMap::new(),
+            sound_effects: BTreeMap::new(),
+            cries: BTreeMap::new(),
+        };
+
+        for asset in &data.audio {
+            asset.validate()?;
+            let source = match (asset.source, compiled_audio.remove(&asset.id)) {
+                (ModpackAudioSource::Midi, Some(bytes)) => {
+                    validate_compiled_audio_payload(asset, &bytes)?;
+                    AudioProgramSource::Midi(bytes)
+                }
+                (ModpackAudioSource::Midi, None) => anyhow::bail!(
+                    "compiled game pack missing embedded MIDI audio payload {}",
+                    asset.id
+                ),
+                (ModpackAudioSource::Pcm, Some(bytes)) => {
+                    validate_compiled_audio_payload(asset, &bytes)?;
+                    let format = asset.pcm_format.as_ref().with_context(|| {
+                        format!(
+                            "compiled PCM audio asset '{}' missing validated pcm_format",
+                            asset.id
+                        )
+                    })?;
+                    AudioProgramSource::Pcm {
+                        bytes,
+                        format: AudioPcmFormat {
+                            sample_rate_hz: format.sample_rate_hz,
+                            channels: format.channels,
+                            bits_per_sample: format.bits_per_sample,
+                        },
+                        loop_start_sample: asset.loop_start_sample,
+                        loop_end_sample: asset.loop_end_sample,
+                    }
+                }
+                (ModpackAudioSource::Pcm, None) => {
+                    let root = external_asset_root.with_context(|| {
+                        format!(
+                            "compiled game pack missing embedded PCM payload {}",
+                            asset.id
+                        )
+                    })?;
+                    let entry = manifest
+                        .music
+                        .get(&asset.id)
+                        .or_else(|| manifest.sound_effects.get(&asset.id))
+                        .or_else(|| manifest.cries.get(&asset.id))
+                        .with_context(|| {
+                            format!("compiled game pack missing PCM manifest entry {}", asset.id)
+                        })?;
+                    AudioProgramSource::PcmFile {
+                        path: root.resolve_data_path(&asset.path)?,
+                        format: AudioPcmFormat {
+                            sample_rate_hz: asset
+                                .pcm_format
+                                .as_ref()
+                                .context("PCM asset missing format")?
+                                .sample_rate_hz,
+                            channels: asset
+                                .pcm_format
+                                .as_ref()
+                                .context("PCM asset missing format")?
+                                .channels,
+                            bits_per_sample: asset
+                                .pcm_format
+                                .as_ref()
+                                .context("PCM asset missing format")?
+                                .bits_per_sample,
+                        },
+                        byte_len: entry.byte_len,
+                        payload_hash: entry.payload_hash.clone(),
+                        loop_start_sample: entry.loop_start_sample,
+                        loop_end_sample: entry.loop_end_sample,
+                    }
+                }
+            };
+            let program = AudioProgram {
+                cache_key: format!("{}:{}:{}", asset.kind.runtime_name(), asset.id, asset.path),
+                source,
+            };
+            let previous = match asset.kind {
+                ModpackAudioKind::Music => catalog.music.insert(asset.id.clone(), program),
+                ModpackAudioKind::SoundEffect => {
+                    catalog.sound_effects.insert(asset.id.clone(), program)
+                }
+                ModpackAudioKind::Cry => catalog.cries.insert(asset.id.clone(), program),
+            };
+            if previous.is_some() {
+                anyhow::bail!(
+                    "duplicate runtime {} audio id '{}'",
+                    asset.kind.runtime_name(),
+                    asset.id
+                );
+            }
+        }
+        if !compiled_audio.is_empty() {
+            anyhow::bail!("runtime compiled audio contains undeclared payloads");
+        }
+        Ok(catalog)
+    }
+
     pub fn from_game_data(
         data: &GameDataSet,
         compiled_audio: &BTreeMap<String, Vec<u8>>,
@@ -18401,6 +18835,8 @@ impl RuntimeAudioCatalog {
                             channels: format.channels,
                             bits_per_sample: format.bits_per_sample,
                         },
+                        loop_start_sample: asset.loop_start_sample,
+                        loop_end_sample: asset.loop_end_sample,
                     }
                 }
             };
@@ -19357,7 +19793,10 @@ mod tests {
         BaseStats, CaptureStorageLocation, Dv, Item, ItemPocket, LearnedMove, Move, Pokemon,
         PokemonSpecies, Trainer, TrainerPartyPokemon, growth_rate, item_pocket, pokemon_type,
     };
-    use crystal_core::state::{FishingRodState, ScriptGraphicsRuntimeKind, SwarmMapTarget};
+    use crystal_core::state::{
+        FishingRodState, PLAYER_GENDER_FEMALE, PLAYER_GENDER_MALE, ScriptGraphicsRuntimeKind,
+        SwarmMapTarget,
+    };
     use crystal_core::systems::evolution::EvolutionEntry;
     use crystal_core::systems::experience::calculate_experience;
     use crystal_core::systems::field_items::ScriptFieldPickup;
@@ -19535,6 +19974,8 @@ mod tests {
     ) -> (std::path::PathBuf, AssetRoot, CrystalRuntime) {
         let root = temp_repository_root(name);
         write_midi(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_NONE.mid"));
+        write_midi(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_ROUTE_29.mid"));
+        write_midi(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_ROUTE_30.mid"));
         write_midi(
             &root.join("apps/web/assets/data/content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE.mid"),
         );
@@ -19545,10 +19986,15 @@ mod tests {
             &root.join("apps/web/assets/data/content-packs/test/music/MUSIC_KANTO_WILD_BATTLE.mid"),
         );
         write_midi(&root.join("apps/web/assets/data/content-packs/test/sfx/SFX_TACKLE.mid"));
+        write_midi(
+            &root.join("apps/web/assets/data/content-packs/test/sfx/SFX_TITLE_SCREEN_ENTRANCE.mid"),
+        );
         write_midi(&root.join("apps/web/assets/data/content-packs/test/cries/CRY_CHIKORITA.mid"));
+        write_midi(&root.join("apps/web/assets/data/content-packs/test/cries/CRY_WOOPER.mid"));
         write_floor_tileset(&root, "johto");
         let data_root = root.join("apps/web/assets/data");
-        let pack = CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report());
+        let data = minimal_runtime_data_with_oak_intro();
+        let pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report_for(&data));
         crystal_assets::write_compiled_game_pack_for_tests(
             data_root.join("runtime.crystalpack"),
             &pack,
@@ -19564,6 +20010,13 @@ mod tests {
         let mut species =
             PokemonSpecies::new_for_tests("CHIKORITA", BaseStats::new(45, 49, 65, 45, 49, 65));
         species.int_id = 1;
+        species
+    }
+
+    fn runtime_wooper_species() -> PokemonSpecies {
+        let mut species =
+            PokemonSpecies::new_for_tests("WOOPER", BaseStats::new(55, 45, 45, 15, 25, 25));
+        species.int_id = 2;
         species
     }
 
@@ -19842,6 +20295,11 @@ mod tests {
                 ModpackAudioAsset::music("MUSIC_NONE", "content-packs/test/music/MUSIC_NONE.mid")
                     .expect("music none asset"),
                 ModpackAudioAsset::music(
+                    "MUSIC_ROUTE_29",
+                    "content-packs/test/music/MUSIC_ROUTE_29.mid",
+                )
+                .expect("route 29 music asset"),
+                ModpackAudioAsset::music(
                     "MUSIC_JOHTO_WILD_BATTLE",
                     "content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE.mid",
                 )
@@ -19861,6 +20319,11 @@ mod tests {
                     "content-packs/test/sfx/SFX_TACKLE.mid",
                 )
                 .expect("sfx asset"),
+                ModpackAudioAsset::sound_effect(
+                    "SFX_TITLE_SCREEN_ENTRANCE",
+                    "content-packs/test/sfx/SFX_TITLE_SCREEN_ENTRANCE.mid",
+                )
+                .expect("title entrance sfx asset"),
                 ModpackAudioAsset::cry(
                     "CRY_CHIKORITA",
                     "content-packs/test/cries/CRY_CHIKORITA.mid",
@@ -20727,6 +21190,63 @@ mod tests {
                 .collect(),
             },
         );
+    }
+
+    fn minimal_runtime_data_with_oak_intro() -> GameDataSet {
+        let mut data = minimal_runtime_data();
+        data.pokemon
+            .insert("WOOPER".to_string(), runtime_wooper_species());
+        data.pokemon_cries.insert(
+            "WOOPER".to_string(),
+            PokemonCryMetadata {
+                cry: "CRY_WOOPER".to_string(),
+                pitch: 0,
+                length: 0,
+            },
+        );
+        data.audio.push(
+            ModpackAudioAsset::music(
+                "MUSIC_ROUTE_30",
+                "content-packs/test/music/MUSIC_ROUTE_30.mid",
+            )
+            .expect("route 30 music asset"),
+        );
+        data.audio.push(
+            ModpackAudioAsset::cry("CRY_WOOPER", "content-packs/test/cries/CRY_WOOPER.mid")
+                .expect("wooper cry asset"),
+        );
+        data.evolutions.0.insert("WOOPER".to_string(), Vec::new());
+        data.learnsets.insert(
+            "WOOPER".to_string(),
+            vec![crystal_core::systems::learnsets::LearnsetEntry(
+                1,
+                "TACKLE".to_string(),
+            )],
+        );
+        data.menu_icons
+            .insert("WOOPER".to_string(), "ICON_WOOPER".to_string());
+        data.pokedex_entries.insert(
+            "WOOPER".to_string(),
+            crystal_core::models::RuntimePokedexEntry {
+                species: "WOOPER".to_string(),
+                classification: "Water Fish".to_string(),
+                height_digits: 4,
+                weight_digits: 85,
+                pages: vec!["A damp test Pokemon.".to_string()],
+            },
+        );
+        data.pokemon_frontpic_anim.insert(
+            "WOOPER".to_string(),
+            crystal_core::models::FrontpicAnimProgram {
+                commands: vec![crystal_core::models::FrontpicAnimCommand {
+                    kind: "frame".to_string(),
+                    frame: Some(0),
+                    duration: Some(8),
+                    ..crystal_core::models::FrontpicAnimCommand::default()
+                }],
+            },
+        );
+        data
     }
 
     fn minimal_runtime_data_with_music() -> GameDataSet {
@@ -21870,6 +22390,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_player_gender_is_authoritative_state() {
+        let root = temp_repository_root("player-gender");
+        let asset_root = AssetRoot::new(&root);
+        let data = minimal_runtime_data();
+        let report = report_for(&data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+
+        let initial = shell.snapshot().expect("initial snapshot");
+        assert_eq!(initial.trainer.player_gender, PLAYER_GENDER_MALE);
+        let gender_set = shell
+            .set_player_gender(PLAYER_GENDER_FEMALE)
+            .expect("set player gender");
+        assert_eq!(gender_set.player_gender_before, PLAYER_GENDER_MALE);
+        assert_eq!(gender_set.player_gender_after, PLAYER_GENDER_FEMALE);
+        assert_eq!(
+            shell
+                .snapshot()
+                .expect("snapshot after player gender")
+                .trainer
+                .player_gender,
+            PLAYER_GENDER_FEMALE
+        );
+        assert!(shell.set_player_gender(2).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn visible_title_new_game_does_not_eagerly_load_stale_continue_save() {
         let (root, asset_root, runtime) = load_minimal_compiled_runtime("title-stale-save");
         let stale_save = root.join("target/crystal-bevy/saves/core-modular.crystalsave");
@@ -21884,10 +22437,14 @@ mod tests {
         assert_eq!(smoke.map, "RuntimeMap");
         assert_eq!(smoke.tile_x, 0);
         assert_eq!(smoke.tile_y, 0);
-        assert_eq!(smoke.saved_frame, Some(0));
+        assert_eq!(smoke.saved_frame, None);
         assert_eq!(
             smoke.title_entries,
-            vec![" CONTINUE".to_string(), ">NEW GAME".to_string()]
+            vec![
+                " CONTINUE".to_string(),
+                ">NEW GAME".to_string(),
+                " OPTION".to_string()
+            ]
         );
         let (reject_root, reject_asset_root, reject_runtime) =
             load_minimal_compiled_runtime("title-stale-save-reject");
@@ -21911,6 +22468,114 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(reject_root);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visible_title_new_game_name_input_is_controlled_before_spawn() {
+        let (root, asset_root, runtime) = load_minimal_compiled_runtime("title-name-input");
+
+        let smoke = smoke_visible_shell_title_name_input(asset_root, runtime, 0, None, "AB")
+            .expect("visible title name input smoke must type and confirm player name");
+
+        assert_eq!(smoke.selected, "NEW_GAME");
+        assert_eq!(
+            smoke.title_entries,
+            vec![">NEW GAME".to_string(), " OPTION".to_string()]
+        );
+        assert_eq!(
+            smoke.initial_name_entries.first().map(String::as_str),
+            Some("NAME ENTRY")
+        );
+        assert!(
+            smoke
+                .initial_name_entries
+                .iter()
+                .any(|entry| entry == "YOUR NAME?"),
+            "{:?}",
+            smoke.initial_name_entries
+        );
+        assert!(
+            smoke
+                .initial_name_entries
+                .iter()
+                .any(|entry| entry == "A B C D E F G H I"),
+            "{:?}",
+            smoke.initial_name_entries
+        );
+        assert!(
+            smoke
+                .initial_name_entries
+                .iter()
+                .any(|entry| entry == "lower  DEL   END "),
+            "{:?}",
+            smoke.initial_name_entries
+        );
+        assert!(
+            smoke
+                .typed_name_entries
+                .iter()
+                .any(|entry| entry == "NAME AB_"),
+            "{:?}",
+            smoke.typed_name_entries
+        );
+        assert_eq!(smoke.trainer_name, "AB");
+        assert_eq!(smoke.map, "RuntimeMap");
+        assert_eq!(smoke.tile_x, 0);
+        assert_eq!(smoke.tile_y, 0);
+        assert_ne!(smoke.state_hash.hash(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visible_overworld_smoke_replays_same_inputs_deterministically() {
+        let input_frames = vec![
+            vec![GameButton::Right],
+            vec![GameButton::Right],
+            vec![GameButton::Down],
+            vec![GameButton::Left],
+            vec![GameButton::Up],
+        ];
+        let (first_root, first_asset_root, first_runtime) =
+            load_minimal_compiled_runtime("visible-overworld-deterministic-a");
+        let first = smoke_visible_shell_overworld(
+            first_asset_root,
+            first_runtime,
+            BevyShellStart::NewGame {
+                spawn_identifier: 0,
+            },
+            BevyShellConfig {
+                smoke_player_name: Some("AB".to_string()),
+                ..Default::default()
+            },
+            &input_frames,
+            None,
+        )
+        .expect("first visible overworld smoke");
+        let (second_root, second_asset_root, second_runtime) =
+            load_minimal_compiled_runtime("visible-overworld-deterministic-b");
+        let second = smoke_visible_shell_overworld(
+            second_asset_root,
+            second_runtime,
+            BevyShellStart::NewGame {
+                spawn_identifier: 0,
+            },
+            BevyShellConfig {
+                smoke_player_name: Some("AB".to_string()),
+                ..Default::default()
+            },
+            &input_frames,
+            None,
+        )
+        .expect("second visible overworld smoke");
+
+        assert_eq!(first, second);
+        assert_eq!(first.frames, input_frames.len());
+        assert_eq!(first.start_map, "RuntimeMap");
+        assert_eq!(first.final_map, "RuntimeMap");
+        assert_eq!(first.state_hash.frame(), input_frames.len() as u64);
+        assert_ne!(first.state_hash.hash(), 0);
+        let _ = std::fs::remove_dir_all(second_root);
+        let _ = std::fs::remove_dir_all(first_root);
     }
 
     #[test]
@@ -22171,6 +22836,7 @@ mod tests {
         assert_eq!(initial.overworld.map_name, "RuntimeMap");
         assert_eq!(initial.phase, RuntimeShellPhase::Overworld);
         assert_eq!(initial.progression.last_spawn_identifier, Some(0));
+        assert_eq!(initial.trainer.player_gender, PLAYER_GENDER_MALE);
         assert!(shell.runtime().has_item("MASTER_BALL"));
         assert!(!shell.runtime().has_item("master_ball"));
         assert!(shell.runtime().item_ids().contains("MASTER_BALL"));
@@ -27426,13 +28092,16 @@ mod tests {
             .program(AudioKind::Cry, "CRY_CHIKORITA")
             .expect("PCM cry");
         match &cry.source {
-            AudioProgramSource::Pcm { bytes, format } => {
+            AudioProgramSource::Pcm { bytes, format, .. } => {
                 assert_eq!(bytes, &[0_u8, 0, 0xff, 0x7f]);
                 assert_eq!(format.sample_rate_hz, 32768);
                 assert_eq!(format.channels, 1);
                 assert_eq!(format.bits_per_sample, 16);
             }
             AudioProgramSource::Midi(_) => panic!("compiled PCM cry must not load as MIDI"),
+            AudioProgramSource::PcmFile { .. } => {
+                panic!("embedded compiled PCM cry must not load from an external file")
+            }
         }
         let manifest_entry = runtime
             .audio()
@@ -30544,6 +31213,17 @@ mod tests {
         session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
             .expect("start battle");
+        if let BattleMemory::StaticWild {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        } = &mut session.state.battle
+        {
+            enemy_pokemon.species.base_stats.speed = 255;
+            enemy_party[0].species.base_stats.speed = 255;
+            refresh_runtime_pokemon_stats(enemy_pokemon);
+            refresh_runtime_pokemon_stats(&mut enemy_party[0]);
+        }
 
         let player_action = BattleAction::Run;
         let enemy_action = BattleAction::Move { slot: 0 };
@@ -30846,7 +31526,7 @@ mod tests {
         assert!(!escape.outcome.escaped);
         assert_eq!(escape.outcome.attempts_before, 0);
         assert_eq!(escape.outcome.attempts_after, 1);
-        assert_eq!(escape.outcome.roll, Some(196));
+        assert_eq!(escape.outcome.roll, Some(47));
         assert_eq!(session.state.battle_escape_attempts, 1);
         assert!(matches!(
             session.state.battle,
@@ -31417,6 +32097,64 @@ mod tests {
         assert_eq!(session.state.battle_active_party_index, None);
         assert_eq!(session.state.money, 245);
         assert_eq!(session.state.battle_pay_day_money, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_pc_withdraw_updates_box_metadata_before_checksum() {
+        let root = temp_repository_root("pc-withdraw-box-metadata");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("runtime shell");
+        shell
+            .add_party_pokemon(
+                "CHIKORITA",
+                5,
+                None,
+                None,
+                "SMOKE",
+                1,
+                Dv::from_non_hp(10, 10, 10, 10),
+            )
+            .expect("add lead");
+        shell
+            .add_party_pokemon(
+                "CHIKORITA",
+                6,
+                None,
+                None,
+                "SMOKE",
+                2,
+                Dv::from_non_hp(10, 10, 10, 10),
+            )
+            .expect("add deposited Pokemon");
+        shell.switch_current_pc_box(1).expect("switch PC box");
+        let deposit = shell
+            .deposit_party_pokemon_to_current_box(1)
+            .expect("deposit party Pokemon");
+
+        let withdraw = shell
+            .withdraw_current_box_pokemon_to_party(deposit.box_slot)
+            .expect("withdraw party Pokemon");
+        let snapshot = shell.snapshot().expect("snapshot after withdraw");
+        let box_one = snapshot
+            .storage
+            .boxes
+            .iter()
+            .find(|pc_box| pc_box.index == 1)
+            .expect("box 1 snapshot");
+
+        assert_eq!(withdraw.pokemon, deposit.pokemon);
+        assert_eq!(snapshot.storage.party_count, 2);
+        assert_eq!(box_one.count, 0);
+        assert!(box_one.slots.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -33854,8 +34592,6 @@ mod tests {
             ("MagnetTrain", ScriptGraphicsRuntimeKind::MagnetTrain),
             ("Diploma", ScriptGraphicsRuntimeKind::Diploma),
             ("PrintDiploma", ScriptGraphicsRuntimeKind::PrintDiploma),
-            ("UnownPuzzle", ScriptGraphicsRuntimeKind::UnownPuzzle),
-            ("OmanyteChamber", ScriptGraphicsRuntimeKind::OmanyteChamber),
             (
                 "DisplayUnownWords",
                 ScriptGraphicsRuntimeKind::DisplayUnownWords,
@@ -34279,15 +35015,6 @@ mod tests {
                 },
             ),
             (
-                "SlotMachine",
-                SpecialRoutineEffect::SlotMachine { coins: 99 },
-            ),
-            ("CardFlip", SpecialRoutineEffect::CardFlip { coins: 99 }),
-            (
-                "UnusedMemoryGame",
-                SpecialRoutineEffect::UnusedMemoryGame { coins: 99 },
-            ),
-            (
                 "UnusedCheckUnusedTwoDayTimer",
                 SpecialRoutineEffect::UnusedCheckUnusedTwoDayTimer {
                     start_day: 0,
@@ -34349,6 +35076,94 @@ mod tests {
             }
             previous_checksum = Some(use_result.state_checksum);
         }
+        session.state.coins = 99;
+        session.state.rng_seed = 1;
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("slot_bet".to_string(), "3".to_string());
+        let slot_result = session
+            .apply_special_routine(&runtime, "SlotMachine")
+            .expect("slot machine special");
+        let SpecialRoutineEffect::SlotMachine {
+            coins_before,
+            bet,
+            payout,
+            coins,
+            rng_seed_after,
+            ..
+        } = slot_result.outcome.effect
+        else {
+            panic!("slot machine returned non-slot effect");
+        };
+        assert_eq!(coins_before, 99);
+        assert_eq!(bet, 3);
+        assert_eq!(coins, 99 - 3 + payout);
+        assert_eq!(session.state.coins, coins);
+        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(session.state.script_runtime.active_menu, None);
+
+        let card_result = session
+            .apply_special_routine(&runtime, "CardFlip")
+            .expect("card flip special");
+        let SpecialRoutineEffect::CardFlip {
+            coins_before,
+            card_index,
+            card_name,
+            payout,
+            coins,
+            rng_seed_after,
+        } = card_result.outcome.effect
+        else {
+            panic!("card flip returned non-card effect");
+        };
+        assert!(card_index < 24);
+        assert!(!card_name.is_empty());
+        assert_eq!(coins, coins_before - 3 + payout);
+        assert_eq!(session.state.coins, coins);
+        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(session.state.script_runtime.active_menu, None);
+
+        session.state.script_runtime.variables.insert(
+            "memory_board".to_string(),
+            "ODDISH,ODDISH,POLIWAG,POLIWAG,PIKACHU,PIKACHU,JIGGLYPUFF,JIGGLYPUFF,RATTATA,RATTATA,VOLTORB,VOLTORB,DITTO,DITTO,ELECTABUZZ,ELECTABUZZ".to_string(),
+        );
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("memory_first".to_string(), "0".to_string());
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("memory_second".to_string(), "1".to_string());
+        let memory_result = session
+            .apply_special_routine(&runtime, "UnusedMemoryGame")
+            .expect("memory game special");
+        let SpecialRoutineEffect::UnusedMemoryGame {
+            matched,
+            symbol,
+            first_index,
+            second_index,
+            coins,
+            rng_seed_after,
+        } = memory_result.outcome.effect
+        else {
+            panic!("memory game returned non-memory effect");
+        };
+        assert!(matched);
+        assert_eq!(symbol.as_deref(), Some("ODDISH"));
+        assert_eq!((first_index, second_index), (0, 1));
+        assert_eq!(coins, session.state.coins);
+        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1")
+        );
+        assert_eq!(session.state.script_runtime.active_menu, None);
+
         for routine in noop_routines {
             let before = session.state.clone();
             let use_result = session
@@ -39410,7 +40225,7 @@ mod tests {
             .get_mut("RuntimeMap")
             .expect("runtime map")
             .attributes
-            .music = Some("MUSIC_ROUTE_29".to_string());
+            .music = Some("MUSIC_ROUTE_30".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -39424,7 +40239,7 @@ mod tests {
             .to_string();
 
         assert!(
-            error.contains("saved maps.RuntimeMap.attributes.music MUSIC_ROUTE_29 is missing from compiled pack audio"),
+            error.contains("saved maps.RuntimeMap.attributes.music MUSIC_ROUTE_30 is missing from compiled pack audio"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -40479,7 +41294,7 @@ mod tests {
         )
         .expect("custom runtime");
         let mut state = GameState::default();
-        state.bag.tm_hm = vec![false, false];
+        state.bag.tm_hm = vec![0, 0];
         state.bag.custom_pockets.insert(
             "BATTLE_PASS".to_string(),
             BTreeMap::from([("BATTLE_PASS".to_string(), 1)]),
@@ -40489,7 +41304,7 @@ mod tests {
             .expect("saved custom pocket item must match compiled custom pocket");
 
         let mut state = GameState::default();
-        state.bag.tm_hm = vec![false, false];
+        state.bag.tm_hm = vec![0, 0];
         state.bag.custom_pockets.insert(
             "WRONG_POCKET".to_string(),
             BTreeMap::from([("BATTLE_PASS".to_string(), 1)]),
@@ -40525,7 +41340,7 @@ mod tests {
         ));
 
         let mut state = GameState::default();
-        state.bag.tm_hm = vec![false];
+        state.bag.tm_hm = vec![0];
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("saved TM/HM vector cannot be shorter than compiled indexes");
@@ -40535,7 +41350,7 @@ mod tests {
         );
 
         let mut state = GameState::default();
-        state.bag.tm_hm = vec![false, true, false];
+        state.bag.tm_hm = vec![0, 1, 0];
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("saved TM/HM vector cannot extend past compiled indexes");
@@ -40554,7 +41369,7 @@ mod tests {
         )
         .expect("duplicate runtime");
         let mut state = GameState::default();
-        state.bag.tm_hm = vec![false, true];
+        state.bag.tm_hm = vec![0, 1];
         let error = duplicate_runtime
             .save_game(&save_path, state)
             .expect_err("saved TM/HM indexes must resolve uniquely");
@@ -43618,6 +44433,10 @@ mod tests {
             kind: ModpackAudioKind::Music,
             source: ModpackAudioSource::Midi,
             pcm_format: None,
+            pcm_frame_count: None,
+            payload_hash: None,
+            loop_start_sample: None,
+            loop_end_sample: None,
         }];
         let error = data.audio[0]
             .validate()
@@ -43651,7 +44470,8 @@ mod tests {
             error.contains("missing embedded audio payload 'MUSIC_ROUTE_29'")
                 || error.contains("missing compiled audio payload MUSIC_ROUTE_29")
                 || error.contains("missing embedded payload")
-                || error.contains("missing payload for definitive asset 'MUSIC_ROUTE_29'"),
+                || error.contains("missing payload for definitive asset 'MUSIC_ROUTE_29'")
+                || error.contains("compiled audio manifest missing payload for definitive MIDI asset 'MUSIC_ROUTE_29'"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(root);

@@ -69,6 +69,7 @@ const ContentPackSchema = z.object({
   priority: z.number().optional().default(0),
   path: z.string().optional().default(""),
   compiled: z.string().nullable().optional(),
+  compiled_json: z.string().nullable().optional(),
   files: ContentPackFilesSchema.default(() => ContentPackFilesSchema.parse({})),
 });
 
@@ -216,7 +217,11 @@ const enabledPacks = (): ContentPack[] =>
   loadContentPackIndexSync().packs.filter((pack) => pack.enabled !== false);
 
 const loadCompiledPackSync = (pack: ContentPack): CompiledContentPack => {
-  const compiledEntry = pack.compiled;
+  const compiledEntry = pack.compiled_json ?? (
+    pack.compiled?.endsWith(".crystalpack")
+      ? pack.compiled.replace(/\.crystalpack$/, ".compiled.json")
+      : pack.compiled
+  );
   if (!compiledEntry) {
     throw new Error(`Content pack ${pack.id} does not declare a compiled asset.`);
   }
@@ -252,7 +257,7 @@ export const listContentPackFilesSync = (category: ContentPackCategory): string[
 };
 
 export const hasEnabledCompiledContentPackSync = (): boolean =>
-  hasBundledCoreCompiledPack() || enabledPacks().some((pack) => Boolean(pack.compiled));
+  hasBundledCoreCompiledPack() || enabledPacks().some((pack) => Boolean(pack.compiled || pack.compiled_json));
 
 export const loadContentPackCategoryJsonSync = (category: ContentPackCategory): unknown[] => {
   const payloads: unknown[] = [];

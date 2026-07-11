@@ -1715,6 +1715,7 @@ class McpGameSession {
   private lastActionResult: ActionResult | null = null;
   private ready = false;
   private interactiveMode = false;
+  private instantMode = DEFAULT_MCP_INSTANT_MODE;
 
   constructor(options?: {
     sessionId?: string;
@@ -1724,6 +1725,7 @@ class McpGameSession {
     this.sessionId = options?.sessionId ?? PRIMARY_MCP_SESSION_ID;
     const settings = getSettings();
     const instantMode = DEFAULT_MCP_INSTANT_MODE;
+    this.instantMode = instantMode;
     const renderUi = new DomCanvasUI(160, 144, 1);
     const textUi = new TextUI(160, 144, 1, null, true, null, true);
     const composite = new CompositeUI(
@@ -1744,7 +1746,14 @@ class McpGameSession {
   }
 
   private isInstantMode(): boolean {
-    return DEFAULT_MCP_INSTANT_MODE;
+    return this.instantMode;
+  }
+
+  public setInstantMode(enabled: boolean): void {
+    this.instantMode = enabled;
+    const settings = getSettings();
+    this.holdFrames = enabled || this.interactiveMode ? 1 : settings.mcpHoldFrames;
+    this.applyInputModeToGameState(this.game?.getGameState?.());
   }
 
   private applyInputModeToGameState(
@@ -3871,6 +3880,23 @@ class McpGameSession {
         is_press: true,
       }),
     });
+  }
+
+  async postInputEvent(input: {
+    key: string;
+    direction?: string | null;
+    button?: string | null;
+    isPress: boolean;
+  }): Promise<void> {
+    await this.ensureReady();
+    const event = new gameEngine.event.Event(input.isPress ? gameEngine.KEYDOWN : gameEngine.KEYUP, {
+      key: input.key,
+      code: input.key,
+      direction: input.direction ?? null,
+      button: input.button ?? null,
+      is_press: input.isPress,
+    });
+    this.getGame().postEvent(event);
   }
 
   private async waitForInputOwningSurfaceSettle(): Promise<void> {

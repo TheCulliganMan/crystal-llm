@@ -712,6 +712,7 @@ pub fn switch_active_battle_party_index(
 ) -> Result<usize, ActiveBattlePartyError> {
     validate_active_battle_party_index(state, index)?;
     state.battle_active_party_index = Some(index);
+    mark_active_party_participant(state);
     Ok(index)
 }
 
@@ -872,11 +873,35 @@ fn reset_active_battle_slots(state: &mut GameState) {
     state.battle_escape_attempts = 0;
     state.battle_player_stat_drop_guard_turns = 0;
     state.battle_pay_day_money = 0;
+    state.script_runtime.active_battle_combat = None;
+    mark_active_party_participant(state);
 }
 
 pub fn deactivate_battle(state: &mut GameState) {
     state.battle = BattleMemory::Inactive;
+    state.script_runtime.active_battle_combat = None;
+    clear_battle_participant_markers(state);
     clear_active_battle_slots(state);
+}
+
+fn mark_active_party_participant(state: &mut GameState) {
+    let Some(index) = state.battle_active_party_index else {
+        return;
+    };
+    if let Some(pokemon) = state.storage.party.pokemon[index].as_mut() {
+        pokemon.turns_in_battle = pokemon.turns_in_battle.saturating_add(1).max(1);
+    }
+}
+
+fn clear_battle_participant_markers(state: &mut GameState) {
+    for pokemon in state.storage.party.pokemon.iter_mut().flatten() {
+        pokemon.turns_in_battle = 0;
+    }
+    for pc_box in &mut state.storage.pc_boxes {
+        for pokemon in pc_box.pokemon.iter_mut().flatten() {
+            pokemon.turns_in_battle = 0;
+        }
+    }
 }
 
 pub fn clear_active_battle_slots(state: &mut GameState) {
@@ -1165,6 +1190,14 @@ mod tests {
     #[test]
     fn deactivate_battle_clears_all_runtime_battle_bookkeeping() {
         let mut state = GameState::default();
+        state
+            .storage
+            .register_capture(Pokemon::new_for_tests(
+                species(),
+                5,
+                Dv::from_non_hp(1, 1, 1, 1),
+            ))
+            .expect("store active party mon");
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
             encounter(),
@@ -1177,6 +1210,14 @@ mod tests {
         )
         .expect("wild start");
         activate_wild_battle_start(&mut state, &start);
+        let active_index = state.battle_active_party_index.expect("active party");
+        assert_eq!(
+            state.storage.party.pokemon[active_index]
+                .as_ref()
+                .expect("active Pokemon")
+                .turns_in_battle,
+            1
+        );
         state.battle_rewarded_enemy_party_indices.insert(0);
         state.battle_escape_attempts = 2;
         state.battle_player_stat_drop_guard_turns = 3;
@@ -1191,6 +1232,13 @@ mod tests {
         assert_eq!(state.battle_escape_attempts, 0);
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.battle_pay_day_money, 0);
+        assert!(state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .all(|pokemon| pokemon.turns_in_battle == 0));
     }
 
     #[test]

@@ -203,6 +203,7 @@ pub fn process_step_checked(
 }
 
 pub fn process_overworld_step(state: &mut GameState, rules: &StepEventRules) -> StepEventResult {
+    crate::systems::special_routines::advance_day_care_step(state);
     let result = process_step(rules, &mut state.step_events, &mut state.storage.party);
     if state.repel_steps_remaining == 0 {
         state.active_repel_item = None;
@@ -247,20 +248,27 @@ pub fn apply_happiness_step(
 }
 
 pub fn process_egg_step(rules: &StepEventRules, party: &mut Party) -> Option<String> {
+    let mut hatched = None;
     for pokemon in party.pokemon.iter_mut().flatten() {
         if !is_egg(rules, pokemon) {
             continue;
         }
         pokemon.happiness = pokemon.happiness.wrapping_sub(1);
-        if pokemon.happiness != 0 {
-            return None;
+        if pokemon.happiness == 0 && hatched.is_none() {
+            let species_id = pokemon.species.id.clone();
+            pokemon.nickname = crate::models::pokemon_species_display_name(&species_id);
+            pokemon.happiness = rules.hatched_egg_happiness;
+            pokemon.hp = pokemon.max_hp;
+            pokemon.status = None;
+            pokemon.sleep_turns = 0;
+            pokemon.flinching = false;
+            pokemon.confusion_turns = 0;
+            pokemon.rampage_turns = 0;
+            pokemon.perish_song_turns = 0;
+            hatched = Some(species_id);
         }
-        let species_id = pokemon.species.id.clone();
-        pokemon.nickname = species_id.clone();
-        pokemon.happiness = rules.hatched_egg_happiness;
-        return Some(species_id);
     }
-    None
+    hatched
 }
 
 pub fn process_poison_step(
@@ -316,7 +324,8 @@ pub fn is_poisoned(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
 }
 
 pub fn is_egg(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
-    pokemon.nickname == rules.egg_nickname
+    let _ = rules;
+    pokemon.status.as_deref() == Some("EGG")
 }
 
 fn apply_poison_faint_happiness(party: &mut Party, poisoned_before_step: Vec<usize>) {
@@ -543,6 +552,7 @@ mod tests {
     fn egg_step_hatches_only_when_counter_decrements_to_zero() {
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
+        egg.status = Some("EGG".to_string());
         egg.happiness = 1;
         let mut party = party_with(vec![(0, egg)]);
         let mut counters = StepEventCounters {
@@ -559,12 +569,14 @@ mod tests {
     }
 
     #[test]
-    fn egg_step_wraps_counter_and_stops_at_first_egg() {
+    fn egg_step_wraps_counter_and_processes_all_eggs() {
         let mut first = pokemon("TOGEPI");
         first.nickname = rules().egg_nickname;
+        first.status = Some("EGG".to_string());
         first.happiness = 0;
         let mut second = pokemon("PICHU");
         second.nickname = rules().egg_nickname;
+        second.status = Some("EGG".to_string());
         second.happiness = 2;
         let mut party = party_with(vec![(0, first), (1, second)]);
         let mut counters = StepEventCounters {
@@ -575,13 +587,30 @@ mod tests {
         let result = process_step(&rules(), &mut counters, &mut party);
         assert_eq!(result.egg_hatched, false);
         assert_eq!(party.pokemon[0].as_ref().expect("first").happiness, 0xff);
-        assert_eq!(party.pokemon[1].as_ref().expect("second").happiness, 2);
+        assert_eq!(party.pokemon[1].as_ref().expect("second").happiness, 1);
+    }
+
+    #[test]
+    fn normal_pokemon_nicknamed_egg_is_not_treated_as_an_egg() {
+        let mut normal = pokemon("TOGEPI");
+        normal.nickname = rules().egg_nickname;
+        normal.happiness = 50;
+        assert!(!is_egg(&rules(), &normal));
+    }
+
+    #[test]
+    fn egg_status_is_authoritative_even_with_a_custom_nickname() {
+        let mut egg = pokemon("TOGEPI");
+        egg.nickname = "HATCHLING".to_string();
+        egg.status = Some("EGG".to_string());
+        assert!(is_egg(&rules(), &egg));
     }
 
     #[test]
     fn egg_hatch_skips_poison_in_count_step_ordering() {
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
+        egg.status = Some("EGG".to_string());
         egg.happiness = 1;
         let mut oddish = pokemon("ODDISH");
         oddish.hp = 3;
@@ -606,6 +635,7 @@ mod tests {
         chikorita.happiness = 70;
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
+        egg.status = Some("EGG".to_string());
         egg.happiness = 70;
         let mut party = party_with(vec![(0, chikorita), (1, egg)]);
         let mut counters = StepEventCounters {

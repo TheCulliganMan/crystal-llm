@@ -112,6 +112,7 @@ const writeFakeDisassembly = (root) => {
       "",
     ].join("\n")
   );
+  fs.writeFileSync(path.join(root, "constants", "battle_constants.asm"), "DEF EGG_LEVEL EQU 5\n");
   fs.writeFileSync(path.join(root, "maps", "TestMap.asm"), "DEF MAP_COIN_GIFT EQU COIN_CHUNK * 2\n");
   fs.writeFileSync(path.join(root, "constants", "trainer_constants.asm"), "");
   fs.writeFileSync(path.join(root, "data", "trainers", "class_names.asm"), "");
@@ -273,6 +274,7 @@ describe("export-runtime-fallbacks", () => {
           UNOWN_Y: 25,
           UNOWN_Z: 26,
           NUM_UNOWN: 26,
+          EGG_LEVEL: 5,
           ZEPHYRBADGE: 0,
           HIVEBADGE: 1,
           NUM_JOHTO_BADGES: 2,

@@ -1,12 +1,14 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::battle::turn::BattleCombatState;
 use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::map::MapSceneTable;
 use crate::models::{
     Bag, LearnedMove, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonSpecies,
     PokemonStorage, Trainer,
 };
+use crate::random::Random;
 use crate::systems::script_audio::{
     SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
     SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS, SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS,
@@ -16,7 +18,7 @@ use crate::systems::script_text::SCRIPT_TEXT_LABEL_COMMANDS;
 use crate::systems::script_warps::{SCRIPT_MAP_LOAD_COMMANDS, SCRIPT_MAP_REFRESH_COMMANDS};
 use crate::systems::shop::{SCRIPT_SHOP_ZERO_MART_TYPES, is_known_script_mart_type};
 use crate::systems::step_events::StepEventCounters;
-use crate::systems::time::TimeState;
+use crate::systems::time::{ClockTime, TimeState};
 use crate::timing::Frame;
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
@@ -25,6 +27,8 @@ use crate::world::session::{
 };
 
 pub const PLAYER_NAME_LENGTH: usize = 8;
+pub const PLAYER_GENDER_MALE: u8 = 0;
+pub const PLAYER_GENDER_FEMALE: u8 = 1;
 const MOBILE_LOGIN_PASSWORD_LENGTH: usize = 17;
 const BATTLE_TOWER_SAVE_FILE_FLAG_YOURS: u8 = 0x1;
 const BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION: u8 = 0x2;
@@ -50,6 +54,7 @@ pub struct GameState {
     pub options: Options,
     pub player_name: String,
     pub player_id: u16,
+    pub player_gender: u8,
     pub party: PartyState,
     pub storage: PokemonStorage,
     pub pending_move_learn: Option<PendingMoveLearn>,
@@ -122,6 +127,7 @@ impl<'de> Deserialize<'de> for GameState {
             options: Options,
             player_name: String,
             player_id: u16,
+            player_gender: u8,
             party: PartyState,
             storage: PokemonStorage,
             pending_move_learn: Option<PendingMoveLearn>,
@@ -188,6 +194,7 @@ impl<'de> Deserialize<'de> for GameState {
             options: raw.options,
             player_name: raw.player_name,
             player_id: raw.player_id,
+            player_gender: raw.player_gender,
             party: raw.party,
             storage: raw.storage,
             pending_move_learn: raw.pending_move_learn,
@@ -259,6 +266,7 @@ impl Default for GameState {
             options: Options::default(),
             player_name: String::new(),
             player_id: 0,
+            player_gender: PLAYER_GENDER_MALE,
             party: PartyState::default(),
             storage: PokemonStorage::default(),
             pending_move_learn: None,
@@ -902,9 +910,11 @@ pub struct BugContestState {
     pub timer_active: bool,
     pub timer_minutes_remaining: u8,
     pub timer_seconds_remaining: u8,
+    pub timer_start_time: Option<ClockTime>,
     pub party_backup: Vec<Pokemon>,
     pub second_party_species: Option<String>,
     pub caught_mon: Option<Pokemon>,
+    pub pending_caught_mon: Option<Pokemon>,
     pub caught_species: Option<String>,
     pub caught_level: Option<u8>,
     pub selected_contestant_flags: Vec<String>,
@@ -924,9 +934,13 @@ impl<'de> Deserialize<'de> for BugContestState {
             timer_active: bool,
             timer_minutes_remaining: u8,
             timer_seconds_remaining: u8,
+            #[serde(default)]
+            timer_start_time: Option<ClockTime>,
             party_backup: Vec<Pokemon>,
             second_party_species: Option<String>,
             caught_mon: Option<Pokemon>,
+            #[serde(default)]
+            pending_caught_mon: Option<Pokemon>,
             caught_species: Option<String>,
             caught_level: Option<u8>,
             selected_contestant_flags: Vec<String>,
@@ -940,9 +954,11 @@ impl<'de> Deserialize<'de> for BugContestState {
             timer_active: raw.timer_active,
             timer_minutes_remaining: raw.timer_minutes_remaining,
             timer_seconds_remaining: raw.timer_seconds_remaining,
+            timer_start_time: raw.timer_start_time,
             party_backup: raw.party_backup,
             second_party_species: raw.second_party_species,
             caught_mon: raw.caught_mon,
+            pending_caught_mon: raw.pending_caught_mon,
             caught_species: raw.caught_species,
             caught_level: raw.caught_level,
             selected_contestant_flags: raw.selected_contestant_flags,
@@ -1004,6 +1020,11 @@ impl BugContestState {
                 ));
             }
             (None, None, None) => {}
+        }
+        if let Some(pokemon) = &self.pending_caught_mon {
+            pokemon
+                .validate_saved_state()
+                .map_err(|error| format!("bug_contest.pending_caught_mon: {error}"))?;
         }
         for flag in &self.selected_contestant_flags {
             validate_flag_name(flag)
@@ -2075,8 +2096,8 @@ impl BattleMemory {
                         .map_err(|error| format!("battle.trainer.event_flag {error}"))?;
                 }
                 validate_empty_or_script_runtime_token("battle.trainer.seen_text", seen_text)?;
-                validate_empty_or_script_runtime_token("battle.trainer.win_text", win_text)?;
-                validate_empty_or_script_runtime_token("battle.trainer.loss_text", loss_text)?;
+                validate_empty_or_exact_text("battle.trainer.win_text", win_text)?;
+                validate_empty_or_exact_text("battle.trainer.loss_text", loss_text)?;
                 validate_empty_or_script_runtime_token("battle.trainer.callback", callback)?;
                 validate_script_runtime_label("battle.trainer.source_script", source_script)?;
                 validate_script_runtime_token("battle.trainer.encounter_music", encounter_music)?;
@@ -2226,6 +2247,11 @@ impl OverworldMemory {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeMemory {
+    /// Saveable combat state for the currently active battle.  Crystal keeps
+    /// these effects in WRAM across turns; storing it with the runtime memory
+    /// prevents a turn boundary from silently resetting screens, weather,
+    /// traps, and multi-turn move counters.
+    pub active_battle_combat: Option<BattleCombatState>,
     pub script_value: Option<String>,
     pub variables: BTreeMap<String, String>,
     pub variable_writes: Vec<ScriptRuntimeVariableWrite>,
@@ -2305,6 +2331,8 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawScriptRuntimeMemory {
+            #[serde(default)]
+            active_battle_combat: Option<BattleCombatState>,
             script_value: Option<String>,
             variables: BTreeMap<String, String>,
             variable_writes: Vec<ScriptRuntimeVariableWrite>,
@@ -2378,6 +2406,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
 
         let raw = RawScriptRuntimeMemory::deserialize(deserializer)?;
         let memory = Self {
+            active_battle_combat: raw.active_battle_combat,
             script_value: raw.script_value,
             variables: raw.variables,
             variable_writes: raw.variable_writes,
@@ -6623,6 +6652,18 @@ fn validate_empty_or_script_runtime_token(field: &str, value: &str) -> Result<()
     }
 }
 
+fn validate_empty_or_exact_text(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{field} must be exact, untrimmed, and contain no control characters"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_inches_field(field: &str, value: u8) -> Result<(), String> {
     if value >= 12 {
         return Err(format!("{field} {value} is outside inches range 0..11"));
@@ -7213,8 +7254,51 @@ pub struct ScriptRuntimeQueuedCommand {
 }
 
 impl GameState {
+    /// Apply the per-day state invalidation performed by Crystal's
+    /// `CheckDailyResetTimer`.  The RTC and the daily timer are separate in
+    /// the original, but both are driven by the same completed day boundary
+    /// in the frame runtime.
+    pub fn apply_daily_reset(&mut self) {
+        self.fishing.daily_flags1 = 0;
+        self.fishing.swarm_flag = 0;
+        self.swarms.active.clear();
+        self.apply_pokerus_tick(1);
+        if self.kenji_break_timer > 0 {
+            self.kenji_break_timer -= 1;
+        }
+        if self.kenji_break_timer == 0 {
+            let mut rng = Random::new_crystal(self.rng_seed);
+            self.kenji_break_timer = 3 + (rng.battle_random_byte() & 0x03);
+            self.rng_seed = rng.seed();
+        }
+    }
+
+    /// Apply Crystal's daily Pokérus tick to party and PC records. The
+    /// strain (high nibble) is retained after the low-nibble day counter
+    /// reaches zero, preventing a cured Pokémon from re-contracting.
+    pub fn apply_pokerus_tick(&mut self, days: u8) {
+        fn tick(pokemon: &mut Pokemon, days: u8) {
+            let remaining = pokemon.pokerus & 0x0f;
+            if remaining == 0 {
+                return;
+            }
+            pokemon.pokerus = (pokemon.pokerus & 0xf0) | remaining.saturating_sub(days);
+        }
+
+        for pokemon in self.storage.party.pokemon.iter_mut().flatten() {
+            tick(pokemon, days);
+        }
+        for pc_box in &mut self.storage.pc_boxes {
+            for pokemon in pc_box.pokemon.iter_mut().flatten() {
+                tick(pokemon, days);
+            }
+        }
+        self.sync_party_from_storage();
+    }
+
     pub fn validate_saved_state(&self) -> Result<(), String> {
         validate_saved_player_name(&self.player_name)?;
+        validate_saved_player_gender(self.player_gender)?;
         self.bag
             .validate()
             .map_err(|error| format!("invalid saved bag: {error}"))?;
@@ -7305,6 +7389,11 @@ impl GameState {
 
     fn validate_saved_battle_cursors(&self) -> Result<(), String> {
         let Some(enemy_party_len) = self.battle.enemy_party_len() else {
+            if self.script_runtime.active_battle_combat.is_some() {
+                return Err(
+                    "active_battle_combat cannot be saved without an active battle".to_string(),
+                );
+            }
             if self.battle_active_party_index.is_some() {
                 return Err(
                     "battle_active_party_index cannot be saved without an active battle"
@@ -7393,6 +7482,14 @@ impl GameState {
             return Err(
                 "battle_active_enemy_party_index must be saved for an active battle".to_string(),
             );
+        }
+        if let Some(combat) = &self.script_runtime.active_battle_combat {
+            if combat.enemy_party_index >= enemy_party_len {
+                return Err(format!(
+                    "active_battle_combat enemy index {} is outside enemy party range 0..{}",
+                    combat.enemy_party_index, enemy_party_len
+                ));
+            }
         }
         if !self.battle_rewarded_enemy_party_indices.is_empty()
             && !matches!(self.battle, BattleMemory::Trainer { .. })
@@ -7577,6 +7674,15 @@ fn validate_saved_player_name(player_name: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+pub fn validate_saved_player_gender(player_gender: u8) -> Result<(), String> {
+    match player_gender {
+        PLAYER_GENDER_MALE | PLAYER_GENDER_FEMALE => Ok(()),
+        other => Err(format!(
+            "player_gender {other} is outside Crystal gender range 0..1"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -8679,6 +8785,7 @@ pub enum GameStateBattleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{BaseStats, Dv, PcBox};
 
     #[test]
     fn initial_state_matches_typescript_defaults_that_affect_gameplay() {
@@ -8686,6 +8793,7 @@ mod tests {
         assert_eq!(state.options.text_speed, TextSpeed::Fast);
         assert_eq!(state.player_name, "");
         assert_eq!(state.player_id, 0);
+        assert_eq!(state.player_gender, PLAYER_GENDER_MALE);
         assert_eq!(state.options.battle_scene, BattleScene::On);
         assert_eq!(state.options.battle_style, BattleStyle::Shift);
         assert_eq!(state.options.sound, Sound::Stereo);
@@ -8728,6 +8836,63 @@ mod tests {
         assert_eq!(state.frame_counter, 0);
         assert_eq!(state.rng_seed, 1);
         assert!(!state.has_seen_intro);
+    }
+
+    #[test]
+    fn daily_reset_clears_fishing_and_swarm_state() {
+        let mut state = GameState::default();
+        state.fishing.daily_flags1 = 0b1010;
+        state.fishing.swarm_flag = 1;
+        state.swarms.active.insert(
+            "route-30".to_string(),
+            SwarmMapTarget {
+                map_id: "route-30".to_string(),
+                map_group: None,
+                map_number: None,
+            },
+        );
+
+        state.apply_daily_reset();
+
+        assert_eq!(state.fishing.daily_flags1, 0);
+        assert_eq!(state.fishing.swarm_flag, 0);
+        assert!(state.swarms.active.is_empty());
+        assert!((3..=6).contains(&state.kenji_break_timer));
+    }
+
+    #[test]
+    fn daily_reset_decrements_kenji_break_countdown_without_resampling() {
+        let mut state = GameState::default();
+        state.kenji_break_timer = 4;
+        let seed = state.rng_seed;
+
+        state.apply_daily_reset();
+
+        assert_eq!(state.kenji_break_timer, 3);
+        assert_eq!(state.rng_seed, seed);
+    }
+
+    #[test]
+    fn pokerus_tick_preserves_strain_and_cures_low_nibble_in_party_and_pc() {
+        let species = PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
+        let mut party_mon = Pokemon::new_for_tests(species.clone(), 5, Dv::default());
+        party_mon.pokerus = 0xa2;
+        let mut boxed_mon = Pokemon::new_for_tests(species, 5, Dv::default());
+        boxed_mon.pokerus = 0x53;
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(party_mon);
+        let mut pc_box = PcBox::new(0);
+        pc_box.set_slot(0, Some(boxed_mon));
+        state.storage.pc_boxes.push(pc_box);
+        state.sync_party_from_storage();
+
+        state.apply_pokerus_tick(2);
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().pokerus, 0xa0);
+        assert_eq!(state.storage.pc_boxes[0].pokemon[0].as_ref().unwrap().pokerus, 0x51);
+
+        state.apply_pokerus_tick(1);
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().pokerus, 0xa0);
+        assert_eq!(state.storage.pc_boxes[0].pokemon[0].as_ref().unwrap().pokerus, 0x50);
     }
 
     #[test]
@@ -8807,6 +8972,15 @@ mod tests {
             Err(format!(
                 "player_name length 9 exceeds Crystal limit {PLAYER_NAME_LENGTH}"
             ))
+        );
+
+        state = GameState {
+            player_gender: 2,
+            ..GameState::default()
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("player_gender 2 is outside Crystal gender range 0..1".to_string())
         );
 
         state = GameState::default();

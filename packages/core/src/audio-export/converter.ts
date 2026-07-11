@@ -817,6 +817,8 @@ export class WavConverter {
       if (op === "sound_ret") {
         if (stack.length > 1) {
           stack.pop();
+        } else {
+          return;
         }
         continue;
       }
@@ -838,8 +840,14 @@ export class WavConverter {
         if (!target) {
           continue;
         }
-        if (loopCount === 0 && this.loopedMusicExportSeconds === null && mainloopSeen) {
-          return;
+        const targetIsMainLoop = sources[target.src]?.commands[target.pc - 1]?.command === "label"
+          && sources[target.src]?.commands[target.pc - 1]?.args[0] === ".mainloop";
+        if (loopCount === 0 && targetIsMainLoop && stack.length === 1) {
+          if (mainloopSeen) {
+            return;
+          }
+          mainloopSeen = true;
+          yield { command: "__loop_point__", args: [] };
         }
 
         const key = `${frame.src}:${frame.pc - 1}`;

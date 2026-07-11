@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::battle::capture::{
     CaptureAttemptContext, CaptureOutcome, CaptureRules, CaptureUseError, CaptureWobbleProbability,
-    StoredCapture, complete_active_wild_capture, throw_ball_from_bag,
+    StoredCapture, complete_active_wild_capture_result, throw_ball_from_bag,
 };
 use crate::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
 use crate::battle::start::deactivate_battle;
@@ -188,13 +188,16 @@ fn resolve_active_battle_capture_or_escape_item(
             item_id: item_id.to_string(),
         })?;
         state.rng_seed = capture.rng_seed_after;
-        let stored_capture = if capture.caught && !capture.blocked {
-            complete_active_wild_capture(state, &capture)
+        let completion = if capture.caught && !capture.blocked {
+            complete_active_wild_capture_result(state, &capture)
                 .map_err(ActiveBattleFlowError::CaptureComplete)?
         } else {
-            None
+            crate::battle::capture::CaptureCompletion {
+                stored: None,
+                contest_pokemon: None,
+            }
         };
-        let end = if stored_capture.is_some() {
+        let end = if completion.stored.is_some() || completion.contest_pokemon.is_some() {
             ActiveBattleFlowEnd::Caught
         } else {
             ActiveBattleFlowEnd::Ongoing
@@ -203,7 +206,7 @@ fn resolve_active_battle_capture_or_escape_item(
             end,
             turn: None,
             capture: Some(capture),
-            stored_capture,
+            stored_capture: completion.stored,
         }));
     }
     if item.battle_escape_mode.is_some() {

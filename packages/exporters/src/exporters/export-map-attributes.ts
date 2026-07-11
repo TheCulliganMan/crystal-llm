@@ -222,6 +222,28 @@ function parseConnections(lines: string[], index: number, connectionFlags: strin
   return [connections, index + i];
 }
 
+function deriveConnectionFlags(lines: string[], index: number): string {
+  const directions: string[] = [];
+  let cursor = index;
+  while (cursor < lines.length) {
+    const line = lines[cursor].trim();
+    if (!line) {
+      cursor += 1;
+      continue;
+    }
+    if (!line.startsWith("connection")) {
+      break;
+    }
+    const direction = line.split(",")[0]?.split(/\s+/)[1];
+    if (!direction) {
+      throw new Error(`Malformed connection row: ${line}`);
+    }
+    directions.push(direction.toUpperCase());
+    cursor += 1;
+  }
+  return directions.length ? directions.join("|") : "0";
+}
+
 export function exportMapAttributes(): Record<string, MapAttributes> {
   const attributesPath = path.join(getDisassemblyRoot(), "data", "maps", "attributes.asm");
   const dimensionsPath = path.join(getDisassemblyRoot(), "constants", "map_constants.asm");
@@ -243,7 +265,7 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
     }
     const parts = line.split(",").map((part) => part.trim());
     const mapName = parts[0].split(/\s+/)[1];
-    if (!mapName || parts.length < 4 || parts.some((part) => !part)) {
+    if (!mapName || (parts.length !== 3 && parts.length !== 4) || parts.some((part) => !part)) {
       throw new Error(`Malformed map_attributes row in ${attributesPath}: ${line}`);
     }
     const tilesetName = requireMappingValue(mapToTilesetMap, mapName, `tileset mapping for map '${mapName}'`);
@@ -252,7 +274,7 @@ export function exportMapAttributes(): Record<string, MapAttributes> {
     const constantMeta = requireMappingValue(mapConstantsMeta, mapConstant, `map constant metadata for '${mapConstant}'`);
     const dimensionEntry = requireMappingValue(mapDimensions, mapConstant, `dimension entry for '${mapConstant}'`);
     const borderBlock = parseAsmNumber(parts[2]);
-    const connectionFlags = parts[3];
+    const connectionFlags = parts[3] ?? deriveConnectionFlags(lines, index + 1);
     const [connections, newIndex] = parseConnections(lines, index + 1, connectionFlags);
     index = newIndex;
 

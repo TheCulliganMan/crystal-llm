@@ -802,6 +802,21 @@ pub fn apply_script_runtime_command(
                 if has_species { "TRUE" } else { "FALSE" }.to_string(),
             )
         }
+        "checkpokemail" => {
+            apply_runtime_effect(state, &command)?;
+            let has_mail = state
+                .storage
+                .party
+                .pokemon
+                .iter()
+                .flatten()
+                .any(|pokemon| pokemon.mail.is_some());
+            set_script_value(
+                state,
+                &command,
+                if has_mail { "TRUE" } else { "FALSE" }.to_string(),
+            )
+        }
         "checkver" => {
             state.script_runtime.version_check_requested = true;
             let value = inputs
@@ -1267,6 +1282,9 @@ pub fn parse_script_i32_token(
 }
 
 fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeCommandError> {
+    if let Some(value) = script_numeric_symbol(token) {
+        return Ok(value);
+    }
     if !is_potential_numeric_token(token) {
         return Err(if is_exact_numeric_symbol(token) {
             ScriptRuntimeCommandError::UnknownNumericToken {
@@ -1304,6 +1322,13 @@ fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeComma
             command: command.to_string(),
             token: token.to_string(),
         })
+}
+
+fn script_numeric_symbol(token: &str) -> Option<i32> {
+    match token {
+        "BATTLETOWER_REWARD_QUANTITY" => Some(5),
+        _ => None,
+    }
 }
 
 fn is_potential_numeric_token(token: &str) -> bool {
@@ -1839,6 +1864,39 @@ mod tests {
         assert_eq!(state.script_runtime.effects.len(), 4);
         assert_eq!(state.script_runtime.effects[0].command, "special");
         assert_eq!(state.script_runtime.effects[3].command, "addcellnum");
+    }
+
+    #[test]
+    fn check_pokemail_sets_script_result_from_authoritative_party_mail() {
+        let mut state = GameState::default();
+        let species = crate::models::PokemonSpecies::new_for_tests(
+            "SPEAROW",
+            crate::models::BaseStats::new(40, 60, 30, 70, 31, 31),
+        );
+        let mut pokemon = crate::models::Pokemon::new_for_tests(
+            species,
+            10,
+            crate::models::Dv::default(),
+        );
+        pokemon.mail = Some(crate::models::pokemon::MailData {
+            message: "DARK CAVE leads".to_string(),
+            author: "RANDY".to_string(),
+            species: "SPEAROW".to_string(),
+        });
+        state.storage.party.pokemon[0] = Some(pokemon);
+
+        apply_script_runtime_command(
+            &mut state,
+            command("checkpokemail", &["ReceivedSpearowMailText"]),
+            default_inputs(),
+        )
+        .expect("check mail");
+
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("TRUE"));
+        assert_eq!(
+            state.script_runtime.checked_mail_targets,
+            vec!["ReceivedSpearowMailText".to_string()]
+        );
     }
 
     #[test]
@@ -2550,6 +2608,10 @@ mod tests {
         assert_eq!(parse_script_i32_token("raw_script", "%1010"), Ok(10));
         assert_eq!(parse_script_i32_token("raw_script", "-2"), Ok(-2));
         assert_eq!(parse_script_i32_token("raw_script", "+1"), Ok(1));
+        assert_eq!(
+            parse_script_i32_token("raw_script", "BATTLETOWER_REWARD_QUANTITY"),
+            Ok(5)
+        );
         assert!(matches!(
             parse_script_i32_token("raw_script", "0x10"),
             Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })

@@ -3539,8 +3539,8 @@ mod tests {
             ],
         };
 
-        let outcome =
-            apply_script_movement(&mut session, &command, &movement).expect("guide movement applies");
+        let outcome = apply_script_movement(&mut session, &command, &movement)
+            .expect("guide movement applies");
 
         assert_eq!(outcome.previous_tile, TilePosition::new(10, 6));
         assert_eq!(outcome.tile, TilePosition::new(7, 5));
@@ -3579,7 +3579,9 @@ mod tests {
             &mut session,
             "CHERRYGROVECITY_GRAMPS",
             "GuideGentMovement4",
-            &["LEFT", "LEFT", "LEFT", "DOWN", "LEFT", "LEFT", "LEFT", "DOWN"],
+            &[
+                "LEFT", "LEFT", "LEFT", "DOWN", "LEFT", "LEFT", "LEFT", "DOWN",
+            ],
         );
         apply_test_movement(
             &mut session,

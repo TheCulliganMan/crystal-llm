@@ -2179,6 +2179,7 @@ const exportStoryEventScriptConstants = () => {
   Object.assign(
     global,
     parseDefConstants(path.join(disassemblyRoot, "constants", "pokemon_constants.asm"), global),
+    parseDefConstants(path.join(disassemblyRoot, "constants", "battle_constants.asm"), global),
     parseDefConstants(path.join(disassemblyRoot, "constants", "ram_constants.asm"), global)
   );
   const maps = {};
@@ -2344,11 +2345,17 @@ const exportRuntimeAssets = ({
   repoRoot = path.resolve(projectRoot, "..", ".."),
   disassemblyRoot: disassemblyOverride = path.join(repoRoot, "vendor", "pokecrystal"),
   outDir: outDirOverride = path.join(projectRoot, "assets", "data"),
+  strict = process.env.CRYSTAL_CANONICAL_EXPORT === "1",
 } = {}) => {
   disassemblyRoot = disassemblyOverride;
   outDir = outDirOverride;
   fs.mkdirSync(outDir, { recursive: true });
   if (!fs.existsSync(disassemblyRoot) || !hasCompleteRuntimeDisassembly(disassemblyRoot)) {
+    if (strict) {
+      throw new Error(
+        `Canonical runtime export requires a complete ASM checkout at ${disassemblyRoot}`
+      );
+    }
     if (
       !fs.existsSync(path.join(outDir, "collision", "collision_permissions.json")) ||
       !fs.existsSync(path.join(outDir, "collision", "collision_stdscripts.json"))

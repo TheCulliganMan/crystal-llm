@@ -1,0 +1,8 @@
+[project]
+name = "crystal-asm-oracle"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pyboy==2.7.0"]
+
+[tool.uv]
+package = false

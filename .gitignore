@@ -140,6 +140,7 @@ packages/cli/dist/* 2.ts
 # Rust build artifacts
 target/
 Cargo.lock
+!rust/Cargo.lock
 **/*.rs.bk
 render_tests/credits_frames/*
 .node/
@@ -159,6 +160,9 @@ apps/web/.next_stale*
 apps/web/output/*
 mcp-*
 apps/web/mcp-*
+!apps/web/src/app/mcp-client.ts
+!packages/cli/src/mcp-server.ts
+!packages/core/src/core/mcp-identity-context.server.ts
 .pokecrystal-agents/runs/*
 .pokecrystal-cli/runs/
 .pokecrystal-cli/runs/*

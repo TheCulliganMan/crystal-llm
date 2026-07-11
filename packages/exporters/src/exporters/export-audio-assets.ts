@@ -1,17 +1,53 @@
 import fs from "fs";
 import path from "path";
+import {
+  pcmClipToBytes,
+  renderPcmClipFromAsm,
+} from "@pokecrystal/core/audio-export/pcm-clip";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { ensureDir, getTypeScriptDataDir } from "./asm-utils";
 
-export type ExportedAudioAsset = {
+type PcmAudioFormat = {
+  sample_rate_hz: number;
+  channels: number;
+  bits_per_sample: number;
+};
+
+type ExportedAudioAssetBase = {
   id: string;
   path: string;
   kind: "music" | "sound_effect" | "cry";
-  source: "midi";
+};
+
+export type ExportedAudioAsset = ExportedAudioAssetBase & (
+  | {
+      source: "midi";
+    }
+  | {
+      source: "pcm";
+      pcm_format: PcmAudioFormat;
+      pcm_frame_count: number;
+      payload_hash: string;
+      loop_start_sample: number | null;
+      loop_end_sample: number | null;
+    }
+);
+
+type RenderedPcmAudioAsset = ExportedAudioAssetBase & {
+  source: "pcm";
+  pcm_format: PcmAudioFormat;
+  pcm_frame_count: number;
+  payload_hash: string;
+  loop_start_sample: number | null;
+  loop_end_sample: number | null;
 };
 
 const CORE_AUDIO_ROOT = "content-packs/core-modular";
-const MIDI_TICKS_PER_QUARTER = 96;
+const PCM_AUDIO_FORMAT: PcmAudioFormat = {
+  sample_rate_hz: 44_100,
+  channels: 2,
+  bits_per_sample: 16,
+};
 
 export type ExportedPokemonCryMetadata = {
   cry: string;
@@ -52,75 +88,72 @@ function exportMusicLabelStemsFromAsm(disassemblyRoot: string): Map<string, stri
   return labels;
 }
 
-function writeU16(value: number): Buffer {
-  const buffer = Buffer.alloc(2);
-  buffer.writeUInt16BE(value);
-  return buffer;
-}
+type PcmPayloadMetadata = Pick<
+  RenderedPcmAudioAsset,
+  "pcm_frame_count" | "payload_hash" | "loop_start_sample" | "loop_end_sample"
+>;
 
-function writeU32(value: number): Buffer {
-  const buffer = Buffer.alloc(4);
-  buffer.writeUInt32BE(value);
-  return buffer;
-}
-
-function midiVarLen(value: number): Buffer {
-  if (!Number.isInteger(value) || value < 0 || value > 0x0fffffff) {
-    throw new Error(`MIDI delta time ${value} is outside variable-length range.`);
+function fnv1a32(bytes: Uint8Array): string {
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  const bytes = [value & 0x7f];
-  value >>= 7;
-  while (value > 0) {
-    bytes.unshift((value & 0x7f) | 0x80);
-    value >>= 7;
+  return hash.toString(16).padStart(8, "0");
+}
+
+function writeRenderedPcmAsset(
+  asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata>,
+  disassemblyRoot: string,
+  stem: string,
+): PcmPayloadMetadata {
+  const kind = asset.kind === "music" ? "music" : asset.kind === "cry" ? "cry" : "sfx";
+  let clip;
+  try {
+    clip = renderPcmClipFromAsm(
+      path.join(disassemblyRoot, "audio"),
+      kind,
+      stem,
+      asset.id,
+    );
+  } catch (error) {
+    throw new Error(`Audio asset ${asset.id} failed to render '${stem}': ${String(error)}`);
   }
-  return Buffer.from(bytes);
-}
-
-function exactAudioSeed(id: string): number {
-  let seed = 0;
-  for (const byte of Buffer.from(id, "ascii")) {
-    seed = (seed * 131 + byte) >>> 0;
+  if (!clip) {
+    throw new Error(`Audio asset ${asset.id} has no exact ASM program for '${stem}'.`);
   }
-  return seed;
-}
-
-function midiNoteForAudioId(id: string, offset = 0): number {
-  return 48 + ((exactAudioSeed(id) + offset * 7) % 36);
-}
-
-function standardMidiPayload(id: string, kind: ExportedAudioAsset["kind"]): Buffer {
-  const channel = kind === "music" ? 0 : kind === "sound_effect" ? 1 : 2;
-  const velocity = kind === "music" ? 84 : 104;
-  const duration = kind === "music" ? MIDI_TICKS_PER_QUARTER : Math.floor(MIDI_TICKS_PER_QUARTER / 2);
-  const noteCount = kind === "music" ? 4 : 1;
-  const trackEvents: Buffer[] = [
-    Buffer.from([0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20]),
-    Buffer.from([0x00, 0xc0 | channel, kind === "cry" ? 80 : kind === "sound_effect" ? 81 : 1]),
-  ];
-  for (let index = 0; index < noteCount; index += 1) {
-    const note = midiNoteForAudioId(id, index);
-    trackEvents.push(Buffer.from([0x00, 0x90 | channel, note, velocity]));
-    trackEvents.push(Buffer.concat([midiVarLen(duration), Buffer.from([0x80 | channel, note, 0x00])]));
+  if (
+    clip.sampleRate !== asset.pcm_format.sample_rate_hz ||
+    clip.pcm.length === 0 ||
+    clip.pcm.length % asset.pcm_format.channels !== 0
+  ) {
+    throw new Error(`Audio asset ${asset.id} rendered an invalid PCM payload.`);
   }
-  trackEvents.push(Buffer.from([0x00, 0xff, 0x2f, 0x00]));
-  const track = Buffer.concat(trackEvents);
-  return Buffer.concat([
-    Buffer.from("MThd", "ascii"),
-    writeU32(6),
-    writeU16(0),
-    writeU16(1),
-    writeU16(MIDI_TICKS_PER_QUARTER),
-    Buffer.from("MTrk", "ascii"),
-    writeU32(track.length),
-    track,
-  ]);
-}
-
-function writeGeneratedMidiAsset(asset: ExportedAudioAsset): void {
   const absolutePath = path.join(getTypeScriptDataDir(), asset.path);
   ensureDir(path.dirname(absolutePath));
-  fs.writeFileSync(absolutePath, standardMidiPayload(asset.id, asset.kind));
+  const bytes = pcmClipToBytes(clip);
+  fs.writeFileSync(absolutePath, Buffer.from(bytes));
+  return {
+    pcm_frame_count: clip.pcm.length / asset.pcm_format.channels,
+    payload_hash: fnv1a32(bytes),
+    loop_start_sample: clip.loopStartSample,
+    loop_end_sample: clip.loopEndSample,
+  };
+}
+
+function writeSilentPcmAsset(
+  asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata>,
+): PcmPayloadMetadata {
+  const absolutePath = path.join(getTypeScriptDataDir(), asset.path);
+  ensureDir(path.dirname(absolutePath));
+  const bytes = Buffer.alloc(asset.pcm_format.channels * 2);
+  fs.writeFileSync(absolutePath, bytes);
+  return {
+    pcm_frame_count: 1,
+    payload_hash: fnv1a32(bytes),
+    loop_start_sample: null,
+    loop_end_sample: null,
+  };
 }
 
 function exportIndexedAudioPointers(
@@ -211,12 +244,17 @@ export function exportAudioAssets(
       if (!stem) {
         throw new Error(`Music pointer '${label}' for '${id}' does not match an exact audio/music ASM label.`);
       }
-      return {
+      const asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata> = {
         id,
-        path: `${CORE_AUDIO_ROOT}/music/${id}.mid`,
-        kind: "music" as const,
-        source: "midi" as const,
+        path: `${CORE_AUDIO_ROOT}/music/${id}.pcm`,
+        kind: "music",
+        source: "pcm",
+        pcm_format: PCM_AUDIO_FORMAT,
       };
+      const metadata = id === "MUSIC_NONE"
+        ? writeSilentPcmAsset(asset)
+        : writeRenderedPcmAsset(asset, disassemblyRoot, stem);
+      return { ...asset, ...metadata } satisfies RenderedPcmAudioAsset;
     });
 
   const sfx = exportIndexedAudioPointers(
@@ -228,30 +266,37 @@ export function exportAudioAssets(
     if (!label.startsWith("Sfx_")) {
       throw new Error(`SFX pointer '${label}' for '${id}' must use an exact Sfx_* label.`);
     }
-    return {
+    const asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata> = {
       id,
-      path: `${CORE_AUDIO_ROOT}/sfx/${id}.mid`,
-      kind: "sound_effect" as const,
-      source: "midi" as const,
+      path: `${CORE_AUDIO_ROOT}/sfx/${id}.pcm`,
+      kind: "sound_effect",
+      source: "pcm",
+      pcm_format: PCM_AUDIO_FORMAT,
     };
+    const metadata = writeRenderedPcmAsset(asset, disassemblyRoot, label.replace(/^Sfx_/, ""));
+    return { ...asset, ...metadata } satisfies RenderedPcmAudioAsset;
   });
 
   const cries = uniqueSorted([
     ...Object.values(pokemonCries).map((cry) => requireExactCryLabel(cry.cry)),
     ...exportCryLabelsFromAsm(),
-  ]).map((label) => ({
-    id: label,
-    path: `${CORE_AUDIO_ROOT}/cries/${label}.mid`,
-    kind: "cry" as const,
-    source: "midi" as const,
-  }));
+  ]).map((label) => {
+    const asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata> = {
+      id: label,
+      path: `${CORE_AUDIO_ROOT}/cries/${label}.pcm`,
+      kind: "cry",
+      source: "pcm",
+      pcm_format: PCM_AUDIO_FORMAT,
+    };
+    const metadata = writeRenderedPcmAsset(asset, disassemblyRoot, label.replace(/^CRY_/, ""));
+    return { ...asset, ...metadata } satisfies RenderedPcmAudioAsset;
+  });
 
   const assets: Record<string, ExportedAudioAsset> = {};
   for (const asset of [...music, ...sfx, ...cries]) {
     if (Object.prototype.hasOwnProperty.call(assets, asset.id)) {
       throw new Error(`duplicate audio asset id ${asset.id}`);
     }
-    writeGeneratedMidiAsset(asset);
     assets[asset.id] = asset;
   }
   return assets;

@@ -19,7 +19,8 @@ pub struct Bag {
     pub pc_items: BTreeMap<String, u16>,
     pub balls: BTreeMap<String, u16>,
     pub key_items: BTreeMap<String, u16>,
-    pub tm_hm: Vec<bool>,
+    /// TM/HM quantities, indexed by the compiled `tmhm_index`.
+    pub tm_hm: Vec<u8>,
     pub custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
 }
 
@@ -35,7 +36,7 @@ impl<'de> Deserialize<'de> for Bag {
             pc_items: BTreeMap<String, u16>,
             balls: BTreeMap<String, u16>,
             key_items: BTreeMap<String, u16>,
-            tm_hm: Vec<bool>,
+            tm_hm: Vec<u8>,
             custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
         }
 
@@ -102,7 +103,7 @@ impl Bag {
                 1,
                 Some(KEY_ITEM_POCKET_CAPACITY),
             ),
-            ITEM_POCKET_TM_HM => self.add_tmhm(definition),
+            ITEM_POCKET_TM_HM => self.add_tmhm(definition, quantity),
             other => add_to_custom_pocket(
                 &mut self.custom_pockets,
                 other,
@@ -126,7 +127,7 @@ impl Bag {
             ITEM_POCKET_KEY_ITEM => {
                 remove_from_inventory(&mut self.key_items, &definition.script_name, quantity)
             }
-            ITEM_POCKET_TM_HM => self.remove_tmhm(definition),
+            ITEM_POCKET_TM_HM => self.remove_tmhm(definition, quantity),
             other => remove_from_custom_pocket(
                 &mut self.custom_pockets,
                 other,
@@ -220,7 +221,7 @@ impl Bag {
         self.remove_item(definition, 1)
     }
 
-    fn add_tmhm(&mut self, definition: &Item) -> Result<bool, String> {
+    fn add_tmhm(&mut self, definition: &Item, quantity: u16) -> Result<bool, String> {
         let Some(index) = definition.tmhm_index else {
             return Err(format!(
                 "TM/HM item id '{}' is not indexed",
@@ -228,30 +229,34 @@ impl Bag {
             ));
         };
         if self.tm_hm.len() <= index {
-            self.tm_hm.resize(index + 1, false);
+            self.tm_hm.resize(index + 1, 0);
         }
-        if self.tm_hm[index] {
+        if self.tm_hm[index] >= MAX_ITEM_STACK as u8 {
             return Ok(false);
         }
-        self.tm_hm[index] = true;
-        Ok(true)
+        let before = self.tm_hm[index];
+        self.tm_hm[index] = self.tm_hm[index]
+            .saturating_add(quantity.min(MAX_ITEM_STACK) as u8)
+            .min(MAX_ITEM_STACK as u8);
+        Ok(self.tm_hm[index] != before)
     }
 
-    fn remove_tmhm(&mut self, definition: &Item) -> Result<bool, String> {
+    fn remove_tmhm(&mut self, definition: &Item, amount: u16) -> Result<bool, String> {
         let Some(index) = definition.tmhm_index else {
             return Err(format!(
                 "TM/HM item id '{}' is not indexed",
                 definition.script_name
             ));
         };
-        let Some(flag) = self.tm_hm.get_mut(index) else {
+        let Some(quantity) = self.tm_hm.get_mut(index) else {
             return Ok(false);
         };
-        if !*flag {
+        if *quantity == 0 {
             return Ok(false);
         }
-        *flag = false;
-        Ok(true)
+        let removed = (*quantity).min(amount.min(u16::from(u8::MAX)) as u8);
+        *quantity -= removed;
+        Ok(removed > 0)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -260,6 +265,16 @@ impl Bag {
         validate_inventory(&self.balls, MAX_ITEM_STACK, BALL_POCKET_CAPACITY, "balls")?;
         validate_inventory(&self.key_items, 1, KEY_ITEM_POCKET_CAPACITY, "key_items")?;
         validate_custom_pockets(&self.custom_pockets)?;
+        if let Some((index, quantity)) = self
+            .tm_hm
+            .iter()
+            .enumerate()
+            .find(|(_, quantity)| **quantity > MAX_ITEM_STACK as u8)
+        {
+            return Err(format!(
+                "tm_hm[{index}] quantity {quantity} exceeds maximum {MAX_ITEM_STACK}"
+            ));
+        }
         Ok(())
     }
 }
@@ -632,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn key_items_do_not_stack_and_tmhm_flags_are_exact() {
+    fn key_items_do_not_stack_and_tmhm_quantities_are_exact() {
         let bicycle = item("BICYCLE", item_pocket("KEY_ITEM"));
         let mut tm_mud_slap = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         tm_mud_slap.tmhm_index = Some(30);
@@ -642,9 +657,16 @@ mod tests {
         assert!(!bag.add_item(&bicycle, 1).expect("key item already held"));
         assert!(bag.add_item(&tm_mud_slap, 1).expect("add tm"));
         assert_eq!(bag.quantity(&tm_mud_slap), 1);
-        assert!(!bag.add_item(&tm_mud_slap, 1).expect("tm already held"));
+        assert!(
+            bag.add_item(&tm_mud_slap, 1)
+                .expect("tm quantity increments")
+        );
+        assert_eq!(bag.quantity(&tm_mud_slap), 2);
+        assert!(bag.add_item(&tm_mud_slap, 200).expect("tm quantity caps"));
+        assert_eq!(bag.quantity(&tm_mud_slap), u16::from(MAX_ITEM_STACK));
+        assert!(!bag.add_item(&tm_mud_slap, 1).expect("tm stack full"));
         assert!(bag.remove_item(&tm_mud_slap, 1).expect("remove tm"));
-        assert_eq!(bag.quantity(&tm_mud_slap), 0);
+        assert_eq!(bag.quantity(&tm_mud_slap), u16::from(MAX_ITEM_STACK - 1));
     }
 
     #[test]

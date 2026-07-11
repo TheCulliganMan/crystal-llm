@@ -178,6 +178,28 @@ const syncContentPackIndex = ({
     };
   }
 
+  // The Rust exporter owns the v2 index for compiled `.crystalpack` artifacts.
+  // The legacy web synchronizer must never reinterpret that schema or replace
+  // it with its smaller JSON-only view.
+  const existingIndexPath = path.join(dataRoot, CONTENT_PACK_ROOT_RELATIVE, "index.json");
+  if (fs.existsSync(existingIndexPath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(existingIndexPath, "utf8"));
+      if (existing?.version >= 2 || existing?.packs?.some((pack) =>
+        typeof pack?.compiled === "string" && pack.compiled.endsWith(".crystalpack")
+      )) {
+        return {
+          skipped: true,
+          reason: "compiled Rust content-pack index is authoritative",
+          outputPath: existingIndexPath,
+          outputPaths: [existingIndexPath],
+        };
+      }
+    } catch {
+      // The normal path below reports malformed JSON through its own rewrite.
+    }
+  }
+
   const payload = buildIndexPayload({ dataRoot });
   const nextText = `${JSON.stringify(payload, null, 2)}\n`;
   const outputPaths = [path.join(dataRoot, CONTENT_PACK_ROOT_RELATIVE, "index.json")];

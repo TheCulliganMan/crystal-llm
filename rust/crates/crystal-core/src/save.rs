@@ -11,7 +11,7 @@ use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
 pub const SAVE_EXTENSION: &str = "crystalsave";
-pub const SAVE_FORMAT_VERSION: u16 = 4;
+pub const SAVE_FORMAT_VERSION: u16 = 5;
 const SAVE_VERSION_OFFSET: usize = SAVE_MAGIC.len();
 const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;
@@ -578,10 +578,46 @@ fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveEr
             source,
         })?;
     }
-    std::fs::write(path, bytes).map_err(|source| SaveError::Write {
-        path: path.display().to_string(),
+    let backup = save_backup_path(path);
+    if path.exists() {
+        if backup.exists() {
+            std::fs::remove_file(&backup).map_err(|source| SaveError::Write {
+                path: backup.display().to_string(),
+                source,
+            })?;
+        }
+        std::fs::rename(path, &backup).map_err(|source| SaveError::Write {
+            path: backup.display().to_string(),
+            source,
+        })?;
+    }
+    if let Err(error) = write_primary_save_bytes(path, &bytes) {
+        if !path.exists() && backup.exists() {
+            let _ = std::fs::rename(&backup, path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn save_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", path.display()))
+}
+
+fn write_primary_save_bytes(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    let temporary = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
+    std::fs::write(&temporary, bytes).map_err(|source| SaveError::Write {
+        path: temporary.display().to_string(),
         source,
-    })
+    })?;
+    if let Err(source) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(SaveError::Write {
+            path: path.display().to_string(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 fn encode_save_game_bytes(save: &SaveGame) -> Result<Vec<u8>, SaveError> {
@@ -628,7 +664,28 @@ pub fn read_save_game_for_modpack(
     expected: &SaveModpackIdentity,
     expected_pack_content_hash: &str,
 ) -> Result<SaveGame, SaveError> {
-    let save = read_save_game(path)?;
+    let path = path.as_ref();
+    let save = match read_save_game(path) {
+        Ok(save) => save,
+        Err(primary_error) => {
+            let backup = save_backup_path(path);
+            if !backup.exists() {
+                return Err(primary_error);
+            }
+            let backup_bytes = match std::fs::read(&backup) {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(primary_error),
+            };
+            let save = match read_save_game_bytes(&backup_bytes, backup.display().to_string()) {
+                Ok(save) => save,
+                Err(_) => return Err(primary_error),
+            };
+            assert_save_matches_modpack(&save, expected, expected_pack_content_hash)?;
+            let bytes = encode_save_game_bytes(&save)?;
+            write_primary_save_bytes(path, &bytes)?;
+            save
+        }
+    };
     assert_save_matches_modpack(&save, expected, expected_pack_content_hash)?;
     Ok(save)
 }
@@ -1400,6 +1457,43 @@ mod tests {
             error.contains("save metadata frame 7 does not match state frame 0"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn corrupted_primary_save_recovers_from_backup_and_repairs_primary() {
+        let path = temp_save_path("backup-recovery.crystalsave");
+        let backup = save_backup_path(&path);
+        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+
+        let mut first_state = GameState::default();
+        first_state.frame_counter = 11;
+        write_save_game(&path, &test_save(first_state.clone(), modpack.clone()))
+            .expect("write first save");
+
+        let mut second_state = first_state.clone();
+        second_state.frame_counter = 12;
+        write_save_game(&path, &test_save(second_state, modpack.clone()))
+            .expect("write second save");
+        assert!(backup.exists(), "second write should preserve a backup");
+
+        std::fs::write(&path, b"truncated primary").expect("corrupt primary save");
+        let recovered = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("recover valid backup");
+
+        assert_eq!(recovered.state.frame_counter, first_state.frame_counter);
+        assert_eq!(
+            read_save_game(&path).expect("repaired primary").state,
+            first_state
+        );
+        let backup_save = read_save_game_bytes(
+            &std::fs::read(&backup).expect("read preserved backup"),
+            backup.display().to_string(),
+        )
+        .expect("preserved backup");
+        assert_eq!(backup_save.state, first_state);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
     }
 
     #[test]

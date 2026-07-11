@@ -42,10 +42,18 @@ export function extractAsmProgram(sourceText: string, entryLabel: string): strin
       return null;
     }
     let end = lines.length;
+    let hasCommands = false;
     for (let i = start + 1; i < lines.length; i += 1) {
       if (/^[A-Za-z0-9_]+:\s*$/.test(lines[i])) {
-        end = i;
-        break;
+        if (hasCommands) {
+          end = i;
+          break;
+        }
+        continue;
+      }
+      const command = lines[i].split(";", 1)[0].trim();
+      if (command && !command.startsWith("assert")) {
+        hasCommands = true;
       }
     }
     return lines.slice(start, end);
@@ -75,7 +83,11 @@ export function extractAsmProgram(sourceText: string, entryLabel: string): strin
     const owner = label.startsWith(".") ? null : label;
     for (const match of blockText.matchAll(/^\s*sound_call\s+([A-Za-z0-9_.]+)/gm)) {
       const raw = match[1];
-      queue.push(raw.startsWith(".") && owner ? `${owner}${raw}` : raw);
+      const target = raw.startsWith(".") && owner ? `${owner}${raw}` : raw;
+      queue.push(target);
+      if (target.includes(".")) {
+        queue.push(target.split(".", 1)[0]);
+      }
     }
   }
 
@@ -97,11 +109,54 @@ function loadAsmCollectionSource(
   const requestedSlug = normalizeAsmSlug(requestStem);
   const labels = Array.from(sourceText.matchAll(/^([A-Za-z0-9_]+):\s*$/gm))
     .map((match) => match[1]);
-  const entryLabel = labels.find((label) => normalizeAsmSlug(label.replace(/^(Sfx|Cry)_/, "")) === requestedSlug);
+  const entryLabel = labels.find((label) =>
+    normalizeAsmSlug(label.replace(/^(Sfx|Cry)_?/, "")) === requestedSlug,
+  );
   if (!entryLabel) {
     return null;
   }
   return extractAsmProgram(sourceText, entryLabel);
+}
+
+function loadMusicProgram(root: string, requestStem: string): string | null {
+  const musicPath = path.join(root, "music", `${requestStem}.asm`);
+  let source: string;
+  try {
+    source = normalizeStandaloneLocalLabels(fs.readFileSync(musicPath, "utf8"));
+  } catch {
+    return null;
+  }
+
+  const musicRoot = path.join(root, "music");
+  const sourcesByLabel = new Map<string, string>();
+  for (const fileName of fs.readdirSync(musicRoot).filter((entry) => entry.endsWith(".asm")).sort()) {
+    const filePath = path.join(musicRoot, fileName);
+    const text = normalizeStandaloneLocalLabels(fs.readFileSync(filePath, "utf8"));
+    for (const match of text.matchAll(/^([A-Za-z_][A-Za-z0-9_]*):\s*$/gm)) {
+      sourcesByLabel.set(match[1], text);
+    }
+  }
+
+  const blocks = [source];
+  const includedLabels = new Set<string>();
+  for (let index = 0; index < blocks.length; index += 1) {
+    for (const match of blocks[index].matchAll(/^\s*sound_(?:call|jump)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
+      const label = match[1];
+      if (includedLabels.has(label)) {
+        continue;
+      }
+      includedLabels.add(label);
+      const referencedSource = sourcesByLabel.get(label);
+      if (!referencedSource || referencedSource === source) {
+        continue;
+      }
+      const extracted = extractAsmProgram(referencedSource, label);
+      if (extracted) {
+        blocks.push(extracted);
+      }
+    }
+  }
+  return blocks.join("\n\n");
 }
 
 export function buildAsmAudioProgram(
@@ -115,16 +170,14 @@ export function buildAsmAudioProgram(
   }
 
   if (kind === "music") {
-    const musicPath = path.join(root, "music", `${normalizedStem}.asm`);
-    try {
-      const source = normalizeStandaloneLocalLabels(fs.readFileSync(musicPath, "utf8"));
-      return {
-        cacheKey: `music:${musicPath}`,
-        source,
-      };
-    } catch {
+    const source = loadMusicProgram(root, normalizedStem);
+    if (!source) {
       return null;
     }
+    return {
+      cacheKey: `music:${path.join(root, "music", `${normalizedStem}.asm`)}`,
+      source,
+    };
   }
 
   if (kind === "sfx") {

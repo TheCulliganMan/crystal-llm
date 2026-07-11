@@ -475,6 +475,22 @@ pub enum PokemonBuildError {
     Experience(#[from] ExperienceError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaughtData {
+    pub level: u8,
+    pub ball: u8,
+    pub location: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailData {
+    pub message: String,
+    pub author: String,
+    pub species: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pokemon {
@@ -485,6 +501,14 @@ pub struct Pokemon {
     pub moves: Vec<LearnedMove>,
     #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub status: Option<String>,
+    /// Pokérus status byte from the party structure. The low nibble stores
+    /// remaining days; the high nibble is the strain and is preserved after
+    /// the counter reaches zero.
+    pub pokerus: u8,
+    #[serde(default)]
+    pub caught_data: Option<CaughtData>,
+    #[serde(default)]
+    pub mail: Option<MailData>,
     pub level: u8,
     pub hp: u16,
     pub max_hp: u16,
@@ -528,6 +552,11 @@ impl<'de> Deserialize<'de> for Pokemon {
             moves: Vec<LearnedMove>,
             #[serde(deserialize_with = "required_nullable_pokemon_token")]
             status: Option<String>,
+            pokerus: u8,
+            #[serde(default)]
+            caught_data: Option<CaughtData>,
+            #[serde(default)]
+            mail: Option<MailData>,
             level: u8,
             hp: u16,
             max_hp: u16,
@@ -563,6 +592,9 @@ impl<'de> Deserialize<'de> for Pokemon {
             item: raw.item,
             moves: raw.moves,
             status: raw.status,
+            pokerus: raw.pokerus,
+            caught_data: raw.caught_data,
+            mail: raw.mail,
             level: raw.level,
             hp: raw.hp,
             max_hp: raw.max_hp,
@@ -606,6 +638,9 @@ impl Pokemon {
             item: None,
             moves: Vec::new(),
             status: None,
+            pokerus: 0,
+            caught_data: None,
+            mail: None,
             level,
             hp: stats.max_hp,
             max_hp: stats.max_hp,
@@ -665,6 +700,19 @@ impl Pokemon {
         }
         if let Some(status) = &self.status {
             validate_exact_token("pokemon.status", status)?;
+        }
+        if let Some(caught) = &self.caught_data {
+            if caught.level == 0 || caught.level > 100 {
+                return Err(format!(
+                    "pokemon.caught_data.level {} is outside range 1..100",
+                    caught.level
+                ));
+            }
+        }
+        if let Some(mail) = &self.mail {
+            validate_exact_text("pokemon.mail.message", &mail.message)?;
+            validate_exact_text("pokemon.mail.author", &mail.author)?;
+            validate_exact_token("pokemon.mail.species", &mail.species)?;
         }
         if self.level == 0 || self.level > 100 {
             return Err(format!(
@@ -1007,6 +1055,9 @@ pub fn create_pokemon_from_known_dvs(
         item: None,
         moves: learned_moves,
         status: None,
+        pokerus: 0,
+        caught_data: None,
+        mail: None,
         level,
         hp: stats.max_hp,
         max_hp: stats.max_hp,
@@ -1372,6 +1423,27 @@ mod tests {
         .expect("explicit null item and status are valid");
         assert_eq!(explicit_nulls.item, None);
         assert_eq!(explicit_nulls.status, None);
+    }
+
+    #[test]
+    fn pokemon_persists_caught_data_mail_and_pokerus_metadata() {
+        let mut pokemon = Pokemon::new_for_tests(chikorita(), 5, Dv::from_non_hp(10, 10, 10, 10));
+        pokemon.pokerus = 0xb4;
+        pokemon.caught_data = Some(CaughtData {
+            level: 5,
+            ball: 4,
+            location: 18,
+        });
+        pokemon.mail = Some(MailData {
+            message: "Please deliver this safely!".to_string(),
+            author: "CHRIS".to_string(),
+            species: "SPEAROW".to_string(),
+        });
+        let encoded = serde_json::to_string(&pokemon).expect("serialize metadata");
+        let decoded: Pokemon = serde_json::from_str(&encoded).expect("deserialize metadata");
+        assert_eq!(decoded.pokerus, 0xb4);
+        assert_eq!(decoded.caught_data, pokemon.caught_data);
+        assert_eq!(decoded.mail, pokemon.mail);
     }
 
     #[test]
