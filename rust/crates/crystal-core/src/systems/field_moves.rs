@@ -1326,7 +1326,7 @@ pub fn apply_surf_field_move(
     require_travel_rule_shape(rule, false)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
-    if player.mode == MovementMode::Surf {
+    if matches!(player.mode, MovementMode::Surf | MovementMode::SurfPika) {
         return Err(FieldMoveError::InvalidMovementMode {
             move_id: rule.move_id.clone(),
             mode: player.mode,
@@ -1363,7 +1363,11 @@ pub fn apply_surf_field_move(
         });
     }
     let from_tile = player.tile;
-    player.mode = MovementMode::Surf;
+    player.mode = if actor.species.id == "PIKACHU" {
+        MovementMode::SurfPika
+    } else {
+        MovementMode::Surf
+    };
     player.tile = target;
     Ok(FieldMoveTravelOutcome {
         move_id: rule.move_id.clone(),
@@ -1390,7 +1394,7 @@ pub fn apply_waterfall_field_move(
     require_travel_rule_shape(rule, true)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
-    if player.mode != MovementMode::Surf {
+    if !matches!(player.mode, MovementMode::Surf | MovementMode::SurfPika) {
         return Err(FieldMoveError::InvalidMovementMode {
             move_id: rule.move_id.clone(),
             mode: player.mode,
@@ -1444,7 +1448,7 @@ pub fn apply_waterfall_field_move(
         let Some(sample) = sample_collision(map, tileset, target) else {
             break;
         };
-        if describe_collision(sample.permission).terrain != Terrain::Water {
+        if describe_collision(sample.permission).terrain == Terrain::Wall {
             break;
         }
         if is_direction_blocked(sample.permission, player.facing) {

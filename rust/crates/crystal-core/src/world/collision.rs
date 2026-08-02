@@ -90,6 +90,11 @@ pub mod permissions {
     pub const WATERFALL_UP: u8 = 0x32;
     pub const WATERFALL: u8 = 0x33;
     pub const CURRENT_DOWN: u8 = 0x3b;
+    pub const CURRENT_RIGHT: u8 = 0x38;
+    pub const CURRENT_LEFT: u8 = 0x39;
+    pub const CURRENT_UP: u8 = 0x3a;
+    pub const ICE: u8 = 0x23;
+    pub const ICE_2B: u8 = 0x2b;
     pub const HOP_RIGHT: u8 = 0xa0;
     pub const HOP_LEFT: u8 = 0xa1;
     pub const HOP_UP: u8 = 0xa2;
@@ -118,6 +123,47 @@ pub fn is_warp_permission(permission: u8) -> bool {
         || (permission & 0xf0) == permissions::WARP_CARPET_DOWN
 }
 
+pub const fn directional_warp_facing(permission: u8) -> Option<Direction> {
+    match permission {
+        permissions::WARP_CARPET_DOWN => Some(Direction::Down),
+        permissions::WARP_CARPET_UP => Some(Direction::Up),
+        permissions::WARP_CARPET_LEFT => Some(Direction::Left),
+        permissions::WARP_CARPET_RIGHT => Some(Direction::Right),
+        _ => None,
+    }
+}
+
+/// Return the standard script dispatched by Crystal when A is pressed while
+/// facing an interactive collision tile.  These are not map background events:
+/// they are defined globally in `data/collision/collision_stdscripts.asm`.
+pub fn standard_interaction_script(permission: u8) -> Option<&'static str> {
+    match permission {
+        permissions::BOOKSHELF => Some("MagazineBookshelfScript"),
+        permissions::PC => Some("PCScript"),
+        permissions::RADIO => Some("Radio1Script"),
+        permissions::TOWN_MAP => Some("TownMapScript"),
+        permissions::MART_SHELF => Some("MerchandiseShelfScript"),
+        permissions::TV => Some("TVScript"),
+        permissions::WINDOW => Some("WindowScript"),
+        permissions::INCENSE_BURNER => Some("IncenseBurnerScript"),
+        _ => None,
+    }
+}
+
+pub fn is_standard_interaction_script(script: &str) -> bool {
+    [
+        "MagazineBookshelfScript",
+        "PCScript",
+        "Radio1Script",
+        "TownMapScript",
+        "MerchandiseShelfScript",
+        "TVScript",
+        "WindowScript",
+        "IncenseBurnerScript",
+    ]
+    .contains(&script)
+}
+
 pub fn describe_collision(permission: u8) -> CollisionAttributes {
     CollisionAttributes {
         value: permission,
@@ -138,6 +184,9 @@ pub fn describe_collision(permission: u8) -> CollisionAttributes {
             | permissions::WATERFALL_RIGHT
             | permissions::WATERFALL_LEFT
             | permissions::WATERFALL_UP
+            | permissions::CURRENT_RIGHT
+            | permissions::CURRENT_LEFT
+            | permissions::CURRENT_UP
             | permissions::CURRENT_DOWN
             | permissions::RIGHT_BUOY
             | permissions::LEFT_BUOY

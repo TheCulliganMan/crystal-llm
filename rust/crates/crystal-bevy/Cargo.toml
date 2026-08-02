@@ -25,6 +25,7 @@ crystal-assets = { path = "../crystal-assets" }
 crystal-audio = { path = "../crystal-audio" }
 crystal-core = { path = "../crystal-core" }
 crystal-net = { path = "../crystal-net" }
+flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
 serde_json.workspace = true

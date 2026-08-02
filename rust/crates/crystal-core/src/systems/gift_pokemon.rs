@@ -400,6 +400,7 @@ pub fn give_gift_pokemon(
         pokemon.nickname = nickname.to_string();
     }
     if request.egg {
+        pokemon.is_egg = true;
         pokemon.nickname = EGG_NICKNAME.to_string();
         pokemon.happiness = species_data.step_cycles_to_hatch;
         pokemon.hp = 0;

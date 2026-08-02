@@ -586,6 +586,12 @@ pub struct FishingRolledSession {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FishingError {
+    #[error("cannot fish while using a surfing movement mode")]
+    CannotFishWhileSurfing,
+    #[error("cannot fish because the facing tile is outside the map")]
+    FacingTileOutOfBounds,
+    #[error("cannot fish because the facing tile is not water")]
+    FacingTileIsNotWater,
     #[error("invalid fishing rod '{rod}'")]
     InvalidRod { rod: String },
     #[error("unknown fishing rod '{rod}'")]

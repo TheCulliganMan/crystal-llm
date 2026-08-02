@@ -142,6 +142,18 @@ pub struct WildEncounter {
     pub species: String,
 }
 
+/// A temporary encounter table supplied by a special event such as the
+/// Bug-Catching Contest. It is kept separate from map encounter data because
+/// Crystal replaces the normal slot table while the event is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecialWildEncounterEntry {
+    pub percent: u8,
+    pub species: String,
+    pub min_level: u8,
+    pub max_level: u8,
+}
+
 impl<'de> Deserialize<'de> for WildEncounter {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1385,9 +1397,7 @@ pub fn choose_slot_from_percent(
 }
 
 pub fn apply_grass_level_variance(base_level: u8, surface: EncounterSurface, roll_byte: u8) -> u8 {
-    // Crystal applies the same four-step level variance to grass and surfing
-    // encounters. Fishing tables do not pass through this selector.
-    if !matches!(surface, EncounterSurface::Grass | EncounterSurface::Water) {
+    if surface != EncounterSurface::Grass {
         return base_level;
     }
     let mut extra = 0;
@@ -2387,7 +2397,7 @@ mod tests {
     fn grass_level_variance_uses_same_thresholds_as_typescript() {
         assert_eq!(
             apply_grass_level_variance(5, EncounterSurface::Water, 255),
-            9
+            5
         );
         assert_eq!(apply_grass_level_variance(5, EncounterSurface::Grass, 0), 5);
         assert_eq!(

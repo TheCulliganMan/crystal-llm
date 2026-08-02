@@ -74,8 +74,8 @@ pub struct BattleItemOutcome {
     pub experience_after: i32,
     pub status_before: Option<String>,
     pub status_after: Option<String>,
-    pub confusion_turns_before: u8,
-    pub confusion_turns_after: u8,
+    pub confusion_turns_before: u16,
+    pub confusion_turns_after: u16,
     pub focus_energy_before: bool,
     pub focus_energy_after: bool,
     pub pp_changes: Vec<BattleItemPpChange>,
@@ -1289,9 +1289,14 @@ fn apply_full_restore(
 ) -> Result<BattleItemOutcome, BattleItemError> {
     let status_before = pokemon.status.clone();
     let hp_before = pokemon.hp;
+    let confusion_turns_before = pokemon.confusion_turns;
     restore_hp(pokemon, item)?;
     clear_status(pokemon);
-    if pokemon.hp == hp_before && pokemon.status == status_before {
+    pokemon.confusion_turns = 0;
+    if pokemon.hp == hp_before
+        && pokemon.status == status_before
+        && confusion_turns_before == 0
+    {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
         });
@@ -1307,7 +1312,7 @@ fn apply_full_restore(
         experience_after: pokemon.experience,
         status_before,
         status_after: pokemon.status.clone(),
-        confusion_turns_before: pokemon.confusion_turns,
+        confusion_turns_before,
         confusion_turns_after: pokemon.confusion_turns,
         focus_energy_before: pokemon.focus_energy,
         focus_energy_after: pokemon.focus_energy,
@@ -1515,9 +1520,11 @@ fn apply_restore_pp(
 
     let target_slots = match scope {
         "MOVE" => {
-            let slot = move_slot.ok_or_else(|| BattleItemError::MissingMoveSlot {
-                item_id: item.script_name.clone(),
-            })?;
+            let Some(slot) = move_slot else {
+                return Err(BattleItemError::MissingMoveSlot {
+                    item_id: item.script_name.clone(),
+                });
+            };
             if slot >= pokemon.moves.len() {
                 return Err(BattleItemError::MoveSlotOutOfRange {
                     item_id: item.script_name.clone(),

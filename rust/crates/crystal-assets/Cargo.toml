@@ -10,9 +10,14 @@ rust-version.workspace = true
 anyhow.workspace = true
 ciborium.workspace = true
 crystal-core = { path = "../crystal-core" }
+flate2 = "1.1"
 serde.workspace = true
 serde_path_to_error = "0.1"
 serde_json.workspace = true
+sha2.workspace = true
 
 [features]
-test-fixtures = []
+test-fixtures = ["crystal-core/test-fixtures"]
+
+[dev-dependencies]
+crystal-core = { path = "../crystal-core", features = ["test-fixtures"] }

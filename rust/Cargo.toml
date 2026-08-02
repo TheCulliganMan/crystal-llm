@@ -8,6 +8,34 @@ members = [
 ]
 resolver = "2"
 
+# The shipped Bevy binary is a real-time renderer.  Keep release builds
+# optimized across crate boundaries and avoid spending runtime CPU on unwind
+# paths that cannot recover from a fatal process error.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Bevy's default dev profile (opt-level 0) makes the renderer and ECS spend
+# most of their time in bounds checks and unoptimized scheduling code.  That
+# is useful for tiny crates, but it makes ordinary `cargo run` look like the
+# game is running at a few frames per second.  Keep symbols and fast
+# incremental builds while giving the playable shell a modest optimization
+# level; release still uses the fully optimized profile above.
+[profile.dev]
+opt-level = 2
+debug = 1
+incremental = true
+
+# The shell is a real-time Bevy application.  Optimizing only workspace
+# crates leaves Bevy/ECS/render dependencies at opt-level 0, which can turn a
+# normal `cargo run` into a multi-second frame loop on an otherwise idle Mac.
+# Keep debug symbols and incremental builds, but optimize the dependency graph
+# that executes every frame as well.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.package]
 edition = "2024"
 license = "ISC"
@@ -20,4 +48,5 @@ bincode = { version = "2", features = ["serde"] }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"

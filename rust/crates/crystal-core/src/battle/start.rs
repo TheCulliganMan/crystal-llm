@@ -6,6 +6,7 @@ use crate::models::{
     Dv, Move, Pokemon, PokemonBuildError, PokemonSpecies, Trainer, TrainerCatalog,
     TrainerPartyPokemon, create_pokemon_from_known_dvs,
 };
+use crate::battle::turn::{BattleSide, switch_battle_combat_pokemon};
 use crate::random::Random;
 use crate::state::{BattleMemory, EventFlagError, GameState};
 use crate::systems::economy::CurrencyCatalog;
@@ -641,16 +642,37 @@ pub fn complete_trainer_battle(
     completion: &TrainerBattleCompletion,
 ) -> Result<TrainerBattleCompletionOutcome, TrainerBattleError> {
     let continued_after_battle = completion.won || completion.can_lose;
+    state.battle_result = if completion.won { 0 } else { 1 };
     let mut prize_money = 0;
     if completion.won {
-        prize_money = trainer_prize_money_from_active_battle(state, completion)?;
         let max_money = trainer_battle_money_cap(currency_constants)?;
-        state.money = state.money.saturating_add(prize_money).min(max_money);
+        let mut reward_unit = trainer_prize_money_from_active_battle(state, completion)?;
+        if state.battle_amulet_coin_active {
+            reward_unit = double_asm_battle_money(reward_unit);
+        }
+        let mom_shares = usize::from(state.mom_saving_some_money && state.moms_money < max_money);
+        let wallet_shares = 4usize.saturating_sub(mom_shares);
+        for _ in 0..mom_shares {
+            state.moms_money = state.moms_money.saturating_add(reward_unit).min(max_money);
+        }
+        for _ in 0..wallet_shares {
+            state.money = state.money.saturating_add(reward_unit).min(max_money);
+        }
+        prize_money = double_asm_battle_money(double_asm_battle_money(reward_unit));
+
+        let mut pay_day_money = state.battle_pay_day_money.min(ASM_MAX_BATTLE_MONEY);
+        if state.battle_amulet_coin_active {
+            pay_day_money = double_asm_battle_money(pay_day_money);
+        }
+        state.money = state.money.saturating_add(pay_day_money).min(max_money);
     }
     if continued_after_battle && !completion.event_flag.is_empty() {
         state.flags.set_event_flag(&completion.event_flag, true)?;
     }
     if continued_after_battle {
+        if completion.won {
+            state.spread_pokerus_after_battle();
+        }
         deactivate_battle(state);
     }
     Ok(TrainerBattleCompletionOutcome {
@@ -713,6 +735,7 @@ pub fn switch_active_battle_party_index(
     validate_active_battle_party_index(state, index)?;
     state.battle_active_party_index = Some(index);
     mark_active_party_participant(state);
+    activate_amulet_coin_for_active_party(state);
     Ok(index)
 }
 
@@ -806,11 +829,18 @@ pub fn advance_active_trainer_battle(
     let next = enemy_party
         .iter()
         .enumerate()
-        .skip(current_enemy_index + 1)
-        .find_map(|(index, pokemon)| (pokemon.hp > 0).then_some((index, pokemon.clone())));
+        .find_map(|(index, pokemon)| {
+            (index != current_enemy_index && pokemon.hp > 0)
+                .then_some((index, pokemon.clone()))
+        });
     if let Some((index, pokemon)) = next {
         *enemy_pokemon = pokemon.clone();
         state.battle_active_enemy_party_index = Some(index);
+        if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
+            switch_battle_combat_pokemon(combat, BattleSide::Enemy, index).map_err(|_| {
+                ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index }
+            })?;
+        }
         state.pokedex.record_seen_pokemon(&pokemon);
         Ok(TrainerBattleAdvanceOutcome {
             next_enemy: Some(pokemon),
@@ -873,15 +903,35 @@ fn reset_active_battle_slots(state: &mut GameState) {
     state.battle_escape_attempts = 0;
     state.battle_player_stat_drop_guard_turns = 0;
     state.battle_pay_day_money = 0;
+    state.battle_amulet_coin_active = false;
     state.script_runtime.active_battle_combat = None;
     mark_active_party_participant(state);
+    activate_amulet_coin_for_active_party(state);
 }
 
 pub fn deactivate_battle(state: &mut GameState) {
     state.battle = BattleMemory::Inactive;
     state.script_runtime.active_battle_combat = None;
+    clear_persistent_party_battle_state(state);
+    state.sync_party_from_storage();
     clear_battle_participant_markers(state);
     clear_active_battle_slots(state);
+}
+
+/// BattleMon counters live in the transient WRAM battle structure in Crystal.
+/// Only persistent status/HP/etc. survive a battle boundary; never leave
+/// confusion, sleep countdowns, rampage, stat stages, or flinch state on the
+/// saveable party records after a flee, victory, or loss.
+fn clear_persistent_party_battle_state(state: &mut GameState) {
+    for pokemon in state.storage.party.pokemon.iter_mut().flatten() {
+        pokemon.sleep_turns = 0;
+        pokemon.flinching = false;
+        pokemon.rampage_turns = 0;
+        pokemon.confusion_turns = 0;
+        pokemon.perish_song_turns = 0;
+        pokemon.focus_energy = false;
+        pokemon.stat_boosts = crate::models::pokemon::default_stat_boosts();
+    }
 }
 
 fn mark_active_party_participant(state: &mut GameState) {
@@ -890,6 +940,26 @@ fn mark_active_party_participant(state: &mut GameState) {
     };
     if let Some(pokemon) = state.storage.party.pokemon[index].as_mut() {
         pokemon.turns_in_battle = pokemon.turns_in_battle.saturating_add(1).max(1);
+    }
+}
+
+pub(crate) fn activate_amulet_coin_for_active_party(state: &mut GameState) {
+    if state.battle_amulet_coin_active {
+        return;
+    }
+    let Some(index) = state.battle_active_party_index else {
+        return;
+    };
+    if state
+        .storage
+        .party
+        .pokemon
+        .get(index)
+        .and_then(Option::as_ref)
+        .and_then(|pokemon| pokemon.item.as_deref())
+        == Some("AMULET_COIN")
+    {
+        state.battle_amulet_coin_active = true;
     }
 }
 
@@ -911,6 +981,15 @@ pub fn clear_active_battle_slots(state: &mut GameState) {
     state.battle_escape_attempts = 0;
     state.battle_player_stat_drop_guard_turns = 0;
     state.battle_pay_day_money = 0;
+    state.battle_amulet_coin_active = false;
+}
+
+const ASM_MAX_BATTLE_MONEY: u32 = 0x00ff_ffff;
+
+fn double_asm_battle_money(amount: u32) -> u32 {
+    amount.min(ASM_MAX_BATTLE_MONEY)
+        .saturating_mul(2)
+        .min(ASM_MAX_BATTLE_MONEY)
 }
 
 fn trainer_battle_money_cap(
@@ -969,18 +1048,15 @@ fn trainer_prize_money_from_active_battle(
             slot,
         });
     }
-    reward
-        .checked_mul(u32::from(level))
-        .ok_or(TrainerBattleError::PrizeMoneyOverflow {
-            reward: *reward,
-            level,
-        })
+    Ok(reward
+        .saturating_mul(u32::from(level))
+        .min(ASM_MAX_BATTLE_MONEY))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, growth_rate};
+    use crate::models::{BaseStats, Stat, growth_rate};
     use crate::systems::experience::{GrowthRateCatalog, crystal_growth_rate_catalog_for_tests};
     use crate::world::encounters::{
         EncounterSurface, ResolvedWildEncounter, TimeOfDay, WildEncounter,
@@ -1222,6 +1298,18 @@ mod tests {
         state.battle_escape_attempts = 2;
         state.battle_player_stat_drop_guard_turns = 3;
         state.battle_pay_day_money = 40;
+        {
+            let pokemon = state.storage.party.pokemon[active_index]
+                .as_mut()
+                .expect("active Pokemon");
+            pokemon.sleep_turns = 3;
+            pokemon.flinching = true;
+            pokemon.rampage_turns = 2;
+            pokemon.confusion_turns = 4;
+            pokemon.perish_song_turns = 2;
+            pokemon.focus_energy = true;
+            pokemon.stat_boosts.insert(Stat::Attack, 2);
+        }
 
         deactivate_battle(&mut state);
 
@@ -1232,13 +1320,28 @@ mod tests {
         assert_eq!(state.battle_escape_attempts, 0);
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.battle_pay_day_money, 0);
-        assert!(state
-            .storage
-            .party
-            .pokemon
-            .iter()
-            .flatten()
-            .all(|pokemon| pokemon.turns_in_battle == 0));
+        assert!(
+            state
+                .storage
+                .party
+                .pokemon
+                .iter()
+                .flatten()
+                .all(|pokemon| pokemon.turns_in_battle == 0)
+        );
+        let pokemon = state.storage.party.pokemon[active_index]
+            .as_ref()
+            .expect("active Pokemon after cleanup");
+        assert_eq!(pokemon.sleep_turns, 0);
+        assert!(!pokemon.flinching);
+        assert_eq!(pokemon.rampage_turns, 0);
+        assert_eq!(pokemon.confusion_turns, 0);
+        assert_eq!(pokemon.perish_song_turns, 0);
+        assert!(!pokemon.focus_energy);
+        assert_eq!(
+            pokemon.stat_boosts,
+            crate::models::pokemon::default_stat_boosts()
+        );
     }
 
     #[test]
@@ -1358,6 +1461,16 @@ mod tests {
         let mut state = GameState::default();
         state.battle = BattleMemory::from(&start);
         state.battle_active_enemy_party_index = Some(0);
+        let player = Pokemon::new_for_tests(species(), 10, Dv::from_non_hp(2, 2, 2, 2));
+        state.script_runtime.active_battle_combat = Some(
+            crate::battle::turn::BattleCombatState::new(
+                player.clone(),
+                first.clone(),
+                state.rng_seed,
+            )
+                .with_parties(vec![player], vec![first.clone(), second.clone()])
+                .with_party_indices(0, 0),
+        );
 
         assert_eq!(
             advance_active_trainer_battle(&mut state),
@@ -1368,6 +1481,13 @@ mod tests {
             panic!("expected trainer battle");
         };
         enemy_pokemon.hp = 0;
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_mut()
+            .expect("active trainer combat");
+        combat.enemy.hp = 0;
+        combat.enemy_party[0].hp = 0;
         state.battle_rewarded_enemy_party_indices.insert(0);
 
         let outcome = advance_active_trainer_battle(&mut state).expect("advance trainer battle");
@@ -1391,6 +1511,46 @@ mod tests {
         };
         assert_eq!(enemy_pokemon, &second);
         assert_eq!(enemy_party[0].hp, 0);
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("advanced trainer combat");
+        assert_eq!(combat.enemy.species.id, second.species.id);
+        assert_eq!(combat.enemy.hp, second.hp);
+        assert_eq!(combat.enemy.turns_in_battle, 1);
+        assert_eq!(combat.enemy_party_index, 1);
+
+        // Trainer AI can switch forward before a knockout. Replacement must
+        // still find a living earlier slot instead of treating the trainer as
+        // defeated merely because no later index is usable.
+        let BattleMemory::Trainer {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        } = &mut state.battle
+        else {
+            panic!("expected trainer battle");
+        };
+        *enemy_pokemon = second.clone();
+        enemy_pokemon.hp = 0;
+        enemy_party[0] = first.clone();
+        enemy_party[1] = enemy_pokemon.clone();
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_mut()
+            .expect("active trainer combat");
+        combat.enemy.hp = 0;
+        combat.enemy_party[0] = first.clone();
+        combat.enemy_party[1].hp = 0;
+        state.battle_rewarded_enemy_party_indices.insert(1);
+
+        let reordered =
+            advance_active_trainer_battle(&mut state).expect("find earlier living trainer slot");
+        assert_eq!(reordered.next_enemy, Some(first));
+        assert!(!reordered.trainer_defeated);
+        assert_eq!(state.battle_active_enemy_party_index, Some(0));
     }
 
     #[test]
@@ -1950,7 +2110,7 @@ mod tests {
         let outcome = complete_trainer_battle(&mut state, &currency_constants, &completion)
             .expect("completion resolves");
         assert!(outcome.continued_after_battle);
-        assert_eq!(outcome.prize_money, 350);
+        assert_eq!(outcome.prize_money, 1400);
         assert_eq!(outcome.money_after, max_money);
         assert!(
             state

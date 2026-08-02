@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{
     GameState, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
-    ScriptReturnFrame,
+    ScriptLocation, ScriptReturnFrame,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -204,15 +204,20 @@ pub fn resolve_script_control_command(
 
 pub fn apply_script_control_command(
     state: &mut GameState,
+    origin_map_name: &str,
     command: ScriptControlCommand,
     numeric_constants: &BTreeMap<String, i32>,
 ) -> Result<ScriptControlAction, ScriptControlCommandError> {
     let action = resolve_script_control_command(state, command, numeric_constants)?;
-    apply_script_control_action_to_state(state, &action);
+    apply_script_control_action_to_state(state, origin_map_name, &action);
     Ok(action)
 }
 
-pub fn apply_script_control_action_to_state(state: &mut GameState, action: &ScriptControlAction) {
+pub fn apply_script_control_action_to_state(
+    state: &mut GameState,
+    origin_map_name: &str,
+    action: &ScriptControlAction,
+) {
     match action {
         ScriptControlAction::Continue {
             source_script,
@@ -240,20 +245,33 @@ pub fn apply_script_control_action_to_state(state: &mut GameState, action: &Scri
                 state
                     .script_runtime
                     .deferred_scripts
-                    .push(target_script.clone());
+                    .push(ScriptLocation {
+                        origin_map_name: origin_map_name.to_string(),
+                        script: target_script.clone(),
+                    });
                 ScriptControlRuntimeKind::Defer
             } else if *call {
                 state.script_runtime.call_stack.push(ScriptReturnFrame {
+                    origin_map_name: origin_map_name.to_string(),
                     source_script: source_script.clone(),
                     next_command_index: command_index + 1,
                 });
-                state.script_runtime.next_script = Some(target_script.clone());
+                state.script_runtime.next_script = Some(ScriptLocation {
+                    origin_map_name: origin_map_name.to_string(),
+                    script: target_script.clone(),
+                });
                 ScriptControlRuntimeKind::Call
             } else if *standard {
-                state.script_runtime.next_script = Some(target_script.clone());
+                state.script_runtime.next_script = Some(ScriptLocation {
+                    origin_map_name: origin_map_name.to_string(),
+                    script: target_script.clone(),
+                });
                 ScriptControlRuntimeKind::StandardJump
             } else {
-                state.script_runtime.next_script = Some(target_script.clone());
+                state.script_runtime.next_script = Some(ScriptLocation {
+                    origin_map_name: origin_map_name.to_string(),
+                    script: target_script.clone(),
+                });
                 ScriptControlRuntimeKind::Jump
             };
             state
@@ -1125,12 +1143,13 @@ mod tests {
         state.script_runtime.script_value = Some("TRUE".to_string());
         apply_script_control_command(
             &mut state,
+            "TestMap",
             script_control_command("iftrue", None, Some(".Yes")),
             &BTreeMap::new(),
         )
         .expect("jump");
         assert_eq!(
-            state.script_runtime.next_script.as_deref(),
+            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
             Some(".Yes@Script")
         );
         assert_eq!(
@@ -1140,6 +1159,7 @@ mod tests {
 
         apply_script_control_command(
             &mut state,
+            "TestMap",
             script_control_command("scall", None, Some(".Call")),
             &BTreeMap::new(),
         )
@@ -1147,31 +1167,37 @@ mod tests {
         assert_eq!(
             state.script_runtime.call_stack,
             vec![ScriptReturnFrame {
+                origin_map_name: "TestMap".to_string(),
                 source_script: "Script".to_string(),
                 next_command_index: 7,
             }]
         );
         assert_eq!(
-            state.script_runtime.next_script.as_deref(),
+            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
             Some(".Call@Script")
         );
 
         apply_script_control_command(
             &mut state,
+            "TestMap",
             script_control_command("sdefer", None, Some(".Deferred")),
             &BTreeMap::new(),
         )
         .expect("defer");
         assert_eq!(
             state.script_runtime.deferred_scripts,
-            vec![".Deferred@Script"]
+            vec![ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: ".Deferred@Script".to_string(),
+            }]
         );
 
         let mut jumpstd = script_control_command("jumpstd", None, Some("PokecenterSignScript"));
         jumpstd.resolved_target_script = None;
-        apply_script_control_command(&mut state, jumpstd, &BTreeMap::new()).expect("jumpstd");
+        apply_script_control_command(&mut state, "TestMap", jumpstd, &BTreeMap::new())
+            .expect("jumpstd");
         assert_eq!(
-            state.script_runtime.next_script.as_deref(),
+            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
             Some("PokecenterSignScript")
         );
         assert_eq!(
@@ -1190,6 +1216,7 @@ mod tests {
         state.script_runtime.script_value = Some("SATURDAY".to_string());
         apply_script_control_command(
             &mut state,
+            "TestMap",
             script_control_command("ifnotequal", Some("SATURDAY"), Some(".Done")),
             &BTreeMap::new(),
         )
@@ -1211,9 +1238,13 @@ mod tests {
     #[test]
     fn end_records_exact_end_state_and_clears_next_script() {
         let mut state = GameState::default();
-        state.script_runtime.next_script = Some("PendingScript".to_string());
+        state.script_runtime.next_script = Some(ScriptLocation {
+            origin_map_name: "TestMap".to_string(),
+            script: "PendingScript".to_string(),
+        });
         apply_script_control_command(
             &mut state,
+            "TestMap",
             script_control_command("endifjustbattled", None, None),
             &BTreeMap::new(),
         )
@@ -1238,6 +1269,7 @@ mod tests {
         assert!(matches!(
             apply_script_control_command(
                 &mut state,
+                "TestMap",
                 script_control_command("iftrue", None, Some(".Done")),
                 &BTreeMap::new(),
             ),
@@ -1254,12 +1286,15 @@ mod tests {
     fn invalid_control_source_script_does_not_mutate_runtime_state() {
         let mut state = GameState::default();
         state.script_runtime.script_value = Some("TRUE".to_string());
-        state.script_runtime.next_script = Some("PendingScript".to_string());
+        state.script_runtime.next_script = Some(ScriptLocation {
+            origin_map_name: "TestMap".to_string(),
+            script: "PendingScript".to_string(),
+        });
         let mut bad_source = script_control_command("scall", None, Some(".Done"));
         bad_source.source_script = "fallback_script".to_string();
 
         assert_eq!(
-            apply_script_control_command(&mut state, bad_source, &BTreeMap::new()),
+            apply_script_control_command(&mut state, "TestMap", bad_source, &BTreeMap::new()),
             Err(ScriptControlCommandError::InvalidSourceScript {
                 source_script: "fallback_script".to_string(),
             })
@@ -1267,7 +1302,7 @@ mod tests {
 
         assert!(state.script_runtime.control_events.is_empty());
         assert_eq!(
-            state.script_runtime.next_script.as_deref(),
+            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
             Some("PendingScript")
         );
         assert!(state.script_runtime.call_stack.is_empty());

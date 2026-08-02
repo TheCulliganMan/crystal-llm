@@ -530,7 +530,8 @@ pub fn find_evolution_candidate<'a>(
         species_id: species_id.to_string(),
     })?;
 
-    for entry in table.entries_for(species_id)? {
+    let entries = table.entries_for(species_id)?;
+    for entry in entries {
         validate_evolution_runtime_token(&entry.method).map_err(|_| {
             EvolutionError::InvalidMethod {
                 species_id: species_id.to_string(),
@@ -724,8 +725,13 @@ pub fn evolve_pokemon(
     let old_species_id = pokemon.species.id.clone();
     let old_max_hp = pokemon.max_hp;
     let old_hp = pokemon.hp;
-    if pokemon.nickname == old_species_id {
-        pokemon.nickname = target_species.id.clone();
+    if !pokemon.nickname.trim().is_empty()
+        && pokemon
+            .nickname
+            .trim()
+            .eq_ignore_ascii_case(&old_species_id)
+    {
+        pokemon.nickname = target_species.id.to_uppercase();
     }
     pokemon.species = target_species.clone();
     refresh_evolved_stats(pokemon, old_max_hp, old_hp);
@@ -807,7 +813,7 @@ fn evolution_moves_for(
     }
     let mut current = known_moves.to_vec();
     let mut learned = Vec::new();
-    let mut pending = Vec::new();
+    let pending = Vec::new();
     for LearnsetEntry(learn_level, move_name) in
         level_up_moves_for_species(context.learnsets, species_id).map_err(|_| {
             EvolutionError::MissingLearnset {
@@ -833,9 +839,7 @@ fn evolution_moves_for(
             current_pp: move_data.pp,
             pp_ups: 0,
         };
-        if current.len() >= 4 {
-            pending.push(entry);
-        } else {
+        if current.len() < 4 {
             current.push(entry.clone());
             learned.push(entry);
         }

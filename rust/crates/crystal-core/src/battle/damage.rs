@@ -634,6 +634,33 @@ pub struct DamageContext {
     pub defender_identified: bool,
     pub weather: Weather,
     pub random_roll: u8,
+    /// Apply Crystal's pre-stage 12.5% badge boost to the selected attacking stat.
+    #[serde(default)]
+    pub attacker_badge_boost: bool,
+    /// Apply Crystal's pre-stage 12.5% badge boost to the selected defending stat.
+    #[serde(default)]
+    pub defender_badge_boost: bool,
+    /// The original battler is Ditto holding Metal Powder. This cannot be
+    /// inferred from the effective transformed Pokemon used for damage stats.
+    #[serde(default)]
+    pub defender_metal_powder: bool,
+    /// Reflect or Light Screen is active for the selected damage category.
+    /// Crystal wraps the 16-bit doubled Defense, then jointly truncates both
+    /// selected damage stats into the command's byte registers.
+    #[serde(default)]
+    pub defender_screen: bool,
+    /// Percentage added by a matching Gen II type-boosting held item. The ROM
+    /// applies this to the post-division quotient before critical damage.
+    #[serde(default)]
+    pub held_type_boost_percent: u8,
+    /// Multiplier applied to the capped damage command result before the STAB
+    /// command. Triple Kick uses 1, 2, then 3 for its successive kicks.
+    #[serde(default = "default_pre_stab_multiplier")]
+    pub pre_stab_multiplier: u8,
+    /// Crystal's separate Rage counter. Rage multiplies post-effectiveness
+    /// damage by counter + 1 before damage variation.
+    #[serde(default)]
+    pub rage_counter: u8,
 }
 
 impl Default for DamageContext {
@@ -644,6 +671,13 @@ impl Default for DamageContext {
             defender_identified: false,
             weather: Weather::None,
             random_roll: 255,
+            attacker_badge_boost: false,
+            defender_badge_boost: false,
+            defender_metal_powder: false,
+            defender_screen: false,
+            held_type_boost_percent: 0,
+            pre_stab_multiplier: default_pre_stab_multiplier(),
+            rage_counter: 0,
         }
     }
 }
@@ -870,19 +904,24 @@ pub fn calculate_damage(
         }
     })?;
 
-    let base_attack = attacker.calculate_stat(attack_stat).ok_or_else(|| {
-        DamageCalculationError::MissingStat {
-            pokemon_id: attacker.species.id.clone(),
-            stat: attack_stat,
-        }
-    })?;
-    let base_defense = defender.calculate_stat(defense_stat).ok_or_else(|| {
-        DamageCalculationError::MissingStat {
-            pokemon_id: defender.species.id.clone(),
-            stat: defense_stat,
-        }
-    })?;
-    let attack_value = if context.is_critical && defense_stage > attack_stage {
+    let mut base_attack = match attack_stat {
+        Stat::Attack => attacker.attack,
+        Stat::SpecialAttack => attacker.special_attack,
+        _ => unreachable!("damage selected a non-attacking stat"),
+    };
+    let mut base_defense = match defense_stat {
+        Stat::Defense => defender.defense,
+        Stat::SpecialDefense => defender.special_defense,
+        _ => unreachable!("damage selected a non-defending stat"),
+    };
+    if context.attacker_badge_boost {
+        base_attack = base_attack.saturating_add(base_attack / 8).min(999);
+    }
+    if context.defender_badge_boost {
+        base_defense = base_defense.saturating_add(base_defense / 8).min(999);
+    }
+    let critical_ignores_stages = context.is_critical && defense_stage > attack_stage;
+    let attack_value = if critical_ignores_stages {
         clamp_stat(base_attack)
     } else {
         clamp_stat(
@@ -894,7 +933,8 @@ pub fn calculate_damage(
         )
     };
     let attack_value = apply_burn_attack_penalty(attacker, physical, attack_value);
-    let defense_value = if context.is_critical && defense_stage > attack_stage {
+    let attack_value = apply_species_held_attack_boost(attacker, physical, attack_value);
+    let mut defense_value = if critical_ignores_stages {
         clamp_stat(base_defense)
     } else {
         clamp_stat(
@@ -904,17 +944,39 @@ pub fn calculate_damage(
                 },
             )?,
         )
+    };
+    if context.defender_screen && !critical_ignores_stages {
+        defense_value = defense_value.wrapping_mul(2);
     }
-    .max(1);
+    let (mut attack_value, mut defense_value) =
+        truncate_damage_stats(attack_value, defense_value);
+    if context.defender_metal_powder
+        || (defender.species.id == "DITTO" && defender.item.as_deref() == Some("METAL_POWDER"))
+    {
+        (attack_value, defense_value) =
+            apply_metal_powder_damage_stats(attack_value, defense_value);
+    }
+    if move_data.effect == "SELFDESTRUCT" {
+        defense_value = (defense_value / 2).max(1);
+    }
 
     let level_factor = ((2 * attacker.level as u16) / 5) + 2;
-    let mut damage = (((level_factor as u32 * move_data.power as u32 * attack_value as u32)
+    let mut base_damage = ((level_factor as u32 * move_data.power as u32 * attack_value as u32)
         / defense_value as u32)
-        / 50) as u16;
-    if context.is_critical {
-        damage = damage.saturating_mul(2);
+        / 50;
+    if context.held_type_boost_percent != 0 {
+        base_damage = base_damage
+            .saturating_mul(100 + u32::from(context.held_type_boost_percent))
+            / 100;
     }
-    damage = damage.min(997) + 2;
+    if context.is_critical {
+        base_damage = base_damage.saturating_mul(2);
+    }
+    // DamageCalc caps the full-width quotient at 997 before adding the
+    // minimum two damage. Narrowing first can wrap a large quotient below the
+    // cap and produce tiny damage for otherwise maximal attacks.
+    let mut damage = base_damage.min(997) as u16 + 2;
+    damage = damage.saturating_mul(u16::from(context.pre_stab_multiplier.max(1)));
 
     damage = apply_weather_type_modifier(
         damage,
@@ -949,6 +1011,15 @@ pub fn calculate_damage(
     }
     damage = type_multiplier.apply_floor(damage);
 
+    if move_data.effect == "RAGE" && context.rage_counter != 0 {
+        damage = u16::try_from(
+            u32::from(damage)
+                .saturating_mul(u32::from(context.rage_counter) + 1)
+                .min(u32::from(u16::MAX)),
+        )
+        .expect("Rage damage was capped to u16");
+    }
+
     let roll = context.random_roll.max(1);
     damage = ((damage as u32 * roll as u32) / 255).max(1) as u16;
 
@@ -956,6 +1027,47 @@ pub fn calculate_damage(
         damage,
         type_multiplier,
     })
+}
+
+const fn default_pre_stab_multiplier() -> u8 {
+    1
+}
+
+pub(crate) fn truncate_damage_stats(mut attack: u16, mut defense: u16) -> (u16, u16) {
+    while attack > u16::from(u8::MAX) || defense > u16::from(u8::MAX) {
+        attack = (attack >> 2).max(1);
+        defense = (defense >> 2).max(1);
+    }
+    (attack, defense)
+}
+
+pub(crate) fn apply_metal_powder_damage_stats(
+    attack: u16,
+    defense: u16,
+) -> (u16, u16) {
+    let defense = defense.min(u16::from(u8::MAX));
+    let sum = defense + defense / 2;
+    if sum <= u16::from(u8::MAX) {
+        return (attack, sum.max(1));
+    }
+    let attack = (attack >> 1).max(1);
+    let wrapped = (sum & u16::from(u8::MAX)) as u8;
+    let defense = u16::from((wrapped >> 1) | 0x80);
+    (attack, defense.max(1))
+}
+
+fn apply_species_held_attack_boost(attacker: &Pokemon, physical: bool, attack: u16) -> u16 {
+    let item = attacker.item.as_deref();
+    if physical
+        && matches!(attacker.species.id.as_str(), "CUBONE" | "MAROWAK")
+        && item == Some("THICK_CLUB")
+    {
+        return attack.wrapping_mul(2);
+    }
+    if !physical && attacker.species.id == "PIKACHU" && item == Some("LIGHT_BALL") {
+        return attack.wrapping_mul(2);
+    }
+    attack
 }
 
 pub fn apply_weather_type_modifier(
@@ -1766,6 +1878,36 @@ mod tests {
     }
 
     #[test]
+    fn damage_uses_copied_battle_stats_instead_of_recalculating_species_stats() {
+        let mut attacker = pokemon(
+            "DITTO",
+            pokemon_type("NORMAL"),
+            BaseStats::new(48, 48, 48, 48, 48, 48),
+            50,
+        );
+        attacker.attack = 200;
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 83, 80, 100, 100),
+            50,
+        );
+        let result = calculate_damage(
+            &attacker,
+            &defender,
+            &tackle(pokemon_type("NORMAL"), 60),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("copied battle Attack is used");
+
+        assert!(result.damage > 40);
+    }
+
+    #[test]
     fn burn_halves_physical_attack_damage_for_exact_status_token() {
         let attacker = pokemon(
             "ATTACKER",
@@ -1867,6 +2009,281 @@ mod tests {
         .expect("burned special damage");
 
         assert_eq!(burned.damage, normal.damage);
+    }
+
+    #[test]
+    fn screens_apply_inside_critical_hit_damage() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        let move_data = tackle(pokemon_type("NORMAL"), 60);
+        let critical = DamageContext {
+            is_critical: true,
+            ..DamageContext::default()
+        };
+        let screened = DamageContext {
+            defender_screen: true,
+            ..critical
+        };
+
+        let plain = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            critical,
+        )
+        .expect("critical damage without screen");
+        let screened = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            screened,
+        )
+        .expect("critical damage with screen");
+
+        assert!(screened.damage < plain.damage);
+    }
+
+    #[test]
+    fn critical_stage_bypass_reloads_defense_after_the_screen_step() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let mut defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        defender.stat_boosts.insert(Stat::Defense, 1);
+        let move_data = tackle(pokemon_type("NORMAL"), 60);
+        let plain = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                is_critical: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("stage-bypassing critical without screen");
+        let screened = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                is_critical: true,
+                defender_screen: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("stage-bypassing critical with screen");
+
+        assert_eq!(screened.damage, plain.damage);
+    }
+
+    #[test]
+    fn screen_defense_retains_gen_two_paired_stat_truncation() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let mut defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        defender.defense = 512;
+        let move_data = tackle(pokemon_type("NORMAL"), 60);
+
+        let plain = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("damage without wrapped screen");
+        let screened = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                defender_screen: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("damage with wrapped screen");
+
+        assert!(screened.damage > plain.damage);
+    }
+
+    #[test]
+    fn held_type_parameter_boosts_the_quotient_before_minimum_damage() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("FIRE"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        let move_data = tackle(pokemon_type("NORMAL"), 80);
+        let plain = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("plain damage");
+        let boosted = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                held_type_boost_percent: 10,
+                ..DamageContext::default()
+            },
+        )
+        .expect("type-item damage");
+
+        assert_eq!(
+            boosted.damage,
+            ((u32::from(plain.damage - 2) * 110) / 100) as u16 + 2
+        );
+    }
+
+    #[test]
+    fn full_width_base_damage_is_capped_before_narrowing() {
+        let mut attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            100,
+        );
+        attacker.level = 255;
+        attacker.attack = 999;
+        let mut defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        defender.defense = 1;
+
+        let result = calculate_damage(
+            &attacker,
+            &defender,
+            &tackle(pokemon_type("NORMAL"), 255),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                is_critical: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("maximal damage calculation");
+
+        assert_eq!(result.damage, 1498);
+    }
+
+    #[test]
+    fn rage_counter_multiplies_damage_after_type_effectiveness() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        let mut rage = tackle(pokemon_type("NORMAL"), 20);
+        rage.name = "RAGE".to_string();
+        rage.effect = "RAGE".to_string();
+
+        let initial = calculate_damage(
+            &attacker,
+            &defender,
+            &rage,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("initial Rage damage");
+        let built = calculate_damage(
+            &attacker,
+            &defender,
+            &rage,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                rage_counter: 2,
+                ..DamageContext::default()
+            },
+        )
+        .expect("built Rage damage");
+
+        assert_eq!(built.damage, initial.damage * 3);
     }
 
     #[test]

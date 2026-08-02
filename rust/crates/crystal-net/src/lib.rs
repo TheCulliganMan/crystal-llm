@@ -488,8 +488,6 @@ struct WireCommandChecksumResult {
 enum WireGameEvent {
     FrameAdvanced { frame: u64 },
     JoypadChanged { pressed: u8, down: u8 },
-    MenuOpened,
-    MenuClosed,
 }
 
 impl From<&GameEvent> for WireGameEvent {
@@ -500,8 +498,6 @@ impl From<&GameEvent> for WireGameEvent {
                 pressed: *pressed,
                 down: *down,
             },
-            GameEvent::MenuOpened => Self::MenuOpened,
-            GameEvent::MenuClosed => Self::MenuClosed,
         }
     }
 }
@@ -511,8 +507,6 @@ impl From<WireGameEvent> for GameEvent {
         match event {
             WireGameEvent::FrameAdvanced { frame } => Self::FrameAdvanced { frame },
             WireGameEvent::JoypadChanged { pressed, down } => Self::JoypadChanged { pressed, down },
-            WireGameEvent::MenuOpened => Self::MenuOpened,
-            WireGameEvent::MenuClosed => Self::MenuClosed,
         }
     }
 }
@@ -1130,11 +1124,11 @@ mod tests {
     use crystal_core::timing::Frame;
 
     fn modpack() -> SaveModpackIdentity {
-        SaveModpackIdentity::new("core-modular", "1234abcd").expect("modpack identity")
+        SaveModpackIdentity::new("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("modpack identity")
     }
 
     fn pack_content_hash() -> &'static str {
-        "01020304"
+        "0102030401020304010203040102030401020304010203040102030401020304"
     }
 
     fn session() -> LinkSessionIdentity {
@@ -1180,7 +1174,7 @@ mod tests {
             "format_version": crystal_core::save::SAVE_FORMAT_VERSION,
             "modpack": {
                 "id": "core-modular",
-                "hash": "1234abcd"
+                "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
             },
             "pack_content_hash": pack_content_hash(),
             "created_frame": frame,
@@ -2036,7 +2030,7 @@ mod tests {
             *hello = LinkHello::from_session(
                 LinkSessionIdentity::new(
                     "session-1",
-                    SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+                    SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
                     pack_content_hash(),
                 )
                 .expect("other session"),
@@ -2072,7 +2066,7 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2094,7 +2088,7 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2127,7 +2121,7 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd").expect("other pack"),
+            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2486,7 +2480,7 @@ mod tests {
                 "format_version": crystal_core::save::SAVE_FORMAT_VERSION,
                 "modpack": {
                     "id": "other-pack",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
                 "pack_content_hash": pack_content_hash(),
                 "created_frame": 144,
@@ -2510,9 +2504,9 @@ mod tests {
                 "format_version": crystal_core::save::SAVE_FORMAT_VERSION,
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
-                "pack_content_hash": "ffffffff",
+                "pack_content_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 "created_frame": 144,
                 "saved_frame": 144,
                 "state_frame": 144,
@@ -2610,7 +2604,7 @@ mod tests {
 
     #[test]
     fn link_endpoint_rejects_bare_save_summary_for_wrong_pack() {
-        let wrong_summary = save_summary_for_modpack("other-pack", "1234abcd", 144, 0xbbcc_ddee);
+        let wrong_summary = save_summary_for_modpack("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd", 144, 0xbbcc_ddee);
         let transport = RawLinkTransport::with_inbound([LinkMessage::SaveSummary(wrong_summary)]);
         let mut endpoint =
             LinkEndpoint::new(transport, hello_for(1, "HOST")).expect("raw endpoint");

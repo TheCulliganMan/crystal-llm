@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::collision::{PlayerTraversalState, TilesetCollision, can_enter_tile, can_jump_ledge};
+use super::collision::{
+    PlayerTraversalState, Terrain, TilesetCollision, can_enter_tile, can_jump_ledge,
+    describe_collision, sample_collision,
+};
 use super::map::{Direction, OverworldMapData, TilePosition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,19 +13,20 @@ pub enum MovementMode {
     Bike,
     Skate,
     Surf,
+    SurfPika,
 }
 
 impl MovementMode {
     pub const fn traversal_state(self) -> PlayerTraversalState {
         match self {
             Self::Normal | Self::Bike | Self::Skate => PlayerTraversalState::Walk,
-            Self::Surf => PlayerTraversalState::Surf,
+            Self::Surf | Self::SurfPika => PlayerTraversalState::Surf,
         }
     }
 
     pub const fn speed_multiplier(self) -> u8 {
         match self {
-            Self::Normal | Self::Surf => 1,
+            Self::Normal | Self::Surf | Self::SurfPika => 1,
             Self::Bike | Self::Skate => 2,
         }
     }
@@ -185,6 +189,12 @@ pub fn attempt_step_with_occupied_tiles(
     }
 
     let from = state.tile;
+    if matches!(state.mode, MovementMode::Surf | MovementMode::SurfPika)
+        && sample_collision(map, tileset, target)
+            .is_some_and(|sample| describe_collision(sample.permission).terrain == Terrain::Land)
+    {
+        state.mode = MovementMode::Normal;
+    }
     state.tile = target;
     StepOutcome::Moved {
         from,

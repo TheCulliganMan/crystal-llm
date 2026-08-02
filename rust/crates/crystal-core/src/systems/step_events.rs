@@ -1,7 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::models::{Party, Pokemon};
+use crate::models::pokemon::StatExperience;
+use crate::models::{Party, Pokemon, calculate_stats};
 use crate::state::GameState;
+use crate::systems::experience::{ExperienceError, GrowthRateCatalog};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +88,8 @@ pub enum StepEventError {
     MissingRules,
     #[error("step event rules are invalid: {issue:?}")]
     InvalidRules { issue: StepEventRulesIssue },
+    #[error("day-care experience calculation failed: {error}")]
+    DayCareExperience { error: ExperienceError },
 }
 
 pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssue> {
@@ -147,6 +151,7 @@ pub struct StepEventCounters {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepEventResult {
+    pub repel_expired: Option<String>,
     pub egg_hatched: bool,
     pub hatched_species: Option<String>,
     pub poison_result: Option<PoisonDamageResult>,
@@ -176,6 +181,7 @@ pub fn process_step(
     if counters.step_count == rules.egg_step_trigger {
         if let Some(hatched_species) = process_egg_step(rules, party) {
             return StepEventResult {
+                repel_expired: None,
                 egg_hatched: true,
                 hatched_species: Some(hatched_species),
                 poison_result: None,
@@ -186,6 +192,7 @@ pub fn process_step(
 
     let poison_result = process_poison_step(rules, counters, party);
     StepEventResult {
+        repel_expired: None,
         egg_hatched: false,
         hatched_species: None,
         poison_result,
@@ -202,24 +209,73 @@ pub fn process_step_checked(
     Ok(process_step(rules, counters, party))
 }
 
-pub fn process_overworld_step(state: &mut GameState, rules: &StepEventRules) -> StepEventResult {
-    crate::systems::special_routines::advance_day_care_step(state);
-    let result = process_step(rules, &mut state.step_events, &mut state.storage.party);
-    if state.repel_steps_remaining == 0 {
-        state.active_repel_item = None;
+pub fn process_overworld_step(
+    state: &mut GameState,
+    rules: &StepEventRules,
+    growth_rates: &GrowthRateCatalog,
+) -> Result<StepEventResult, StepEventError> {
+    if state.repel_steps_remaining > 0 {
+        let expired = state.tick_repel_step_after_movement();
+        if let Some(item_id) = expired {
+            state.sync_party_from_storage();
+            return Ok(StepEventResult {
+                repel_expired: Some(item_id),
+                ..StepEventResult::default()
+            });
+        }
     } else {
-        state.tick_repel_step_after_movement();
+        state.active_repel_item = None;
     }
+    state.step_events.poison_step_count = state.step_events.poison_step_count.wrapping_add(1);
+    state.step_events.step_count = state.step_events.step_count.wrapping_add(1);
+
+    let mut happiness_changed = Vec::new();
+    if state.step_events.step_count == 0 {
+        happiness_changed = apply_happiness_step(
+            rules,
+            &mut state.step_events,
+            &mut state.storage.party,
+        );
+    }
+
+    if state.step_events.step_count == rules.egg_step_trigger {
+        if let Some(hatched_species) = process_egg_step(rules, &mut state.storage.party) {
+            state.sync_party_from_storage();
+            return Ok(StepEventResult {
+                repel_expired: None,
+                egg_hatched: true,
+                hatched_species: Some(hatched_species),
+                poison_result: None,
+                happiness_changed,
+            });
+        }
+    }
+
+    crate::systems::special_routines::advance_day_care_step(state, growth_rates)
+        .map_err(|error| StepEventError::DayCareExperience { error })?;
+    let poison_result = process_poison_step(
+        rules,
+        &mut state.step_events,
+        &mut state.storage.party,
+    );
+    let result = StepEventResult {
+        repel_expired: None,
+        egg_hatched: false,
+        hatched_species: None,
+        poison_result,
+        happiness_changed,
+    };
     state.sync_party_from_storage();
-    result
+    Ok(result)
 }
 
 pub fn process_overworld_step_checked(
     state: &mut GameState,
     rules: &StepEventRules,
+    growth_rates: &GrowthRateCatalog,
 ) -> Result<StepEventResult, StepEventError> {
     require_step_event_rules(rules)?;
-    Ok(process_overworld_step(state, rules))
+    process_overworld_step(state, rules, growth_rates)
 }
 
 pub fn apply_happiness_step(
@@ -248,27 +304,34 @@ pub fn apply_happiness_step(
 }
 
 pub fn process_egg_step(rules: &StepEventRules, party: &mut Party) -> Option<String> {
-    let mut hatched = None;
     for pokemon in party.pokemon.iter_mut().flatten() {
         if !is_egg(rules, pokemon) {
             continue;
         }
         pokemon.happiness = pokemon.happiness.wrapping_sub(1);
-        if pokemon.happiness == 0 && hatched.is_none() {
+        if pokemon.happiness == 0 {
             let species_id = pokemon.species.id.clone();
-            pokemon.nickname = crate::models::pokemon_species_display_name(&species_id);
+            let stats = calculate_stats(
+                &pokemon.species,
+                pokemon.level,
+                pokemon.dvs,
+                StatExperience {
+                    hp: pokemon.hp_exp,
+                    attack: pokemon.attack_exp,
+                    defense: pokemon.defense_exp,
+                    speed: pokemon.speed_exp,
+                    special: pokemon.special_exp,
+                },
+            );
+            pokemon.is_egg = false;
+            pokemon.nickname = species_id.clone();
             pokemon.happiness = rules.hatched_egg_happiness;
-            pokemon.hp = pokemon.max_hp;
-            pokemon.status = None;
-            pokemon.sleep_turns = 0;
-            pokemon.flinching = false;
-            pokemon.confusion_turns = 0;
-            pokemon.rampage_turns = 0;
-            pokemon.perish_song_turns = 0;
-            hatched = Some(species_id);
+            pokemon.max_hp = stats.max_hp;
+            pokemon.hp = stats.max_hp;
+            return Some(species_id);
         }
     }
-    hatched
+    None
 }
 
 pub fn process_poison_step(
@@ -325,7 +388,7 @@ pub fn is_poisoned(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
 
 pub fn is_egg(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
     let _ = rules;
-    pokemon.status.as_deref() == Some("EGG")
+    pokemon.is_egg || pokemon.status.as_deref() == Some("EGG") || pokemon.species.id == "EGG"
 }
 
 fn apply_poison_faint_happiness(party: &mut Party, poisoned_before_step: Vec<usize>) {
@@ -358,6 +421,7 @@ fn pokemon_event_name(pokemon: &Pokemon) -> String {
 mod tests {
     use super::*;
     use crate::models::{BaseStats, Dv, PokemonSpecies};
+    use crate::systems::experience::crystal_growth_rate_catalog_for_tests;
 
     fn rules() -> StepEventRules {
         StepEventRules {
@@ -661,22 +725,26 @@ mod tests {
         state.repel_steps_remaining = 1;
         state.active_repel_item = Some("REPEL".to_string());
 
-        let result = process_overworld_step(&mut state, &rules());
+        let result = process_overworld_step(
+            &mut state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+        )
+        .expect("overworld step");
 
-        assert_eq!(
-            result.poison_result,
-            Some(PoisonDamageResult {
-                damaged_names: vec!["ODDISH".to_string()],
-                fainted_names: Vec::new(),
-            })
-        );
-        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 2);
+        assert_eq!(result.poison_result, None);
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().hp, 3);
         assert_eq!(state.party.pokemon[0].as_ref().unwrap().species, "ODDISH");
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
 
         state.active_repel_item = Some("REPEL".to_string());
-        let _ = process_overworld_step(&mut state, &rules());
+        let _ = process_overworld_step(
+            &mut state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+        )
+        .expect("overworld step");
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
     }

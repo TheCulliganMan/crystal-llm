@@ -331,6 +331,7 @@ pub struct BallCatchRateResult {
 pub struct CaptureOutcome {
     pub caught: bool,
     pub blocked: bool,
+    pub storage_full: bool,
     pub wobble_count: u8,
     pub animation_shakes: u8,
     pub final_catch_rate: u8,
@@ -369,6 +370,7 @@ pub fn resolve_capture_attempt(
         return Ok(CaptureOutcome {
             caught: false,
             blocked: true,
+            storage_full: false,
             wobble_count: 0,
             animation_shakes: 0,
             final_catch_rate: 0,
@@ -381,6 +383,7 @@ pub fn resolve_capture_attempt(
         return Ok(CaptureOutcome {
             caught: true,
             blocked: false,
+            storage_full: false,
             wobble_count: 3,
             animation_shakes: 4,
             final_catch_rate: 255,
@@ -395,6 +398,7 @@ pub fn resolve_capture_attempt(
         return Ok(CaptureOutcome {
             caught: true,
             blocked: false,
+            storage_full: false,
             wobble_count: 3,
             animation_shakes: 4,
             final_catch_rate,
@@ -416,6 +420,7 @@ pub fn resolve_capture_attempt(
     Ok(CaptureOutcome {
         caught: false,
         blocked: false,
+        storage_full: false,
         wobble_count,
         animation_shakes: wobble_count,
         final_catch_rate,
@@ -436,32 +441,11 @@ pub fn throw_ball_from_bag(
 ) -> Result<Option<CaptureOutcome>, CaptureUseError> {
     validate_capture_ball_item(rules, ball)?;
     context.ball_id = ball.script_name.clone();
-    if context.trainer_battle {
-        if bag.quantity(ball) == 0 {
-            return Ok(None);
-        }
-        let mut outcome = resolve_capture_attempt(
-            player,
-            enemy,
-            &context,
-            rules,
-            wobble_probabilities,
-            rng,
-        )?;
-        outcome.ball_id = Some(context.ball_id);
-        return Ok(Some(outcome));
-    }
     if !bag.consume_ball(ball).map_err(CaptureUseError::Bag)? {
         return Ok(None);
     }
-    let mut outcome = resolve_capture_attempt(
-        player,
-        enemy,
-        &context,
-        rules,
-        wobble_probabilities,
-        rng,
-    )?;
+    let mut outcome =
+        resolve_capture_attempt(player, enemy, &context, rules, wobble_probabilities, rng)?;
     outcome.ball_id = Some(context.ball_id);
     Ok(Some(outcome))
 }
@@ -777,10 +761,17 @@ pub fn complete_active_wild_capture_result(
             location: 0,
         });
     }
-    if battle_type == "BATTLETYPE_BUG_CONTEST" {
+    if matches!(
+        battle_type.as_str(),
+        "BATTLETYPE_CONTEST" | "BATTLETYPE_BUG_CONTEST" | "BATTLETYPE_PARK"
+    ) {
         let mut contest_pokemon = enemy_pokemon;
         contest_pokemon.status = None;
-        contest_pokemon.original_trainer_name = state.player_name.clone();
+        contest_pokemon.original_trainer_name = if state.player_name.is_empty() {
+            "PLAYER".to_string()
+        } else {
+            state.player_name.clone()
+        };
         contest_pokemon.original_trainer_id = state.player_id;
         state.pokedex.record_caught_pokemon(&contest_pokemon);
         if state.bug_contest.caught_mon.is_some() {
@@ -803,6 +794,23 @@ pub fn complete_active_wild_capture_result(
             contest_pokemon: Some(contest_pokemon),
         });
     }
+    if battle_type == "BATTLETYPE_TUTORIAL" {
+        // The Dude demo owns a temporary battle and bag. Crystal ends it after
+        // the scripted catch without putting that Rattata in the player's save.
+        state.battle_result |= 1 << 6;
+        deactivate_battle(state);
+        state.sync_party_from_storage();
+        return Ok(CaptureCompletion {
+            stored: None,
+            contest_pokemon: None,
+        });
+    }
+    enemy_pokemon.original_trainer_name = if state.player_name.is_empty() {
+        "PLAYER".to_string()
+    } else {
+        state.player_name.clone()
+    };
+    enemy_pokemon.original_trainer_id = state.player_id;
     let stored = complete_captured_pokemon(
         outcome,
         &mut state.storage,
@@ -1836,6 +1844,7 @@ mod tests {
         let outcome = CaptureOutcome {
             caught: true,
             blocked: false,
+            storage_full: false,
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
@@ -1883,6 +1892,7 @@ mod tests {
         let outcome = CaptureOutcome {
             caught: true,
             blocked: false,
+            storage_full: false,
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
@@ -1919,6 +1929,7 @@ mod tests {
         let outcome = CaptureOutcome {
             caught: false,
             blocked: false,
+            storage_full: false,
             wobble_count: 0,
             animation_shakes: 0,
             final_catch_rate: 1,
@@ -2016,7 +2027,7 @@ mod tests {
     }
 
     #[test]
-    fn throwing_ball_in_trainer_battle_is_blocked_without_consuming_bag_item() {
+    fn throwing_ball_in_trainer_battle_is_blocked_and_consumes_bag_item() {
         let ball = test_ball("POKE_BALL");
         let player = pokemon("CHIKORITA", 45, 5, 20, 20);
         let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
@@ -2043,7 +2054,7 @@ mod tests {
         assert!(!outcome.caught);
         assert_eq!(outcome.ball_id.as_deref(), Some("POKE_BALL"));
         assert_eq!(outcome.rng_seed_after, rng.seed());
-        assert_eq!(bag.quantity(&ball), 1);
+        assert_eq!(bag.quantity(&ball), 0);
 
         let mut empty_bag = Bag::default();
         let mut context = CaptureAttemptContext::wild("IGNORED");

@@ -86,7 +86,7 @@ pub fn battle_escape_rules_issues(
     if rules.enemy_speed_divisor == 0 {
         issues.push(BattleEscapeRulesIssue::MissingEnemySpeedDivisor);
     }
-    if rules.rng_roll_values == 0 || rules.rng_roll_values > u16::from(u8::MAX) + 1 {
+    if rules.rng_roll_values != u16::from(u8::MAX) + 1 {
         issues.push(BattleEscapeRulesIssue::InvalidRngRollValues {
             rng_roll_values: rules.rng_roll_values,
         });
@@ -132,28 +132,25 @@ pub fn attempt_wild_battle_escape(
     let player_speed = escape_speed(EscapeSide::Player, player, stat_multipliers)?;
     let enemy_speed = escape_speed(EscapeSide::Enemy, enemy, stat_multipliers)?;
     let chance = escape_chance(player_speed, enemy_speed, attempts_before, rules)?;
+    let attempts_after = attempts_before.saturating_add(1);
     if player_speed >= enemy_speed || chance >= rules.rng_roll_values {
         return Ok(BattleEscapeAttempt {
             escaped: true,
             chance,
             roll: None,
             attempts_before,
-            attempts_after: attempts_before,
+            attempts_after,
             rng_seed_after: rng.seed(),
         });
     }
-    let roll = rng.randrange(u32::from(rules.rng_roll_values)) as u8;
-    let escaped = u16::from(roll) < chance;
+    let roll = rng.battle_random_byte();
+    let escaped = u16::from(roll) <= chance;
     Ok(BattleEscapeAttempt {
         escaped,
         chance,
         roll: Some(roll),
         attempts_before,
-        attempts_after: if escaped {
-            attempts_before
-        } else {
-            attempts_before.saturating_add(1)
-        },
+        attempts_after,
         rng_seed_after: rng.seed(),
     })
 }
@@ -174,9 +171,9 @@ pub fn escape_chance(
             message: "enemy_speed_divisor must be nonzero".to_string(),
         });
     }
-    if rules.rng_roll_values == 0 || rules.rng_roll_values > u16::from(u8::MAX) + 1 {
+    if rules.rng_roll_values != u16::from(u8::MAX) + 1 {
         return Err(BattleEscapeError::InvalidRules {
-            message: "rng_roll_values must be in 1..=256".to_string(),
+            message: "rng_roll_values must be exactly 256".to_string(),
         });
     }
     let enemy_divisor = (enemy_speed / rules.enemy_speed_divisor).max(1);
@@ -342,7 +339,28 @@ mod tests {
         assert!(outcome.escaped);
         assert_eq!(outcome.roll, None);
         assert_eq!(outcome.attempts_before, 2);
-        assert_eq!(outcome.attempts_after, 2);
+        assert_eq!(outcome.attempts_after, 3);
+        assert_eq!(outcome.rng_seed_after, 7);
+    }
+
+    #[test]
+    fn equal_speed_player_escapes_without_rng() {
+        let player = pokemon("RATTATA", 60);
+        let enemy = pokemon("PIDGEY", 60);
+        let mut rng = Random::new(7);
+
+        let outcome = attempt_wild_battle_escape(
+            &player,
+            &enemy,
+            &stat_multipliers(),
+            &escape_rules(),
+            0,
+            &mut rng,
+        )
+        .expect("equal-speed escape resolves");
+
+        assert!(outcome.escaped);
+        assert_eq!(outcome.roll, None);
         assert_eq!(outcome.rng_seed_after, 7);
     }
 

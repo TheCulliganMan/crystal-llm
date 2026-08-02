@@ -6,7 +6,9 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::multiplayer::{fnv1a32_bytes, fnv1a32_hex_bytes, game_state_checksum};
+use sha2::{Digest, Sha256};
+
+use crate::multiplayer::{fnv1a32_bytes, game_state_checksum};
 use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
@@ -60,20 +62,20 @@ impl SaveModpackIdentity {
                 "save modpack identity requires non-empty compiled pack bytes".to_string(),
             ));
         }
-        let hash = fnv1a32_hex_bytes(compiled_pack_bytes);
+        let hash = sha256_hex(compiled_pack_bytes);
         Self::new(id, hash)
     }
 
     pub fn validate(&self) -> Result<(), SaveError> {
         Self::validate_id(&self.id)?;
-        if self.hash.len() != 8
+        if self.hash.len() != 64
             || !self
                 .hash
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(SaveError::InvalidIdentity(format!(
-                "save modpack hash '{}' must be an exact 8-character lowercase FNV hex hash",
+                "save modpack hash '{}' must be an exact 64-character lowercase SHA-256 hex digest",
                 self.hash
             )));
         }
@@ -851,16 +853,21 @@ fn assert_save_matches_modpack(
 }
 
 pub fn validate_pack_content_hash(hash: &str) -> Result<(), SaveError> {
-    if hash.len() != 8
+    if hash.len() != 64
         || !hash
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(SaveError::InvalidIdentity(format!(
-            "save pack content hash '{hash}' must be an exact 8-character lowercase FNV hex hash"
+            "save pack content hash '{hash}' must be an exact 64-character lowercase SHA-256 hex digest"
         )));
     }
     Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validate_save_path(path: &Path) -> Result<(), SaveError> {
@@ -962,7 +969,7 @@ mod tests {
     use super::*;
 
     fn pack_content_hash() -> &'static str {
-        "01020304"
+        "0102030401020304010203040102030401020304010203040102030401020304"
     }
 
     fn test_save(state: GameState, modpack: SaveModpackIdentity) -> SaveGame {
@@ -992,7 +999,11 @@ mod tests {
         let mut state = GameState::default();
         state.frame_counter = 42;
         state.pokedex.seen_species.insert("CHIKORITA".to_string());
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let save = test_save(state.clone(), modpack.clone());
 
         write_save_game(&path, &save).expect("write save");
@@ -1039,7 +1050,11 @@ mod tests {
     #[test]
     fn save_slot_index_lists_only_exact_pack_bound_crystalsaves() {
         let directory = temp_save_dir("slot-index");
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let mut first_state = GameState::default();
         first_state.frame_counter = 12;
         let mut second_state = GameState::default();
@@ -1076,8 +1091,16 @@ mod tests {
     #[test]
     fn save_slot_index_ignores_non_save_entries_and_skips_incompatible_saves() {
         let directory = temp_save_dir("slot-index-invalid");
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
-        let other_modpack = SaveModpackIdentity::new("other-pack", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let other_modpack = SaveModpackIdentity::new(
+            "other-pack",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
 
         write_save_game_for_modpack(
             directory.join("slot.crystalsave"),
@@ -1111,7 +1134,11 @@ mod tests {
         write_save_game_for_modpack(
             directory.join("other-hash.crystalsave"),
             GameState::default(),
-            &SaveModpackIdentity::new("core-modular", "ffffffff").expect("identity"),
+            &SaveModpackIdentity::new(
+                "core-modular",
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )
+            .expect("identity"),
             pack_content_hash(),
         )
         .expect("write incompatible hash save");
@@ -1126,7 +1153,7 @@ mod tests {
             directory.join("other-content.crystalsave"),
             GameState::default(),
             &modpack,
-            "ffffffff",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         )
         .expect("write incompatible content save");
         let slots = list_save_game_summaries_for_modpack(&directory, &modpack, pack_content_hash())
@@ -1153,7 +1180,11 @@ mod tests {
     #[test]
     fn save_slot_index_rejects_corrupt_crystalsaves_instead_of_hiding_them() {
         let directory = temp_save_dir("slot-index-corrupt");
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         write_save_game_for_modpack(
             directory.join("slot.crystalsave"),
             GameState::default(),
@@ -1178,7 +1209,11 @@ mod tests {
         let path = temp_save_path("slot.json");
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
 
         let error = write_save_game(&path, &save).expect_err("json saves are not runtime saves");
@@ -1191,7 +1226,11 @@ mod tests {
         let path = temp_save_path("slot");
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
 
         let error = write_save_game(&path, &save).expect_err("missing extension is invalid");
@@ -1204,7 +1243,11 @@ mod tests {
         let path = temp_save_path("bad slot.crystalsave");
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
 
         let error = write_save_game(&path, &save).expect_err("malformed slot id is invalid");
@@ -1219,7 +1262,11 @@ mod tests {
     fn save_paths_reject_current_and_parent_directory_aliases() {
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
         let bytes = encode_save_game_bytes(&save).expect("encode save");
 
@@ -1249,7 +1296,11 @@ mod tests {
         let path = temp_save_path("slot.crystalsave");
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
         write_save_game(&path, &save).expect("write save");
         let mut bytes = std::fs::read(&path).expect("read raw save");
@@ -1272,7 +1323,11 @@ mod tests {
 
     #[test]
     fn framed_save_bytes_accept_transport_source_labels_without_path_coercion() {
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let save = test_save(GameState::default(), modpack.clone());
         let bytes = encode_save_game_bytes(&save).expect("encode framed save");
 
@@ -1291,7 +1346,11 @@ mod tests {
     fn save_rejects_empty_payload_hash_mismatch_and_legacy_unframed_payloads() {
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
 
         let mut empty = Vec::with_capacity(SAVE_HEADER_LEN);
@@ -1348,7 +1407,11 @@ mod tests {
     fn save_validates_modpack_identity_and_frame() {
         let mut save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
         save.metadata.saved_frame = 9;
 
@@ -1361,7 +1424,11 @@ mod tests {
         ));
         let mut hash_mismatch = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
         let expected_hash = hash_mismatch.metadata.saved_state_hash;
         hash_mismatch.metadata.saved_state_hash ^= 1;
@@ -1371,38 +1438,53 @@ mod tests {
                 if expected == expected_hash ^ 1 && actual == expected_hash
         ));
         assert!(SaveModpackIdentity::new("core-modular", "not-a-hash").is_err());
-        let uppercase_hash = SaveModpackIdentity::new("core-modular", "ABCDEF12")
-            .expect_err("hash is exact lowercase");
+        let uppercase_hash = SaveModpackIdentity::new(
+            "core-modular",
+            "ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12",
+        )
+        .expect_err("hash is exact lowercase");
         assert!(
             uppercase_hash
                 .to_string()
-                .contains("exact 8-character lowercase FNV hex hash"),
+                .contains("exact 64-character lowercase SHA-256 hex digest"),
             "{uppercase_hash}"
         );
-        let padded_id =
-            SaveModpackIdentity::new(" core-modular ", "1234abcd").expect_err("id is untrimmed");
+        let padded_id = SaveModpackIdentity::new(
+            " core-modular ",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect_err("id is untrimmed");
         assert!(
             padded_id
                 .to_string()
                 .contains("id must be exact and untrimmed"),
             "{padded_id}"
         );
-        let whitespace_id =
-            SaveModpackIdentity::new(" ", "1234abcd").expect_err("id whitespace is untrimmed");
+        let whitespace_id = SaveModpackIdentity::new(
+            " ",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect_err("id whitespace is untrimmed");
         assert!(
             whitespace_id
                 .to_string()
                 .contains("id must be exact and untrimmed"),
             "{whitespace_id}"
         );
-        let spaced_id =
-            SaveModpackIdentity::new("core modular", "1234abcd").expect_err("id is a token");
+        let spaced_id = SaveModpackIdentity::new(
+            "core modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect_err("id is a token");
         assert!(
             spaced_id.to_string().contains("separated manifest ids"),
             "{spaced_id}"
         );
-        let joined_identity = SaveModpackIdentity::new("core-modular+johto.plus", "1234abcd")
-            .expect("joined manifest ids are the canonical runtime pack id");
+        let joined_identity = SaveModpackIdentity::new(
+            "core-modular+johto.plus",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("joined manifest ids are the canonical runtime pack id");
         assert_eq!(joined_identity.id(), "core-modular+johto.plus");
         for malformed_id in [
             "+core-modular",
@@ -1412,8 +1494,11 @@ mod tests {
             "core-modular+johto/plus",
             "core-modular+johto plus",
         ] {
-            let error = SaveModpackIdentity::new(malformed_id, "1234abcd")
-                .expect_err("malformed joined manifest ids are invalid");
+            let error = SaveModpackIdentity::new(
+                malformed_id,
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect_err("malformed joined manifest ids are invalid");
             assert!(
                 error.to_string().contains("separated manifest ids"),
                 "{malformed_id}: {error}"
@@ -1425,8 +1510,11 @@ mod tests {
             "core-modular+fallback-johto",
             "core-modular+legacy_johto",
         ] {
-            let error = SaveModpackIdentity::new(reserved_id, "1234abcd")
-                .expect_err("reserved runtime pack identities are invalid");
+            let error = SaveModpackIdentity::new(
+                reserved_id,
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect_err("reserved runtime pack identities are invalid");
             assert!(
                 error
                     .to_string()
@@ -1440,7 +1528,11 @@ mod tests {
     fn save_game_deserialize_rejects_invalid_frame_without_later_fixup() {
         let mut save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
         save.metadata.saved_frame = 7;
         let payload =
@@ -1463,7 +1555,11 @@ mod tests {
     fn corrupted_primary_save_recovers_from_backup_and_repairs_primary() {
         let path = temp_save_path("backup-recovery.crystalsave");
         let backup = save_backup_path(&path);
-        let modpack = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
 
         let mut first_state = GameState::default();
         first_state.frame_counter = 11;
@@ -1500,7 +1596,7 @@ mod tests {
     fn save_json_payloads_reject_unknown_fields_without_identity_fallbacks() {
         let identity_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
             "id": "core-modular",
-            "hash": "1234abcd",
+            "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
             "normalized_id": "CORE-MODULAR"
         }))
         .expect_err("modpack identity must not accept alternate ids")
@@ -1512,18 +1608,18 @@ mod tests {
 
         let hash_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
             "id": "core-modular",
-            "hash": "ABCDEF12"
+            "hash": "ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12ABCDEF12"
         }))
         .expect_err("modpack identity hashes must validate during JSON load")
         .to_string();
         assert!(
-            hash_error.contains("exact 8-character lowercase FNV hex hash"),
+            hash_error.contains("exact 64-character lowercase SHA-256 hex digest"),
             "{hash_error}"
         );
 
         let reserved_error = serde_json::from_value::<SaveModpackIdentity>(serde_json::json!({
             "id": "core-modular+fallback-save",
-            "hash": "1234abcd"
+            "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
         }))
         .expect_err("modpack identity ids must validate during JSON load")
         .to_string();
@@ -1535,9 +1631,9 @@ mod tests {
         let metadata_frame_error = serde_json::from_value::<SaveMetadata>(serde_json::json!({
             "modpack": {
                 "id": "core-modular",
-                "hash": "1234abcd"
+                "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
             },
-            "pack_content_hash": "01020304",
+            "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304",
             "created_frame": 9,
             "saved_frame": 8,
             "saved_state_hash": 0
@@ -1552,9 +1648,9 @@ mod tests {
         let metadata_identity_error = serde_json::from_value::<SaveMetadata>(serde_json::json!({
             "modpack": {
                 "id": "legacy-pack",
-                "hash": "1234abcd"
+                "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
             },
-            "pack_content_hash": "01020304",
+            "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304",
             "created_frame": 8,
             "saved_frame": 8,
             "saved_state_hash": 0
@@ -1568,7 +1664,11 @@ mod tests {
 
         let mut save_json = serde_json::to_value(test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         ))
         .expect("save json");
         save_json
@@ -1589,9 +1689,17 @@ mod tests {
     fn save_modpack_hash_must_match_runtime_pack() {
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
-        let expected = SaveModpackIdentity::new("core-modular", "ffffffff").expect("identity");
+        let expected = SaveModpackIdentity::new(
+            "core-modular",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .expect("identity");
 
         let error = assert_save_matches_modpack(&save, &expected, pack_content_hash())
             .expect_err("mismatched modpack hashes must not load silently");
@@ -1625,7 +1733,11 @@ mod tests {
 
     #[test]
     fn save_modpack_match_requires_valid_save_payload() {
-        let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let expected = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let mut save = test_save(GameState::default(), expected.clone());
         save.metadata.saved_frame = 9;
 
@@ -1649,9 +1761,17 @@ mod tests {
     fn save_modpack_id_must_match_runtime_pack() {
         let save = test_save(
             GameState::default(),
-            SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity"),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
         );
-        let expected = SaveModpackIdentity::new("other-pack", "1234abcd").expect("identity");
+        let expected = SaveModpackIdentity::new(
+            "other-pack",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
 
         let error = assert_save_matches_modpack(&save, &expected, pack_content_hash())
             .expect_err("mismatched modpack ids must not load silently");
@@ -1661,24 +1781,41 @@ mod tests {
 
     #[test]
     fn save_pack_content_hash_must_match_runtime_pack() {
-        let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let expected = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let save = test_save(GameState::default(), expected.clone());
 
-        let error = assert_save_matches_modpack(&save, &expected, "ffffffff")
-            .expect_err("mismatched pack content hashes must not load silently");
+        let error = assert_save_matches_modpack(
+            &save,
+            &expected,
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .expect_err("mismatched pack content hashes must not load silently");
 
         assert!(matches!(error, SaveError::PackContentHashMismatch { .. }));
 
         let bytes = encode_save_game_bytes(&save).expect("encode framed save");
         assert!(matches!(
-            read_save_game_bytes_for_modpack(&bytes, "slot.crystalsave", &expected, "ffffffff"),
+            read_save_game_bytes_for_modpack(
+                &bytes,
+                "slot.crystalsave",
+                &expected,
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
             Err(SaveError::PackContentHashMismatch { .. })
         ));
     }
 
     #[test]
     fn save_validation_rejects_invalid_saved_state_identifiers() {
-        let expected = SaveModpackIdentity::new("core-modular", "1234abcd").expect("identity");
+        let expected = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
         let mut save = test_save(GameState::default(), expected.clone());
         save.state
             .flags
@@ -1751,6 +1888,7 @@ mod tests {
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
         runtime_queue_save_json["state"]["script_runtime"]["command_queue"] = serde_json::json!([{
+            "origin_map_name": "TestMap",
             "command": "callasm",
             "target": "Queued Target",
             "bank": "BANK1",
@@ -1846,12 +1984,9 @@ mod tests {
                 .expect("identity");
 
         assert_eq!(identity.id, "core-modular");
-        assert_eq!(identity.hash.len(), 8);
-        assert!(
-            identity
-                .hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        assert_eq!(
+            identity.hash,
+            "7563c469171e9467f67116b9ed207de1ec7b9180c4aebe7da709e6f991c1aa7f"
         );
         let empty = SaveModpackIdentity::from_compiled_pack_bytes("core-modular", b"")
             .expect_err("empty compiled pack bytes are not a runtime pack identity");

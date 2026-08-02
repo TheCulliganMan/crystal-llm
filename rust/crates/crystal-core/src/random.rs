@@ -121,7 +121,10 @@ where
                 self.rejected_ranges += 1;
                 continue;
             }
-            return value / max;
+            // SimpleDivide returns the remainder in A.  RandomRange therefore
+            // returns `random % max`, not the quotient (the latter produces
+            // values far outside the requested range for every max < 16).
+            return value % max;
         }
     }
 }
@@ -142,20 +145,18 @@ impl Random {
         }
     }
 
-    /// Construct the gameplay RNG used by the Rust runtime.  `Random::new`
-    /// remains available for deterministic legacy/unit fixtures, while all
-    /// runtime adapters can opt into Crystal's byte-wide ADC/SBC algorithm.
-    /// The divider is a deterministic injected sample stream; production can
-    /// replace it through the replay/frame adapter without changing callers.
+    /// Construct the gameplay RNG used by the Rust runtime, matching the
+    /// TypeScript HardwareRNG state transition and divider LFSR. `Random::new`
+    /// remains a separate deterministic fixture path.
     pub const fn new_crystal(seed: u32) -> Self {
         Self {
             seed,
             crystal: Some(CrystalRandomState {
                 add: seed as u8,
                 sub: (seed >> 8) as u8,
-                carry: (seed & 0x8000_0000) != 0,
+                carry: false,
             }),
-            divider: ((seed >> 16) as u16) | 1,
+            divider: (seed >> 16) as u16,
         }
     }
 
@@ -165,7 +166,6 @@ impl Random {
                 (state.add as u32)
                     | ((state.sub as u32) << 8)
                     | ((self.divider as u32) << 16)
-                    | ((state.carry as u32) << 31)
             }
             None => self.seed,
         }
@@ -192,52 +192,60 @@ impl Random {
         self.randrange(256) as u8
     }
 
+    /// Return the two Crystal RNG bytes produced by one `Random` call.  The
+    /// de-novo Pokérus routine checks both `hRandomAdd` and `hRandomSub`.
+    pub fn crystal_random_add_sub(&mut self) -> (u8, u8) {
+        if self.crystal.is_some() {
+            let sub = self.crystal_random();
+            let add = self.crystal.expect("crystal RNG state remains present").add;
+            (add, sub)
+        } else {
+            let sub = self.randrange(256) as u8;
+            (sub, sub)
+        }
+    }
+
     fn crystal_random(&mut self) -> u8 {
         let Some(mut state) = self.crystal else {
             unreachable!("crystal_random called for legacy RNG");
         };
         let divider_add = self.next_divider();
-        let (partial_add, carry_from_divider) = state.add.overflowing_add(divider_add);
-        let (add, carry_from_flag) = partial_add.overflowing_add(u8::from(state.carry));
-        let add_overflow = carry_from_divider || carry_from_flag;
-        state.add = add;
-        let divider_sub = self.next_divider();
-        let (partial_sub, borrow_from_divider) = state.sub.overflowing_sub(divider_sub);
-        let (sub, borrow_from_flag) = partial_sub.overflowing_sub(u8::from(add_overflow));
-        state.sub = sub;
-        state.carry = borrow_from_divider || borrow_from_flag;
+        state.add = state.add.wrapping_add(divider_add);
+        state.sub = state.sub.wrapping_sub(divider_add);
+        state.carry = false;
         self.crystal = Some(state);
-        sub
+        state.sub
     }
 
     fn next_divider(&mut self) -> u8 {
-        // Deterministic divider samples model the hardware input boundary.
-        // The frame/runtime adapter can seed this cursor with recorded DIV
-        // bytes for oracle replay.
-        self.divider = self.divider.wrapping_mul(251).wrapping_add(1);
-        (self.divider >> 8) as u8
+        if self.divider == 0 {
+            self.divider = 0xace1;
+        }
+        let feedback = self.divider & 1;
+        self.divider >>= 1;
+        if feedback != 0 {
+            self.divider ^= 0xb400;
+        }
+        self.divider as u8
     }
 
     fn crystal_randrange(&mut self, max: u32) -> u32 {
-        if max <= u32::from(u8::MAX) {
-            let max = max as u8;
-            let remainder = (256u16 % u16::from(max)) as u8;
-            loop {
-                self.crystal_random();
-                let value = self.crystal.expect("crystal state").add;
-                if value.checked_add(remainder).is_none() {
-                    continue;
-                }
-                return u32::from(value / max);
+        let mut mask = 1u32;
+        while mask < max {
+            mask = (mask << 1) | 1;
+        }
+        let bit_length = 32 - mask.leading_zeros();
+        let byte_count = bit_length.div_ceil(8).max(1);
+        loop {
+            let mut value = 0u32;
+            for _ in 0..byte_count {
+                value = (value << 8) | u32::from(self.crystal_random());
+            }
+            value &= mask;
+            if value < max {
+                return value;
             }
         }
-        if max == 256 {
-            self.crystal_random();
-            return u32::from(self.crystal.expect("crystal state").add);
-        }
-        let hi = self.crystal_randrange(256);
-        let lo = self.crystal_randrange(256);
-        ((hi << 8) | lo) % max
     }
 }
 
@@ -289,23 +297,33 @@ mod tests {
             ReplayDivider::new([250, 0, 3, 0, 7, 0]),
         );
 
-        assert_eq!(rng.random_range(10), 0);
+        // The first two hRandomAdd values are in the rejected high window;
+        // the third wraps to 4 and is the first accepted Crystal sample.
+        assert_eq!(rng.random_range(10), 4);
         assert_eq!(rng.random_calls(), 3);
         assert_eq!(rng.rejected_ranges(), 2);
     }
 
     #[test]
-    fn battle_random_byte_exposes_the_subtraction_register() {
-        let mut rng = Random::new_crystal(0x0000_8010);
-        let mut expected = CrystalRandom::new(
+    fn crystal_random_range_returns_simple_divide_remainder() {
+        let mut rng = CrystalRandom::new(
             CrystalRandomState {
-                add: 0x10,
-                sub: 0x80,
+                add: 0,
+                sub: 0,
                 carry: false,
             },
-            ReplayDivider::new([0, 247]),
+            ReplayDivider::new([7, 0]),
         );
-        assert_eq!(rng.battle_random_byte(), expected.random());
+        assert_eq!(rng.random_range(3), 1);
+    }
+
+    #[test]
+    fn battle_random_byte_exposes_the_subtraction_register() {
+        let mut rng = Random::new_crystal(0x0000_8010);
+        // The TypeScript runtime advances its divider once and applies the
+        // same byte to both accumulators.  0xace1 steps to 0xe270, so hRandomSub
+        // becomes 0x80 - 0x70 = 0x10.
+        assert_eq!(rng.battle_random_byte(), 0x10);
     }
 
     #[test]

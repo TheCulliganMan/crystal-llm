@@ -97,6 +97,16 @@ pub enum AudioProgramSource {
         loop_start_sample: Option<usize>,
         loop_end_sample: Option<usize>,
     },
+    /// Gzip-compressed PCM kept lazy inside a compiled game pack. The
+    /// renderer expands it only when the track is actually played.
+    PcmGzip {
+        bytes: Vec<u8>,
+        format: AudioPcmFormat,
+        byte_len: usize,
+        payload_hash: String,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
+    },
     PcmFile {
         path: PathBuf,
         format: AudioPcmFormat,
@@ -649,7 +659,9 @@ mod tests {
         assert!(!program.cache_key.contains(".mp3"));
         match program.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmFile { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }
@@ -666,7 +678,9 @@ mod tests {
         assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
         match sfx.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmFile { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }
@@ -684,7 +698,9 @@ mod tests {
         assert!(!cry.cache_key.contains(".mp3"));
         match cry.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmFile { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmFile { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }

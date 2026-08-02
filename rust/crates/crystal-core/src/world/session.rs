@@ -11,12 +11,13 @@ use crate::random::Random;
 use crate::state::{EventFlagMemory, GameState, GameStateFrameError};
 
 use super::collision::{
-    Terrain, TilesetCollision, can_jump_ledge, describe_collision, permissions, sample_collision,
+    Terrain, TilesetCollision, can_jump_ledge, describe_collision, directional_warp_facing,
+    is_warp_permission, permissions, sample_collision, standard_interaction_script,
 };
 use super::encounters::{
     EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
-    ResolvedWildEncounter, TimeOfDay, WildEncounterData, encounter_threshold,
-    passes_encounter_roll, select_wild_encounter,
+    ResolvedWildEncounter, SpecialWildEncounterEntry, TimeOfDay, WildEncounter, WildEncounterData,
+    encounter_threshold, passes_encounter_roll, select_wild_encounter,
 };
 use super::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
 use super::movement::{
@@ -49,8 +50,19 @@ pub struct OverworldSession {
     pub player_hidden: bool,
     pub hidden_event_flags: BTreeSet<String>,
     pub hidden_object_identifiers: BTreeSet<String>,
+    /// The time used by Crystal's object scheduler (`hram_y`).  This lives on
+    /// the session because collision, interaction, and trainer sight all
+    /// query the same visible-object set.
+    #[serde(default = "default_session_time_of_day")]
+    pub time_of_day: TimeOfDay,
     pub tileset: TilesetCollision,
     pub player: PlayerMovementState,
+    #[serde(default)]
+    pub last_step_direction: Option<Direction>,
+}
+
+const fn default_session_time_of_day() -> TimeOfDay {
+    TimeOfDay::Day
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +229,7 @@ pub struct OverworldLedgeJumpResult {
     pub warp: Option<WarpTrigger>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OverworldInteractionTarget {
     Object {
@@ -228,9 +240,12 @@ pub enum OverworldInteractionTarget {
     Background {
         event_type: String,
     },
+    Collision {
+        permission: u8,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldInteraction {
     pub map_name: String,
@@ -258,6 +273,13 @@ pub struct EncounterCheckOptions {
     pub has_cleanse_tag: bool,
     pub active_repel_item: Option<String>,
     pub lead_party_level: Option<u8>,
+    /// Ordered Roamer slots (Raikou, Entei, Suicune). A matching slot is
+    /// selected with Crystal's post-threshold roaming roll before the normal
+    /// encounter slot roll.
+    #[serde(default)]
+    pub roaming_candidates: Vec<Option<(String, u8)>>,
+    #[serde(default)]
+    pub special_wild_encounters: Vec<SpecialWildEncounterEntry>,
 }
 
 impl Default for EncounterCheckOptions {
@@ -268,6 +290,8 @@ impl Default for EncounterCheckOptions {
             has_cleanse_tag: false,
             active_repel_item: None,
             lead_party_level: None,
+            roaming_candidates: Vec::new(),
+            special_wild_encounters: Vec::new(),
         }
     }
 }
@@ -374,8 +398,10 @@ impl OverworldSession {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(player_tile),
+            last_step_direction: None,
         }
     }
 
@@ -469,6 +495,7 @@ impl OverworldSession {
         );
         if let StepOutcome::Moved { from, to, .. } = outcome {
             self.update_follow_after_entity_move("PLAYER", from, to);
+            self.last_step_direction = Some(direction);
         }
         self.frame += 1;
         Ok(outcome)
@@ -498,6 +525,7 @@ impl OverworldSession {
         );
         if let LedgeJumpOutcome::Jumped { from, to, .. } = outcome {
             self.update_follow_after_entity_move("PLAYER", from, to);
+            self.last_step_direction = Some(direction);
         }
         self.frame += 1;
         Ok(outcome)
@@ -625,6 +653,30 @@ impl OverworldSession {
         Ok(())
     }
 
+    pub fn set_object_runtime_facing(
+        &mut self,
+        object_id: &str,
+        direction: Direction,
+    ) -> Result<(), OverworldObjectCoordinateError> {
+        if !self
+            .objects
+            .iter()
+            .any(|object| object.object_identifier.as_deref() == Some(object_id))
+        {
+            return Err(OverworldObjectCoordinateError::OutOfRange {
+                object_id: object_id.to_string(),
+                x: 0,
+                y: 0,
+            });
+        }
+        self.object_facings.insert(object_id.to_string(), direction);
+        Ok(())
+    }
+
+    pub fn set_player_facing(&mut self, direction: Direction) {
+        self.player.facing = direction;
+    }
+
     fn set_follow_entity_facing(&mut self, object_id: &str, direction: Direction) {
         if object_id == "PLAYER" {
             self.player.facing = direction;
@@ -657,6 +709,74 @@ impl OverworldSession {
         Ok(occupied)
     }
 
+    pub fn push_strength_boulder_checked(
+        &mut self,
+        direction: Direction,
+        options: StepOptions,
+    ) -> Result<Option<String>, OverworldObjectCoordinateError> {
+        let Some(facing_tile) = checked_move_by_stride(
+            self.player.tile,
+            direction,
+            options.stride_tiles,
+        ) else {
+            return Ok(None);
+        };
+        let Some((object_slot, object)) = self.visible_object_at_checked(facing_tile)? else {
+            return Ok(None);
+        };
+        if object.spritemovedata != "SPRITEMOVEDATA_STRENGTH_BOULDER" {
+            return Ok(None);
+        }
+        let Some(object_id) = object.object_identifier.clone() else {
+            return Ok(None);
+        };
+        let object_index = usize::from(object_slot.saturating_sub(1));
+        let object_tile = self.object_runtime_tile_checked(object_index, object)?;
+        let occupied_tiles = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(index, object)| *index != object_index && self.is_object_visible(object))
+            .map(|(index, object)| {
+                self.object_runtime_tile_checked(index, object)
+                    .map(|tile| OccupiedTile {
+                        tile,
+                        object_identifier: object.object_identifier.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut player_probe = self.player.clone();
+        if !matches!(
+            attempt_step_with_occupied_tiles(
+                &mut player_probe,
+                direction,
+                &self.map,
+                &self.tileset,
+                options,
+                &occupied_tiles,
+            ),
+            StepOutcome::Moved { .. }
+        ) {
+            return Ok(None);
+        }
+        let mut boulder = PlayerMovementState::new(object_tile);
+        let outcome = attempt_step_with_occupied_tiles(
+            &mut boulder,
+            direction,
+            &self.map,
+            &self.tileset,
+            options,
+            &occupied_tiles,
+        );
+        if !matches!(outcome, StepOutcome::Moved { .. }) {
+            return Ok(None);
+        }
+        self.object_runtime_tiles
+            .insert(object_id.clone(), boulder.tile);
+        self.object_facings.insert(object_id.clone(), direction);
+        Ok(Some(object_id))
+    }
+
     pub fn is_object_visible(&self, object: &ObjectEvent) -> bool {
         if object
             .object_identifier
@@ -665,7 +785,249 @@ impl OverworldSession {
         {
             return false;
         }
-        object.event_flag == "-1" || !self.hidden_event_flags.contains(&object.event_flag)
+        if object.event_flag != "-1" && self.hidden_event_flags.contains(&object.event_flag) {
+            return false;
+        }
+        object_visible_at_time(object.hram_y, self.time_of_day)
+    }
+
+    pub fn set_time_of_day(&mut self, time_of_day: TimeOfDay) {
+        self.time_of_day = time_of_day;
+    }
+
+    pub fn forced_movement_direction(&self) -> Option<Direction> {
+        let sample = sample_collision(&self.map, &self.tileset, self.player.tile)?;
+        match sample.permission {
+            permissions::CURRENT_RIGHT => Some(Direction::Right),
+            permissions::CURRENT_LEFT => Some(Direction::Left),
+            permissions::CURRENT_UP => Some(Direction::Up),
+            permissions::CURRENT_DOWN => Some(Direction::Down),
+            // Ice keeps the direction of the step that entered it.  Merely
+            // facing a direction on an ice tile must not start sliding.
+            permissions::ICE | permissions::ICE_2B => self.last_step_direction,
+            _ => None,
+        }
+    }
+
+    pub fn forced_current_direction(&self) -> Option<Direction> {
+        let sample = sample_collision(&self.map, &self.tileset, self.player.tile)?;
+        match sample.permission {
+            permissions::CURRENT_RIGHT => Some(Direction::Right),
+            permissions::CURRENT_LEFT => Some(Direction::Left),
+            permissions::CURRENT_UP => Some(Direction::Up),
+            permissions::CURRENT_DOWN => Some(Direction::Down),
+            _ => None,
+        }
+    }
+
+    /// Advance the frame-driven movement modes implemented by Crystal's
+    /// `SpriteMovementData`. Script-controlled objects are left untouched;
+    /// these walkers are the autonomous map-object behaviors.
+    pub fn advance_autonomous_objects(&mut self) -> Result<(), OverworldObjectCoordinateError> {
+        self.advance_autonomous_objects_with_rng(None)
+    }
+
+    pub fn advance_autonomous_objects_with_rng(
+        &mut self,
+        mut rng: Option<&mut Random>,
+    ) -> Result<(), OverworldObjectCoordinateError> {
+        // Crystal's movement task advances on a 16-frame cadence. Keeping the
+        // cadence in the session makes this deterministic for both Bevy and
+        // headless replay callers.
+        if self.frame == 0 || self.frame % 16 != 0 {
+            return Ok(());
+        }
+
+        let visible_indices: Vec<usize> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| self.is_object_visible(object))
+            .filter(|(_, object)| {
+                matches!(
+                    object.spritemovedata.as_str(),
+                    "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
+                        | "SPRITEMOVEDATA_WALK_UP_DOWN"
+                        | "SPRITEMOVEDATA_WANDER"
+                        | "SPRITEMOVEDATA_SWIM_WANDER"
+                        | "SPRITEMOVEDATA_SPINCLOCKWISE"
+                        | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
+                        | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
+                        | "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        for index in visible_indices {
+            let object = &self.objects[index];
+            let Some(object_id) = object.object_identifier.as_deref() else {
+                continue;
+            };
+            let current = self.object_runtime_tile_checked(index, object)?;
+            // Object movement uses the same one-runtime-tile stride as the
+            // player.  METATILE_WIDTH is the map-art block size, not the
+            // gameplay movement stride.
+            let stride = DEFAULT_RUNTIME_TILE_STRIDE;
+            let (min_x, max_x, min_y, max_y) = (
+                object.x as i16 * stride - object.move_range_x as i16 * stride,
+                object.x as i16 * stride + object.move_range_x as i16 * stride,
+                object.y as i16 * stride - object.move_range_y as i16 * stride,
+                object.y as i16 * stride + object.move_range_y as i16 * stride,
+            );
+            let movement = object.spritemovedata.as_str();
+            let mut direction = *self
+                .object_facings
+                .get(object_id)
+                .unwrap_or(&Direction::Down);
+            if movement == "SPRITEMOVEDATA_SPINCLOCKWISE"
+                || movement == "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
+            {
+                direction = match (movement, direction) {
+                    ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Up) => Direction::Right,
+                    ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Right) => Direction::Down,
+                    ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Down) => Direction::Left,
+                    ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Left) => Direction::Up,
+                    ("SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE", Direction::Up) => Direction::Left,
+                    ("SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE", Direction::Left) => Direction::Down,
+                    ("SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE", Direction::Down) => Direction::Right,
+                    ("SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE", Direction::Right) => Direction::Up,
+                    _ => Direction::Up,
+                };
+                self.object_facings.insert(object_id.to_string(), direction);
+                continue;
+            } else if movement == "SPRITEMOVEDATA_SPINRANDOM_SLOW"
+                || movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
+            {
+                let Some(rng) = rng.as_deref_mut() else {
+                    continue;
+                };
+                direction = match rng.randrange(4) {
+                    0 => Direction::Up,
+                    1 => Direction::Right,
+                    2 => Direction::Down,
+                    _ => Direction::Left,
+                };
+                if direction
+                    == *self
+                        .object_facings
+                        .get(object_id)
+                        .unwrap_or(&Direction::Down)
+                {
+                    direction = match direction {
+                        Direction::Up => Direction::Right,
+                        Direction::Right => Direction::Down,
+                        Direction::Down => Direction::Left,
+                        Direction::Left => Direction::Up,
+                    };
+                }
+                self.object_facings.insert(object_id.to_string(), direction);
+                continue;
+            } else if movement == "SPRITEMOVEDATA_WALK_LEFT_RIGHT" {
+                if current.x <= min_x {
+                    direction = Direction::Right;
+                } else if current.x >= max_x {
+                    direction = Direction::Left;
+                } else if !matches!(direction, Direction::Left | Direction::Right) {
+                    direction = Direction::Left;
+                }
+            } else if movement == "SPRITEMOVEDATA_WALK_UP_DOWN" {
+                if current.y <= min_y {
+                    direction = Direction::Down;
+                } else if current.y >= max_y {
+                    direction = Direction::Up;
+                } else if !matches!(direction, Direction::Up | Direction::Down) {
+                    direction = Direction::Up;
+                }
+            } else {
+                let Some(rng) = rng.as_deref_mut() else {
+                    continue;
+                };
+                let candidates = [
+                    Direction::Up,
+                    Direction::Down,
+                    Direction::Left,
+                    Direction::Right,
+                ];
+                let mut available = Vec::new();
+                for candidate in candidates {
+                    let (candidate_dx, candidate_dy) = candidate.delta();
+                    let candidate_tile = TilePosition::new(
+                        current.x + candidate_dx * stride,
+                        current.y + candidate_dy * stride,
+                    );
+                    if candidate_tile.x < min_x
+                        || candidate_tile.x > max_x
+                        || candidate_tile.y < min_y
+                        || candidate_tile.y > max_y
+                        || candidate_tile == self.player.tile
+                    {
+                        continue;
+                    }
+                    let occupied = self
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .filter(|(other_index, other)| {
+                            *other_index != index && self.is_object_visible(other)
+                        })
+                        .filter_map(|(other_index, other)| {
+                            self.object_runtime_tile_checked(other_index, other).ok()
+                        })
+                        .any(|tile| tile == candidate_tile);
+                    let walkable = sample_collision(&self.map, &self.tileset, candidate_tile)
+                        .map(|sample| {
+                            let terrain = describe_collision(sample.permission).terrain;
+                            if movement == "SPRITEMOVEDATA_SWIM_WANDER" {
+                                terrain == Terrain::Water
+                            } else {
+                                terrain != Terrain::Wall
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !occupied && walkable {
+                        available.push(candidate);
+                    }
+                }
+                let Some(selected) = available
+                    .get(rng.randrange(available.len() as u32) as usize)
+                    .copied()
+                else {
+                    continue;
+                };
+                direction = selected;
+            }
+            let (dx, dy) = direction.delta();
+            let target = TilePosition::new(current.x + dx * stride, current.y + dy * stride);
+            if target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y {
+                self.object_facings.insert(object_id.to_string(), direction);
+                continue;
+            }
+            if target == self.player.tile {
+                self.object_facings.insert(object_id.to_string(), direction);
+                continue;
+            }
+            let occupied = self
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index && self.is_object_visible(other)
+                })
+                .filter_map(|(other_index, other)| {
+                    self.object_runtime_tile_checked(other_index, other).ok()
+                })
+                .any(|tile| tile == target);
+            self.object_facings.insert(object_id.to_string(), direction);
+            let walkable = sample_collision(&self.map, &self.tileset, target)
+                .map(|sample| describe_collision(sample.permission).terrain != Terrain::Wall)
+                .unwrap_or(false);
+            if !occupied && walkable {
+                self.object_runtime_tiles
+                    .insert(object_id.to_string(), target);
+            }
+        }
+        Ok(())
     }
 
     pub fn check_interaction_checked(
@@ -710,9 +1072,8 @@ impl OverworldSession {
             }
         }
 
-        Ok(self
-            .background_event_at_checked(adjusted_tile)?
-            .map(|event| OverworldInteraction {
+        if let Some(event) = self.background_event_at_checked(adjusted_tile)? {
+            return Ok(Some(OverworldInteraction {
                 map_name: self.map.name.clone(),
                 player_tile: self.player.tile,
                 facing: self.player.facing,
@@ -721,7 +1082,23 @@ impl OverworldSession {
                 target: OverworldInteractionTarget::Background {
                     event_type: event.event_type.clone(),
                 },
-            }))
+            }));
+        }
+
+        Ok(
+            sample_collision(&self.map, &self.tileset, adjusted_tile).and_then(|sample| {
+                standard_interaction_script(sample.permission).map(|script| OverworldInteraction {
+                    map_name: self.map.name.clone(),
+                    player_tile: self.player.tile,
+                    facing: self.player.facing,
+                    target_tile: adjusted_tile,
+                    script: script.to_string(),
+                    target: OverworldInteractionTarget::Collision {
+                        permission: sample.permission,
+                    },
+                })
+            }),
+        )
     }
 
     pub fn check_coord_event_checked(
@@ -767,11 +1144,26 @@ impl OverworldSession {
     pub fn check_trainer_sight_checked(
         &self,
     ) -> Result<Option<OverworldInteraction>, OverworldCoordinateError> {
+        self.check_trainer_sight_checked_with_filter(|_| true)
+    }
+
+    pub fn check_trainer_sight_checked_with_filter<F>(
+        &self,
+        mut eligible: F,
+    ) -> Result<Option<OverworldInteraction>, OverworldCoordinateError>
+    where
+        F: FnMut(&ObjectEvent) -> bool,
+    {
         self.objects
             .iter()
             .enumerate()
             .filter(|(_, object)| self.is_object_visible(object))
-            .filter(|(_, object)| object.object_type == "OBJECTTYPE_SCRIPT" && object.radius > 0)
+            .filter(|(_, object)| eligible(object))
+            .filter(|(_, object)| {
+                object.object_type == "OBJECTTYPE_TRAINER"
+                    && object.radius > 0
+                    && object_has_dispatchable_script(object)
+            })
             .try_fold(None, |matched, (index, object)| {
                 if matched.is_some() {
                     return Ok(matched);
@@ -958,6 +1350,26 @@ impl OverworldSession {
     }
 
     pub fn check_warp_checked(&self) -> Result<Option<WarpTrigger>, OverworldEventCoordinateError> {
+        for warp in &self.map_events.warps {
+            if warp_tile_position_checked(warp).is_none() {
+                return Err(OverworldEventCoordinateError::WarpOutOfRange {
+                    index: warp.index,
+                    x: warp.x,
+                    y: warp.y,
+                });
+            }
+        }
+        let Some(collision) = sample_collision(&self.map, &self.tileset, self.player.tile) else {
+            return Ok(None);
+        };
+        if !is_warp_permission(collision.permission) {
+            return Ok(None);
+        }
+        if directional_warp_facing(collision.permission)
+            .is_some_and(|required| required != self.player.facing)
+        {
+            return Ok(None);
+        }
         self.map_events
             .warps
             .iter()
@@ -1153,7 +1565,17 @@ impl OverworldSession {
         let input = staged
             .apply_joypad_mask(joypad_mask, step_options, current_scene)
             .map_err(OverworldInputTickError::Input)?;
-        let wild_encounter = if input.action.moves_player() && input.trainer_sight.is_none() {
+        let movement_warp = match &input.action {
+            OverworldInputAction::Step(result) => result.warp.is_some(),
+            OverworldInputAction::LedgeJump(result) => result.warp.is_some(),
+            _ => false,
+        };
+        let wild_encounter = if input.action.moves_player()
+            && !movement_warp
+            && input.coord_event.is_none()
+            && input.trainer_sight.is_none()
+            && input.connection.is_none()
+        {
             staged
                 .check_wild_encounter(
                     encounters,
@@ -1197,6 +1619,14 @@ impl OverworldSession {
             direction,
             stride,
         ))
+    }
+
+    pub fn can_jump_ledge_checked(
+        &self,
+        direction: Direction,
+        options: StepOptions,
+    ) -> Result<bool, OverworldCoordinateError> {
+        self.can_jump_ledge_from_input(direction, options)
     }
 
     pub fn ledge_jump_and_check_warp_checked(
@@ -1249,6 +1679,83 @@ impl OverworldSession {
                 repelled_by: None,
                 rng_seed_after: rng.seed(),
             }));
+        }
+
+        // Crystal checks roaming monsters after the encounter-rate roll but
+        // before selecting a normal wild slot. The roll is deliberately kept
+        // byte-wide: values >= 100 miss, then bits 0..1 select one of the
+        // three roaming slots. Water encounters never use roamers.
+        if surface != EncounterSurface::Water && options.roaming_candidates.len() >= 3 {
+            let roaming_roll = rng.battle_random_byte();
+            if roaming_roll < 100 {
+                let slot = usize::from(roaming_roll & 0x03);
+                if slot != 0 {
+                    if let Some((species, level)) = options.roaming_candidates[slot - 1].clone() {
+                        let resolved = ResolvedWildEncounter {
+                            level,
+                            encounter: crate::world::encounters::WildEncounter {
+                                species,
+                                level,
+                            },
+                            slot: slot - 1,
+                        };
+                        let (resolved, repelled_by) =
+                            apply_repel_to_wild_encounter(Some(resolved), &options)?;
+                        return Ok(Some(WildEncounterRoll {
+                            map_name: self.map.name.clone(),
+                            tile: self.player.tile,
+                            surface,
+                            time: options.time,
+                            threshold,
+                            encounter_roll,
+                            slot_percent_roll: None,
+                            level_roll: Some(level),
+                            resolved,
+                            repelled_by,
+                            rng_seed_after: rng.seed(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        if !options.special_wild_encounters.is_empty() {
+            let mut roll = rng.randrange(100) as i16;
+            for entry in &options.special_wild_encounters {
+                roll -= i16::from(entry.percent);
+                if roll < 0 {
+                    let range = entry.max_level.saturating_sub(entry.min_level) + 1;
+                    let level = entry.min_level + rng.randrange(u32::from(range)) as u8;
+                    let resolved = ResolvedWildEncounter {
+                        level,
+                        encounter: WildEncounter {
+                            level,
+                            species: entry.species.clone(),
+                        },
+                        slot: 0,
+                    };
+                    let (resolved, repelled_by) =
+                        apply_repel_to_wild_encounter(Some(resolved), &options)?;
+                    return Ok(Some(WildEncounterRoll {
+                        map_name: self.map.name.clone(),
+                        tile: self.player.tile,
+                        surface,
+                        time: options.time,
+                        threshold,
+                        encounter_roll,
+                        slot_percent_roll: None,
+                        level_roll: Some(level),
+                        resolved,
+                        repelled_by,
+                        rng_seed_after: rng.seed(),
+                    }));
+                }
+            }
+            return Err(EncounterError::EmptyEncounterSlots {
+                map_name: self.map.name.clone(),
+                surface,
+                time: options.time,
+            });
         }
 
         let slot_percent_roll = next_percent_roll(rng);
@@ -1352,6 +1859,8 @@ pub fn object_event_initial_facing(spritemovedata: &str) -> Option<Direction> {
         | "SPRITEMOVEDATA_STILL"
         | "SPRITEMOVEDATA_WANDER"
         | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
+        | "SPRITEMOVEDATA_WALK_UP_DOWN"
+        | "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
         | "SPRITEMOVEDATA_STANDING_DOWN"
         | "SPRITEMOVEDATA_SPINRANDOM_FAST"
         | "SPRITEMOVEDATA_PLAYER"
@@ -1379,8 +1888,8 @@ pub fn object_event_initial_facing(spritemovedata: &str) -> Option<Direction> {
         | "SPRITEMOVEDATA_GRASS"
         | "SPRITEMOVEDATA_SWIM_WANDER" => Some(Direction::Down),
         "SPRITEMOVEDATA_STANDING_UP" => Some(Direction::Up),
-        "SPRITEMOVEDATA_WALK_LEFT_RIGHT" | "SPRITEMOVEDATA_STANDING_LEFT" => Some(Direction::Left),
-        "SPRITEMOVEDATA_WALK_UP_DOWN" | "SPRITEMOVEDATA_STANDING_RIGHT" => Some(Direction::Right),
+        "SPRITEMOVEDATA_STANDING_LEFT" => Some(Direction::Left),
+        "SPRITEMOVEDATA_STANDING_RIGHT" => Some(Direction::Right),
         "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE" => Some(Direction::Left),
         "SPRITEMOVEDATA_SPINCLOCKWISE" => Some(Direction::Right),
         _ => None,
@@ -1419,7 +1928,9 @@ fn encounter_surface_for_player_tile_checked(
         return Ok(Some(EncounterSurface::Grass));
     }
     let attributes = describe_collision(sample.permission);
-    if session.player.mode == MovementMode::Surf && attributes.terrain == Terrain::Water {
+    if matches!(session.player.mode, MovementMode::Surf | MovementMode::SurfPika)
+        && attributes.terrain == Terrain::Water
+    {
         return Ok(Some(EncounterSurface::Water));
     }
     Ok(None)
@@ -1568,8 +2079,10 @@ impl WarpTransition {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
+            last_step_direction: None,
         }
     }
 }
@@ -1596,8 +2109,10 @@ impl ConnectionTransition {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
+            last_step_direction: None,
         }
     }
 }
@@ -1618,6 +2133,20 @@ fn object_coordinate_out_of_range(
         x: object.x,
         y: object.y,
     }
+}
+
+/// Crystal stores an NPC's schedule as a bit mask in `hram_y`: morning is
+/// bit 0, daytime bit 1, and night bit 2. Zero and -1 mean "any time".
+fn object_visible_at_time(hram_y: i16, time_of_day: TimeOfDay) -> bool {
+    if hram_y == 0 || hram_y == -1 {
+        return true;
+    }
+    let time_mask = match time_of_day {
+        TimeOfDay::Morning => 0b001,
+        TimeOfDay::Day => 0b010,
+        TimeOfDay::Night => 0b100,
+    };
+    (hram_y as u16 & time_mask) != 0
 }
 
 pub fn background_event_tile_position_checked(event: &BackgroundEvent) -> Option<TilePosition> {
@@ -1665,6 +2194,124 @@ mod tests {
     use crate::timing::Frame;
     use crate::world::collision::{MetatileCollision, permissions};
     use crate::world::encounters::{WildEncounter, WildEncounterTable};
+
+    #[test]
+    fn object_schedule_mask_matches_crystal_time_of_day_bits() {
+        assert!(object_visible_at_time(-1, TimeOfDay::Morning));
+        assert!(object_visible_at_time(0, TimeOfDay::Night));
+        assert!(object_visible_at_time(0b001, TimeOfDay::Morning));
+        assert!(!object_visible_at_time(0b001, TimeOfDay::Day));
+        assert!(object_visible_at_time(0b110, TimeOfDay::Night));
+        assert!(!object_visible_at_time(0b110, TimeOfDay::Morning));
+    }
+
+    #[test]
+    fn walking_object_facings_start_from_the_asm_table_before_autonomous_movement() {
+        assert_eq!(
+            object_event_initial_facing("SPRITEMOVEDATA_WALK_LEFT_RIGHT"),
+            Some(Direction::Down)
+        );
+        assert_eq!(
+            object_event_initial_facing("SPRITEMOVEDATA_WALK_UP_DOWN"),
+            Some(Direction::Down)
+        );
+    }
+
+    #[test]
+    fn autonomous_horizontal_walker_advances_on_crystal_frame_cadence() {
+        let mut walker = object("WALKER", 1, 1, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 1;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(6, 6),
+        );
+        session.frame = 16;
+        session
+            .advance_autonomous_objects()
+            .expect("walker advances");
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(0, 1)
+        );
+    }
+
+    #[test]
+    fn autonomous_wander_uses_injected_crystal_rng_and_collision() {
+        let mut wanderer = object("WANDERER", 1, 1, "-1");
+        wanderer.spritemovedata = "SPRITEMOVEDATA_WANDER".to_string();
+        wanderer.move_range_x = 1;
+        wanderer.move_range_y = 1;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![wanderer],
+            tileset(),
+            TilePosition::new(6, 6),
+        );
+        session.frame = 16;
+        let mut rng = Random::new_crystal(0x1234_5678);
+        session
+            .advance_autonomous_objects_with_rng(Some(&mut rng))
+            .expect("wanderer advances");
+        assert_ne!(
+            session.object_runtime_tile_by_id("WANDERER").unwrap(),
+            TilePosition::new(2, 2)
+        );
+        assert_ne!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn current_permission_exposes_forced_down_direction() {
+        let current_tileset = TilesetCollision {
+            metatiles: vec![MetatileCollision {
+                collision: [permissions::CURRENT_DOWN; 4],
+            }],
+        };
+        let session = OverworldSession::new(
+            map_with_blocks(2, 2, vec![0; 4]),
+            current_tileset,
+            TilePosition::new(0, 0),
+        );
+        assert_eq!(session.forced_current_direction(), Some(Direction::Down));
+
+        for (permission, direction) in [
+            (permissions::CURRENT_RIGHT, Direction::Right),
+            (permissions::CURRENT_LEFT, Direction::Left),
+            (permissions::CURRENT_UP, Direction::Up),
+        ] {
+            let session = OverworldSession::new(
+                map_with_blocks(2, 2, vec![0; 4]),
+                TilesetCollision {
+                    metatiles: vec![MetatileCollision {
+                        collision: [permission; 4],
+                    }],
+                },
+                TilePosition::new(0, 0),
+            );
+            assert_eq!(session.forced_current_direction(), Some(direction));
+        }
+
+        let mut ice_session = OverworldSession::new(
+            map_with_blocks(2, 2, vec![0; 4]),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::ICE; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        ice_session.player.facing = Direction::Left;
+        assert_eq!(ice_session.forced_movement_direction(), None);
+        ice_session.last_step_direction = Some(Direction::Left);
+        assert_eq!(
+            ice_session.forced_movement_direction(),
+            Some(Direction::Left)
+        );
+    }
 
     fn map() -> OverworldMapData {
         OverworldMapData::from_attributes(
@@ -1816,6 +2463,19 @@ mod tests {
         }
     }
 
+    fn warp_tileset() -> TilesetCollision {
+        TilesetCollision {
+            metatiles: vec![MetatileCollision {
+                collision: [
+                    permissions::FLOOR,
+                    permissions::WARP_PANEL,
+                    permissions::FLOOR,
+                    permissions::FLOOR,
+                ],
+            }],
+        }
+    }
+
     fn counter_tileset() -> TilesetCollision {
         TilesetCollision {
             metatiles: vec![
@@ -1824,6 +2484,19 @@ mod tests {
                 },
                 MetatileCollision {
                     collision: [permissions::COUNTER; 4],
+                },
+            ],
+        }
+    }
+
+    fn interaction_tileset(permission: u8) -> TilesetCollision {
+        TilesetCollision {
+            metatiles: vec![
+                MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                },
+                MetatileCollision {
+                    collision: [permission; 4],
                 },
             ],
         }
@@ -1975,7 +2648,7 @@ mod tests {
         };
         let map = map_with_blocks(52, 3, vec![0; 156]);
         let mut session =
-            OverworldSession::with_events(map, events, tileset(), TilePosition::new(50, 2));
+            OverworldSession::with_events(map, events, warp_tileset(), TilePosition::new(50, 2));
 
         let result = session
             .step_and_check_warp_checked(
@@ -2834,6 +3507,37 @@ mod tests {
     }
 
     #[test]
+    fn interaction_dispatches_standard_scripts_for_interactive_collision_tiles() {
+        for (permission, script) in [
+            (permissions::BOOKSHELF, "MagazineBookshelfScript"),
+            (permissions::PC, "PCScript"),
+            (permissions::RADIO, "Radio1Script"),
+            (permissions::TOWN_MAP, "TownMapScript"),
+            (permissions::TV, "TVScript"),
+        ] {
+            let mut session = OverworldSession::with_events(
+                map_with_blocks(2, 1, vec![0, 1]),
+                MapEvents::default(),
+                interaction_tileset(permission),
+                TilePosition::new(1, 0),
+            );
+            session.player.facing = Direction::Right;
+
+            let interaction = session
+                .check_interaction_checked(StepOptions::default().stride_tiles)
+                .expect("checked interaction")
+                .expect("interactive collision tile");
+
+            assert_eq!(interaction.script, script, "permission {permission:#04x}");
+            assert_eq!(interaction.target_tile, TilePosition::new(2, 0));
+            assert_eq!(
+                interaction.target,
+                OverworldInteractionTarget::Collision { permission }
+            );
+        }
+    }
+
+    #[test]
     fn input_interaction_rejects_invalid_background_event_coordinates_without_advancing_frame() {
         let events = MapEvents {
             bg_events: vec![background_event(
@@ -2872,6 +3576,7 @@ mod tests {
     #[test]
     fn trainer_sight_uses_raw_object_tile_radius() {
         let mut trainer = object("ROUTE29_YOUNGSTER", 2, 0, "-1");
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
         trainer.radius = 2;
         trainer.sightline_direction_override = Some("DOWN".to_string());
         trainer.script = "Route29YoungsterScript".to_string();
@@ -2899,8 +3604,36 @@ mod tests {
                 target: OverworldInteractionTarget::Object {
                     object_index: 1,
                     object_identifier: Some("ROUTE29_YOUNGSTER".to_string()),
-                    object_type: "OBJECTTYPE_SCRIPT".to_string(),
+                    object_type: "OBJECTTYPE_TRAINER".to_string(),
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn trainer_object_type_triggers_sightline_battle() {
+        let mut trainer = object("ROUTE29_YOUNGSTER", 2, 0, "-1");
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        trainer.radius = 2;
+        trainer.sightline_direction_override = Some("DOWN".to_string());
+        let session = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 4, vec![0; 12]),
+            MapEvents::default(),
+            vec![trainer],
+            tileset(),
+            TilePosition::new(2, 2),
+        );
+        let sight = session
+            .check_trainer_sight_checked()
+            .expect("checked trainer sight")
+            .expect("trainer object sight");
+        assert_eq!(sight.script, "TestScript");
+        assert_eq!(
+            sight.target,
+            OverworldInteractionTarget::Object {
+                object_index: 1,
+                object_identifier: Some("ROUTE29_YOUNGSTER".to_string()),
+                object_type: "OBJECTTYPE_TRAINER".to_string(),
             }
         );
     }
@@ -3251,7 +3984,7 @@ mod tests {
     }
 
     #[test]
-    fn session_repel_allows_resolved_same_level_wild_encounter() {
+    fn session_repel_allows_resolved_same_level_wild_encounter_like_asm() {
         let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
         let mut rng = Random::new(1);
 
@@ -3270,9 +4003,82 @@ mod tests {
             .expect("encounter roll")
             .expect("grass encounter check");
 
-        let resolved = roll.resolved.expect("same level encounter resolves");
+        let resolved = roll.resolved.expect("same-level encounter resolves");
         assert_eq!(resolved.level, 7);
         assert_eq!(roll.repelled_by, None);
+    }
+
+    #[test]
+    fn encounter_roll_checks_roamers_before_normal_slot_selection() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut selected = None;
+        for seed in 1..10_000 {
+            let mut rng = Random::new(seed);
+            let roll = session
+                .check_wild_encounter(
+                    &encounter_data(),
+                    &encounter_slot_tables(),
+                    &encounter_music_modifiers(),
+                    &mut rng,
+                    EncounterCheckOptions {
+                        roaming_candidates: vec![Some(("RAIKOU".to_string(), 40)), None, None],
+                        ..EncounterCheckOptions::default()
+                    },
+                )
+                .expect("encounter roll");
+            if let Some(roll) =
+                roll.filter(|roll| roll.slot_percent_roll.is_none() && roll.resolved.is_some())
+            {
+                selected = Some(roll);
+                break;
+            }
+        }
+        let roll = selected.expect("a deterministic seed should select the roamer");
+        assert_eq!(
+            roll.resolved
+                .as_ref()
+                .map(|resolved| resolved.encounter.species.as_str()),
+            Some("RAIKOU")
+        );
+        assert_eq!(
+            roll.resolved.as_ref().map(|resolved| resolved.level),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn encounter_roll_uses_special_bug_contest_table_before_normal_slots() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut selected = None;
+        for seed in 1..10_000 {
+            let mut rng = Random::new(seed);
+            let roll = session
+                .check_wild_encounter(
+                    &encounter_data(),
+                    &encounter_slot_tables(),
+                    &encounter_music_modifiers(),
+                    &mut rng,
+                    EncounterCheckOptions {
+                        special_wild_encounters: vec![SpecialWildEncounterEntry {
+                            percent: 255,
+                            species: "SCYTHER".to_string(),
+                            min_level: 13,
+                            max_level: 14,
+                        }],
+                        ..EncounterCheckOptions::default()
+                    },
+                )
+                .expect("encounter roll");
+            if let Some(roll) = roll.filter(|roll| roll.resolved.is_some()) {
+                selected = Some(roll);
+                break;
+            }
+        }
+        let roll = selected.expect("a deterministic seed should resolve the special encounter");
+        let resolved = roll.resolved.expect("special encounter result");
+        assert_eq!(resolved.encounter.species, "SCYTHER");
+        assert!((13..=14).contains(&resolved.level));
+        assert_eq!(roll.slot_percent_roll, None);
     }
 
     #[test]
@@ -3378,7 +4184,7 @@ mod tests {
         let mut session = OverworldSession::with_events(
             map_with_blocks(3, 3, vec![0; 9]),
             events,
-            tileset(),
+            warp_tileset(),
             TilePosition::new(0, 2),
         );
 

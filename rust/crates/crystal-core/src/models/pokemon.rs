@@ -501,6 +501,10 @@ pub struct Pokemon {
     pub moves: Vec<LearnedMove>,
     #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub status: Option<String>,
+    /// Persistent egg identity; the status field is reserved for battle
+    /// conditions and is retained only as a legacy read discriminator.
+    #[serde(default)]
+    pub is_egg: bool,
     /// Pokérus status byte from the party structure. The low nibble stores
     /// remaining days; the high nibble is the strain and is preserved after
     /// the counter reaches zero.
@@ -516,7 +520,7 @@ pub struct Pokemon {
     pub sleep_turns: u8,
     pub flinching: bool,
     pub rampage_turns: u8,
-    pub confusion_turns: u8,
+    pub confusion_turns: u16,
     pub perish_song_turns: u8,
     pub focus_energy: bool,
     pub original_trainer_name: String,
@@ -552,6 +556,8 @@ impl<'de> Deserialize<'de> for Pokemon {
             moves: Vec<LearnedMove>,
             #[serde(deserialize_with = "required_nullable_pokemon_token")]
             status: Option<String>,
+            #[serde(default)]
+            is_egg: bool,
             pokerus: u8,
             #[serde(default)]
             caught_data: Option<CaughtData>,
@@ -564,7 +570,7 @@ impl<'de> Deserialize<'de> for Pokemon {
             sleep_turns: u8,
             flinching: bool,
             rampage_turns: u8,
-            confusion_turns: u8,
+            confusion_turns: u16,
             perish_song_turns: u8,
             focus_energy: bool,
             original_trainer_name: String,
@@ -592,6 +598,7 @@ impl<'de> Deserialize<'de> for Pokemon {
             item: raw.item,
             moves: raw.moves,
             status: raw.status,
+            is_egg: raw.is_egg,
             pokerus: raw.pokerus,
             caught_data: raw.caught_data,
             mail: raw.mail,
@@ -638,6 +645,7 @@ impl Pokemon {
             item: None,
             moves: Vec::new(),
             status: None,
+            is_egg: false,
             pokerus: 0,
             caught_data: None,
             mail: None,
@@ -1055,6 +1063,7 @@ pub fn create_pokemon_from_known_dvs(
         item: None,
         moves: learned_moves,
         status: None,
+        is_egg: false,
         pokerus: 0,
         caught_data: None,
         mail: None,

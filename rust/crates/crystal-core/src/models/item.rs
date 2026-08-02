@@ -6,6 +6,22 @@ pub const ITEM_POCKET_ITEM: &str = "ITEM";
 pub const ITEM_POCKET_BALL: &str = "BALL";
 pub const ITEM_POCKET_KEY_ITEM: &str = "KEY_ITEM";
 pub const ITEM_POCKET_TM_HM: &str = "TM_HM";
+pub const MAIL_ITEM_IDS: &[&str] = &[
+    "FLOWER_MAIL",
+    "SURF_MAIL",
+    "LITEBLUEMAIL",
+    "PORTRAITMAIL",
+    "LOVELY_MAIL",
+    "EON_MAIL",
+    "MORPH_MAIL",
+    "BLUESKY_MAIL",
+    "MUSIC_MAIL",
+    "MIRAGE_MAIL",
+];
+
+pub fn is_mail_item_id(item_id: &str) -> bool {
+    MAIL_ITEM_IDS.contains(&item_id)
+}
 
 pub fn item_pocket(id: &str) -> ItemPocket {
     id.to_string()

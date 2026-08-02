@@ -1278,7 +1278,7 @@ fn validate_command_checksum_events(events: &[GameEvent]) -> Result<(), Multipla
                     message: format!("command checksum event {index} advances to frame 0"),
                 });
             }
-            GameEvent::FrameAdvanced { .. } | GameEvent::MenuOpened | GameEvent::MenuClosed => {}
+            GameEvent::FrameAdvanced { .. } => {}
             GameEvent::JoypadChanged { pressed, down } => {
                 validate_command_event_joypad_mask(index, "pressed", *pressed)?;
                 validate_command_event_joypad_mask(index, "down", *down)?;
@@ -2915,6 +2915,20 @@ pub fn game_state_checksum(state: &GameState) -> Result<StateChecksum, StateChec
     state
         .validate_saved_state()
         .map_err(StateChecksumError::InvalidState)?;
+    game_state_checksum_unchecked(state)
+}
+
+/// Compute the authoritative state checksum without re-validating the whole
+/// save graph.
+///
+/// Runtime mutation code has already validated the loaded state and applies
+/// only typed mutations that preserve those invariants. Keeping this split
+/// lets the fixed-rate frame loop retain its checksum contract without walking
+/// every party, box, map override, script queue, and catalog reference on
+/// every frame.
+pub fn game_state_checksum_unchecked(
+    state: &GameState,
+) -> Result<StateChecksum, StateChecksumError> {
     let bytes = bincode::serde::encode_to_vec(state, state_checksum_binary_config())
         .map_err(|error| StateChecksumError::Encode(error.to_string()))?;
     Ok(StateChecksum::new(
@@ -6432,7 +6446,7 @@ mod tests {
     }
 
     fn pack_content_hash() -> &'static str {
-        "01020304"
+        "0102030401020304010203040102030401020304010203040102030401020304"
     }
 
     fn test_session(
@@ -6521,7 +6535,7 @@ mod tests {
 
     #[test]
     fn link_message_reports_exact_session_identity_for_bound_transport_messages() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let hello = LinkMessage::Hello(
             LinkHello::from_session(session.clone(), test_player(1)).expect("hello"),
@@ -6579,7 +6593,7 @@ mod tests {
             );
             assert_eq!(
                 message.validate_session_identity(
-                    &test_session("session-1", test_modpack("core-modular", "1234abcd"))
+                    &test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
                         .expect("session")
                 ),
                 Err(MultiplayerMessageError::MissingSessionIdentity {
@@ -6592,9 +6606,9 @@ mod tests {
 
     #[test]
     fn link_message_rejects_session_identity_mismatches_without_pack_fallback() {
-        let expected = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let expected = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("expected session");
-        let other_pack = test_session("session-1", test_modpack("core-modular", "ffffffff"))
+        let other_pack = test_session("session-1", test_modpack("core-modular", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
             .expect("other pack session");
         let message = LinkMessage::SessionInput(
             SessionPlayerInputFrame::new(
@@ -6623,7 +6637,7 @@ mod tests {
         assert_eq!(
             LinkMessage::SessionDisconnect(
                 SessionDisconnectFrame::new(
-                    test_session("session-1", test_modpack("core-modular", "1234abcd"))
+                    test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
                         .expect("session"),
                     2,
                     "closed",
@@ -6637,7 +6651,7 @@ mod tests {
 
     #[test]
     fn link_messages_can_bind_inputs_to_exact_pack_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let input = PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input");
         let bound =
@@ -6648,7 +6662,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_input""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -6670,7 +6684,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -6688,7 +6702,7 @@ mod tests {
                 "session_id": " session-1",
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -6748,7 +6762,7 @@ mod tests {
 
     #[test]
     fn link_messages_can_bind_menu_choices_to_exact_pack_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
         let bound =
@@ -6759,7 +6773,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_menu_choice""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -6775,7 +6789,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -6834,7 +6848,7 @@ mod tests {
 
     #[test]
     fn link_messages_can_bind_menu_choice_results_to_exact_pack_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let choice = MenuChoiceFrame::new(2, Frame(144), "RuntimeMenu", 1, 4).expect("menu choice");
         let result = MenuChoiceResultFrame::new(
@@ -6868,7 +6882,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -6882,7 +6896,7 @@ mod tests {
     #[test]
     fn link_messages_serialize_input_journals_as_transport_neutral_payloads() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let journal = DeterministicInputJournal::new(
             session,
             [1, 2],
@@ -6929,7 +6943,7 @@ mod tests {
 
     #[test]
     fn binary_link_messages_can_decode_with_exact_session_gate() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let message = LinkMessage::SessionInput(
             SessionPlayerInputFrame::new(
@@ -6949,7 +6963,7 @@ mod tests {
 
     #[test]
     fn binary_link_messages_reject_raw_or_wrong_session_at_exact_session_gate() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let raw_message =
             LinkMessage::Input(PlayerInputFrame::new(2, Frame(144), 0b1001_0000).expect("input"));
@@ -6963,7 +6977,7 @@ mod tests {
             })
         );
 
-        let wrong_session = test_session("session-1", test_modpack("core-modular", "ffffffff"))
+        let wrong_session = test_session("session-1", test_modpack("core-modular", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
             .expect("wrong session identity");
         let wrong_message = LinkMessage::SessionInput(
             SessionPlayerInputFrame::new(
@@ -7053,7 +7067,7 @@ mod tests {
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
                 " session-1",
-                test_modpack("core-modular", "1234abce"),
+                test_modpack("core-modular", "1234abce1234abce1234abce1234abce1234abce1234abce1234abce1234abce"),
                 pack_content_hash(),
             ),
             test_player(2),
@@ -7100,7 +7114,7 @@ mod tests {
 
     #[test]
     fn session_state_hash_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let checksum = StateChecksumFrame::new(2, Frame(144), 0xaabbccdd);
         let frame = SessionStateChecksumFrame::new(session.clone(), checksum.clone())
@@ -7111,7 +7125,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_state_hash""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -7128,7 +7142,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_frame =
@@ -7222,7 +7236,7 @@ mod tests {
 
     #[test]
     fn runtime_command_frames_can_be_bound_to_exact_link_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
             .expect("runtime payload");
@@ -7249,7 +7263,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -7262,7 +7276,7 @@ mod tests {
 
     #[test]
     fn runtime_command_result_frames_can_be_bound_to_exact_link_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
             .expect("runtime payload");
@@ -7303,7 +7317,7 @@ mod tests {
 
     #[test]
     fn save_summaries_can_be_bound_to_exact_link_session_identity() {
-        let modpack = test_modpack("core-modular", "1234abcd");
+        let modpack = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         let session = test_session("session-1", modpack.clone()).expect("session identity");
         let summary = save_summary(modpack, pack_content_hash(), 144);
         let bound =
@@ -7322,7 +7336,7 @@ mod tests {
         assert_eq!(LinkMessage::SaveSummary(summary).validate(), Ok(()));
 
         let other_summary = save_summary(
-            SaveModpackIdentity::new("core-modular", "ffffffff").expect("other identity"),
+            SaveModpackIdentity::new("core-modular", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").expect("other identity"),
             pack_content_hash(),
             144,
         );
@@ -7335,7 +7349,7 @@ mod tests {
 
     #[test]
     fn save_checkpoints_bind_summary_to_state_checksum_and_session() {
-        let modpack = test_modpack("core-modular", "1234abcd");
+        let modpack = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         let session = test_session("session-1", modpack.clone()).expect("session identity");
         let summary = save_summary(modpack, pack_content_hash(), 144);
         let checksum = StateChecksumFrame::new(2, Frame(144), 0xaabb_ccdd);
@@ -7344,7 +7358,7 @@ mod tests {
         let bound = SessionSaveCheckpointFrame::new(session.clone(), checkpoint.clone())
             .expect("bound checkpoint");
         let wrong_pack_session =
-            test_session("session-1", test_modpack("other-pack", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         assert!(matches!(
             SessionSaveCheckpointFrame::new(wrong_pack_session, checkpoint.clone()),
             Err(SaveCheckpointFrameError::InvalidSessionSummary { .. })
@@ -7395,7 +7409,7 @@ mod tests {
 
     #[test]
     fn link_messages_can_carry_session_bound_save_and_runtime_frames() {
-        let modpack = test_modpack("core-modular", "1234abcd");
+        let modpack = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         let session = test_session("session-1", modpack.clone()).expect("session identity");
         let summary = save_summary(modpack.clone(), pack_content_hash(), 144);
         let checkpoint = SaveCheckpointFrame::new(
@@ -7435,7 +7449,7 @@ mod tests {
             assert_eq!(message.validate(), Ok(()));
             let json = serde_json::to_string(&message).expect("serialize session-bound message");
             assert!(json.contains(r#""session_id":"session-1""#));
-            assert!(json.contains(r#""pack_content_hash":"01020304""#));
+            assert!(json.contains(r#""pack_content_hash":"0102030401020304010203040102030401020304010203040102030401020304""#));
             assert_eq!(
                 serde_json::from_str::<LinkMessage>(&json).expect("deserialize bound message"),
                 message
@@ -7444,7 +7458,7 @@ mod tests {
         }
 
         let mismatched_summary = save_summary(
-            SaveModpackIdentity::new("core-modular", "ffffffff").expect("other identity"),
+            SaveModpackIdentity::new("core-modular", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").expect("other identity"),
             pack_content_hash(),
             144,
         );
@@ -7460,7 +7474,7 @@ mod tests {
 
     #[test]
     fn deterministic_replay_bundle_binds_journal_commands_results_and_terminal_checksum() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let journal = DeterministicInputJournal::new(
             session.clone(),
@@ -7522,7 +7536,7 @@ mod tests {
 
     #[test]
     fn save_resume_replay_binds_checkpoint_to_journal_start_state() {
-        let modpack = test_modpack("core-modular", "1234abcd");
+        let modpack = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         let session = test_session("session-1", modpack.clone()).expect("session identity");
         let checkpoint = SessionSaveCheckpointFrame::new(
             session.clone(),
@@ -7563,7 +7577,7 @@ mod tests {
 
     #[test]
     fn save_resume_replay_rejects_session_and_start_checksum_mismatches() {
-        let modpack = test_modpack("core-modular", "1234abcd");
+        let modpack = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         let resume_session = test_session("session-1", modpack.clone()).expect("session identity");
         let other_session = test_session("session-2", modpack.clone()).expect("other session");
         let checkpoint = SessionSaveCheckpointFrame::new(
@@ -7638,9 +7652,9 @@ mod tests {
 
     #[test]
     fn deterministic_replay_bundle_rejects_wrong_session_and_out_of_range_commands() {
-        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
-        let other_session = test_session("session-2", test_modpack("core-modular", "1234abcd"))
+        let other_session = test_session("session-2", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("other session");
         let journal = DeterministicInputJournal::new(
             replay_session.clone(),
@@ -7751,7 +7765,7 @@ mod tests {
 
     #[test]
     fn deterministic_replay_bundle_rejects_terminal_checksum_hash_mismatch() {
-        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let replay_session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let journal = DeterministicInputJournal::new(
             replay_session,
@@ -7782,7 +7796,7 @@ mod tests {
         );
 
         let journal = DeterministicInputJournal::new(
-            test_session("session-1", test_modpack("core-modular", "1234abcd"))
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
                 .expect("session identity"),
             [1, 2],
             StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd),
@@ -7822,6 +7836,10 @@ mod tests {
             mode: crate::world::movement::MovementMode::Normal,
         };
         let checksum = game_state_checksum(&state).expect("checksum");
+        assert_eq!(
+            checksum,
+            game_state_checksum_unchecked(&state).expect("unchecked checksum")
+        );
         let frame = StateChecksumFrame::from_game_state(2, &state).expect("checksum frame");
 
         assert_eq!(checksum.frame(), 144);
@@ -7916,7 +7934,7 @@ mod tests {
     fn hello_message_carries_protocol_and_exact_modpack_identity() {
         let hello = test_hello(
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(1),
         )
         .expect("hello");
@@ -7942,9 +7960,9 @@ mod tests {
                 "session_id": "session-1",
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
-                "pack_content_hash": "01020304"
+                "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304"
             },
             "player": {
                 "id": 0,
@@ -7965,9 +7983,9 @@ mod tests {
                 "session_id": " legacy-session",
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
-                "pack_content_hash": "01020304"
+                "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304"
             },
             "player": {
                 "id": 1,
@@ -8005,10 +8023,10 @@ mod tests {
                 "session_id": "session-1",
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd",
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
                     "normalized_id": "CORE-MODULAR"
                 },
-                "pack_content_hash": "01020304"
+                "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304"
             },
             "player": {
                 "id": 1,
@@ -8068,10 +8086,10 @@ mod tests {
     #[test]
     fn link_handshake_requires_exact_session_protocol_and_modpack_identity() {
         let local =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("local");
         let matching = test_hello(
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("matching");
@@ -8080,7 +8098,7 @@ mod tests {
 
         let wrong_session = test_hello(
             "session-2",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("wrong session");
@@ -8094,23 +8112,23 @@ mod tests {
 
         let wrong_hash = test_hello(
             "session-1",
-            test_modpack("core-modular", "ffffffff"),
+            test_modpack("core-modular", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
             test_player(2),
         )
         .expect("wrong hash");
         assert_eq!(
             validate_link_hello(&local, &wrong_hash),
             Err(LinkHandshakeError::ModpackHashMismatch {
-                expected: "1234abcd".to_string(),
-                actual: "ffffffff".to_string(),
+                expected: "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd".to_string(),
+                actual: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
             })
         );
 
         let wrong_content_hash = LinkHello::from_session(
             LinkSessionIdentity::new(
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
-                "ffffffff",
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             )
             .expect("wrong content hash session"),
             test_player(2),
@@ -8120,13 +8138,13 @@ mod tests {
             validate_link_hello(&local, &wrong_content_hash),
             Err(LinkHandshakeError::PackContentHashMismatch {
                 expected: pack_content_hash().to_string(),
-                actual: "ffffffff".to_string(),
+                actual: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
             })
         );
 
         let case_changed = test_hello(
             "session-1",
-            test_modpack("CORE-MODULAR", "1234abcd"),
+            test_modpack("CORE-MODULAR", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("case changed");
@@ -8138,7 +8156,7 @@ mod tests {
             })
         );
 
-        let reserved_pack = SaveModpackIdentity::new("core-modular+fallback-link", "1234abcd")
+        let reserved_pack = SaveModpackIdentity::new("core-modular+fallback-link", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")
             .expect_err("link modpack identities must reject reserved pack id segments");
         assert!(
             reserved_pack
@@ -8151,15 +8169,15 @@ mod tests {
     #[test]
     fn link_session_identity_validation_owns_protocol_and_modpack_comparison() {
         let local =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("local");
         let matching =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("matching");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("matching");
         validate_link_session_identity(&local, &matching).expect("matching session");
 
         let protocol_drift = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION + 1,
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         assert_eq!(
@@ -8171,7 +8189,7 @@ mod tests {
         );
 
         let other_pack =
-            test_session("session-1", test_modpack("other-pack", "1234abcd")).expect("other pack");
+            test_session("session-1", test_modpack("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("other pack");
         assert_eq!(
             validate_link_session_identity(&local, &other_pack),
             Err(LinkHandshakeError::ModpackIdMismatch {
@@ -8187,7 +8205,7 @@ mod tests {
         assert_eq!(
             test_hello(
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 zero_id_player,
             ),
             Err(LinkHandshakeError::InvalidPlayerIdentity { player_id: 0 })
@@ -8197,7 +8215,7 @@ mod tests {
         assert_eq!(
             test_hello(
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 empty_player
             ),
             Err(LinkHandshakeError::MissingPlayerDisplayName { player_id: 2 })
@@ -8207,7 +8225,7 @@ mod tests {
         assert_eq!(
             test_hello(
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 padded_player
             ),
             Err(LinkHandshakeError::InvalidPlayerDisplayName {
@@ -8220,7 +8238,7 @@ mod tests {
         assert_eq!(
             test_hello(
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 control_player
             ),
             Err(LinkHandshakeError::InvalidPlayerDisplayName {
@@ -8230,7 +8248,7 @@ mod tests {
         );
 
         let local =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("local");
         let bypassed = LinkHello::new_unchecked_for_tests(
             local.clone(),
             PlayerIdentity::new_unchecked_for_tests(3, ""),
@@ -8272,7 +8290,7 @@ mod tests {
 
     #[test]
     fn link_handshake_rejects_malformed_session_ids_without_trimming() {
-        let pack_identity = test_modpack("core-modular", "1234abcd");
+        let pack_identity = test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd");
         assert_eq!(
             test_session("", pack_identity.clone()).and_then(|session| session.validate()),
             Err(LinkHandshakeError::MissingSessionId)
@@ -8319,7 +8337,7 @@ mod tests {
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION,
                 "legacy-session",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 pack_content_hash(),
             ),
             test_player(2),
@@ -8335,12 +8353,12 @@ mod tests {
     #[test]
     fn link_handshake_rejects_protocol_drift() {
         let local =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("local");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("local");
         let remote = LinkHello::new_unchecked_for_tests(
             LinkSessionIdentity::new_unchecked_for_tests(
                 LINK_PROTOCOL_VERSION + 1,
                 "session-1",
-                test_modpack("core-modular", "1234abcd"),
+                test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                 pack_content_hash(),
             ),
             test_player(2),
@@ -8358,14 +8376,14 @@ mod tests {
     #[test]
     fn link_lobby_accepts_matching_hellos_in_player_id_order() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session.clone(), test_player(3)).expect("lobby");
 
         assert_eq!(
             lobby.accept_hello(
                 test_hello(
                     "session-1",
-                    test_modpack("core-modular", "1234abcd"),
+                    test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                     test_player(1)
                 )
                 .expect("player 1 hello")
@@ -8376,7 +8394,7 @@ mod tests {
             lobby.accept_hello(
                 test_hello(
                     "session-1",
-                    test_modpack("core-modular", "1234abcd"),
+                    test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                     test_player(2)
                 )
                 .expect("player 2 hello")
@@ -8395,11 +8413,11 @@ mod tests {
     #[test]
     fn link_lobby_duplicate_same_player_is_idempotent() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
         let hello = test_hello(
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("hello");
@@ -8415,17 +8433,17 @@ mod tests {
     #[test]
     fn link_lobby_rejects_conflicting_player_identity() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
         let original = test_hello(
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("original");
         let conflict = test_hello(
             "session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             PlayerIdentity::new(2, "P02").expect("player"),
         )
         .expect("conflict");
@@ -8444,11 +8462,11 @@ mod tests {
     #[test]
     fn link_lobby_rejects_case_changed_modpack_id_before_roster_insert() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
         let case_changed = test_hello(
             "session-1",
-            test_modpack("CORE-MODULAR", "1234abcd"),
+            test_modpack("CORE-MODULAR", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             test_player(2),
         )
         .expect("case changed");
@@ -8466,13 +8484,13 @@ mod tests {
     #[test]
     fn link_lobby_creates_lockstep_buffer_for_accepted_roster() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(4)).expect("lobby");
         lobby
             .accept_hello(
                 test_hello(
                     "session-1",
-                    test_modpack("core-modular", "1234abcd"),
+                    test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                     test_player(2),
                 )
                 .expect("hello"),
@@ -8502,7 +8520,7 @@ mod tests {
     #[test]
     fn link_lobby_exports_local_hello_for_registered_player_only() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let lobby = LinkLobby::new(session.clone(), test_player(1)).expect("lobby");
 
         assert_eq!(
@@ -8518,13 +8536,13 @@ mod tests {
     #[test]
     fn battle_action_sync_waits_for_roster_and_orders_exact_actions() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(4)).expect("lobby");
         lobby
             .accept_hello(
                 test_hello(
                     "session-1",
-                    test_modpack("core-modular", "1234abcd"),
+                    test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                     test_player(2),
                 )
                 .expect("hello"),
@@ -8998,7 +9016,7 @@ mod tests {
 
     #[test]
     fn session_battle_action_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let action = BattleActionFrame::new(
             2,
@@ -9017,7 +9035,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_battle_action""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -9034,7 +9052,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -9048,13 +9066,13 @@ mod tests {
     #[test]
     fn trade_sync_swaps_confirmed_party_slots_without_item_id_coercion() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let mut lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
         lobby
             .accept_hello(
                 test_hello(
                     "session-1",
-                    test_modpack("core-modular", "1234abcd"),
+                    test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
                     test_player(2),
                 )
                 .expect("hello"),
@@ -9192,7 +9210,7 @@ mod tests {
     #[test]
     fn trade_sync_rejects_unknown_players_wrong_trade_ids_and_empty_slots() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
 
         assert_eq!(
@@ -9336,7 +9354,7 @@ mod tests {
 
     #[test]
     fn session_trade_offer_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-trade-1", test_modpack("core-crystal", "1234abc1"))
+        let session = test_session("session-trade-1", test_modpack("core-crystal", "1234abc11234abc11234abc11234abc11234abc11234abc11234abc11234abc1"))
             .expect("session");
         let offer =
             TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", Some("EMBER_ORB"))).expect("offer");
@@ -9348,8 +9366,8 @@ mod tests {
         assert!(json.contains(r#""type":"session_trade_offer""#));
         assert!(json.contains(r#""session_id":"session-trade-1""#));
         assert!(json.contains(r#""id":"core-crystal""#));
-        assert!(json.contains(r#""hash":"1234abc1""#));
-        assert!(json.contains(r#""pack_content_hash":"01020304""#));
+        assert!(json.contains(r#""hash":"1234abc11234abc11234abc11234abc11234abc11234abc11234abc11234abc1""#));
+        assert!(json.contains(r#""pack_content_hash":"0102030401020304010203040102030401020304010203040102030401020304""#));
         assert!(json.contains(r#""trade_id":"trade-1""#));
         assert!(json.contains(r#""item":"EMBER_ORB""#));
         assert_eq!(
@@ -9370,7 +9388,7 @@ mod tests {
 
     #[test]
     fn session_trade_confirmation_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-trade-2", test_modpack("core-crystal", "1234abc2"))
+        let session = test_session("session-trade-2", test_modpack("core-crystal", "1234abc21234abc21234abc21234abc21234abc21234abc21234abc21234abc2"))
             .expect("session");
         let confirmation = confirmation("trade-1", 2, true);
         let message = LinkMessage::SessionTradeConfirmation(
@@ -9382,8 +9400,8 @@ mod tests {
         assert!(json.contains(r#""type":"session_trade_confirmation""#));
         assert!(json.contains(r#""session_id":"session-trade-2""#));
         assert!(json.contains(r#""id":"core-crystal""#));
-        assert!(json.contains(r#""hash":"1234abc2""#));
-        assert!(json.contains(r#""pack_content_hash":"01020304""#));
+        assert!(json.contains(r#""hash":"1234abc21234abc21234abc21234abc21234abc21234abc21234abc21234abc2""#));
+        assert!(json.contains(r#""pack_content_hash":"0102030401020304010203040102030401020304010203040102030401020304""#));
         assert!(json.contains(r#""trade_id":"trade-1""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json)
@@ -9407,7 +9425,7 @@ mod tests {
         let session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " bad-session",
-            test_modpack("core-crystal", "1234abc1"),
+            test_modpack("core-crystal", "1234abc11234abc11234abc11234abc11234abc11234abc11234abc11234abc1"),
             pack_content_hash(),
         );
         let offer = TradeOffer::new("trade-1", 1, 0, pokemon("PIKACHU", None)).expect("offer");
@@ -9423,7 +9441,7 @@ mod tests {
                 "session_id": " bad-session",
                 "modpack": {
                     "id": "core-crystal",
-                    "hash": "1234abc1"
+                    "hash": "1234abc11234abc11234abc11234abc11234abc11234abc11234abc11234abc1"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -9448,7 +9466,7 @@ mod tests {
                 "session_id": " bad-session",
                 "modpack": {
                     "id": "core-crystal",
-                    "hash": "1234abc1"
+                    "hash": "1234abc11234abc11234abc11234abc11234abc11234abc11234abc11234abc1"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -9509,7 +9527,7 @@ mod tests {
 
     #[test]
     fn session_link_byte_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let frame = LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("frame");
         let bound = SessionLinkByteFrame::new(session.clone(), frame.clone()).expect("bound byte");
@@ -9519,7 +9537,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_link_byte""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -9573,7 +9591,7 @@ mod tests {
     #[test]
     fn link_cable_from_lobby_requires_accepted_players() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let lobby = LinkLobby::new(session, test_player(1)).expect("lobby");
 
         assert_eq!(
@@ -9617,7 +9635,7 @@ mod tests {
 
     #[test]
     fn session_link_clock_sync_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let frame = LinkClockSyncFrame::new(2, 10, 11, 12).expect("sync");
         let bound =
@@ -9631,7 +9649,7 @@ mod tests {
         );
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -9653,7 +9671,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let byte = LinkByteFrame::new(2, LINK_PREAMBLE_RESPONSE, 7).expect("byte");
@@ -9759,7 +9777,7 @@ mod tests {
 
     #[test]
     fn session_rng_init_link_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let state = BattleRngState::new(0xf3dd, 0x56, 0x78).expect("rng state");
         let bound = SessionBattleRngInitFrame::new(session.clone(), state).expect("bound rng init");
@@ -9769,7 +9787,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_rng_init""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -9791,7 +9809,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let invalid_bound =
@@ -9809,7 +9827,7 @@ mod tests {
                 "session_id": " session-1",
                 "modpack": {
                     "id": "core-modular",
-                    "hash": "1234abcd"
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
                 },
                 "pack_content_hash": pack_content_hash()
             },
@@ -9918,7 +9936,7 @@ mod tests {
     #[test]
     fn deterministic_input_journal_records_pack_bound_contiguous_lockstep_frames() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
         let frames = vec![
             LockstepFrame::new(4, BTreeMap::from([(1, 0x10), (2, 0x20)])).expect("frame 4"),
@@ -9966,7 +9984,7 @@ mod tests {
     #[test]
     fn deterministic_input_journal_rejects_missing_players_and_frame_gaps() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
         let start_checksum = StateChecksumFrame::new(1, Frame(4), 0xaabb_ccdd);
 
         assert_eq!(
@@ -10001,7 +10019,7 @@ mod tests {
     #[test]
     fn deterministic_input_journal_requires_explicit_terminal_checksum_frame() {
         let session =
-            test_session("session-1", test_modpack("core-modular", "1234abcd")).expect("session");
+            test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd")).expect("session");
 
         assert_eq!(
             DeterministicInputJournal::new(
@@ -10343,7 +10361,7 @@ mod tests {
 
     #[test]
     fn session_presence_and_interactions_carry_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let presence = OverworldPresence::new(
             "u1",
@@ -10375,7 +10393,7 @@ mod tests {
             "{presence_json}"
         );
         assert!(
-            presence_json.contains(r#""hash":"1234abcd""#),
+            presence_json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#),
             "{presence_json}"
         );
         assert!(
@@ -10456,7 +10474,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         let presence = OverworldPresence::new(
@@ -10813,7 +10831,7 @@ mod tests {
 
     #[test]
     fn session_disconnect_message_carries_exact_pack_bound_session_identity() {
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         let frame =
             SessionDisconnectFrame::new(session.clone(), 2, "closed").expect("disconnect frame");
@@ -10823,7 +10841,7 @@ mod tests {
         assert!(json.contains(r#""type":"session_disconnect""#), "{json}");
         assert!(json.contains(r#""session_id":"session-1""#), "{json}");
         assert!(json.contains(r#""id":"core-modular""#), "{json}");
-        assert!(json.contains(r#""hash":"1234abcd""#), "{json}");
+        assert!(json.contains(r#""hash":"1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd""#), "{json}");
         assert!(
             json.contains(&format!(r#""pack_content_hash":"{}""#, pack_content_hash())),
             "{json}"
@@ -10844,7 +10862,7 @@ mod tests {
         let invalid_session = LinkSessionIdentity::new_unchecked_for_tests(
             LINK_PROTOCOL_VERSION,
             " session-1",
-            test_modpack("core-modular", "1234abcd"),
+            test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"),
             pack_content_hash(),
         );
         assert!(matches!(
@@ -10857,7 +10875,7 @@ mod tests {
             Err(MultiplayerMessageError::InvalidLinkHandshake { .. })
         ));
 
-        let session = test_session("session-1", test_modpack("core-modular", "1234abcd"))
+        let session = test_session("session-1", test_modpack("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"))
             .expect("session identity");
         assert_eq!(
             SessionDisconnectFrame::new(session.clone(), 0, "closed"),

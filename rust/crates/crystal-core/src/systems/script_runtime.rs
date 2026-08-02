@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::Dv;
 use crate::state::{
-    GameState, ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
-    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor,
-    ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
+    GameState, HALL_OF_FAME_ENTRY_LIMIT, HALL_OF_FAME_MASTER_COUNT, HALL_OF_FAME_TEAM_SIZE,
+    HallOfFameEntry, HallOfFamePokemon, ScriptRuntimeAsmDirective,
+    ScriptRuntimeDecorationDescription, ScriptRuntimeDelay, ScriptRuntimeEarthquake,
+    ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeNumericBufferWrite,
+    ScriptLocation, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
     ScriptRuntimeVariableWrite,
 };
 
@@ -23,6 +25,7 @@ pub struct ScriptRuntimeCommand {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeInputs {
+    pub selected_party_index: Option<usize>,
     pub random_value: Option<u32>,
     pub rng_seed_after: Option<u32>,
     pub game_version: Option<String>,
@@ -285,6 +288,7 @@ pub struct ScriptDispatchOutcome {
 pub fn commit_interaction_script_dispatch(
     state: &mut GameState,
     session_last_talked_object_identifier: &mut Option<String>,
+    origin_map_name: &str,
     next_script: &str,
     last_talked_object: Option<&str>,
 ) -> Result<ScriptDispatchOutcome, ScriptRuntimeCommandError> {
@@ -300,7 +304,10 @@ pub fn commit_interaction_script_dispatch(
             object_identifier: object_identifier.to_string(),
         });
     }
-    state.script_runtime.next_script = Some(next_script.to_string());
+    state.script_runtime.next_script = Some(ScriptLocation {
+        origin_map_name: origin_map_name.to_string(),
+        script: next_script.to_string(),
+    });
     state.script_runtime.last_talked_object = last_talked_object.map(str::to_string);
     *session_last_talked_object_identifier = last_talked_object.map(str::to_string);
     Ok(ScriptDispatchOutcome {
@@ -751,8 +758,9 @@ pub fn script_label_parent(source_script: &str) -> &str {
         .unwrap_or(source_script)
 }
 
-pub fn apply_script_runtime_command(
+pub fn apply_script_runtime_command_in_map(
     state: &mut GameState,
+    origin_map_name: &str,
     command: ScriptRuntimeCommand,
     inputs: ScriptRuntimeInputs,
 ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
@@ -803,29 +811,17 @@ pub fn apply_script_runtime_command(
             )
         }
         "checkpokemail" => {
-            apply_runtime_effect(state, &command)?;
-            let has_mail = state
-                .storage
-                .party
-                .pokemon
-                .iter()
-                .flatten()
-                .any(|pokemon| pokemon.mail.is_some());
-            set_script_value(
-                state,
-                &command,
-                if has_mail { "TRUE" } else { "FALSE" }.to_string(),
-            )
+            apply_runtime_effect(state, origin_map_name, &command)?;
+            set_script_value(state, &command, "2".to_string())
         }
         "checkver" => {
-            state.script_runtime.version_check_requested = true;
             let value = inputs
                 .game_version
                 .ok_or(ScriptRuntimeCommandError::MissingGameVersion)?;
             set_script_value(state, &command, value)
         }
         _ => {
-            apply_runtime_effect(state, &command)?;
+            apply_runtime_effect(state, origin_map_name, &command)?;
             ScriptRuntimeOutcome::EffectRecorded {
                 command: command.command.clone(),
                 source_script: command.source_script.clone(),
@@ -896,6 +892,7 @@ pub fn validate_script_runtime_command(
 
 fn apply_runtime_effect(
     state: &mut GameState,
+    origin_map_name: &str,
     command: &ScriptRuntimeCommand,
 ) -> Result<(), ScriptRuntimeCommandError> {
     match command.command.as_str() {
@@ -993,10 +990,7 @@ fn apply_runtime_effect(
         }
         "pokepic" => state.script_runtime.active_pokemon_picture = Some(command.args[0].clone()),
         "closepokepic" => state.script_runtime.active_pokemon_picture = None,
-        "trade" => state
-            .script_runtime
-            .completed_trades
-            .push(command.args[0].clone()),
+        "trade" => {}
         "catchtutorial" => {
             state
                 .script_runtime
@@ -1007,8 +1001,14 @@ fn apply_runtime_effect(
         "warpsound" => state.script_runtime.warp_sound_queued = true,
         "blackoutmod" => state.script_runtime.blackout_mod = Some(command.args[0].clone()),
         "battletowertext" => state.script_runtime.battle_tower_text = Some(command.args[0].clone()),
-        "halloffame" => state.script_runtime.hall_of_fame_requested = true,
-        "credits" => state.script_runtime.credits_requested = true,
+        "halloffame" => record_hall_of_fame(state),
+        "credits" => {
+            // Script_credits calls RedCredits, which stores SPAWN_RED before
+            // entering the credits program. Hall of Fame credits use the
+            // separate `halloffame` command and store SPAWN_LANCE there.
+            state.hall_of_fame.spawn_after_champion = Some(2);
+            state.script_runtime.credits_requested = true;
+        }
         "writevar" => {
             let value = state.script_runtime.script_value.clone().ok_or_else(|| {
                 ScriptRuntimeCommandError::MissingAccumulator {
@@ -1103,6 +1103,7 @@ fn apply_runtime_effect(
             .script_runtime
             .command_queue
             .push(ScriptRuntimeQueuedCommand {
+                origin_map_name: origin_map_name.to_string(),
                 command: command.command.clone(),
                 bank: Some(command.args[0].clone()),
                 target: command.args[1].clone(),
@@ -1126,6 +1127,7 @@ fn apply_runtime_effect(
                 .script_runtime
                 .command_queue
                 .push(ScriptRuntimeQueuedCommand {
+                    origin_map_name: origin_map_name.to_string(),
                     command: command.command.clone(),
                     bank: None,
                     target: command.args[0].clone(),
@@ -1138,6 +1140,7 @@ fn apply_runtime_effect(
                 .script_runtime
                 .command_queue
                 .push(ScriptRuntimeQueuedCommand {
+                    origin_map_name: origin_map_name.to_string(),
                     command: command.command.clone(),
                     bank: Some(command.args[0].clone()),
                     target: command.args[1].clone(),
@@ -1167,6 +1170,61 @@ fn apply_runtime_effect(
         }
     }
     Ok(())
+}
+
+/// Implements `halloffame` as a state mutation rather than a presentation-only
+/// request. Crystal snapshots the current party into SRAM before starting the
+/// Hall of Fame animation, saturates the win counter at 200, and records the
+/// newest team at the front of a bounded history.
+fn record_hall_of_fame(state: &mut GameState) {
+    let count = state.hall_of_fame.count;
+    let next_count = if count < HALL_OF_FAME_MASTER_COUNT {
+        count.saturating_add(1)
+    } else {
+        count
+    };
+    let mut team: [Option<HallOfFamePokemon>; HALL_OF_FAME_TEAM_SIZE] =
+        std::array::from_fn(|_| None);
+    let mut slot = 0usize;
+    for pokemon in state.storage.party.pokemon.iter().flatten() {
+        if slot >= HALL_OF_FAME_TEAM_SIZE
+            || pokemon.is_egg
+            || pokemon.status.as_deref() == Some("EGG")
+            || pokemon.species.id == "EGG"
+        {
+            continue;
+        }
+        let dvs = (u16::from(pokemon.dvs.attack & 0x0f) << 12)
+            | (u16::from(pokemon.dvs.defense & 0x0f) << 8)
+            | (u16::from(pokemon.dvs.speed & 0x0f) << 4)
+            | u16::from(pokemon.dvs.special & 0x0f);
+        team[slot] = Some(HallOfFamePokemon {
+            species: pokemon.species.id.clone(),
+            trainer_id: pokemon.original_trainer_id,
+            dvs,
+            level: pokemon.level,
+            nickname: pokemon.nickname.chars().take(10).collect(),
+        });
+        slot += 1;
+    }
+    state.hall_of_fame.entries.insert(
+        0,
+        HallOfFameEntry {
+            win_count: next_count,
+            team,
+        },
+    );
+    state
+        .hall_of_fame
+        .entries
+        .truncate(HALL_OF_FAME_ENTRY_LIMIT);
+    state.hall_of_fame.count = next_count;
+    state.hall_of_fame.spawn_after_champion = Some(1);
+    state
+        .flags
+        .engine_flags
+        .insert("STATUSFLAGS_HALL_OF_FAME_F".to_string(), true);
+    state.script_runtime.hall_of_fame_requested = true;
 }
 
 fn set_script_value(
@@ -1437,7 +1495,16 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{BaseStats, Dv, Pokemon, PokemonSpecies};
     use crate::state::PartyPokemonRef;
+
+    fn apply_script_runtime_command(
+        state: &mut GameState,
+        command: ScriptRuntimeCommand,
+        inputs: ScriptRuntimeInputs,
+    ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
+        apply_script_runtime_command_in_map(state, "TestMap", command, inputs)
+    }
 
     fn command(name: &str, args: &[&str]) -> ScriptRuntimeCommand {
         ScriptRuntimeCommand {
@@ -1456,6 +1523,7 @@ mod tests {
         let outcome = commit_interaction_script_dispatch(
             &mut state,
             &mut last_talked_object,
+            "Route36",
             "Route36SudowoodoScript",
             Some("ROUTE36_SUDOWOODO"),
         )
@@ -1469,8 +1537,11 @@ mod tests {
             }
         );
         assert_eq!(
-            state.script_runtime.next_script.as_deref(),
-            Some("Route36SudowoodoScript")
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "Route36".to_string(),
+                script: "Route36SudowoodoScript".to_string(),
+            })
         );
         assert_eq!(
             state.script_runtime.last_talked_object.as_deref(),
@@ -1487,6 +1558,7 @@ mod tests {
         let error = commit_interaction_script_dispatch(
             &mut state,
             &mut last_talked_object,
+            "Route36",
             "Route36SudowoodoScript",
             Some("fallback_object"),
         )
@@ -1873,11 +1945,8 @@ mod tests {
             "SPEAROW",
             crate::models::BaseStats::new(40, 60, 30, 70, 31, 31),
         );
-        let mut pokemon = crate::models::Pokemon::new_for_tests(
-            species,
-            10,
-            crate::models::Dv::default(),
-        );
+        let mut pokemon =
+            crate::models::Pokemon::new_for_tests(species, 10, crate::models::Dv::default());
         pokemon.mail = Some(crate::models::pokemon::MailData {
             message: "DARK CAVE leads".to_string(),
             author: "RANDY".to_string(),
@@ -1892,7 +1961,7 @@ mod tests {
         )
         .expect("check mail");
 
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("TRUE"));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("2"));
         assert_eq!(
             state.script_runtime.checked_mail_targets,
             vec!["ReceivedSpearowMailText".to_string()]
@@ -2107,7 +2176,7 @@ mod tests {
             state.script_runtime.script_value.as_deref(),
             Some("CRYSTAL")
         );
-        assert!(state.script_runtime.version_check_requested);
+        assert!(!state.script_runtime.version_check_requested);
     }
 
     #[test]
@@ -2807,6 +2876,61 @@ mod tests {
             Some("SPRITE_ROCKER")
         );
         assert_eq!(state.script_runtime.next_script, None);
+    }
+
+    #[test]
+    fn hall_of_fame_records_party_without_eggs_and_saturates_count() {
+        let species =
+            PokemonSpecies::new_for_tests("CHIKORITA", BaseStats::new(45, 49, 65, 45, 49, 65));
+        let mut champion = Pokemon::new_for_tests(species.clone(), 42, Dv::from_non_hp(1, 2, 3, 4));
+        champion.nickname = "CHAMPION".to_string();
+        champion.original_trainer_id = 0x1234;
+        let mut egg = Pokemon::new_for_tests(species, 5, Dv::default());
+        egg.is_egg = true;
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(champion);
+        state.storage.party.pokemon[1] = Some(egg);
+        state.hall_of_fame.count = HALL_OF_FAME_MASTER_COUNT;
+
+        let outcome =
+            apply_script_runtime_command(&mut state, command("halloffame", &[]), default_inputs())
+                .expect("hall of fame command");
+
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::EffectRecorded { .. }
+        ));
+        assert_eq!(state.hall_of_fame.count, HALL_OF_FAME_MASTER_COUNT);
+        assert_eq!(state.hall_of_fame.entries.len(), 1);
+        let record = &state.hall_of_fame.entries[0];
+        assert_eq!(
+            record.team[0].as_ref().map(|mon| mon.species.as_str()),
+            Some("CHIKORITA")
+        );
+        assert_eq!(record.team[0].as_ref().map(|mon| mon.dvs), Some(0x1234));
+        assert!(record.team[1].is_none());
+        assert_eq!(state.hall_of_fame.spawn_after_champion, Some(1));
+        assert_eq!(
+            state.flags.engine_flags.get("STATUSFLAGS_HALL_OF_FAME_F"),
+            Some(&true)
+        );
+        assert!(state.script_runtime.hall_of_fame_requested);
+    }
+
+    #[test]
+    fn credits_command_records_red_post_credits_spawn_before_presentation() {
+        let mut state = GameState::default();
+
+        let outcome =
+            apply_script_runtime_command(&mut state, command("credits", &[]), default_inputs())
+                .expect("credits command");
+
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::EffectRecorded { .. }
+        ));
+        assert_eq!(state.hall_of_fame.spawn_after_champion, Some(2));
+        assert!(state.script_runtime.credits_requested);
     }
 
     #[test]

@@ -85,6 +85,18 @@ impl PcBox {
         true
     }
 
+    pub fn compact(&mut self) {
+        let pokemon = self
+            .pokemon
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        for index in 0..MAX_BOX_MONS {
+            self.set_slot(index, pokemon.get(index).cloned());
+        }
+    }
+
     pub fn set_slot(&mut self, index: usize, pokemon: Option<Pokemon>) {
         assert!(index < MAX_BOX_MONS, "box slot {index} is out of range");
         let previous_filled = self.pokemon[index].is_some();

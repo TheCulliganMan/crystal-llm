@@ -29,6 +29,14 @@ use crate::world::session::{
 pub const PLAYER_NAME_LENGTH: usize = 8;
 pub const PLAYER_GENDER_MALE: u8 = 0;
 pub const PLAYER_GENDER_FEMALE: u8 = 1;
+pub const MAILBOX_CAPACITY: usize = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxMail {
+    pub item_id: String,
+    pub mail: crate::models::pokemon::MailData,
+}
 const MOBILE_LOGIN_PASSWORD_LENGTH: usize = 17;
 const BATTLE_TOWER_SAVE_FILE_FLAG_YOURS: u8 = 0x1;
 const BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION: u8 = 0x2;
@@ -57,10 +65,14 @@ pub struct GameState {
     pub player_gender: u8,
     pub party: PartyState,
     pub storage: PokemonStorage,
+    pub mailbox: Vec<MailboxMail>,
     pub pending_move_learn: Option<PendingMoveLearn>,
+    pub pending_move_learn_queue: Vec<PendingMoveLearn>,
     pub bag: Bag,
     pub money: u32,
     pub moms_money: u32,
+    pub mom_saving_active: bool,
+    pub mom_saving_some_money: bool,
     pub coins: u16,
     pub pokedex: PokedexState,
     pub link_battle_stats: LinkBattleStats,
@@ -74,11 +86,16 @@ pub struct GameState {
     pub battle_escape_attempts: u8,
     pub battle_player_stat_drop_guard_turns: u8,
     pub battle_pay_day_money: u32,
+    pub battle_amulet_coin_active: bool,
     pub repel_steps_remaining: u16,
     pub active_repel_item: Option<String>,
     pub registered_key_item: Option<String>,
     pub dig_warp_map_name: Option<String>,
     pub dig_warp_index: Option<u16>,
+    pub previous_warp_map_name: Option<String>,
+    pub previous_warp_index: Option<u16>,
+    pub backup_warp_map_name: Option<String>,
+    pub backup_warp_index: Option<u16>,
     pub last_spawn_identifier: Option<u16>,
     pub kenji_break_timer: u8,
     pub player_palette_id: u8,
@@ -105,6 +122,7 @@ pub struct GameState {
     pub bug_contest: BugContestState,
     pub link_session: LinkSessionState,
     pub battle_tower: BattleTowerState,
+    pub hall_of_fame: HallOfFameState,
     pub mobile_link: MobileLinkState,
     pub gs_healings: u16,
     pub trainer_rankings_healings: u16,
@@ -130,10 +148,14 @@ impl<'de> Deserialize<'de> for GameState {
             player_gender: u8,
             party: PartyState,
             storage: PokemonStorage,
+            mailbox: Vec<MailboxMail>,
             pending_move_learn: Option<PendingMoveLearn>,
+            pending_move_learn_queue: Vec<PendingMoveLearn>,
             bag: Bag,
             money: u32,
             moms_money: u32,
+            mom_saving_active: bool,
+            mom_saving_some_money: bool,
             coins: u16,
             pokedex: PokedexState,
             link_battle_stats: LinkBattleStats,
@@ -147,11 +169,20 @@ impl<'de> Deserialize<'de> for GameState {
             battle_escape_attempts: u8,
             battle_player_stat_drop_guard_turns: u8,
             battle_pay_day_money: u32,
+            battle_amulet_coin_active: bool,
             repel_steps_remaining: u16,
             active_repel_item: Option<String>,
             registered_key_item: Option<String>,
             dig_warp_map_name: Option<String>,
             dig_warp_index: Option<u16>,
+            #[serde(default)]
+            previous_warp_map_name: Option<String>,
+            #[serde(default)]
+            previous_warp_index: Option<u16>,
+            #[serde(default)]
+            backup_warp_map_name: Option<String>,
+            #[serde(default)]
+            backup_warp_index: Option<u16>,
             last_spawn_identifier: Option<u16>,
             kenji_break_timer: u8,
             player_palette_id: u8,
@@ -178,6 +209,7 @@ impl<'de> Deserialize<'de> for GameState {
             bug_contest: BugContestState,
             link_session: LinkSessionState,
             battle_tower: BattleTowerState,
+            hall_of_fame: HallOfFameState,
             mobile_link: MobileLinkState,
             gs_healings: u16,
             trainer_rankings_healings: u16,
@@ -197,10 +229,14 @@ impl<'de> Deserialize<'de> for GameState {
             player_gender: raw.player_gender,
             party: raw.party,
             storage: raw.storage,
+            mailbox: raw.mailbox,
             pending_move_learn: raw.pending_move_learn,
+            pending_move_learn_queue: raw.pending_move_learn_queue,
             bag: raw.bag,
             money: raw.money,
             moms_money: raw.moms_money,
+            mom_saving_active: raw.mom_saving_active,
+            mom_saving_some_money: raw.mom_saving_some_money,
             coins: raw.coins,
             pokedex: raw.pokedex,
             link_battle_stats: raw.link_battle_stats,
@@ -214,11 +250,16 @@ impl<'de> Deserialize<'de> for GameState {
             battle_escape_attempts: raw.battle_escape_attempts,
             battle_player_stat_drop_guard_turns: raw.battle_player_stat_drop_guard_turns,
             battle_pay_day_money: raw.battle_pay_day_money,
+            battle_amulet_coin_active: raw.battle_amulet_coin_active,
             repel_steps_remaining: raw.repel_steps_remaining,
             active_repel_item: raw.active_repel_item,
             registered_key_item: raw.registered_key_item,
             dig_warp_map_name: raw.dig_warp_map_name,
             dig_warp_index: raw.dig_warp_index,
+            previous_warp_map_name: raw.previous_warp_map_name,
+            previous_warp_index: raw.previous_warp_index,
+            backup_warp_map_name: raw.backup_warp_map_name,
+            backup_warp_index: raw.backup_warp_index,
             last_spawn_identifier: raw.last_spawn_identifier,
             kenji_break_timer: raw.kenji_break_timer,
             player_palette_id: raw.player_palette_id,
@@ -245,6 +286,7 @@ impl<'de> Deserialize<'de> for GameState {
             bug_contest: raw.bug_contest,
             link_session: raw.link_session,
             battle_tower: raw.battle_tower,
+            hall_of_fame: raw.hall_of_fame,
             mobile_link: raw.mobile_link,
             gs_healings: raw.gs_healings,
             trainer_rankings_healings: raw.trainer_rankings_healings,
@@ -260,8 +302,14 @@ impl<'de> Deserialize<'de> for GameState {
     }
 }
 
-impl Default for GameState {
-    fn default() -> Self {
+impl GameState {
+    /// Construct the cleared WRAM state used as the input to Crystal's
+    /// new-game initialization program.
+    ///
+    /// This is deliberately not `Default`: production callers must identify
+    /// the lifecycle transition that creates a fresh state, while save loads
+    /// continue to enter through validated deserialization.
+    pub fn reset_wram_for_new_game() -> Self {
         Self {
             options: Options::default(),
             player_name: String::new(),
@@ -269,10 +317,14 @@ impl Default for GameState {
             player_gender: PLAYER_GENDER_MALE,
             party: PartyState::default(),
             storage: PokemonStorage::default(),
+            mailbox: Vec::new(),
             pending_move_learn: None,
+            pending_move_learn_queue: Vec::new(),
             bag: Bag::default(),
             money: 0,
             moms_money: 0,
+            mom_saving_active: false,
+            mom_saving_some_money: false,
             coins: 0,
             pokedex: PokedexState::default(),
             link_battle_stats: LinkBattleStats::default(),
@@ -286,11 +338,16 @@ impl Default for GameState {
             battle_escape_attempts: 0,
             battle_player_stat_drop_guard_turns: 0,
             battle_pay_day_money: 0,
+            battle_amulet_coin_active: false,
             repel_steps_remaining: 0,
             active_repel_item: None,
             registered_key_item: None,
             dig_warp_map_name: None,
             dig_warp_index: None,
+            previous_warp_map_name: None,
+            previous_warp_index: None,
+            backup_warp_map_name: None,
+            backup_warp_index: None,
             last_spawn_identifier: None,
             kenji_break_timer: 0,
             player_palette_id: 0,
@@ -317,6 +374,7 @@ impl Default for GameState {
             bug_contest: BugContestState::default(),
             link_session: LinkSessionState::default(),
             battle_tower: BattleTowerState::default(),
+            hall_of_fame: HallOfFameState::default(),
             mobile_link: MobileLinkState::default(),
             gs_healings: 0,
             trainer_rankings_healings: 0,
@@ -327,6 +385,13 @@ impl Default for GameState {
             rng_seed: 1,
             has_seen_intro: false,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl Default for GameState {
+    fn default() -> Self {
+        Self::reset_wram_for_new_game()
     }
 }
 
@@ -359,6 +424,134 @@ impl<'de> Deserialize<'de> for UnusedTwoDayTimerState {
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
         Ok(state)
+    }
+}
+
+impl GameState {
+    /// Run Crystal's post-battle spread step for an already-active infection.
+    /// The original scans one side of the party after a one-third chance,
+    /// copying the source strain to the first uninfected neighbor. The same
+    /// boundary also performs Crystal's rare Shuckle Berry conversion.
+    pub fn spread_pokerus_after_battle(&mut self) -> bool {
+        let mut rng = Random::new_crystal(self.rng_seed);
+        let reached_goldenrod = self
+            .flags
+            .is_engine_flag_set("ENGINE_REACHED_GOLDENROD")
+            .unwrap_or(false);
+        if reached_goldenrod && rng.battle_random_byte() < 16 {
+            if let Some(shuckle) = self
+                .storage
+                .party
+                .pokemon
+                .iter_mut()
+                .flatten()
+                .find(|mon| mon.species.id == "SHUCKLE" && mon.item.as_deref() == Some("BERRY"))
+            {
+                shuckle.item = Some("BERRY_JUICE".to_string());
+            }
+        }
+        let Some(source_index) = self
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .position(|pokemon| pokemon.as_ref().is_some_and(|mon| mon.pokerus & 0x0f != 0))
+        else {
+            if reached_goldenrod {
+                let (add, sub) = rng.crystal_random_add_sub();
+                if add == 0 && sub < 3 {
+                    let party_count = self.storage.party.filled_slots() as u8;
+                    if party_count > 0 {
+                        let target_index = loop {
+                            let (_, sample) = rng.crystal_random_add_sub();
+                            let index = sample & 0x07;
+                            if index < party_count {
+                                break usize::from(index);
+                            }
+                        };
+                        let eligible = self.storage.party.pokemon[target_index]
+                            .as_ref()
+                            .is_some_and(|mon| mon.pokerus & 0xf0 == 0);
+                        if eligible {
+                            let sample = loop {
+                                let (_, sample) = rng.crystal_random_add_sub();
+                                if sample != 0 {
+                                    break sample;
+                                }
+                            };
+                            let duration_seed = if sample & 0xf0 == 0 {
+                                sample
+                            } else {
+                                (sample & 0x07).saturating_add(1)
+                            };
+                            let status = (duration_seed << 4) | ((duration_seed & 0x03) + 1);
+                            let infected = if let Some(mon) =
+                                self.storage.party.pokemon[target_index].as_mut()
+                            {
+                                mon.pokerus = status;
+                                true
+                            } else {
+                                false
+                            };
+                            if infected {
+                                self.rng_seed = rng.seed();
+                                self.sync_party_from_storage();
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            self.rng_seed = rng.seed();
+            return false;
+        };
+        if rng.battle_random_byte() >= 85 || self.storage.party.filled_slots() <= 1 {
+            self.rng_seed = rng.seed();
+            return false;
+        }
+        let scan_forward = rng.battle_random_byte() >= 128;
+        let source_status = self.storage.party.pokemon[source_index]
+            .as_ref()
+            .map(|mon| mon.pokerus)
+            .unwrap_or(0);
+        let mut target = if scan_forward {
+            source_index.checked_add(1)
+        } else {
+            source_index.checked_sub(1)
+        };
+        let target_index = loop {
+            let Some(index) = target else { break None };
+            let Some(mon) = self.storage.party.pokemon[index].as_ref() else {
+                target = if scan_forward {
+                    index.checked_add(1)
+                } else {
+                    index.checked_sub(1)
+                };
+                continue;
+            };
+            if mon.pokerus == 0 {
+                break Some(index);
+            }
+            if mon.pokerus & 0x03 == 0 {
+                break None;
+            }
+            target = if scan_forward {
+                index.checked_add(1)
+            } else {
+                index.checked_sub(1)
+            };
+        };
+        let Some(target_index) = target_index else {
+            self.rng_seed = rng.seed();
+            return false;
+        };
+        let strain_duration = ((source_status >> 4) & 0x03).max(1);
+        if let Some(mon) = self.storage.party.pokemon[target_index].as_mut() {
+            mon.pokerus = (source_status & 0xf0) | strain_duration;
+        }
+        self.rng_seed = rng.seed();
+        self.sync_party_from_storage();
+        true
     }
 }
 
@@ -534,6 +727,45 @@ where
         }
     }
     Ok(())
+}
+
+pub const HALL_OF_FAME_TEAM_SIZE: usize = 6;
+pub const HALL_OF_FAME_ENTRY_LIMIT: usize = 50;
+pub const HALL_OF_FAME_MASTER_COUNT: u8 = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HallOfFamePokemon {
+    pub species: String,
+    pub trainer_id: u16,
+    pub dvs: u16,
+    pub level: u8,
+    pub nickname: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HallOfFameEntry {
+    pub win_count: u8,
+    pub team: [Option<HallOfFamePokemon>; HALL_OF_FAME_TEAM_SIZE],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HallOfFameState {
+    pub count: u8,
+    pub entries: Vec<HallOfFameEntry>,
+    pub spawn_after_champion: Option<u16>,
+}
+
+impl Default for HallOfFameState {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            entries: Vec::new(),
+            spawn_after_champion: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1086,6 +1318,10 @@ pub struct DayCareState {
     pub lady: DayCareResidentState,
     pub compatibility_score: u8,
     pub egg_present: bool,
+    /// The concrete egg generated by breeding.  Keeping the record (rather
+    /// than only a boolean flag) makes pickup deterministic and saveable.
+    #[serde(default)]
+    pub egg: Option<Pokemon>,
     pub steps_until_next_egg: u16,
     pub steps_since_last_egg: u8,
     pub last_interaction: Option<DayCareInteractionState>,
@@ -1124,6 +1360,8 @@ impl<'de> Deserialize<'de> for DayCareState {
             lady: DayCareResidentState,
             compatibility_score: u8,
             egg_present: bool,
+            #[serde(default)]
+            egg: Option<Pokemon>,
             steps_until_next_egg: u16,
             steps_since_last_egg: u8,
             last_interaction: Option<DayCareInteractionState>,
@@ -1135,6 +1373,7 @@ impl<'de> Deserialize<'de> for DayCareState {
             lady: raw.lady,
             compatibility_score: raw.compatibility_score,
             egg_present: raw.egg_present,
+            egg: raw.egg,
             steps_until_next_egg: raw.steps_until_next_egg,
             steps_since_last_egg: raw.steps_since_last_egg,
             last_interaction: raw.last_interaction,
@@ -1209,6 +1448,12 @@ impl DayCareState {
         self.man.validate_saved_state("day_care.man")?;
         self.lady.validate_saved_state("day_care.lady")?;
         let both_residents_active = self.man.active && self.lady.active;
+        if self.egg.is_some() && !self.egg_present {
+            return Err("day_care.egg cannot exist without egg_present".to_string());
+        }
+        if self.egg.as_ref().is_some_and(|egg| !egg.is_egg) {
+            return Err("day_care.egg must retain egg identity".to_string());
+        }
         if self.egg_present && !both_residents_active {
             return Err(
                 "day_care.egg_present cannot be saved without both residents active".to_string(),
@@ -1316,16 +1561,32 @@ impl DayCareInteractionState {
             }
         }
         match self.action.as_str() {
-            "deposit" => validate_day_care_interaction_payload(
-                "day_care.last_interaction",
-                self,
-                DayCareInteractionShape {
-                    success_pokemon: true,
-                    success_reason: None,
-                    failure_reason: Some("occupied"),
-                    failure_pokemon: false,
-                },
-            ),
+            "deposit" => {
+                if !self.success
+                    && matches!(
+                        self.reason.as_deref(),
+                        Some("occupied" | "egg" | "fainted" | "mail" | "last_usable")
+                    )
+                {
+                    validate_day_care_pokemon_and_reason(
+                        "day_care.last_interaction",
+                        self,
+                        false,
+                        self.reason.as_deref(),
+                    )
+                } else {
+                    validate_day_care_interaction_payload(
+                        "day_care.last_interaction",
+                        self,
+                        DayCareInteractionShape {
+                            success_pokemon: true,
+                            success_reason: None,
+                            failure_reason: Some("occupied"),
+                            failure_pokemon: false,
+                        },
+                    )
+                }
+            }
             "withdraw" => {
                 if self.success {
                     validate_day_care_pokemon_and_reason(
@@ -1347,6 +1608,12 @@ impl DayCareInteractionState {
                             self,
                             true,
                             Some("party_full"),
+                        ),
+                        Some("not_enough_money") => validate_day_care_pokemon_and_reason(
+                            "day_care.last_interaction",
+                            self,
+                            true,
+                            Some("not_enough_money"),
                         ),
                         Some(reason) => Err(format!(
                             "day_care.last_interaction.reason {reason} is not valid for failed withdraw"
@@ -1457,6 +1724,7 @@ fn validate_day_care_pokemon_and_reason(
 pub struct MysteryGiftState {
     pub stored_item: Option<String>,
     pub backup_item: Option<String>,
+    pub trainer_house_flag: bool,
 }
 
 impl<'de> Deserialize<'de> for MysteryGiftState {
@@ -1469,12 +1737,14 @@ impl<'de> Deserialize<'de> for MysteryGiftState {
         struct RawMysteryGiftState {
             stored_item: Option<String>,
             backup_item: Option<String>,
+            trainer_house_flag: bool,
         }
 
         let raw = RawMysteryGiftState::deserialize(deserializer)?;
         let state = Self {
             stored_item: raw.stored_item,
             backup_item: raw.backup_item,
+            trainer_house_flag: raw.trainer_house_flag,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
         Ok(state)
@@ -1633,12 +1903,12 @@ impl RoamingPokemonState {
         if self.level == 0 {
             return Err(format!("roaming_pokemon[{index}].level must be nonzero"));
         }
-        if self.map_group == 0 {
+        if self.map_group == 0 && self.map_number != 0 {
             return Err(format!(
                 "roaming_pokemon[{index}].map_group must be nonzero"
             ));
         }
-        if self.map_number == 0 {
+        if self.map_number == 0 && self.map_group != 0 {
             return Err(format!(
                 "roaming_pokemon[{index}].map_number must be nonzero"
             ));
@@ -1696,6 +1966,9 @@ where
                 species: roaming.species.clone(),
                 level: roaming.level,
             });
+        }
+        if roaming.map_group == 0 && roaming.map_number == 0 {
+            continue;
         }
         if !map_location_exists(roaming.map_group, roaming.map_number) {
             return Err(RoamingSaveError::MissingMapLocation {
@@ -2314,9 +2587,9 @@ pub struct ScriptRuntimeMemory {
     pub pending_text_wait: Option<ScriptTextWait>,
     pub pending_yes_no: Option<ScriptYesNoPrompt>,
     pub control_events: Vec<ScriptControlRuntimeEvent>,
-    pub next_script: Option<String>,
+    pub next_script: Option<ScriptLocation>,
     pub call_stack: Vec<ScriptReturnFrame>,
-    pub deferred_scripts: Vec<String>,
+    pub deferred_scripts: Vec<ScriptLocation>,
     pub script_ended: Option<ScriptEndState>,
     pub shop_events: Vec<ScriptShopRuntimeEvent>,
     pub pending_shop: Option<ScriptShopRequest>,
@@ -2395,9 +2668,9 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_text_wait: Option<ScriptTextWait>,
             pending_yes_no: Option<ScriptYesNoPrompt>,
             control_events: Vec<ScriptControlRuntimeEvent>,
-            next_script: Option<String>,
+            next_script: Option<ScriptLocation>,
             call_stack: Vec<ScriptReturnFrame>,
-            deferred_scripts: Vec<String>,
+            deferred_scripts: Vec<ScriptLocation>,
             script_ended: Option<ScriptEndState>,
             shop_events: Vec<ScriptShopRuntimeEvent>,
             pending_shop: Option<ScriptShopRequest>,
@@ -2484,7 +2757,10 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
 
 impl ScriptRuntimeMemory {
     pub fn validate(&self) -> Result<(), String> {
-        validate_optional_script_runtime_label("next_script", self.next_script.as_deref())?;
+        if let Some(next_script) = &self.next_script {
+            validate_script_runtime_token("next_script.origin_map_name", &next_script.origin_map_name)?;
+            validate_script_runtime_label("next_script.script", &next_script.script)?;
+        }
         validate_optional_script_runtime_label(
             "last_special_routine",
             self.last_special_routine.as_deref(),
@@ -2507,7 +2783,14 @@ impl ScriptRuntimeMemory {
             validate_menu_coords(coords)?;
         }
         for (index, script) in self.deferred_scripts.iter().enumerate() {
-            validate_script_runtime_label(&format!("deferred_scripts[{index}]"), script)?;
+            validate_script_runtime_token(
+                &format!("deferred_scripts[{index}].origin_map_name"),
+                &script.origin_map_name,
+            )?;
+            validate_script_runtime_label(
+                &format!("deferred_scripts[{index}].script"),
+                &script.script,
+            )?;
         }
         for (index, script) in self.stack.iter().enumerate() {
             validate_script_runtime_label(&format!("stack[{index}]"), script)?;
@@ -2547,6 +2830,10 @@ impl ScriptRuntimeMemory {
             validate_script_runtime_label(&format!("given_mail_targets[{index}]"), target)?;
         }
         for (index, frame) in self.call_stack.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("call_stack[{index}].origin_map_name"),
+                &frame.origin_map_name,
+            )?;
             validate_script_runtime_label(
                 &format!("call_stack[{index}].source_script"),
                 &frame.source_script,
@@ -2677,6 +2964,10 @@ impl ScriptRuntimeMemory {
             )?;
         }
         for (index, command) in self.command_queue.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("command_queue[{index}].origin_map_name"),
+                &command.origin_map_name,
+            )?;
             validate_script_runtime_token(
                 &format!("command_queue[{index}].command"),
                 &command.command,
@@ -5463,6 +5754,14 @@ pub fn validate_saved_day_care_references(
         validate_pokemon("day_care.lady.pokemon", pokemon)
             .map_err(DayCareReferenceSaveError::Pokemon)?;
     }
+    if let Some(pokemon) = &day_care.egg {
+        validate_pokemon("day_care.egg", pokemon).map_err(DayCareReferenceSaveError::Pokemon)?;
+        if !pokemon.is_egg {
+            return Err(DayCareReferenceSaveError::Pokemon(
+                "day_care.egg must retain egg identity".to_string(),
+            ));
+        }
+    }
     if let Some(interaction) = &day_care.last_interaction {
         if let Some(species) = &interaction.pokemon {
             if !species_exists(species) {
@@ -7029,8 +7328,16 @@ pub enum ScriptControlRuntimeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptReturnFrame {
+    pub origin_map_name: String,
     pub source_script: String,
     pub next_command_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptLocation {
+    pub origin_map_name: String,
+    pub script: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7246,6 +7553,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeEmote {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeQueuedCommand {
+    pub origin_map_name: String,
     pub command: String,
     pub target: String,
     pub bank: Option<String>,
@@ -7305,6 +7613,54 @@ impl GameState {
         self.storage
             .validate_metadata()
             .map_err(|error| format!("invalid saved storage: {error}"))?;
+        for (location, pokemon) in self
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pokemon)| pokemon.as_ref().map(|pokemon| (format!("party[{index}]"), pokemon)))
+            .chain(self.storage.pc_boxes.iter().enumerate().flat_map(|(box_index, pc_box)| {
+                pc_box.pokemon.iter().enumerate().filter_map(move |(slot_index, pokemon)| {
+                    pokemon.as_ref().map(|pokemon| (format!("pc_boxes[{box_index}][{slot_index}]"), pokemon))
+                })
+            }))
+        {
+            let holds_mail_item = pokemon.item.as_deref().is_some_and(crate::models::item::is_mail_item_id);
+            if holds_mail_item != pokemon.mail.is_some() {
+                return Err(format!(
+                    "saved {location} must have both a Mail item and Mail data or neither"
+                ));
+            }
+        }
+        if self.mailbox.len() > MAILBOX_CAPACITY {
+            return Err(format!(
+                "saved mailbox contains {} messages, exceeding capacity {MAILBOX_CAPACITY}",
+                self.mailbox.len()
+            ));
+        }
+        for (index, entry) in self.mailbox.iter().enumerate() {
+            validate_script_runtime_token(
+                &format!("mailbox[{index}].item_id"),
+                &entry.item_id,
+            )?;
+            if !crate::models::item::is_mail_item_id(&entry.item_id) {
+                return Err(format!(
+                    "mailbox[{index}].item_id '{}' is not an ASM Mail item",
+                    entry.item_id
+                ));
+            }
+            if entry.mail.message.is_empty() {
+                return Err(format!("mailbox[{index}] has an empty message"));
+            }
+            if entry.mail.author.is_empty() {
+                return Err(format!("mailbox[{index}] has an empty author"));
+            }
+            validate_script_runtime_token(
+                &format!("mailbox[{index}].mail.species"),
+                &entry.mail.species,
+            )?;
+        }
         self.time
             .validate_saved_state()
             .map_err(|error| format!("invalid saved time: {error}"))?;
@@ -7315,7 +7671,11 @@ impl GameState {
         if self.party != projected_party {
             return Err("saved party projection does not match authoritative storage".to_string());
         }
-        if let Some(pending) = &self.pending_move_learn {
+        for pending in self
+            .pending_move_learn
+            .iter()
+            .chain(self.pending_move_learn_queue.iter())
+        {
             pending
                 .validate_saved_state()
                 .map_err(|error| format!("invalid pending move learn: {error}"))?;
@@ -7470,6 +7830,12 @@ impl GameState {
                     "battle_pay_day_money cannot be saved without an active battle".to_string(),
                 );
             }
+            if self.battle_amulet_coin_active {
+                return Err(
+                    "battle_amulet_coin_active cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
             return Ok(());
         };
         if enemy_party_len == 0 {
@@ -7555,6 +7921,36 @@ impl GameState {
                 ));
             }
             _ => {}
+        }
+        for (label, map_name, warp_index) in [
+            (
+                "previous_warp",
+                self.previous_warp_map_name.as_deref(),
+                self.previous_warp_index,
+            ),
+            (
+                "backup_warp",
+                self.backup_warp_map_name.as_deref(),
+                self.backup_warp_index,
+            ),
+        ] {
+            validate_optional_script_runtime_token(&format!("{label}_map_name"), map_name)?;
+            match (map_name, warp_index) {
+                (Some(map_name), None) => {
+                    return Err(format!(
+                        "{label}_map_name {map_name} cannot be saved without {label}_index"
+                    ));
+                }
+                (None, Some(index)) => {
+                    return Err(format!(
+                        "{label}_index {index} cannot be saved without {label}_map_name"
+                    ));
+                }
+                (_, Some(0)) => {
+                    return Err(format!("{label}_index cannot be zero"));
+                }
+                _ => {}
+            }
         }
         validate_optional_script_runtime_token(
             "pending_special_battle_type",
@@ -7654,8 +8050,6 @@ impl GameState {
                 let frame = self.try_advance_frame()?;
                 Ok(vec![GameEvent::FrameAdvanced { frame: frame.0 }])
             }
-            GameCommand::OpenMenu => Ok(vec![GameEvent::MenuOpened]),
-            GameCommand::CloseMenu => Ok(vec![GameEvent::MenuClosed]),
         }
     }
 }
@@ -8727,8 +9121,6 @@ impl JoypadMemory {
 pub enum GameCommand {
     Joypad { mask: u8 },
     AdvanceFrame,
-    OpenMenu,
-    CloseMenu,
 }
 
 impl<'de> Deserialize<'de> for GameCommand {
@@ -8741,8 +9133,6 @@ impl<'de> Deserialize<'de> for GameCommand {
         enum RawGameCommand {
             Joypad { mask: u8 },
             AdvanceFrame,
-            OpenMenu,
-            CloseMenu,
         }
 
         match RawGameCommand::deserialize(deserializer)? {
@@ -8751,8 +9141,6 @@ impl<'de> Deserialize<'de> for GameCommand {
                 Ok(Self::Joypad { mask })
             }
             RawGameCommand::AdvanceFrame => Ok(Self::AdvanceFrame),
-            RawGameCommand::OpenMenu => Ok(Self::OpenMenu),
-            RawGameCommand::CloseMenu => Ok(Self::CloseMenu),
         }
     }
 }
@@ -8762,8 +9150,6 @@ impl<'de> Deserialize<'de> for GameCommand {
 pub enum GameEvent {
     FrameAdvanced { frame: u64 },
     JoypadChanged { pressed: u8, down: u8 },
-    MenuOpened,
-    MenuClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -8784,12 +9170,32 @@ pub enum GameStateBattleError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_state_command_surface_has_no_event_only_menu_commands() {
+        let source = include_str!("state.rs");
+        let open = format!("{}{}", "Open", "Menu");
+        let close = format!("{}{}", "Close", "Menu");
+        assert!(
+            !source.contains(&open) && !source.contains(&close),
+            "menus must be entered through source-derived frame/script execution"
+        );
+    }
+
+    #[test]
+    fn default_state_is_available_only_as_a_test_fixture() {
+        let source = include_str!("state.rs");
+        assert!(source.contains(
+            "#[cfg(any(test, feature = \"test-fixtures\"))]\nimpl Default for GameState"
+        ));
+        assert_eq!(GameState::default(), GameState::reset_wram_for_new_game());
+    }
+
     use super::*;
     use crate::models::{BaseStats, Dv, PcBox};
 
     #[test]
-    fn initial_state_matches_typescript_defaults_that_affect_gameplay() {
-        let state = GameState::default();
+    fn reset_wram_state_has_required_new_game_inputs() {
+        let state = GameState::reset_wram_for_new_game();
         assert_eq!(state.options.text_speed, TextSpeed::Fast);
         assert_eq!(state.player_name, "");
         assert_eq!(state.player_id, 0);
@@ -8874,7 +9280,8 @@ mod tests {
 
     #[test]
     fn pokerus_tick_preserves_strain_and_cures_low_nibble_in_party_and_pc() {
-        let species = PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
+        let species =
+            PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
         let mut party_mon = Pokemon::new_for_tests(species.clone(), 5, Dv::default());
         party_mon.pokerus = 0xa2;
         let mut boxed_mon = Pokemon::new_for_tests(species, 5, Dv::default());
@@ -8887,12 +9294,51 @@ mod tests {
         state.sync_party_from_storage();
 
         state.apply_pokerus_tick(2);
-        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().pokerus, 0xa0);
-        assert_eq!(state.storage.pc_boxes[0].pokemon[0].as_ref().unwrap().pokerus, 0x51);
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().pokerus,
+            0xa0
+        );
+        assert_eq!(
+            state.storage.pc_boxes[0].pokemon[0]
+                .as_ref()
+                .unwrap()
+                .pokerus,
+            0x51
+        );
 
         state.apply_pokerus_tick(1);
-        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().pokerus, 0xa0);
-        assert_eq!(state.storage.pc_boxes[0].pokemon[0].as_ref().unwrap().pokerus, 0x50);
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().pokerus,
+            0xa0
+        );
+        assert_eq!(
+            state.storage.pc_boxes[0].pokemon[0]
+                .as_ref()
+                .unwrap()
+                .pokerus,
+            0x50
+        );
+    }
+
+    #[test]
+    fn pokerus_spread_copies_strain_to_a_neighbor_and_advances_rng() {
+        let species =
+            PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
+        let mut state = GameState::default();
+        let mut infected = Pokemon::new_for_tests(species.clone(), 5, Dv::default());
+        infected.pokerus = 0xa2;
+        state.storage.party.pokemon[0] = Some(infected);
+        state.storage.party.pokemon[1] = Some(Pokemon::new_for_tests(species, 5, Dv::default()));
+        state.sync_party_from_storage();
+
+        let seed = 0x0000_7001;
+        state.rng_seed = seed;
+        assert!(state.spread_pokerus_after_battle());
+        assert_eq!(
+            state.storage.party.pokemon[1].as_ref().unwrap().pokerus,
+            0xa2
+        );
+        assert_ne!(state.rng_seed, seed);
     }
 
     #[test]
@@ -11033,12 +11479,15 @@ mod tests {
     #[test]
     fn saved_script_runtime_validates_control_continuation_labels() {
         let mut runtime = ScriptRuntimeMemory {
-            next_script: Some(" .Done@Script".to_string()),
+            next_script: Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: " .Done@Script".to_string(),
+            }),
             ..ScriptRuntimeMemory::default()
         };
         assert_eq!(
             runtime.validate(),
-            Err("next_script has invalid script label ' .Done@Script'".to_string())
+            Err("next_script.script has invalid script label ' .Done@Script'".to_string())
         );
 
         runtime = ScriptRuntimeMemory {
@@ -11060,13 +11509,20 @@ mod tests {
         );
 
         runtime = ScriptRuntimeMemory::default();
-        runtime.next_script = Some(".Done@Script".to_string());
-        runtime
-            .deferred_scripts
-            .push(".Deferred @Script".to_string());
+        runtime.next_script = Some(ScriptLocation {
+            origin_map_name: "TestMap".to_string(),
+            script: ".Done@Script".to_string(),
+        });
+        runtime.deferred_scripts.push(ScriptLocation {
+            origin_map_name: "TestMap".to_string(),
+            script: ".Deferred @Script".to_string(),
+        });
         assert_eq!(
             runtime.validate(),
-            Err("deferred_scripts[0] has invalid script label '.Deferred @Script'".to_string())
+            Err(
+                "deferred_scripts[0].script has invalid script label '.Deferred @Script'"
+                    .to_string()
+            )
         );
 
         let mut state = GameState::default();
@@ -11145,6 +11601,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.call_stack.push(ScriptReturnFrame {
+            origin_map_name: "TestMap".to_string(),
             source_script: "SourceScript".to_string(),
             next_command_index: 0,
         });
@@ -11943,6 +12400,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
             command: "callasm".to_string(),
             target: "Queued Target".to_string(),
             bank: Some("BANK1".to_string()),
@@ -11956,6 +12414,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
             command: "cmdqueue".to_string(),
             target: "QueuedTarget".to_string(),
             bank: None,
@@ -11969,6 +12428,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
             command: "writecmdqueue".to_string(),
             target: "QueuedTarget".to_string(),
             bank: Some("BANK1".to_string()),
@@ -11982,6 +12442,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
             command: "macroqueue".to_string(),
             target: "QueuedTarget".to_string(),
             bank: None,
@@ -11994,6 +12455,7 @@ mod tests {
         );
 
         let queued = ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
             command: "cmdqueue".to_string(),
             target: "QueuedTarget".to_string(),
             bank: Some("BANK1".to_string()),
@@ -13553,18 +14015,6 @@ mod tests {
             vec![GameEvent::FrameAdvanced { frame: 1 }]
         );
         assert_eq!(state.frame_counter, 1);
-        assert_eq!(
-            state
-                .apply_command(GameCommand::OpenMenu)
-                .expect("open menu command"),
-            vec![GameEvent::MenuOpened]
-        );
-        assert_eq!(
-            state
-                .apply_command(GameCommand::CloseMenu)
-                .expect("close menu command"),
-            vec![GameEvent::MenuClosed]
-        );
     }
 
     #[test]
@@ -13863,6 +14313,7 @@ mod tests {
         let mystery_gift = MysteryGiftState {
             stored_item: Some("GOLD_LEAF".to_string()),
             backup_item: Some("SILVER_LEAF".to_string()),
+            trainer_house_flag: false,
         };
 
         let error =
