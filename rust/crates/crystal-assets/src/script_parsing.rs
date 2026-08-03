@@ -2183,6 +2183,7 @@ fn script_warp_target_map(
     })
 }
 
+#[cfg(test)]
 fn merge_exact_value_payload(
     target: &mut Vec<Value>,
     payload: Value,
@@ -2191,6 +2192,7 @@ fn merge_exact_value_payload(
     merge_exact_values(target, vec![payload], description)
 }
 
+#[cfg(test)]
 fn merge_exact_values(
     target: &mut Vec<Value>,
     source: Vec<Value>,

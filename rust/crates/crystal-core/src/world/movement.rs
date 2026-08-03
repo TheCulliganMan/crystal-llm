@@ -284,7 +284,9 @@ pub fn attempt_ledge_jump_with_occupied_tiles(
         from,
         over: ledge,
         to: landing,
-        speed_multiplier: state.mode.speed_multiplier(),
+        // STEP_LEDGE has its own fixed sixteen-frame movement function. Bike
+        // and skate mode do not select STEP_BIKE for either half of the jump.
+        speed_multiplier: 1,
     }
 }
 
@@ -781,6 +783,32 @@ mod tests {
         );
         assert_eq!(state.tile, TilePosition::new(2, 4));
         assert_eq!(state.facing, Direction::Down);
+    }
+
+    #[test]
+    fn bike_ledge_jump_keeps_fixed_ledge_speed() {
+        let mut state = PlayerMovementState {
+            tile: TilePosition::new(2, 2),
+            facing: Direction::Down,
+            mode: MovementMode::Bike,
+        };
+        let outcome = attempt_ledge_jump(
+            &mut state,
+            Direction::Down,
+            &ledge_map(),
+            &ledge_tileset(permissions::FLOOR),
+            StepOptions::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            LedgeJumpOutcome::Jumped {
+                from: TilePosition::new(2, 2),
+                over: TilePosition::new(2, 3),
+                to: TilePosition::new(2, 4),
+                speed_multiplier: 1,
+            }
+        );
     }
 
     #[test]

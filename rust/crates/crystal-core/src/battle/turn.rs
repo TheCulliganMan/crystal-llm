@@ -22,6 +22,7 @@ use crate::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
 };
 use crate::systems::battle_items::{BattleItemOutcome, apply_active_battle_item_effect};
+use crate::world::encounters::TimeOfDay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -138,6 +139,10 @@ pub struct BattleCombatState {
     pub player_party_index: usize,
     pub enemy_party_index: usize,
     pub weather: Weather,
+    #[serde(default = "default_battle_time_of_day")]
+    pub time_of_day: TimeOfDay,
+    #[serde(default)]
+    pub link_battle: bool,
     pub player_mist_active: bool,
     pub enemy_mist_active: bool,
     pub player_safeguard_turns: u8,
@@ -261,6 +266,8 @@ impl BattleCombatState {
             player_party_index: 0,
             enemy_party_index: 0,
             weather: Weather::None,
+            time_of_day: default_battle_time_of_day(),
+            link_battle: false,
             player_mist_active: false,
             enemy_mist_active: false,
             player_safeguard_turns: 0,
@@ -393,10 +400,20 @@ impl BattleCombatState {
         self.badge_boosts_enabled = enabled;
         self
     }
+
+    pub fn with_time_context(mut self, time_of_day: TimeOfDay, link_battle: bool) -> Self {
+        self.time_of_day = time_of_day;
+        self.link_battle = link_battle;
+        self
+    }
 }
 
 const fn default_sleep_turn_mask() -> u8 {
     0x07
+}
+
+const fn default_battle_time_of_day() -> TimeOfDay {
+    TimeOfDay::Day
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -803,6 +820,9 @@ pub enum BattleTurnError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum BattleEvent {
+    AutomaticStruggle {
+        side: BattleSide,
+    },
     MoveSelected {
         side: BattleSide,
         slot: usize,
@@ -861,6 +881,7 @@ pub enum BattleEvent {
         party_index: usize,
         species: String,
         nickname: String,
+        shiny: bool,
     },
     FuryCutterPower {
         side: BattleSide,
@@ -1793,6 +1814,7 @@ pub enum BattleEvent {
         hp_before: u16,
         hp_after: u16,
         amount: u16,
+        animation_param: u8,
     },
     HealFailed {
         side: BattleSide,
@@ -2036,7 +2058,11 @@ pub fn active_battle_combat_state(
     };
     let mut combat = BattleCombatState::new(player, enemy, state.rng_seed)
         .with_parties(player_party, enemy_party)
-        .with_party_indices(active_party_index, active_enemy_index);
+        .with_party_indices(active_party_index, active_enemy_index)
+        .with_time_context(
+            state.time.time_of_day,
+            state.link_session.link_mode != 0,
+        );
     combat.force_switch_blocked = force_switch_blocked;
     combat.sleep_turn_mask = sleep_turn_mask;
     combat.enemy_effect_ai_random_fail = state.link_session.link_mode == 0
@@ -2474,6 +2500,13 @@ pub fn resolve_wild_battle_turn_with_items(
     let mut events = Vec::new();
     let acted_before = vec![BattleSide::Player];
     set_destiny_bond_active(&mut state, BattleSide::Player, false);
+    // A wild-battle run command passes through ParsePlayerAction's non-move
+    // path before TryToRun, so even a blocked or failed attempt clears these
+    // committed/chained move states.
+    reset_bide_state(&mut state, BattleSide::Player);
+    reset_fury_cutter_chain(&mut state, BattleSide::Player);
+    reset_protect_counter(&mut state, BattleSide::Player);
+    set_rage_active(&mut state, BattleSide::Player, false);
     apply_held_status_healing(&mut state, items, &mut events)?;
     let escape = if state.force_switch_blocked {
         events.push(BattleEvent::RunPrevented {
@@ -3061,6 +3094,7 @@ fn apply_player_obedience(
     Ok(ObedienceAction::Stop)
 }
 
+#[cfg(test)]
 fn player_disobeys(
     state: &BattleCombatState,
     rng: &mut Random,
@@ -3254,16 +3288,13 @@ fn execute_item(
             }
         })?
     };
-    if side == BattleSide::Enemy {
-        // AI_TryItem clears the enemy's committed/chained move state after a
-        // trainer consumes an item. Without this, healing during Bide,
-        // Fury Cutter, Protect, or Rage incorrectly resumes the old chain on
-        // the following turn.
-        reset_bide_state(state, side);
-        reset_fury_cutter_chain(state, side);
-        reset_protect_counter(state, side);
-        set_rage_active(state, side, false);
-    }
+    // ParsePlayerAction clears the player's committed/chained move state
+    // before an accepted non-move command. AI_TryItem owns the same reset for
+    // an enemy trainer item.
+    reset_bide_state(state, side);
+    reset_fury_cutter_chain(state, side);
+    reset_protect_counter(state, side);
+    set_rage_active(state, side, false);
     events.push(BattleEvent::BattleItemEffect { side, outcome });
     Ok(())
 }
@@ -3610,6 +3641,12 @@ fn execute_move_slot(
         learned.current_pp == 0 || disabled_move == Some(learned.name.as_str())
     });
     let automatic_struggle = no_legal_moves;
+    let automatic_turn_state = recharge_move_state(state, side).is_some()
+        || airborne_move_state(state, side).is_some()
+        || charging_move_state(state, side).is_some()
+        || state.pokemon(side).rampage_turns > 0
+        || bide_turns(state, side) > 0
+        || rollout_turns(state, side) > 0;
     let requested_move_name = if automatic_struggle {
         "STRUGGLE".to_string()
     } else {
@@ -3625,6 +3662,9 @@ fn execute_move_slot(
             move_name: requested_move_name,
         });
     };
+    if automatic_struggle && side == BattleSide::Player && !automatic_turn_state {
+        events.push(BattleEvent::AutomaticStruggle { side });
+    }
     events.push(BattleEvent::MoveSelected {
         side,
         slot,
@@ -5003,6 +5043,10 @@ fn apply_beat_up_effect(
             party_index,
             species: participant.species.id.clone(),
             nickname: participant.nickname.clone(),
+            shiny: participant.dvs.defense == 10
+                && participant.dvs.speed == 10
+                && participant.dvs.special == 10
+                && matches!(participant.dvs.attack, 2 | 3 | 6 | 7 | 10 | 11 | 14 | 15),
         });
         let defender_hp_before = state.pokemon(side.other()).hp;
         let raw_damage = result.damage;
@@ -5592,20 +5636,6 @@ fn pokemon_types_include(state: &BattleCombatState, side: BattleSide, type_id: &
         .any(|pokemon_type| pokemon_type == type_id)
 }
 
-fn declared_battle_types(type_categories: &TypeCategories) -> Vec<PokemonType> {
-    let mut types = Vec::new();
-    for type_id in type_categories
-        .physical
-        .iter()
-        .chain(type_categories.special.iter())
-    {
-        if !types.contains(type_id) {
-            types.push(type_id.clone());
-        }
-    }
-    types
-}
-
 fn move_blocked_by_status_or_confusion(
     state: &mut BattleCombatState,
     side: BattleSide,
@@ -6052,6 +6082,7 @@ fn apply_end_turn_leftovers(
             hp_before,
             hp_after,
             amount: hp_after - hp_before,
+            animation_param: 0,
         });
     }
     Ok(())
@@ -9219,6 +9250,8 @@ fn apply_direct_heal_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let weather = state.weather;
+    let time_of_day = state.time_of_day;
+    let link_battle = state.link_battle;
     if move_data.name == "REST" {
         apply_rest_heal_effect(state, side, move_name, events);
         return;
@@ -9234,8 +9267,14 @@ fn apply_direct_heal_effect(
         return;
     }
     let hp_before = pokemon.hp;
-    let amount =
-        direct_heal_amount(pokemon.max_hp, move_data, weather).min(pokemon.max_hp - pokemon.hp);
+    let animation_param = time_based_heal_param(
+        move_data,
+        time_of_day,
+        weather,
+        link_battle,
+    );
+    let amount = direct_heal_amount(pokemon.max_hp, move_data, animation_param)
+        .min(pokemon.max_hp - pokemon.hp);
     pokemon.hp += amount;
     events.push(BattleEvent::HealApplied {
         side,
@@ -9243,6 +9282,7 @@ fn apply_direct_heal_effect(
         hp_before,
         hp_after: pokemon.hp,
         amount,
+        animation_param,
     });
 }
 
@@ -9327,6 +9367,7 @@ fn apply_rest_heal_effect(
         hp_before,
         hp_after: pokemon.hp,
         amount: pokemon.max_hp - hp_before,
+        animation_param: 0,
     });
     events.push(BattleEvent::StatusApplied {
         side,
@@ -9337,12 +9378,38 @@ fn apply_rest_heal_effect(
     set_nightmare_source(state, side, None);
 }
 
-fn direct_heal_amount(max_hp: u16, move_data: &Move, weather: Weather) -> u16 {
+fn time_based_heal_param(
+    move_data: &Move,
+    time_of_day: TimeOfDay,
+    weather: Weather,
+    link_battle: bool,
+) -> u8 {
+    if !matches!(move_data.effect.as_str(), "MOONLIGHT" | "MORNING_SUN" | "SYNTHESIS") {
+        return 2;
+    }
+    let matching_time = match move_data.effect.as_str() {
+        "MORNING_SUN" => time_of_day == TimeOfDay::Morning,
+        "SYNTHESIS" => time_of_day == TimeOfDay::Day,
+        "MOONLIGHT" => time_of_day == TimeOfDay::Night,
+        _ => unreachable!(),
+    };
+    let mut multiplier_index = if link_battle || matching_time { 2_u8 } else { 1_u8 };
+    match weather {
+        Weather::Sun => multiplier_index += 1,
+        Weather::Rain | Weather::Sandstorm => multiplier_index -= 1,
+        Weather::None => {}
+    }
+    multiplier_index
+}
+
+fn direct_heal_amount(max_hp: u16, move_data: &Move, animation_param: u8) -> u16 {
     match move_data.effect.as_str() {
-        "MOONLIGHT" | "MORNING_SUN" | "SYNTHESIS" => match weather {
-            Weather::Sun => ((u32::from(max_hp) * 2) / 3).max(1) as u16,
-            Weather::Rain | Weather::Sandstorm => (max_hp / 4).max(1),
-            Weather::None => (max_hp / 2).max(1),
+        "MOONLIGHT" | "MORNING_SUN" | "SYNTHESIS" => match animation_param {
+            0 => (max_hp / 8).max(1),
+            1 => (max_hp / 4).max(1),
+            2 => (max_hp / 2).max(1),
+            3 => max_hp,
+            _ => unreachable!("time-based heal parameter is a two-bit multiplier index"),
         },
         _ => (max_hp / 2).max(1),
     }
@@ -11701,6 +11768,7 @@ fn apply_paralysis_speed_penalty(pokemon: &Pokemon, speed: u16) -> u16 {
     }
 }
 
+#[cfg(test)]
 fn accuracy_byte(
     move_data: &Move,
     attacker_side: BattleSide,

@@ -19,7 +19,6 @@ fn finish_visible_inactive_battle_after_turn(
         .any(|pokemon| {
             !pokemon.is_egg
                 && pokemon.species.id != "EGG"
-                && !pokemon.nickname.eq_ignore_ascii_case("EGG")
                 && pokemon.hp > 0
         });
     if !has_usable_party {
@@ -410,17 +409,12 @@ fn arm_visible_active_script_cursor_from_run(
     cursor: Option<RuntimeCompiledScriptCursor>,
 ) {
     if let Some(cursor) = cursor {
-        let opens_day_of_week = runtime_shell
-            .shell
-            .script_runtime_command_at(
-                &cursor.origin_map_name,
-                &cursor.source_script,
-                cursor.command_index,
-            )
-            .is_some_and(|command| {
-                command.command == "special"
-                    && command.args.first().is_some_and(|arg| arg == "SetDayOfWeek")
-            });
+        let opens_day_of_week = compiled_special_routine_at(
+            runtime_shell,
+            &cursor.source_script,
+            cursor.command_index,
+        )
+        .is_ok_and(|routine| routine.as_deref() == Some("SetDayOfWeek"));
         if opens_day_of_week && runtime_shell.pending_day_of_week.is_none() {
             runtime_shell.pending_day_of_week = Some(PendingDayOfWeekPrompt {
                 origin_map_name: cursor.origin_map_name.clone(),
@@ -779,7 +773,7 @@ fn activate_visible_script_boundary_after_outcome(
         RuntimeMutationResult::ScriptShopOpened(_) => Ok(true),
         RuntimeMutationResult::ScriptedWildBattleStarted(_)
         | RuntimeMutationResult::ScriptedTrainerBattleStarted(_) => {
-            prepare_visible_battle_entry(runtime_shell);
+            prepare_visible_battle_entry(runtime_shell)?;
             Ok(true)
         }
         RuntimeMutationResult::SpecialRoutineApplied(special) => {
@@ -994,6 +988,7 @@ fn integrate_visible_script_mutation_outcome(
             if !reported_visible_effect {
                 set_shell_action_status(runtime_shell, format!("MOVE {}", movement.object_id));
             }
+            begin_visible_script_movement(runtime_shell, movement)?;
         }
         RuntimeMutationResult::ScriptBlockChanged(block) => {
             runtime_shell.last_audio_events.push(format!(
@@ -1059,8 +1054,473 @@ fn visible_script_movement_effect_frames(
                 )
             }),
         "tree_shake" => Ok(Some(24)),
-        "skyfall" | "skyfall_top" | "fish_cast_rod" | "fish_got_bite" => Ok(Some(0)),
+        "skyfall" => Ok(Some(32)),
+        "skyfall_top" => Ok(Some(16)),
+        "fish_cast_rod" | "fish_got_bite" => Ok(Some(0)),
         _ => Ok(None),
+    }
+}
+
+fn begin_visible_script_movement(
+    runtime_shell: &mut BevyRuntimeShell,
+    movement: &crate::core::systems::script_objects::ScriptMovementOutcome,
+) -> Result<()> {
+    let mut tile = movement.previous_tile;
+    let mut fixed_facing = false;
+    let mut phases = VecDeque::new();
+    for step in &movement.executed_steps {
+        let command = step.command.as_str();
+        match command {
+            "fix_facing" => fixed_facing = true,
+            "remove_fixed_facing" => fixed_facing = false,
+            "step" | "turn_step" | "slide_step" | "slow_step" | "slow_slide_step"
+            | "fast_step" | "big_step" | "fast_slide_step" | "jump_step"
+            | "slow_jump_step" | "fast_jump_step" => {
+                let direction = visible_script_movement_direction(step)?;
+                let jump = command.contains("jump_step");
+                let stride = if jump { 2 } else { 1 };
+                let to = crate::core::world::movement::checked_move_by_stride(
+                    tile,
+                    direction,
+                    stride,
+                )
+                .with_context(|| {
+                    format!(
+                        "visible script movement {} {} overflows from ({},{})",
+                        movement.movement, command, tile.x, tile.y
+                    )
+                })?;
+                let base = if command.starts_with("slow_") {
+                    WALK_FRAME_HOLD_TICKS.saturating_mul(2)
+                } else if command.starts_with("fast_") || command == "big_step" {
+                    WALK_FRAME_HOLD_TICKS / 2
+                } else {
+                    WALK_FRAME_HOLD_TICKS
+                };
+                phases.push_back(VisibleScriptMovementPhase::Move {
+                    from: tile,
+                    to,
+                    direction,
+                    duration: if jump { base.saturating_mul(2) } else { base }.max(1),
+                    jump,
+                    update_facing: !fixed_facing,
+                    standing_frame: jump || command.contains("slide_step"),
+                });
+                tile = to;
+            }
+            "turn_head" | "turn_in" | "turn_waterfall" | "step_bump" | "turn_away" => {
+                let mut direction = visible_script_movement_direction(step)?;
+                if command == "turn_away" {
+                    direction = visible_opposite_direction(direction);
+                }
+                let duration = match command {
+                    "turn_away" => WALK_FRAME_HOLD_TICKS.saturating_mul(2),
+                    "turn_in" => WALK_FRAME_HOLD_TICKS,
+                    "turn_waterfall" => WALK_FRAME_HOLD_TICKS / 2,
+                    _ => 1,
+                };
+                phases.push_back(VisibleScriptMovementPhase::Turn {
+                    direction,
+                    duration,
+                });
+            }
+            "step_sleep" => phases.push_back(VisibleScriptMovementPhase::Hold {
+                duration: step.duration.unwrap_or(u16::from(WALK_FRAME_HOLD_TICKS)),
+            }),
+            command if command.starts_with("step_sleep_") => {
+                let duration = command
+                    .strip_prefix("step_sleep_")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .with_context(|| format!("invalid exact movement sleep {command}"))?;
+                phases.push_back(VisibleScriptMovementPhase::Hold { duration });
+            }
+            "teleport_from" => {
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::TeleportSpin,
+                });
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::TeleportRise,
+                });
+            }
+            "teleport_to" => {
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 17,
+                    effect: VisibleStationaryMovementEffect::TeleportWait,
+                });
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::TeleportDescent,
+                });
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::TeleportSpin,
+                });
+            }
+            "skyfall_top" => phases.push_back(VisibleScriptMovementPhase::Stationary {
+                duration: 16,
+                effect: VisibleStationaryMovementEffect::SkyfallTop,
+            }),
+            "skyfall" => {
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::SkyfallWait,
+                });
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: 16,
+                    effect: VisibleStationaryMovementEffect::SkyfallFall,
+                });
+            }
+            "tree_shake" => phases.push_back(VisibleScriptMovementPhase::TreeShake { duration: 24 }),
+            "remove_object" | "hide_object" => {
+                phases.push_back(VisibleScriptMovementPhase::Visibility { hidden: true });
+            }
+            "show_object" => {
+                phases.push_back(VisibleScriptMovementPhase::Visibility { hidden: false });
+            }
+            "step_dig" => {
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: step.duration.context("movement effect missing duration")?,
+                    effect: VisibleStationaryMovementEffect::DigSpin,
+                });
+                phases.push_back(VisibleScriptMovementPhase::Visibility { hidden: true });
+            }
+            "return_dig" => {
+                phases.push_back(VisibleScriptMovementPhase::Visibility { hidden: false });
+                phases.push_back(VisibleScriptMovementPhase::Stationary {
+                    duration: step.duration.context("movement effect missing duration")?,
+                    effect: VisibleStationaryMovementEffect::DigSpin,
+                });
+            }
+            "step_shake" => phases.push_back(VisibleScriptMovementPhase::ScreenShake {
+                parameter: step.duration.context("screen shake movement missing parameter")?,
+            }),
+            "rock_smash" => phases.push_back(VisibleScriptMovementPhase::Stationary {
+                duration: step.duration.context("Rock Smash movement missing duration")?,
+                effect: VisibleStationaryMovementEffect::RockSmash,
+            }),
+            "step_wait_end" => {
+                phases.push_back(VisibleScriptMovementPhase::Hold {
+                    duration: step.duration.context("movement effect missing duration")?,
+                });
+            }
+            _ => {}
+        }
+    }
+    if phases.is_empty() {
+        return Ok(());
+    }
+    if tile != movement.tile {
+        anyhow::bail!(
+            "visible script movement {} reconstructed ({},{}) but authority ended at ({},{})",
+            movement.movement,
+            tile.x,
+            tile.y,
+            movement.tile.x,
+            movement.tile.y
+        );
+    }
+    if runtime_shell.visible_script_movement.is_some() {
+        let current_object = runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .map(|active| active.object_id.as_str());
+        if current_object != Some(movement.object_id.as_str()) {
+            let revealed_object = if !movement.previous_hidden && movement.object_id != "PLAYER" {
+                runtime_shell
+                    .shell
+                    .session()
+                    .overworld
+                    .objects
+                    .iter()
+                    .find(|object| {
+                        object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+                    })
+                    .cloned()
+            } else {
+                None
+            };
+            let scene = Arc::make_mut(
+                runtime_shell
+                    .visible_script_movement_scene
+                    .as_mut()
+                    .context("queued visible script movement has no retained scene")?,
+            );
+            if movement.object_id == "PLAYER" {
+                scene.overworld.tile = movement.previous_tile;
+                scene.overworld.facing = movement.previous_facing;
+                scene.overworld_player_hidden = movement.previous_hidden;
+            } else {
+                scene
+                    .visible_object_runtime_tiles
+                    .insert(movement.object_id.clone(), movement.previous_tile);
+                scene
+                    .visible_object_facings
+                    .insert(movement.object_id.clone(), movement.previous_facing);
+                if movement.previous_hidden {
+                    scene.visible_objects.retain(|object| {
+                        object.object_identifier.as_deref() != Some(movement.object_id.as_str())
+                    });
+                } else if !scene.visible_objects.iter().any(|object| {
+                    object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+                }) {
+                    scene.visible_objects.push(revealed_object.with_context(|| {
+                        format!("queued movement cannot restore unknown object {}", movement.object_id)
+                    })?);
+                }
+            }
+        }
+        runtime_shell
+            .visible_script_movement
+            .as_mut()
+            .context("visible script movement disappeared while queueing program")?
+            .pending_programs
+            .push_back(VisibleScriptMovementProgram {
+                object_id: movement.object_id.clone(),
+                previous_tile: movement.previous_tile,
+                previous_facing: movement.previous_facing,
+                previous_hidden: movement.previous_hidden,
+                phases,
+                follower_object_id: movement
+                    .previous_follower
+                    .as_ref()
+                    .map(|follower| follower.object_id.clone()),
+                follower_queued_step: initial_visible_follower_step(movement),
+            });
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+    let mut scene = runtime_shell.shell.snapshot()?;
+    if movement.object_id == "PLAYER" {
+        scene.overworld.tile = movement.previous_tile;
+        scene.overworld.facing = movement.previous_facing;
+        scene.overworld_player_hidden = movement.previous_hidden;
+    } else {
+        scene
+            .visible_object_runtime_tiles
+            .insert(movement.object_id.clone(), movement.previous_tile);
+        scene
+            .visible_object_facings
+            .insert(movement.object_id.clone(), movement.previous_facing);
+        if movement.previous_hidden {
+            scene.visible_objects.retain(|object| {
+                object.object_identifier.as_deref() != Some(movement.object_id.as_str())
+            });
+        } else if !scene.visible_objects.iter().any(|object| {
+            object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+        }) {
+            if let Some(object) = runtime_shell
+                .shell
+                .session()
+                .overworld
+                .objects
+                .iter()
+                .find(|object| {
+                    object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+                })
+            {
+                scene.visible_objects.push(object.clone());
+            }
+        }
+    }
+    if movement.object_id == "PLAYER" {
+        runtime_shell.player_walk_stride = false;
+        runtime_shell.player_walk_mirror_stride = false;
+    }
+    restore_visible_follower_origin(&mut scene, movement)?;
+    runtime_shell.visible_script_movement_scene = Some(Arc::new(scene));
+    runtime_shell.visible_script_movement = Some(VisibleScriptMovement {
+        object_id: movement.object_id.clone(),
+        phases,
+        pending_programs: VecDeque::new(),
+        hold_frames_remaining: 0,
+        active_jump_duration: None,
+        active_uses_standing_frame: false,
+        active_tree_shake_duration: None,
+        active_stationary_effect: None,
+        active_stationary_duration: 0,
+        stationary_y_offset: 0,
+        stationary_initial_facing: movement.previous_facing,
+        follower_object_id: movement
+            .previous_follower
+            .as_ref()
+            .map(|follower| follower.object_id.clone()),
+        follower_queued_step: initial_visible_follower_step(movement),
+        follower_active_jump_duration: None,
+        follower_active_uses_standing_frame: false,
+    });
+    start_next_visible_script_movement_phase(runtime_shell)?;
+    Ok(())
+}
+
+fn restore_visible_follower_origin(
+    scene: &mut crate::RuntimeShellSnapshot,
+    movement: &crate::core::systems::script_objects::ScriptMovementOutcome,
+) -> Result<()> {
+    let Some(follower) = movement.previous_follower.as_ref() else {
+        return Ok(());
+    };
+    if follower.object_id == "PLAYER" {
+        scene.overworld.tile = follower.tile;
+        scene.overworld.facing = follower.facing;
+    } else {
+        scene
+            .visible_object_runtime_tiles
+            .insert(follower.object_id.clone(), follower.tile);
+        scene
+            .visible_object_facings
+            .insert(follower.object_id.clone(), follower.facing);
+    }
+    Ok(())
+}
+
+fn initial_visible_follower_step(
+    movement: &crate::core::systems::script_objects::ScriptMovementOutcome,
+) -> Option<VisibleFollowerStep> {
+    let follower = movement.previous_follower.as_ref()?;
+    if let Some(queued) = follower.queued_step {
+        return Some(VisibleFollowerStep {
+            direction: queued.direction,
+            stride: u8::try_from(queued.stride).ok()?,
+            duration: queued.duration,
+            jump: queued.jump,
+            standing_frame: queued.standing_frame,
+        });
+    }
+    let direction = if movement.previous_tile.x > follower.tile.x {
+        Direction::Right
+    } else if movement.previous_tile.x < follower.tile.x {
+        Direction::Left
+    } else if movement.previous_tile.y > follower.tile.y {
+        Direction::Down
+    } else if movement.previous_tile.y < follower.tile.y {
+        Direction::Up
+    } else {
+        return None;
+    };
+    Some(VisibleFollowerStep {
+        direction,
+        stride: 1,
+        duration: WALK_FRAME_HOLD_TICKS,
+        jump: false,
+        standing_frame: false,
+    })
+}
+
+fn begin_visible_follower_step(
+    runtime_shell: &mut BevyRuntimeShell,
+    leader_direction: Direction,
+    leader_stride: u8,
+    leader_duration: u8,
+    leader_jump: bool,
+    leader_standing_frame: bool,
+) -> Result<()> {
+    let (follower_object_id, queued_step) = {
+        let movement = runtime_shell
+            .visible_script_movement
+            .as_mut()
+            .context("visible follower step lost its movement program")?;
+        let follower_object_id = movement.follower_object_id.clone();
+        let queued_step = movement.follower_queued_step.take();
+        if follower_object_id.is_some() {
+            movement.follower_queued_step = Some(VisibleFollowerStep {
+                direction: leader_direction,
+                stride: leader_stride,
+                duration: leader_duration,
+                jump: leader_jump,
+                standing_frame: leader_standing_frame,
+            });
+        }
+        movement.follower_active_jump_duration = queued_step
+            .as_ref()
+            .and_then(|step| step.jump.then_some(step.duration));
+        movement.follower_active_uses_standing_frame = queued_step
+            .as_ref()
+            .is_some_and(|step| step.standing_frame);
+        (follower_object_id, queued_step)
+    };
+    let (Some(follower_object_id), Some(queued_step)) = (follower_object_id, queued_step) else {
+        return Ok(());
+    };
+    let (follower_from, direction) = {
+        let scene = Arc::make_mut(
+            runtime_shell
+                .visible_script_movement_scene
+                .as_mut()
+                .context("visible follower step has no retained scene")?,
+        );
+        let follower_from = if follower_object_id == "PLAYER" {
+            scene.overworld.tile
+        } else {
+            scene
+                .visible_object_runtime_tiles
+                .get(&follower_object_id)
+                .copied()
+                .with_context(|| format!("visible follower {follower_object_id} has no retained tile"))?
+        };
+        let direction = queued_step.direction;
+        let follower_to = crate::core::world::movement::checked_move_by_stride(
+            follower_from,
+            direction,
+            i16::from(queued_step.stride),
+        )
+        .context("visible queued follower step overflows runtime coordinates")?;
+        if follower_object_id == "PLAYER" {
+            scene.overworld.tile = follower_to;
+            scene.overworld.facing = direction;
+        } else {
+            scene
+                .visible_object_runtime_tiles
+                .insert(follower_object_id.clone(), follower_to);
+            scene
+                .visible_object_facings
+                .insert(follower_object_id.clone(), direction);
+        }
+        (follower_from, direction)
+    };
+    if follower_object_id == "PLAYER" {
+        runtime_shell.player_walk_from = Some(follower_from);
+        runtime_shell.player_walk_total_ticks = queued_step.duration;
+        runtime_shell.player_walk_frame_ticks = queued_step.duration;
+        runtime_shell.player_walk_stride = !runtime_shell.player_walk_stride;
+    } else {
+        advance_object_walk_phase(runtime_shell, &follower_object_id, direction);
+        runtime_shell
+            .object_walk_from
+            .insert(follower_object_id.clone(), follower_from);
+        runtime_shell
+            .object_walk_total_ticks_by_id
+            .insert(follower_object_id.clone(), queued_step.duration);
+        runtime_shell
+            .object_walk_frame_ticks_by_id
+            .insert(follower_object_id, queued_step.duration);
+    }
+    Ok(())
+}
+
+fn visible_script_movement_direction(
+    step: &crate::core::systems::script_objects::ScriptMovementStep,
+) -> Result<Direction> {
+    match step.direction.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("up") => Ok(Direction::Up),
+        Some("down") => Ok(Direction::Down),
+        Some("left") => Ok(Direction::Left),
+        Some("right") => Ok(Direction::Right),
+        _ => anyhow::bail!(
+            "script movement {} index={} has no exact direction",
+            step.command,
+            step.index
+        ),
+    }
+}
+
+const fn visible_opposite_direction(direction: Direction) -> Direction {
+    match direction {
+        Direction::Up => Direction::Down,
+        Direction::Down => Direction::Up,
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
     }
 }
 
@@ -1283,14 +1743,19 @@ fn activate_visible_special_routine_boundary(
             kind: crate::core::state::ScriptGraphicsRuntimeKind::HealMachineAnim,
         } => {
             let snapshot = runtime_shell.shell.snapshot()?;
-            let kind = snapshot
+            let script_value = snapshot
                 .script_events
                 .script_value
                 .as_deref()
-                .context("HealMachineAnim requires wScriptVar")?
-                .parse::<u8>()
-                .context("HealMachineAnim wScriptVar must be 0, 1, or 2")?;
-            anyhow::ensure!(kind <= 2, "HealMachineAnim type {kind} is outside 0..=2");
+                .context("HealMachineAnim requires wScriptVar")?;
+            let kind = match script_value {
+                "HEALMACHINE_POKECENTER" | "0" => 0,
+                "HEALMACHINE_ELMS_LAB" | "1" => 1,
+                "HEALMACHINE_HALL_OF_FAME" | "2" => 2,
+                value => anyhow::bail!(
+                    "HealMachineAnim wScriptVar must name one of the three source animation types or contain 0, 1, or 2; got {value}"
+                ),
+            };
             let party_count = u8::try_from(snapshot.party.slots.len())
                 .context("HealMachineAnim party count exceeds u8")?;
             if party_count == 0 {
@@ -1302,6 +1767,72 @@ fn activate_visible_special_routine_boundary(
                 party_count,
                 frame: 0,
             });
+            drain_visible_non_audio_script_events_without_record(runtime_shell)?;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            Ok(true)
+        }
+        SpecialRoutineEffect::RuntimeVisualCommand {
+            kind: crate::core::state::ScriptGraphicsRuntimeKind::MagnetTrain,
+        } => {
+            let snapshot = runtime_shell.shell.snapshot()?;
+            let script_value = snapshot
+                .script_events
+                .script_value
+                .as_deref()
+                .context("MagnetTrain requires wScriptVar")?;
+            let direction_to_goldenrod = match script_value {
+                "TRUE" | "1" => true,
+                "FALSE" | "0" => false,
+                value => anyhow::bail!(
+                    "MagnetTrain wScriptVar must be TRUE/FALSE or 1/0, got {value}"
+                ),
+            };
+            let (direction, position, hold_position, final_position) =
+                if direction_to_goldenrod {
+                    (-1, -96, -64, 96)
+                } else {
+                    (1, 96, 64, -96)
+                };
+            runtime_shell.visible_magnet_train = Some(VisibleMagnetTrain {
+                direction,
+                hold_position,
+                final_position,
+                position,
+                offset: position,
+                wait_counter: 0,
+                phase: 0,
+                arrival_sfx_played: false,
+            });
+            queue_visible_magnet_train_music(runtime_shell)?;
+            drain_visible_non_audio_script_events_without_record(runtime_shell)?;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            Ok(true)
+        }
+        SpecialRoutineEffect::RuntimeVisualCommand {
+            kind: crate::core::state::ScriptGraphicsRuntimeKind::DisplayUnownWords,
+        } => {
+            let snapshot = runtime_shell.shell.snapshot()?;
+            let value = snapshot
+                .script_events
+                .script_value
+                .as_deref()
+                .context("DisplayUnownWords requires wScriptVar")?;
+            let word = match value {
+                "UNOWNWORDS_ESCAPE" | "0" => "ESCAPE",
+                "UNOWNWORDS_LIGHT" | "1" => "LIGHT",
+                "UNOWNWORDS_WATER" | "2" => "WATER",
+                "UNOWNWORDS_HO_OH" | "3" => "HO-OH",
+                value => anyhow::bail!("unknown Unown word constant {value}"),
+            };
+            runtime_shell.visible_unown_words = Some(word.to_string());
+            drain_visible_non_audio_script_events_without_record(runtime_shell)?;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            Ok(true)
+        }
+        SpecialRoutineEffect::RuntimeVisualCommand {
+            kind: crate::core::state::ScriptGraphicsRuntimeKind::Diploma,
+        } => {
+            runtime_shell.visible_diploma = Some(0);
             drain_visible_non_audio_script_events_without_record(runtime_shell)?;
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(true)
@@ -1809,7 +2340,7 @@ fn start_visible_catch_tutorial(
         source_script,
         command_index,
     )?;
-    prepare_visible_battle_entry(runtime_shell);
+    prepare_visible_battle_entry(runtime_shell)?;
     runtime_shell.last_audio_events.push(format!(
         "catch tutorial start source={source_script} start={start:?}"
     ));
@@ -2989,6 +3520,10 @@ fn dispatch_visible_overworld_interaction(
     interaction: crate::core::world::session::OverworldInteraction,
     action_kind: &'static str,
 ) -> Result<()> {
+    // Every successful A-button interaction owns one acknowledgement cue:
+    // object and background events call PlayTalkObject, while the successful
+    // tile-collision path converges on PlayClickSFX before script dispatch.
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     if matches!(
         interaction.script.as_str(),
         "StrengthBoulderScript" | "SmashRockScript"
@@ -3106,7 +3641,15 @@ fn finish_visible_trainer_sight_script(runtime_shell: &mut BevyRuntimeShell) -> 
         Direction::Right => Direction::Left,
     };
     runtime_shell.trainer_walk_from = None;
+    runtime_shell.object_walk_from.clear();
+    runtime_shell.object_walk_frame_ticks_by_id.clear();
+    runtime_shell.object_walk_total_ticks_by_id.clear();
+    runtime_shell.pending_overworld_step_boundary = None;
+    runtime_shell.pending_overworld_warp_scene = None;
+    runtime_shell.visible_script_movement = None;
+    runtime_shell.visible_script_movement_scene = None;
     runtime_shell.object_walk_frame_ticks = 0;
+    runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
     runtime_shell.object_walk_stride = false;
     {
         let overworld = &mut runtime_shell.shell.session_mut().overworld;
@@ -3205,11 +3748,24 @@ fn execute_visible_pending_script_warp(runtime_shell: &mut BevyRuntimeShell) -> 
     if reached_boundary {
         return Ok(());
     }
-    settle_visible_overworld_arrival(runtime_shell, "script_warp")
+    // Script_warp enters through MAPSETUP_WARP: the LCD is blanked during
+    // the map replacement and the destination fades in from white. It does
+    // not use MAPSETUP_DOOR's gradual source-map fade-out.
+    reset_visible_navigation_state(runtime_shell);
+    suppress_visible_map_name_sign_for_current_map(runtime_shell)?;
+    queue_visible_current_music(runtime_shell)?;
+    runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::ScriptFadeIn);
+    runtime_shell.screen_fade = Some(VisibleScreenFade::new(
+        ScriptFadeColor::White,
+        ScriptFadeDirection::In,
+        8,
+    ));
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
 }
 
 fn settle_visible_overworld_frame_arrival(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let Some(frame) = runtime_shell.shell.last_frame() else {
+    let Some(frame) = runtime_shell.shell.last_frame().cloned() else {
         record_visible_runtime_action(runtime_shell, "overworld:arrival:no_frame")?;
         runtime_shell
             .last_audio_events
@@ -3218,7 +3774,34 @@ fn settle_visible_overworld_frame_arrival(runtime_shell: &mut BevyRuntimeShell) 
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     };
-    let reason = if frame.warp.is_some() {
+    let reason = if let Some(warp) = frame.warp.as_ref() {
+        if runtime_shell.visible_walk_warp_phase.is_none() {
+            record_visible_runtime_action(runtime_shell, "overworld:walk_warp:fade_out")?;
+            let permission = warp.trigger.permission;
+            let sfx_id = match permission {
+                // PIT/PIT_68 dispatch FallIntoMapScript, which uses
+                // newloadmap MAPSETUP_FALL without the `warpsound` command.
+                crate::core::world::collision::permissions::PIT
+                | crate::core::world::collision::permissions::PIT_68 => None,
+                // GetWarpSFX compares the complete collision byte against
+                // COLL_DOOR only. Alternate doors, stairs, caves, ladders,
+                // and carpets all fall through to SFX_EXIT_BUILDING.
+                crate::core::world::collision::permissions::DOOR => Some("SFX_ENTER_DOOR"),
+                crate::core::world::collision::permissions::WARP_PANEL => Some("SFX_WARP_TO"),
+                _ => Some("SFX_EXIT_BUILDING"),
+            };
+            if let Some(sfx_id) = sfx_id {
+                queue_visible_shell_sound_effect(runtime_shell, sfx_id)?;
+            }
+            runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::FadeOut);
+            runtime_shell.screen_fade = Some(VisibleScreenFade::new(
+                ScriptFadeColor::White,
+                ScriptFadeDirection::Out,
+                8,
+            ));
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
         "walk_warp"
     } else if frame.connection.is_some() {
         "map_connection"
@@ -3238,11 +3821,57 @@ fn settle_visible_overworld_travel(runtime_shell: &mut BevyRuntimeShell) -> Resu
     settle_visible_overworld_arrival(runtime_shell, "field_travel")
 }
 
+fn suppress_visible_map_name_sign_for_current_map(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    runtime_shell.previous_map_sign_landmark = if matches!(
+        snapshot.overworld.map_name.as_str(),
+        "Route35NationalParkGate" | "Route36NationalParkGate"
+    ) {
+        Some("__MAP_NAME_SIGN_SENTINEL__".to_string())
+    } else {
+        snapshot
+            .presentation
+            .pokegear_landmarks
+            .map_to_landmark
+            .get(&snapshot.overworld.map_name)
+            .cloned()
+    };
+    runtime_shell.visible_map_name_sign = None;
+    Ok(())
+}
+
 fn settle_visible_overworld_arrival(
     runtime_shell: &mut BevyRuntimeShell,
     reason: &str,
 ) -> Result<()> {
+    let connection_continuation = (reason == "map_connection").then(|| {
+        (
+            runtime_shell.overworld_held_direction,
+            runtime_shell.overworld_held_directions.clone(),
+            runtime_shell.overworld_buffered_direction,
+            runtime_shell.player_walk_stride,
+            runtime_shell.player_walk_mirror_stride,
+        )
+    });
     reset_visible_navigation_state(runtime_shell);
+    if let Some((held_direction, held_directions, buffered_direction, stride, mirror_stride)) =
+        connection_continuation
+    {
+        // MAPSETUP_CONNECTION is seamless. Keep the live D-pad arbitration
+        // and the current foot phase across the map boundary; door/warp/fly
+        // arrivals retain the full input reset above.
+        runtime_shell.overworld_held_direction = held_direction;
+        runtime_shell.overworld_held_directions = held_directions;
+        runtime_shell.overworld_buffered_direction = buffered_direction;
+        runtime_shell.overworld_direction_repeat_ticks = 0;
+        runtime_shell.player_walk_stride = stride;
+        runtime_shell.player_walk_mirror_stride = mirror_stride;
+    }
+    if reason != "map_connection" {
+        suppress_visible_map_name_sign_for_current_map(runtime_shell)?;
+    }
     let script_events = runtime_shell.shell.script_events_snapshot();
     if script_events.pending_map_load.is_some() {
         return take_visible_pending_map_load(runtime_shell);
@@ -3552,11 +4181,13 @@ fn reset_visible_navigation_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_oak_intro = None;
     runtime_shell.pending_gender_selection = None;
     runtime_shell.visible_blackout_phase = None;
+    runtime_shell.visible_walk_warp_phase = None;
     runtime_shell.credits_screen = None;
     runtime_shell.last_battle_cry_key = None;
-    runtime_shell.pending_battle_cry_after_message = None;
+    runtime_shell.pending_battle_cries_after_messages.clear();
     runtime_shell.battle_enemy_send_out_pending = false;
     runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_enemy_hp_at_player_send_out = None;
     runtime_shell.pending_battle_scenes_after_message.clear();
     runtime_shell.pending_enemy_response_after_capture = None;
     runtime_shell.visible_capture_animation = None;
@@ -3566,10 +4197,28 @@ fn reset_visible_navigation_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.visible_frontpic_animation = None;
     runtime_shell.visible_fishing_animation = None;
     runtime_shell.last_overworld_input = None;
+    runtime_shell.overworld_direction_repeat_ticks = 0;
+    runtime_shell.overworld_held_direction = None;
+    runtime_shell.overworld_held_directions.clear();
+    runtime_shell.overworld_buffered_direction = None;
+    runtime_shell.ui_held_direction = None;
+    runtime_shell.ui_direction_repeat_ticks = 0;
     runtime_shell.player_walk_frame_ticks = 0;
+    runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
     runtime_shell.player_walk_stride = false;
+    runtime_shell.player_walk_mirror_stride = false;
     runtime_shell.object_walk_frame_ticks = 0;
+    runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
     runtime_shell.object_walk_stride = false;
+    runtime_shell.object_walk_from.clear();
+    runtime_shell.object_walk_frame_ticks_by_id.clear();
+    runtime_shell.object_walk_total_ticks_by_id.clear();
+    runtime_shell.object_walk_phases.clear();
+    runtime_shell.object_walk_directions.clear();
+    runtime_shell.pending_overworld_step_boundary = None;
+    runtime_shell.pending_overworld_warp_scene = None;
+    runtime_shell.visible_script_movement = None;
+    runtime_shell.visible_script_movement_scene = None;
     runtime_shell.recent_overworld_inputs.clear();
 }
 
@@ -3577,10 +4226,28 @@ fn reset_visible_map_reload_after_battle(runtime_shell: &mut BevyRuntimeShell, r
     reset_visible_script_navigation_state(runtime_shell);
     reset_visible_selection_cursors(runtime_shell);
     runtime_shell.last_overworld_input = None;
+    runtime_shell.overworld_direction_repeat_ticks = 0;
+    runtime_shell.overworld_held_direction = None;
+    runtime_shell.overworld_held_directions.clear();
+    runtime_shell.overworld_buffered_direction = None;
+    runtime_shell.ui_held_direction = None;
+    runtime_shell.ui_direction_repeat_ticks = 0;
     runtime_shell.player_walk_frame_ticks = 0;
+    runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
     runtime_shell.player_walk_stride = false;
+    runtime_shell.player_walk_mirror_stride = false;
     runtime_shell.object_walk_frame_ticks = 0;
+    runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
     runtime_shell.object_walk_stride = false;
+    runtime_shell.object_walk_from.clear();
+    runtime_shell.object_walk_frame_ticks_by_id.clear();
+    runtime_shell.object_walk_total_ticks_by_id.clear();
+    runtime_shell.object_walk_phases.clear();
+    runtime_shell.object_walk_directions.clear();
+    runtime_shell.pending_overworld_step_boundary = None;
+    runtime_shell.pending_overworld_warp_scene = None;
+    runtime_shell.visible_script_movement = None;
+    runtime_shell.visible_script_movement_scene = None;
     runtime_shell.recent_overworld_inputs.clear();
     reset_visible_music_state(runtime_shell);
     runtime_shell
@@ -3615,6 +4282,7 @@ fn reset_visible_script_navigation_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.active_script_cursor = None;
     runtime_shell.pending_map_callbacks.clear();
     runtime_shell.map_callback_return_cursor = None;
+    runtime_shell.map_reload_return_cursor = None;
     runtime_shell.pending_scene_script = None;
     runtime_shell.script_command_cursor = 0;
 }
@@ -3637,13 +4305,18 @@ fn reset_visible_selection_cursors(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.bill_pc_box_summary = None;
     runtime_shell.pc_notice = None;
     runtime_shell.field_notice = None;
+    runtime_shell.pending_tmhm_teach_prompt_after_boot = false;
     runtime_shell.field_notice_queue.clear();
+    runtime_shell.pending_sweet_scent_nothing_notice = false;
     runtime_shell.field_notice_scene = None;
     runtime_shell.pending_field_travel_arrival = false;
     runtime_shell.pending_field_travel_delay_frames = None;
     runtime_shell.pending_field_notice_sound = None;
+    runtime_shell.pending_field_notice_cry = None;
+    runtime_shell.visible_strength_notice_phase = None;
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.pending_field_notice_effect_frames = None;
+    runtime_shell.visible_sweet_scent_delay = false;
     runtime_shell.visible_rock_smash_target = None;
     runtime_shell.visible_cut_animation = None;
     runtime_shell.visible_whirlpool_animation = None;
@@ -3651,7 +4324,12 @@ fn reset_visible_selection_cursors(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.visible_flash_animation = None;
     runtime_shell.visible_fly_animation = None;
     runtime_shell.visible_waterfall_animation = None;
+    runtime_shell.pending_surf_start_from = None;
+    runtime_shell.hall_of_fame_pc_index = None;
     runtime_shell.visible_heal_machine = None;
+    runtime_shell.visible_magnet_train = None;
+    runtime_shell.visible_unown_words = None;
+    runtime_shell.visible_diploma = None;
     runtime_shell.visible_battle_transition = None;
     runtime_shell.heal_music_active = false;
     runtime_shell.elevator_cursor = None;
@@ -3729,9 +4407,10 @@ fn reset_visible_battle_exit_state(runtime_shell: &mut BevyRuntimeShell) {
     reset_visible_battle_action_cursors(runtime_shell);
     runtime_shell.party_move_cursor = None;
     runtime_shell.last_battle_cry_key = None;
-    runtime_shell.pending_battle_cry_after_message = None;
+    runtime_shell.pending_battle_cries_after_messages.clear();
     runtime_shell.battle_enemy_send_out_pending = false;
     runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_enemy_hp_at_player_send_out = None;
     runtime_shell.pending_battle_scenes_after_message.clear();
     runtime_shell.pending_enemy_response_after_capture = None;
     runtime_shell.visible_move_animations.clear();
@@ -3739,6 +4418,7 @@ fn reset_visible_battle_exit_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.visible_trainer_exit_animation = None;
     runtime_shell.visible_frontpic_animation = None;
     if runtime_shell.battle_messages.is_empty() {
+        runtime_shell.battle_text_reveal = None;
         reset_visible_music_state(runtime_shell);
     }
 }

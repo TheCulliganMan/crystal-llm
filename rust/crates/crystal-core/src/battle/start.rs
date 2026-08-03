@@ -911,6 +911,9 @@ fn reset_active_battle_slots(state: &mut GameState) {
 
 pub fn deactivate_battle(state: &mut GameState) {
     state.battle = BattleMemory::Inactive;
+    // Every battle exit returns through ReloadMap -> EnterMap before field
+    // scripts resume, which re-arms the five-step encounter cooldown.
+    state.wild_encounter_cooldown = 5;
     state.script_runtime.active_battle_combat = None;
     clear_persistent_party_battle_state(state);
     state.sync_party_from_storage();

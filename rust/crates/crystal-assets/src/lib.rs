@@ -372,7 +372,7 @@ use crystal_core::world::encounters::{
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
     FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, SpecialWildEncounterEntry,
     TimeOfDay, WildEncounter, WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable,
-    apply_grass_level_variance, encounter_music_modifier_issues, encounter_slot_table_issues,
+    apply_surf_level_variance, encounter_music_modifier_issues, encounter_slot_table_issues,
     field_encounter_catalog_issues, roll_headbutt_encounter as core_roll_headbutt_encounter,
     roll_rock_smash_encounter as core_roll_rock_smash_encounter,
     roll_sweet_scent_encounter as core_roll_sweet_scent_encounter, wild_encounter_catalog_issues,

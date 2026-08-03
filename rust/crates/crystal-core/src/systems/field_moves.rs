@@ -3089,6 +3089,7 @@ mod tests {
             trigger: crate::world::session::WarpTrigger {
                 map_name: map_name.to_string(),
                 tile: TilePosition::new(6, 8),
+                permission: crate::world::collision::permissions::DOOR,
                 warp: warp.clone(),
             },
             destination: crate::world::session::WarpDestination {

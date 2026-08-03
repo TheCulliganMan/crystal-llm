@@ -656,6 +656,7 @@
                         lead_party_level: None,
                         roaming_candidates: Vec::new(),
                         special_wild_encounters: Vec::new(),
+                        land_encounters_on_any_land: false,
                     },
                 )
                 .expect("Route29 encounter roll")
@@ -826,6 +827,7 @@
         let trigger = WarpTrigger {
             map_name: "Route29".to_string(),
             tile: TilePosition::new(54, 2),
+            permission: 0x71,
             warp: WarpEvent {
                 index: 1,
                 x: 27,
@@ -856,6 +858,7 @@
         let trigger = WarpTrigger {
             map_name: "Route29".to_string(),
             tile: TilePosition::new(54, 2),
+            permission: 0x71,
             warp: WarpEvent {
                 index: 1,
                 x: 27,
@@ -888,6 +891,7 @@
         let trigger = WarpTrigger {
             map_name: "Source".to_string(),
             tile: TilePosition::new(2, 2),
+            permission: 0x71,
             warp: WarpEvent {
                 index: 1,
                 x: 1,
@@ -944,6 +948,7 @@
         let trigger = WarpTrigger {
             map_name: "Source".to_string(),
             tile: TilePosition::new(2, 2),
+            permission: 0x71,
             warp: WarpEvent {
                 index: 1,
                 x: 1,

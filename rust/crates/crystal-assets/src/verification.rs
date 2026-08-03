@@ -2531,6 +2531,7 @@ fn verify_map_command_source_scripts(data: &GameDataSet, diagnostics: &mut Vec<V
     }
 }
 
+#[cfg(test)]
 fn verify_unique_runtime_script_labels(
     data: &GameDataSet,
     diagnostics: &mut Vec<VerificationError>,
@@ -2555,6 +2556,7 @@ fn verify_unique_runtime_script_labels(
     }
 }
 
+#[cfg(test)]
 fn runtime_source_script_labels(data: &GameDataSet) -> BTreeSet<String> {
     let mut labels = BTreeSet::new();
     for module in data.maps.values() {
@@ -7443,6 +7445,7 @@ fn type_effectiveness_unknown_parts(
     }
 }
 
+#[cfg(test)]
 fn type_effectiveness_message_prefix(table: TypeEffectivenessTableKind) -> &'static str {
     match table {
         TypeEffectivenessTableKind::Matchups => "type effectiveness",
@@ -9293,6 +9296,7 @@ fn verify_field_move_block_rule_replacements(
     }
 }
 
+#[cfg(test)]
 fn metatile_contains_any_collision(metatile: &MetatileCollision, collisions: &[u8]) -> bool {
     metatile
         .collision
@@ -9865,4 +9869,3 @@ fn connection_trigger_tile_from_source(
         _ => Some(source),
     }
 }
-

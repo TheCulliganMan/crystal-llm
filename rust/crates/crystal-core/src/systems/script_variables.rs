@@ -12,7 +12,6 @@ pub struct ScriptVariableCommand {
     pub target: Option<String>,
     #[serde(deserialize_with = "required_script_variable_value_token_vec")]
     pub value_tokens: Vec<String>,
-    #[serde(deserialize_with = "required_script_variable_target_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -462,20 +461,6 @@ where
     } else {
         Err(serde::de::Error::custom(format!(
             "script variable command must be exact lowercase ASCII, found {value:?}"
-        )))
-    }
-}
-
-fn required_script_variable_target_token<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if is_exact_script_variable_target_token(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format!(
-            "script variable target must be exact ASCII alphanumeric/underscore, found {value:?}"
         )))
     }
 }

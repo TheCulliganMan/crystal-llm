@@ -278,6 +278,19 @@ fn close_visible_credits_screen(
 }
 
 fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if let Some(continue_screen) = runtime_shell.visible_continue_screen.take() {
+        let save_path = continue_screen.save_path;
+        record_visible_runtime_action(
+            runtime_shell,
+            format!("title:continue:confirm:{}", save_path.display()),
+        )?;
+        runtime_shell.title_menu = None;
+        runtime_shell
+            .last_audio_events
+            .push(format!("title continue loaded {}", save_path.display()));
+        set_shell_action_status(runtime_shell, format!("CONTINUE {}", save_path.display()));
+        return load_visible_runtime_save(runtime_shell, &save_path, "title_continue");
+    }
     let Some(title) = runtime_shell.title_menu.clone() else {
         return handle_visible_no_active_title_menu(runtime_shell, "confirm");
     };
@@ -290,8 +303,8 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
             let save_path = title
                 .save_path
                 .context("title Continue requires an exact save path")?;
-            let summary = match runtime_shell.shell.runtime().load_save_summary(&save_path) {
-                Ok(summary) => summary,
+            let state = match runtime_shell.shell.runtime().load_save(&save_path) {
+                Ok(state) => state,
                 Err(error) => {
                     record_visible_runtime_action(
                         runtime_shell,
@@ -308,24 +321,26 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
             };
             record_visible_runtime_action(
                 runtime_shell,
-                format!(
-                    "title:continue:{}:{}:{}:{}",
-                    save_path.display(),
-                    summary.modpack().id(),
-                    summary.modpack().hash(),
-                    summary.pack_content_hash()
-                ),
+                format!("title:continue:open:{}", save_path.display()),
             )?;
-            runtime_shell.title_menu = None;
-            runtime_shell.last_audio_events.push(format!(
-                "title continue loaded {}",
-                save_path.to_string_lossy()
-            ));
-            set_shell_action_status(
-                runtime_shell,
-                format!("CONTINUE {}", save_path.to_string_lossy()),
-            );
-            load_visible_runtime_save(runtime_shell, &save_path, "title_continue")?;
+            let badge_count = state
+                .badges
+                .johto
+                .iter()
+                .chain(state.badges.kanto.iter())
+                .filter(|owned| **owned)
+                .count();
+            let has_pokedex = state.flags.is_engine_flag_set("ENGINE_POKEDEX")?;
+            runtime_shell.visible_continue_screen = Some(VisibleContinueScreen {
+                save_path,
+                player_name: state.player_name,
+                badge_count,
+                pokedex_count: has_pokedex.then(|| state.pokedex.caught_count()),
+                hours: u16::from(state.time.game_time_hours),
+                minutes: state.time.game_time_minutes,
+            });
+            set_shell_action_status(runtime_shell, "CONTINUE DATA");
+            mark_runtime_snapshot_dirty(runtime_shell);
         }
         TitleMenuOption::NewGame => {
             runtime_shell.shell = RuntimeGameShell::new_game(
@@ -1471,6 +1486,7 @@ enum BattleMenuAxis {
 fn move_visible_battle_action_cursor_axis(
     runtime_shell: &mut BevyRuntimeShell,
     axis: BattleMenuAxis,
+    delta: isize,
 ) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let Some(battle) = snapshot.battle.as_ref() else {
@@ -1486,10 +1502,28 @@ fn move_visible_battle_action_cursor_axis(
         "battle:actions",
         actions.len(),
     );
+    let (row, column) = (current / 2, current % 2);
     let next = match axis {
-        BattleMenuAxis::Horizontal => current ^ 1,
-        BattleMenuAxis::Vertical => current ^ 2,
+        BattleMenuAxis::Horizontal => {
+            let next_column = if delta.is_negative() {
+                column.saturating_sub(1)
+            } else {
+                (column + 1).min(1)
+            };
+            row * 2 + next_column
+        }
+        BattleMenuAxis::Vertical => {
+            let next_row = if delta.is_negative() {
+                row.saturating_sub(1)
+            } else {
+                (row + 1).min(1)
+            };
+            next_row * 2 + column
+        }
     };
+    if next == current {
+        return Ok(());
+    }
     runtime_shell.battle_action_cursor = Some(MenuCursor {
         surface_id: "battle:actions".to_string(),
         option_index: next,
@@ -1850,6 +1884,9 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
             runtime_shell
                 .last_audio_events
                 .push(format!("move learn cannot forget HM {move_id}"));
+            runtime_shell
+                .battle_messages
+                .push_back("HM moves can't be\nforgotten now.".to_string());
             set_shell_action_status(runtime_shell, "HM MOVES CAN'T BE FORGOTTEN NOW");
             trim_event_log(&mut runtime_shell.last_audio_events);
             return Ok(());
@@ -1878,16 +1915,25 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
     ));
     runtime_shell
         .battle_messages
-        .push_back("1, 2 and...".to_string());
+        .push_back("1, 2 and…".to_string());
+    runtime_shell
+        .battle_messages
+        .push_back("Poof!".to_string());
     runtime_shell.battle_messages.push_back(format!(
-        "Poof! {} forgot {}!\n\nAnd...",
-        recipient_name,
-        replaced_move_name
+        "{} forgot\n{}.",
+        recipient_name, replaced_move_name
     ));
-    runtime_shell.battle_messages.push_back(format!(
-        "{} learned {}!",
+    runtime_shell
+        .battle_messages
+        .push_back("And…".to_string());
+    let learned_message = format!(
+        "{} learned\n{}!",
         recipient_name, learned_move_name
-    ));
+    );
+    runtime_shell
+        .battle_fanfare_messages
+        .push_back(learned_message.clone());
+    runtime_shell.battle_messages.push_back(learned_message);
     push_visible_deferred_evolution_events(
         runtime_shell,
         outcome.deferred_evolution.as_ref(),
@@ -1918,7 +1964,7 @@ fn decline_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
         resolution.party_index, resolution.learned_move
     ));
     runtime_shell.battle_messages.push_back(format!(
-        "{} did not learn {}.",
+        "{}\ndid not learn\n{}.",
         recipient_name,
         learned_move_name
     ));
@@ -1972,23 +2018,28 @@ fn push_visible_deferred_evolution_events(
     let recipient_name = visible_party_pokemon_name(runtime_shell, party_index)?;
     let snapshot = runtime_shell.shell.snapshot()?;
     if let Some(target_species) = evolution.target_species.as_ref() {
-        runtime_shell
-            .battle_messages
-            .push_back(format!("What? {} is evolving!", recipient_name));
-        runtime_shell.battle_messages.push_back(format!(
+        let evolving_message = format!("What? {} is evolving!", recipient_name);
+        let evolved_message = format!(
             "Congratulations! {} evolved into {}!",
             recipient_name,
             crate::core::models::pokemon_species_display_name(target_species)
-        ));
+        );
+        runtime_shell.battle_messages.push_back(evolving_message.clone());
+        runtime_shell.battle_messages.push_back(evolved_message.clone());
+        runtime_shell
+            .battle_evolution_cries
+            .push_back((target_species.clone(), evolving_message.clone()));
+        runtime_shell
+            .battle_sounds_after_messages
+            .push_back(("SFX_CAUGHT_MON".to_string(), evolving_message.clone()));
         runtime_shell
             .last_audio_events
             .push(format!("deferred evolution evolved {target_species}"));
-        queue_visible_pokemon_cry(runtime_shell, target_species, "deferred_evolution")?;
     }
     for learned in &evolution.pending_move_learns {
         let move_name = battle_move_display_name(&snapshot, &learned.name);
         runtime_shell.battle_messages.push_back(format!(
-            "{} is trying to learn {}.",
+            "{} is\ntrying to learn\n{}.",
             recipient_name, move_name
         ));
         runtime_shell.last_audio_events.push(format!(
@@ -2028,7 +2079,7 @@ fn visible_party_pokemon_name(
     runtime_shell: &BevyRuntimeShell,
     party_index: usize,
 ) -> Result<String> {
-    Ok(runtime_shell
+    runtime_shell
         .shell
         .snapshot()?
         .party
@@ -2036,7 +2087,7 @@ fn visible_party_pokemon_name(
         .into_iter()
         .find(|slot| slot.index == party_index)
         .map(|slot| slot.pokemon.nickname)
-        .unwrap_or_else(|| "POKEMON".to_string()))
+        .with_context(|| format!("party slot {party_index} is missing from visible progression"))
 }
 
 fn selected_pokedex_species_id(runtime_shell: &mut BevyRuntimeShell) -> Result<String> {
@@ -2308,8 +2359,7 @@ fn move_visible_battle_move_cursor(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let move_menu_count = battle_move_menu_option_count(&snapshot, &battle)
-        .unwrap_or_else(|| battle.commands.player_move_slots.len() + 1);
+    let move_menu_count = battle_move_menu_option_count(&snapshot, &battle)?;
     move_visible_cursor_slot(
         &mut runtime_shell.battle_move_cursor,
         "battle:moves".to_string(),
@@ -2857,12 +2907,25 @@ fn compiled_special_routine_at(
     source_script: &str,
     command_index: usize,
 ) -> Result<Option<String>> {
-    let map_name = runtime_shell.shell.current_map_name();
-    Ok(runtime_shell
+    // Read the canonical compiled command body. Derived per-map runtime
+    // indexes can omit a shared ASM script label, while the script runner and
+    // its cursor always address this body directly.
+    let command = runtime_shell
         .shell
-        .script_runtime_command_at(map_name, source_script, command_index)
-        .filter(|command| command.command == "special")
-        .and_then(|command| command.args.first().cloned()))
+        .runtime()
+        .compiled_script_commands(source_script)?
+        .into_iter()
+        .nth(command_index);
+    Ok(command
+        .filter(|command| command.get("command").and_then(serde_json::Value::as_str) == Some("special"))
+        .and_then(|command| {
+            command
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }))
 }
 
 fn close_active_runtime_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -3204,14 +3267,48 @@ fn take_visible_pending_map_load(runtime_shell: &mut BevyRuntimeShell) -> Result
     let request = runtime_shell
         .shell
         .take_pending_script_request(RuntimePendingScriptRequestKind::MapLoad)?;
+    let reload_current_map = matches!(
+        &request,
+        RuntimePendingScriptRequest::MapLoad(load)
+            if matches!(
+                load.command.as_str(),
+                "reloadmap" | "reloadmappart" | "reloadmapafterbattle"
+            )
+    );
+    let reload_return_cursor = reload_current_map
+        .then(|| visible_active_compiled_script_cursor(runtime_shell))
+        .flatten();
     reset_visible_navigation_state(runtime_shell);
     runtime_shell
         .last_audio_events
         .push(format!("took pending map load {:?}", request));
-    arm_visible_current_scene_script(runtime_shell, "map_load")?;
-    arm_visible_current_map_callbacks(runtime_shell, "map_load")?;
-    continue_visible_script_after_prompt(runtime_shell)?;
+    if reload_current_map {
+        // MAPSETUP_RELOADMAP preserves the live object buffer and does not
+        // run the map's scene, NEWMAP, OBJECTS, or CMDQUEUE callbacks. Its
+        // LoadBlockData step invokes only MAPCALLBACK_TILES.
+        runtime_shell.pending_scene_script = None;
+        runtime_shell.map_callback_return_cursor = None;
+        runtime_shell.map_reload_return_cursor = reload_return_cursor;
+        runtime_shell.pending_map_callbacks = visible_current_map_callback_scripts(
+            runtime_shell,
+            Some("MAPCALLBACK_TILES"),
+        )?;
+        take_next_visible_map_callback(runtime_shell)?;
+        continue_visible_script_after_prompt(runtime_shell)?;
+        runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::MapReloadFadeIn);
+        runtime_shell.screen_fade = Some(VisibleScreenFade::new(
+            ScriptFadeColor::White,
+            ScriptFadeDirection::In,
+            8,
+        ));
+    } else {
+        arm_visible_current_scene_script(runtime_shell, "map_load")?;
+        arm_visible_current_map_callbacks(runtime_shell, "map_load")?;
+    }
     queue_visible_current_music(runtime_shell)?;
+    if !reload_current_map {
+        continue_visible_script_after_prompt(runtime_shell)?;
+    }
     Ok(())
 }
 
@@ -3260,12 +3357,55 @@ fn arm_visible_current_map_callbacks(
     runtime_shell: &mut BevyRuntimeShell,
     reason: &str,
 ) -> Result<()> {
+    arm_visible_current_map_callbacks_of_kind(runtime_shell, reason, None, true)
+}
+
+fn arm_visible_current_map_callbacks_of_kind(
+    runtime_shell: &mut BevyRuntimeShell,
+    reason: &str,
+    callback_kind: Option<&str>,
+    take_scene_when_empty: bool,
+) -> Result<()> {
+    let map_name = runtime_shell.shell.current_map_name().to_string();
+    runtime_shell.pending_map_callbacks =
+        visible_current_map_callback_scripts(runtime_shell, callback_kind)?;
+    if runtime_shell.pending_map_callbacks.is_empty() {
+        runtime_shell
+            .last_audio_events
+            .push(format!("map callbacks none map={map_name} reason={reason}"));
+        trim_event_log(&mut runtime_shell.last_audio_events);
+        return if take_scene_when_empty {
+            take_visible_pending_scene_script(runtime_shell)
+        } else {
+            Ok(())
+        };
+    }
+    runtime_shell.last_audio_events.push(format!(
+        "map callbacks armed map={} reason={} count={}",
+        map_name,
+        reason,
+        runtime_shell.pending_map_callbacks.len()
+    ));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    take_next_visible_map_callback(runtime_shell)
+}
+
+fn visible_current_map_callback_scripts(
+    runtime_shell: &BevyRuntimeShell,
+    callback_kind: Option<&str>,
+) -> Result<Vec<String>> {
     let map_name = runtime_shell.shell.current_map_name().to_string();
     let mut callbacks = runtime_shell
         .shell
         .map_script_section_command_keys()
         .into_iter()
-        .filter(|key| key.map_name == map_name && key.command == "callback")
+        .filter(|key| {
+            key.map_name == map_name
+                && key.command == "callback"
+                && callback_kind.map_or(true, |kind| {
+                    key.args.first().is_some_and(|candidate| candidate == kind)
+                })
+        })
         .collect::<Vec<_>>();
     callbacks.sort_by_key(|key| key.command_index);
     let mut scripts = Vec::with_capacity(callbacks.len());
@@ -3280,20 +3420,5 @@ fn arm_visible_current_map_callbacks(
         }
         scripts.push(callback.args[1].clone());
     }
-    runtime_shell.pending_map_callbacks = scripts;
-    if runtime_shell.pending_map_callbacks.is_empty() {
-        runtime_shell
-            .last_audio_events
-            .push(format!("map callbacks none map={map_name} reason={reason}"));
-        trim_event_log(&mut runtime_shell.last_audio_events);
-        return take_visible_pending_scene_script(runtime_shell);
-    }
-    runtime_shell.last_audio_events.push(format!(
-        "map callbacks armed map={} reason={} count={}",
-        map_name,
-        reason,
-        runtime_shell.pending_map_callbacks.len()
-    ));
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    take_next_visible_map_callback(runtime_shell)
+    Ok(scripts)
 }

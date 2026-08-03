@@ -19,6 +19,20 @@
         )
     }
 
+    /// Match the desktop executable: the game data comes from the explicit
+    /// compiled pack, while artwork resolves from the workspace asset root.
+    /// `load_from_compiled_pack` intentionally addresses web runtime data and
+    /// therefore cannot exercise the native desktop pack in this test.
+    fn workspace_desktop_runtime(asset_root: &AssetRoot) -> CrystalRuntime {
+        let pack_path = asset_root
+            .repository_root
+            .join("content-packs/core-modular.crystalpack");
+        let loaded = crystal_assets::read_loaded_verified_compiled_game_pack(&pack_path)
+            .expect("load desktop compiled pack");
+        CrystalRuntime::from_loaded_compiled_pack(asset_root, loaded)
+            .expect("construct desktop runtime from compiled pack")
+    }
+
     #[test]
     fn release_shell_contains_no_developer_shortcut_dispatcher() {
         let source = bevy_shell_source();
@@ -336,11 +350,7 @@
             .canonicalize()
             .expect("repository root");
         let asset_root = AssetRoot::new(repo_root);
-        let runtime = CrystalRuntime::load_from_compiled_pack(
-            &asset_root,
-            "content-packs/core-modular.crystalpack",
-        )
-        .expect("load compiled pack");
+        let runtime = workspace_desktop_runtime(&asset_root);
         let spawn_identifier = runtime
             .title_new_game_spawn_identifier()
             .expect("title new-game spawn");
@@ -442,11 +452,7 @@
             .canonicalize()
             .expect("repository root");
         let asset_root = AssetRoot::new(repo_root);
-        let runtime = CrystalRuntime::load_from_compiled_pack(
-            &asset_root,
-            "content-packs/core-modular.crystalpack",
-        )
-        .expect("load compiled pack");
+        let runtime = workspace_desktop_runtime(&asset_root);
         let mut runtime_shell = initialize_bevy_runtime_shell(
             asset_root,
             runtime,
@@ -6179,7 +6185,7 @@
             .shell
             .start_scripted_wild_battle("Route36", "WateredWeirdTreeScript", 12)
             .expect("start Sudowoodo battle");
-        prepare_visible_battle_entry(&mut runtime_shell);
+        prepare_visible_battle_entry(&mut runtime_shell).expect("prepare battle entry");
         assert_eq!(
             runtime_shell
                 .battle_messages
@@ -6187,7 +6193,7 @@
                 .cloned()
                 .collect::<Vec<_>>(),
             vec![
-                "Wild SUDOWOODO appeared!".to_string(),
+                "Wild SUDOWOODO\nappeared!".to_string(),
                 "Go! CYNDAQUIL!".to_string(),
             ]
         );
@@ -6302,7 +6308,9 @@
             },
             &[VisibleShellSmokePokemon {
                 species_id: "CYNDAQUIL".to_string(),
-                level: 20,
+                // Keep this a UI/turn-resolution smoke rather than making its
+                // outcome depend on the canonical Sudowoodo damage race.
+                level: 50,
                 held_item_id: None,
             }],
             &[],
@@ -6559,7 +6567,7 @@
             .shell
             .start_scripted_wild_battle("Route36", "WateredWeirdTreeScript", 12)
             .expect("start Sudowoodo battle");
-        prepare_visible_battle_entry(&mut runtime_shell);
+        prepare_visible_battle_entry(&mut runtime_shell).expect("prepare battle entry");
         sync_visible_battle_action_cursor(&mut runtime_shell);
         select_visible_battle_action(&mut runtime_shell, VisibleBattleAction::Pokemon)
             .expect("select Pokemon");
@@ -6637,7 +6645,7 @@
             .shell
             .start_scripted_wild_battle("Route36", "WateredWeirdTreeScript", 12)
             .expect("start Sudowoodo battle");
-        prepare_visible_battle_entry(&mut runtime_shell);
+        prepare_visible_battle_entry(&mut runtime_shell).expect("prepare battle entry");
         sync_visible_battle_action_cursor(&mut runtime_shell);
         select_visible_battle_action(&mut runtime_shell, VisibleBattleAction::Fight)
             .expect("select fight");
@@ -6746,7 +6754,7 @@
             .shell
             .start_scripted_wild_battle("Route36", "WateredWeirdTreeScript", 12)
             .expect("start Sudowoodo battle");
-        prepare_visible_battle_entry(&mut runtime_shell);
+        prepare_visible_battle_entry(&mut runtime_shell).expect("prepare battle entry");
         sync_visible_battle_action_cursor(&mut runtime_shell);
 
         select_visible_battle_action(&mut runtime_shell, VisibleBattleAction::Pokemon)
@@ -7216,11 +7224,7 @@
             .canonicalize()
             .expect("repository root");
         let asset_root = AssetRoot::new(repo_root);
-        let runtime = CrystalRuntime::load_from_compiled_pack(
-            &asset_root,
-            "content-packs/core-modular.crystalpack",
-        )
-        .expect("load compiled pack");
+        let runtime = workspace_desktop_runtime(&asset_root);
         let spawn_identifier = runtime
             .title_new_game_spawn_identifier()
             .expect("title new-game spawn");
@@ -7287,11 +7291,7 @@
             .canonicalize()
             .expect("repository root");
         let asset_root = AssetRoot::new(repo_root);
-        let runtime = CrystalRuntime::load_from_compiled_pack(
-            &asset_root,
-            "content-packs/core-modular.crystalpack",
-        )
-        .expect("load compiled pack");
+        let runtime = workspace_desktop_runtime(&asset_root);
         let spawn_identifier = runtime
             .title_new_game_spawn_identifier()
             .expect("title new-game spawn");
@@ -7405,7 +7405,7 @@
 
         let mut keys = ButtonInput::<KeyCode>::default();
         keys.press(KeyCode::ArrowDown);
-        apply_visible_runtime_controls(&keys, &mut runtime_shell);
+        apply_visible_runtime_controls(&keys, &mut runtime_shell, true);
 
         assert_eq!(
             visible_start_menu_entries(&runtime_shell).expect("moved start menu entries"),

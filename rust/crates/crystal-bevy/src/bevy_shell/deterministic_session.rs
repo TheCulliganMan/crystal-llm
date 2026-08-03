@@ -148,15 +148,64 @@ fn apply_keyboard_input(
     if !timer.has_tick() {
         return;
     }
+    runtime_shell.lcd_animation_frame = runtime_shell.lcd_animation_frame.wrapping_add(1);
+    let text_acceleration_requested =
+        keys.pressed(KeyCode::KeyZ) || keys.pressed(KeyCode::KeyX);
+    let ambient_phase_changed = runtime_shell.ambient_tileset_animation_active
+        && runtime_shell
+            .ambient_tileset_animation_schedule
+            .iter()
+            .any(|(period, offset)| {
+                runtime_shell.lcd_animation_frame >= *offset
+                    && (runtime_shell.lcd_animation_frame - *offset) % (*period).max(1) == 0
+            });
+    if ambient_phase_changed {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+    }
+    if (runtime_shell.battle_lcd_animation_active
+        || runtime_shell.field_text_reveal.is_some())
+        && runtime_shell.lcd_animation_frame % 8 == 0
+    {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+    }
+    let player_landed = runtime_shell.player_walk_frame_ticks == 1;
     runtime_shell.player_walk_frame_ticks = runtime_shell.player_walk_frame_ticks.saturating_sub(1);
     if runtime_shell.player_walk_frame_ticks == 0 {
-        runtime_shell.player_walk_stride = false;
         runtime_shell.player_walk_from = None;
     }
+    if player_landed {
+        // Retained origins model OBJECT_LAST_MAP_* only while the sprite is
+        // visibly in flight. Forced ice/current/downhill chains pause core
+        // ticks during interpolation, so frame-number expiry alone can leave
+        // an already-landed origin collision-owned across later tiles.
+        let overworld = &mut runtime_shell.shell.session_mut().overworld;
+        overworld.player_last_runtime_tile = None;
+        overworld.player_last_tile_occupied_until_frame = 0;
+    }
     runtime_shell.object_walk_frame_ticks = runtime_shell.object_walk_frame_ticks.saturating_sub(1);
+    for remaining in runtime_shell.object_walk_frame_ticks_by_id.values_mut() {
+        *remaining = remaining.saturating_sub(1);
+    }
+    let landed_object_ids = runtime_shell
+        .object_walk_frame_ticks_by_id
+        .iter()
+        .filter_map(|(object_id, remaining)| (*remaining == 0).then_some(object_id.clone()))
+        .collect::<Vec<_>>();
+    for object_id in landed_object_ids {
+        runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
+        runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
+        runtime_shell.object_walk_from.remove(&object_id);
+        let overworld = &mut runtime_shell.shell.session_mut().overworld;
+        overworld.object_last_runtime_tiles.remove(&object_id);
+        overworld
+            .object_last_tiles_occupied_until_frame
+            .remove(&object_id);
+    }
     if runtime_shell.object_walk_frame_ticks == 0 {
         runtime_shell.trainer_walk_from = None;
-        if runtime_shell.pending_trainer_sight.is_none() {
+        if runtime_shell.pending_trainer_sight.is_none()
+            && runtime_shell.object_walk_frame_ticks_by_id.is_empty()
+        {
             runtime_shell.object_walk_stride = false;
         }
     }
@@ -215,12 +264,17 @@ fn apply_keyboard_input(
         runtime_shell.visible_whirlpool_animation = None;
         runtime_shell.visible_headbutt_animation = None;
         runtime_shell.visible_flash_animation = None;
+        runtime_shell.visible_sweet_scent_delay = false;
+        runtime_shell.pending_surf_start_from = None;
         if std::mem::take(&mut runtime_shell.pending_field_battle_entry) {
-            prepare_visible_battle_entry(&mut runtime_shell);
-            if let Err(error) = settle_visible_battle_after_action(&mut runtime_shell) {
+            if let Err(error) = prepare_visible_battle_entry(&mut runtime_shell)
+                .and_then(|_| settle_visible_battle_after_action(&mut runtime_shell))
+            {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
             }
+        } else if let Some(next) = runtime_shell.field_notice_queue.pop_front() {
+            runtime_shell.field_notice = Some(next);
         }
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
@@ -240,7 +294,9 @@ fn apply_keyboard_input(
                 runtime_shell.field_notice_scene = None;
                 runtime_shell.player_walk_from = None;
                 runtime_shell.player_walk_frame_ticks = 0;
+                runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
                 runtime_shell.player_walk_stride = false;
+                runtime_shell.player_walk_mirror_stride = false;
             } else {
                 let step_index = animation.frame / 4;
                 let phase = (animation.frame % 4) as u8;
@@ -296,9 +352,11 @@ fn apply_keyboard_input(
                     Arc::make_mut(scene).overworld.tile = segment_to;
                 }
                 runtime_shell.player_walk_from = Some(segment_from);
+                runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
                 runtime_shell.player_walk_frame_ticks =
                     WALK_FRAME_HOLD_TICKS.saturating_sub(phase.saturating_mul(2));
                 runtime_shell.player_walk_stride = step_index & 1 == 0;
+                runtime_shell.player_walk_mirror_stride = step_index % 4 >= 2;
                 if let Some(animation) = runtime_shell.visible_waterfall_animation.as_mut() {
                     animation.frame = animation.frame.saturating_add(1);
                 }
@@ -381,6 +439,11 @@ fn apply_keyboard_input(
         advance_visible_fishing_animation(&mut runtime_shell);
         return;
     }
+    if let Some(frame) = runtime_shell.visible_diploma.as_mut() {
+        *frame = frame.wrapping_add(1);
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+        return;
+    }
     if runtime_shell.visible_heal_machine.is_some() {
         if let Err(error) = advance_visible_heal_machine(&mut runtime_shell) {
             record_visible_runtime_error(&mut runtime_shell, &error);
@@ -388,16 +451,39 @@ fn apply_keyboard_input(
         }
         return;
     }
-    if runtime_shell.visible_battle_transition.is_some() {
-        advance_visible_battle_transition(&mut runtime_shell);
+    if runtime_shell.visible_magnet_train.is_some() {
+        if let Err(error) = advance_visible_magnet_train(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
         return;
     }
-    if runtime_shell.visible_frontpic_animation.is_some()
-        && let Err(error) = advance_visible_frontpic_animation(&mut runtime_shell)
-    {
-        record_visible_runtime_error(&mut runtime_shell, &error);
-        runtime_shell.last_error = Some(error.to_string());
-        runtime_shell.visible_frontpic_animation = None;
+    if runtime_shell.visible_battle_transition.is_some() {
+        let waiting_for_step = matches!(
+            runtime_shell.pending_overworld_step_boundary,
+            Some(PendingOverworldStepBoundary::WildBattle)
+        );
+        if waiting_for_step {
+            if runtime_shell.player_walk_frame_ticks > 0
+                || runtime_shell.visible_ledge_jump.is_some()
+            {
+                return;
+            }
+        } else {
+            advance_visible_battle_transition(&mut runtime_shell);
+            return;
+        }
+    }
+    if runtime_shell.visible_frontpic_animation.is_some() {
+        if let Err(error) = advance_visible_frontpic_animation(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+            runtime_shell.visible_frontpic_animation = None;
+        }
+        // AnimateFrontpic owns the complete frame in Crystal. Even when the
+        // final command lands this tick, do not also advance battle logic or
+        // accept a command-menu input beneath the sprite animation.
+        return;
     }
     if runtime_shell
         .visible_capture_animation
@@ -441,68 +527,244 @@ fn apply_keyboard_input(
     {
         return;
     }
+    if runtime_shell.visible_walk_warp_phase.is_some() {
+        return;
+    }
     if let Some(jump) = runtime_shell.visible_ledge_jump.as_mut() {
         if jump.frame < 15 {
             jump.frame += 1;
         } else {
             runtime_shell.visible_ledge_jump = None;
+            let overworld = &mut runtime_shell.shell.session_mut().overworld;
+            overworld.player_last_runtime_tile = None;
+            overworld.player_last_tile_occupied_until_frame = 0;
             mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
     }
+    // A ledge jump is two chained eight-frame steps. Core reports the final
+    // landing tile atomically, but its grass effect belongs to the second
+    // step and must not age during the takeoff half.
+    let landing_grass_not_started = runtime_shell
+        .visible_ledge_jump
+        .is_some_and(|jump| jump.frame <= WALK_FRAME_HOLD_TICKS);
     if let Some(rustle) = runtime_shell.visible_grass_rustle.as_mut() {
-        rustle.age = rustle.age.saturating_add(1);
-        rustle.frames_remaining = rustle.frames_remaining.saturating_sub(1);
-        if rustle.frames_remaining == 0 {
-            runtime_shell.visible_grass_rustle = None;
+        if !landing_grass_not_started {
+            rustle.age = rustle.age.saturating_add(1);
+            rustle.frames_remaining = rustle.frames_remaining.saturating_sub(1);
+            if rustle.frames_remaining == 0 {
+                runtime_shell.visible_grass_rustle = None;
+            }
         }
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if let Some(tween) = runtime_shell.battle_hp_tween.as_mut() {
-        let player_before = tween.player_pixels;
-        let enemy_before = tween.enemy_pixels;
-        let player_changed = advance_visible_hp_pixels(
-            &mut tween.player_pixels,
-            tween.player_target_pixels,
-            &mut tween.player_frames_until_step,
-        );
-        let enemy_changed = advance_visible_hp_pixels(
-            &mut tween.enemy_pixels,
-            tween.enemy_target_pixels,
-            &mut tween.enemy_frames_until_step,
-        );
-        let crossed_downward_threshold = (player_changed
-            && tween.player_pixels < player_before
-            && visible_hp_zone(tween.player_pixels) < visible_hp_zone(player_before))
-            || (enemy_changed
-                && tween.enemy_pixels < enemy_before
-                && visible_hp_zone(tween.enemy_pixels) < visible_hp_zone(enemy_before));
-        if player_changed || enemy_changed {
-            mark_runtime_snapshot_dirty(&mut runtime_shell);
+    if let Some(dust) = runtime_shell.visible_strength_boulder_dust.as_mut() {
+        dust.age = dust.age.saturating_add(1);
+        dust.frames_remaining = dust.frames_remaining.saturating_sub(1);
+        if dust.frames_remaining == 0 {
+            runtime_shell.visible_strength_boulder_dust = None;
         }
-        if crossed_downward_threshold {
-            let BevyRuntimeShell {
-                shell,
-                pending_audio,
-                last_audio_events,
-                ..
-            } = &mut *runtime_shell;
-            if let Err(error) = queue_visible_sound_effect(
-                shell.runtime().audio(),
-                pending_audio,
-                last_audio_events,
-                "SFX_MENU",
-            ) {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+    }
+    if runtime_shell.visible_script_movement.is_some() {
+        match advance_visible_script_movement(&mut runtime_shell) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
                 return;
             }
         }
     }
+    if !runtime_shell.battle_messages.is_empty()
+        && !runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| animation.started)
+    {
+        match runtime_shell.shell.snapshot() {
+            Ok(snapshot) => {
+                if advance_visible_battle_text_reveal(
+                    &mut runtime_shell,
+                    &snapshot,
+                    text_acceleration_requested,
+                ) {
+                    mark_runtime_snapshot_dirty(&mut runtime_shell);
+                }
+            }
+            Err(error) => {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
+        }
+    } else if runtime_shell.battle_text_reveal.take().is_some() {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+    }
+    if let Some(tween) = runtime_shell.battle_hp_tween.as_mut() {
+        let player_changed = advance_visible_hp_pixels(
+            &mut tween.player_pixels,
+            tween.player_target_pixels,
+            &mut tween.player_frames_until_step,
+        );
+        if player_changed {
+            advance_visible_player_hp_number(tween);
+        }
+        let enemy_changed = advance_visible_hp_pixels(
+            &mut tween.enemy_pixels,
+            tween.enemy_target_pixels,
+            &mut tween.enemy_frames_until_step,
+        );
+        if player_changed || enemy_changed {
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
+        }
+    }
+    let hp_tween_active = runtime_shell
+        .battle_hp_tween
+        .as_ref()
+        .is_some_and(visible_battle_hp_tween_active);
+    if !hp_tween_active
+        && runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| animation.waiting_for_hp)
+    {
+        let animation = runtime_shell.visible_move_animations.front_mut().unwrap();
+        animation.waiting_for_hp = false;
+        animation.started = true;
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+        return;
+    }
+    if hp_tween_active {
+        // UpdateBattleHuds waits for the bar animation before battle command
+        // processing resumes. Keeping this frame presentation-only also
+        // prevents a hidden cursor from moving beneath the retained HUD.
+        return;
+    }
+    let mut exp_segment_finished = false;
+    let mut exp_animation_finished = false;
+    let mut exp_pixels_changed = false;
+    if let Some(tween) = runtime_shell.battle_exp_tween.as_mut()
+        && tween.started
+    {
+        if tween.frames_until_step > 0 {
+            tween.frames_until_step -= 1;
+        } else if tween.pixels < tween.target_pixels {
+            tween.pixels += 1;
+            tween.steps_in_segment += 1;
+            tween.frames_until_step = if tween.steps_in_segment <= 2 {
+                2
+            } else if tween.steps_in_segment <= 4 {
+                1
+            } else {
+                0
+            };
+            exp_pixels_changed = true;
+            if tween.pixels == tween.target_pixels {
+                exp_segment_finished = !tween.remaining_targets.is_empty();
+                exp_animation_finished = tween.remaining_targets.is_empty();
+                if exp_segment_finished {
+                    tween.level = tween.level.saturating_add(1).min(100);
+                }
+                tween.started = false;
+            }
+        } else {
+            exp_segment_finished = !tween.remaining_targets.is_empty();
+            exp_animation_finished = tween.remaining_targets.is_empty();
+            if exp_segment_finished {
+                tween.level = tween.level.saturating_add(1).min(100);
+            }
+            tween.started = false;
+        }
+    }
+    if exp_pixels_changed {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+    }
+    if exp_segment_finished {
+        if let Err(error) = queue_visible_shell_sound_effect(
+            &mut runtime_shell,
+            "SFX_HIT_END_OF_EXP_BAR",
+        ) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+        }
+        if runtime_shell
+            .battle_fanfare_messages
+            .front()
+            .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
+        {
+            runtime_shell.battle_fanfare_messages.pop_front();
+            if let Err(error) = queue_visible_shell_sound_effect(
+                &mut runtime_shell,
+                "SFX_DEX_FANFARE_50_79",
+            ) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+            }
+        }
+    }
+    if exp_animation_finished {
+        runtime_shell.battle_exp_tween = runtime_shell.pending_battle_exp_tweens.pop_front();
+        if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
+            && stats.triggered
+        {
+            stats.active = true;
+            // This activation occurs before the per-frame countdown below.
+            stats.frames_before_input = 31;
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
+        }
+        if let Err(error) = finish_visible_empty_battle_reward_presentation(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+        }
+        if runtime_shell
+            .battle_fanfare_messages
+            .front()
+            .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
+        {
+            runtime_shell.battle_fanfare_messages.pop_front();
+            if let Err(error) = queue_visible_shell_sound_effect(
+                &mut runtime_shell,
+                "SFX_DEX_FANFARE_50_79",
+            ) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+            }
+        }
+    }
+    if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
+        && stats.active
+        && stats.frames_before_input > 0
+    {
+        stats.frames_before_input -= 1;
+    }
     if let Some(frames) = runtime_shell.visible_script_delay_frames.as_mut() {
         *frames = frames.saturating_sub(1);
     }
-    let field_travel_delay_finished = if let Some(frames) =
-        runtime_shell.pending_field_travel_delay_frames.as_mut()
+    if runtime_shell.visible_strength_notice_phase
+        == Some(VisibleStrengthNoticePhase::CryPause)
+        && runtime_shell.visible_script_delay_frames == Some(0)
+    {
+        runtime_shell.visible_script_delay_frames = None;
+        let Some(next) = runtime_shell.field_notice_queue.pop_front() else {
+            let error = anyhow::anyhow!(
+                "Strength cry pause finished without the source MoveBoulderText"
+            );
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+            runtime_shell.visible_strength_notice_phase = None;
+            return;
+        };
+        runtime_shell.field_notice = Some(next);
+        runtime_shell.visible_strength_notice_phase =
+            Some(VisibleStrengthNoticePhase::MoveText);
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
+        return;
+    }
+    let field_travel_text_complete = runtime_shell
+        .field_notice
+        .as_deref()
+        .map_or(true, |notice| {
+            visible_field_text_reveal_is_complete_for_text(&runtime_shell, notice)
+        });
+    let field_travel_delay_finished = if field_travel_text_complete
+        && let Some(frames) = runtime_shell.pending_field_travel_delay_frames.as_mut()
     {
         *frames = frames.saturating_sub(1);
         *frames == 0
@@ -513,8 +775,22 @@ fn apply_keyboard_input(
         runtime_shell.pending_field_travel_delay_frames = None;
         runtime_shell.field_notice = None;
         runtime_shell.field_notice_queue.clear();
-        runtime_shell.field_notice_scene = None;
+        runtime_shell.pending_sweet_scent_nothing_notice = false;
+        runtime_shell.visible_strength_notice_phase = None;
         runtime_shell.pending_field_travel_arrival = false;
+        if runtime_shell.visible_field_travel_animation
+            == Some(VisibleFieldTravelAnimation::TeleportFrom)
+        {
+            if let Err(error) = queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_WARP_TO")
+                .and_then(|_| begin_visible_teleport_travel_animation(&mut runtime_shell, false))
+            {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+            }
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
+            return;
+        }
+        runtime_shell.field_notice_scene = None;
         if let Err(error) = settle_visible_overworld_travel(&mut runtime_shell) {
             record_visible_runtime_error(&mut runtime_shell, &error);
             runtime_shell.last_error = Some(error.to_string());
@@ -588,8 +864,14 @@ fn apply_keyboard_input(
     // the idle overworld path must stay allocation- and snapshot-free.  The
     // core shell has a cheap pending-work predicate which is true for an open
     // textbox and false for normal standing-still frames.
-    if runtime_shell.shell.has_pending_script_work() {
-        match tick_visible_field_text_reveal(&mut runtime_shell) {
+    if runtime_shell.shell.has_pending_script_work()
+        || runtime_shell.field_notice.is_some()
+        || runtime_shell.pc_notice.is_some()
+    {
+        match tick_visible_field_text_reveal(
+            &mut runtime_shell,
+            text_acceleration_requested,
+        ) {
             Ok(true) => mark_runtime_snapshot_dirty(&mut runtime_shell),
             Ok(false) => {}
             Err(error) => {
@@ -600,9 +882,7 @@ fn apply_keyboard_input(
         }
         // UseFlashTextScript is text_asm rather than the ordinary
         // field-move text script: once the line has printed it immediately
-        // plays SFX_FLASH and runs BlindingFlash, with no button wait.  Keep
-        // that automatic boundary local to Flash; the other field notices
-        // still require their normal confirmation.
+        // plays SFX_FLASH and runs BlindingFlash, with no button wait.
         if runtime_shell.visible_flash_animation.is_some()
             && runtime_shell.field_notice.is_some()
         {
@@ -631,6 +911,70 @@ fn apply_keyboard_input(
                 }
             }
         }
+        let automatic_field_effect_ready = runtime_shell.field_notice.is_some()
+            && runtime_shell.pending_field_notice_effect_frames.is_some()
+            && runtime_shell.visible_flash_animation.is_none()
+            && (runtime_shell.visible_cut_animation.is_some()
+                || runtime_shell.visible_whirlpool_animation.is_some()
+                || runtime_shell.visible_headbutt_animation.is_some()
+                || runtime_shell.visible_rock_smash_target.is_some());
+        if automatic_field_effect_ready {
+            match runtime_shell.shell.snapshot() {
+                Ok(snapshot)
+                    if visible_field_dialogue_is_fully_revealed(
+                        &runtime_shell,
+                        &snapshot,
+                    ) =>
+                {
+                    runtime_shell.field_notice = None;
+                    if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(error.to_string());
+                        return;
+                    }
+                    begin_pending_field_notice_effect(&mut runtime_shell);
+                    mark_runtime_snapshot_dirty(&mut runtime_shell);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        if runtime_shell.visible_strength_notice_phase
+            == Some(VisibleStrengthNoticePhase::UseText)
+            && runtime_shell.field_notice.is_some()
+        {
+            match runtime_shell.shell.snapshot() {
+                Ok(snapshot)
+                    if visible_field_dialogue_is_fully_revealed(
+                        &runtime_shell,
+                        &snapshot,
+                    ) =>
+                {
+                    runtime_shell.field_notice = None;
+                    if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(error.to_string());
+                        return;
+                    }
+                    runtime_shell.visible_script_delay_frames = Some(3);
+                    runtime_shell.visible_strength_notice_phase =
+                        Some(VisibleStrengthNoticePhase::CryPause);
+                    mark_runtime_snapshot_dirty(&mut runtime_shell);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
         // A field textbox is a script boundary. The visual printer advances
         // on the host clock, but overworld frames must not: otherwise
         // autonomous object movement continues behind the text and scripted
@@ -640,6 +984,63 @@ fn apply_keyboard_input(
         if runtime_shell.field_text_reveal.is_some() {
             return;
         }
+    }
+
+    if runtime_shell.pending_overworld_step_boundary.is_some() {
+        if runtime_shell.player_walk_frame_ticks > 0
+            || runtime_shell.visible_ledge_jump.is_some()
+        {
+            // A map connection is still the same uninterrupted overworld
+            // walk. Sample the live D-pad while its retained source-map step
+            // finishes so a corner pressed during the seam is not lost before
+            // the ordinary input path becomes reachable again. Other arrival
+            // boundaries deliberately retain their complete input lock.
+            let crossing_connection = runtime_shell
+                .shell
+                .last_frame()
+                .is_some_and(|frame| frame.connection.is_some());
+            if crossing_connection && runtime_shell.player_walk_frame_ticks > 0 {
+                sync_overworld_held_directions(&keys, &mut runtime_shell, false);
+                runtime_shell.overworld_buffered_direction = [
+                    (KeyCode::ArrowUp, GameButton::Up),
+                    (KeyCode::ArrowDown, GameButton::Down),
+                    (KeyCode::ArrowLeft, GameButton::Left),
+                    (KeyCode::ArrowRight, GameButton::Right),
+                ]
+                .into_iter()
+                .find_map(|(key, direction)| keys.just_pressed(key).then_some(direction))
+                .or(runtime_shell.overworld_buffered_direction);
+            }
+            return;
+        }
+        let boundary = runtime_shell
+            .pending_overworld_step_boundary
+            .take()
+            .expect("checked pending overworld step boundary");
+        match boundary {
+            PendingOverworldStepBoundary::Arrival => {
+                runtime_shell.pending_overworld_warp_scene = None;
+                run_bevy_action(&mut runtime_shell, settle_visible_overworld_frame_arrival);
+            }
+            PendingOverworldStepBoundary::CoordEvent => {
+                run_bevy_action(&mut runtime_shell, execute_last_coord_event_script);
+            }
+            PendingOverworldStepBoundary::TrainerSight => {
+                run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
+            }
+            PendingOverworldStepBoundary::WildBattle => {
+                run_bevy_action(&mut runtime_shell, settle_visible_battle_after_action);
+            }
+            PendingOverworldStepBoundary::PoisonBlackout => {
+                run_bevy_action(&mut runtime_shell, resolve_visible_blackout);
+            }
+            PendingOverworldStepBoundary::StepEvent(step_event) => {
+                run_bevy_action(&mut runtime_shell, |shell| {
+                    present_visible_step_event(shell, &step_event)
+                });
+            }
+        }
+        return;
     }
 
     let shell_consumes_a = match has_visible_shell_a_action(&mut runtime_shell) {
@@ -671,6 +1072,11 @@ fn apply_keyboard_input(
             && !ctrl_pressed
             && keys.just_pressed(KeyCode::ShiftRight)
             && shell_consumes_select);
+    sync_overworld_held_directions(
+        &keys,
+        &mut runtime_shell,
+        shell_consumes_direction,
+    );
     if visible_shell_pressed {
         return;
     }
@@ -682,15 +1088,137 @@ fn apply_keyboard_input(
         shell_consumes_start,
         shell_consumes_select,
     );
-    if runtime_shell.visible_ledge_jump.is_some() {
+    let newly_pressed_direction = [
+        (KeyCode::ArrowUp, GameButton::Up),
+        (KeyCode::ArrowDown, GameButton::Down),
+        (KeyCode::ArrowLeft, GameButton::Left),
+        (KeyCode::ArrowRight, GameButton::Right),
+    ]
+    .into_iter()
+    .find_map(|(key, direction)| keys.just_pressed(key).then_some(direction));
+    buttons.retain(|button| !is_direction_button(*button));
+    if !shell_consumes_direction
+        && let Some(direction) = newly_pressed_direction.or_else(|| {
+            runtime_shell
+                .overworld_held_directions
+                .front()
+                .copied()
+        })
+    {
+        buttons.insert(0, direction);
+    }
+    let ledge_jump_in_flight = runtime_shell.visible_ledge_jump.is_some();
+    if ledge_jump_in_flight {
         buttons.clear();
+    } else if runtime_shell.player_walk_frame_ticks > 0 {
+        // Crystal does not dispatch A/Start/Select interactions from the
+        // destination tile until the visible tile step has landed. Direction
+        // input remains live so held walking can chain without a dead frame.
+        buttons.retain(|button| is_direction_button(*button));
     }
     let direction_held = buttons.iter().any(|button| is_direction_button(*button));
-    throttle_held_overworld_direction(&mut runtime_shell, &mut buttons);
+    if ledge_jump_in_flight {
+        // STEP_LEDGE owns sixteen visible frames even though the ordinary
+        // walk interpolation timer reaches zero halfway through it. Keep a
+        // newly pressed corner queued for the landing instead of entering the
+        // idle branch below, which would consume and discard it while input is
+        // still locked. Empty frames may continue advancing independent NPCs
+        // and timers during the jump.
+        if let Some(direction) = newly_pressed_direction {
+            runtime_shell.overworld_buffered_direction = Some(direction);
+        }
+        runtime_shell.overworld_direction_repeat_ticks = 0;
+        buttons.clear();
+    } else if runtime_shell.player_walk_frame_ticks > 0 {
+        // Direction changes are buffered while the current tile is visibly
+        // in flight. Core commits tiles atomically, so forwarding a newly
+        // pressed direction here would begin a second step before the first
+        // sprite interpolation landed.
+        if let Some(direction) = newly_pressed_direction {
+            runtime_shell.overworld_buffered_direction = Some(direction);
+        }
+        runtime_shell.overworld_direction_repeat_ticks = 0;
+        buttons.retain(|button| !is_direction_button(*button));
+        // Core movement is tile-atomic and also evaluates ice/current/downhill
+        // auto-steps on an empty joypad frame. Hold those surfaces at this
+        // boundary until the shell finishes drawing the current tile;
+        // otherwise a forced chain can commit multiple tiles inside one
+        // visible step. On an ordinary tile, however, empty authoritative
+        // frames safely keep NPCs and world timers moving concurrently with
+        // the player's interpolation, as they do in TypeScript/Crystal.
+        if runtime_shell
+            .shell
+            .session()
+            .overworld
+            .forced_movement_direction()
+            .is_some()
+        {
+            timer.take_ticks();
+            return;
+        }
+    } else {
+        if let Some(direction) = runtime_shell.overworld_buffered_direction.take() {
+            if runtime_shell.overworld_held_directions.contains(&direction) {
+                buttons.retain(|button| !is_direction_button(*button));
+                buttons.insert(0, direction);
+            }
+        }
+        if let Some(direction) = buttons
+            .iter()
+            .copied()
+            .find(|button| is_direction_button(*button))
+            && (newly_pressed_direction.is_some()
+                || runtime_shell.overworld_held_direction != Some(direction))
+        {
+            // Each directional animation owns its own four-step cycle in
+            // TypeScript. A fresh press or turn starts on the ordinary action
+            // frame; only an uninterrupted same-direction hold carries the
+            // alternate-foot phase across the landing boundary.
+            runtime_shell.player_walk_stride = false;
+            runtime_shell.player_walk_mirror_stride = false;
+        }
+        let blocked_by_walking_object_origin = buttons
+            .iter()
+            .copied()
+            .find(|button| is_direction_button(*button))
+            .and_then(game_button_direction)
+            .and_then(|direction| {
+                crate::core::world::movement::checked_move_by_stride(
+                    runtime_shell.shell.session().overworld.player.tile,
+                    direction,
+                    crate::core::world::movement::DEFAULT_RUNTIME_TILE_STRIDE,
+                )
+            })
+            .is_some_and(|target| {
+                runtime_shell
+                    .object_walk_from
+                    .values()
+                    .any(|origin| *origin == target)
+            });
+        if blocked_by_walking_object_origin {
+            // InitStep moves OBJECT_MAP_* to the destination while retaining
+            // OBJECT_LAST_MAP_* as occupied until the step ends. Core's
+            // tile-atomic NPC authority exposes only the destination, so keep
+            // its retained visual origin collision-owned here as well.
+            runtime_shell.overworld_direction_repeat_ticks = 0;
+            buttons.retain(|button| !is_direction_button(*button));
+            if !runtime_shell.transient_audio_playing
+                && !runtime_shell
+                    .pending_audio
+                    .iter()
+                    .any(|command| !matches!(command.kind, ModpackAudioKind::Music))
+                && let Err(error) =
+                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
+            {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
+        } else {
+            throttle_held_overworld_direction(&mut runtime_shell, &mut buttons);
+        }
+    }
     let input_active = !buttons.is_empty() || direction_held;
-    // A throttled held direction still needs a real core frame: scripts,
-    // autonomous objects, and the joypad release edge continue at 60 Hz even
-    // though it is not yet time to complete another player tile.
     let elapsed_ticks = timer.take_ticks();
 
     let mut tick_ok = false;
@@ -703,8 +1231,63 @@ fn apply_keyboard_input(
     let mut visible_step_event = None;
     let mut execute_contextual_field_move = false;
     let mut final_frame = None;
+    let mut movement_scene_before_final_tick = None;
     let mut tick_error = None;
     for _ in 0..elapsed_ticks {
+        let movement_scene_before_tick = if buttons
+            .iter()
+            .copied()
+            .any(is_direction_button)
+            || runtime_shell
+                .shell
+                .session()
+                .overworld
+                .forced_movement_direction()
+                .is_some()
+        {
+            match runtime_shell.shell.snapshot() {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    tick_error = Some(error);
+                    break;
+                }
+            }
+        } else {
+            None
+        };
+        let object_tiles_before_tick = {
+            let overworld = &runtime_shell.shell.session().overworld;
+            let mut tiles = BTreeMap::new();
+            for (index, object) in overworld
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| overworld.is_object_visible(object))
+            {
+                let Some(object_id) = object.object_identifier.as_ref() else {
+                    continue;
+                };
+                match overworld.object_runtime_tile_checked(index, object) {
+                    Ok(tile) => {
+                        tiles.insert(object_id.clone(), tile);
+                    }
+                    Err(error) => {
+                        tick_error = Some(error.into());
+                        break;
+                    }
+                }
+            }
+            tiles
+        };
+        if tick_error.is_some() {
+            break;
+        }
+        let object_facings_before_tick = runtime_shell
+            .shell
+            .session()
+            .overworld
+            .object_facings
+            .clone();
         match runtime_shell.shell.tick(buttons.clone()).map(Clone::clone) {
             Ok(frame) => {
                 let step_event_boundary = frame.step_events.as_ref().is_some_and(|events| {
@@ -719,8 +1302,110 @@ fn apply_keyboard_input(
                     || frame.warp.is_some()
                     || frame.connection.is_some()
                     || frame.wild_battle.is_some();
+                let object_tiles_after_tick = runtime_shell
+                    .shell
+                    .session()
+                    .overworld
+                    .object_runtime_tiles
+                    .clone();
+                let newly_walking = object_tiles_before_tick
+                    .into_iter()
+                    .filter(|(object_id, from)| {
+                        object_tiles_after_tick
+                            .get(object_id)
+                            .is_some_and(|to| to != from)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let newly_walking_ids = newly_walking.keys().cloned().collect::<BTreeSet<_>>();
+                let pushed_boulder = runtime_shell
+                    .shell
+                    .session()
+                    .overworld
+                    .objects
+                    .iter()
+                    .find_map(|object| {
+                        let object_id = object.object_identifier.as_ref()?;
+                        (newly_walking_ids.contains(object_id)
+                            && object.spritemovedata == "SPRITEMOVEDATA_STRENGTH_BOULDER")
+                            .then(|| {
+                                let from = newly_walking.get(object_id).copied();
+                                let to = object_tiles_after_tick.get(object_id).copied();
+                                let direction = match (from, to) {
+                                    (Some(from), Some(to)) if to.y > from.y => Direction::Down,
+                                    (Some(from), Some(to)) if to.y < from.y => Direction::Up,
+                                    (Some(from), Some(to)) if to.x < from.x => Direction::Left,
+                                    (Some(_), Some(_)) => Direction::Right,
+                                    _ => frame.snapshot.facing,
+                                };
+                                (object_id.clone(), direction)
+                            })
+                    });
+                for (object_id, from) in newly_walking {
+                    runtime_shell.object_walk_from.insert(object_id.clone(), from);
+                    runtime_shell
+                        .object_walk_frame_ticks_by_id
+                        .insert(object_id.clone(), WALK_FRAME_HOLD_TICKS);
+                    runtime_shell
+                        .object_walk_total_ticks_by_id
+                        .insert(object_id, WALK_FRAME_HOLD_TICKS);
+                }
+                if let Some((object_id, direction)) = pushed_boulder {
+                    runtime_shell.visible_strength_boulder_dust =
+                        Some(VisibleStrengthBoulderDust {
+                            object_id,
+                            direction,
+                            frames_remaining: 18,
+                            age: 0,
+                        });
+                }
+                let object_facings_after_tick = runtime_shell
+                    .shell
+                    .session()
+                    .overworld
+                    .object_facings
+                    .clone();
+                for (object_id, direction) in object_facings_after_tick {
+                    if newly_walking_ids.contains(&object_id) {
+                        let phase = if runtime_shell.object_walk_directions.get(&object_id)
+                            == Some(&direction)
+                        {
+                            runtime_shell
+                                .object_walk_phases
+                                .get(&object_id)
+                                .copied()
+                                .unwrap_or(0)
+                                .wrapping_add(1)
+                                % 4
+                        } else {
+                            1
+                        };
+                        runtime_shell.object_walk_phases.insert(object_id.clone(), phase);
+                        runtime_shell.object_walk_directions.insert(object_id, direction);
+                    } else if object_facings_before_tick.get(&object_id) != Some(&direction) {
+                        runtime_shell.object_walk_phases.insert(object_id.clone(), 0);
+                        runtime_shell.object_walk_directions.insert(object_id, direction);
+                    }
+                }
+                movement_scene_before_final_tick = movement_scene_before_tick;
                 final_frame = Some(frame);
-                if reached_boundary {
+                if reached_boundary
+                    || final_frame
+                        .as_ref()
+                        .is_some_and(|frame| {
+                            frame.movement.is_some() || frame.autonomous_objects_changed
+                        })
+                {
+                    // A queued corner belongs only to this continuous walk.
+                    // Never carry it through a warp, encounter, trainer, or
+                    // script boundary into a newly controlled scene.
+                    if reached_boundary {
+                        runtime_shell.overworld_buffered_direction = None;
+                    }
+                    // Core movement is tile-atomic, while the LCD owns the
+                    // following player/object turn, walk, or bump cadence.
+                    // Never consume a second accumulated host tick before
+                    // that result has installed its visible presentation
+                    // boundary.
                     break;
                 }
             }
@@ -742,12 +1427,44 @@ fn apply_keyboard_input(
         Ok(frame) => {
             tick_ok = true;
             let player_moved = matches!(frame.movement, Some(StepOutcome::Moved { .. }));
-            // A held direction remains live through Crystal's turn/blocked
-            // boundary. Only a completed tile step earns the eight-frame
-            // repeat delay; otherwise retry on the next LCD frame so turning
-            // into an open direction flows directly into walking, as in TS.
-            if direction_held && frame.movement.is_some() && !player_moved {
-                runtime_shell.overworld_direction_repeat_ticks = 0;
+            // TypeScript main and Crystal hold a facing change for four LCD
+            // frames before the same held direction begins its tile step.
+            // A wall/object bump remains immediately retryable; assigning the
+            // turn cadence to every non-move made collision feel sticky.
+            if direction_held {
+                match frame.movement.as_ref() {
+                    Some(StepOutcome::Turned { .. }) => {
+                        runtime_shell.overworld_direction_repeat_ticks =
+                            OVERWORLD_TURN_HOLD_TICKS.saturating_sub(1);
+                    }
+                    Some(StepOutcome::Blocked { .. })
+                    | Some(StepOutcome::BlockedByObject { .. })
+                    | Some(StepOutcome::RuntimeTileOverflow { .. }) => {
+                        runtime_shell.overworld_direction_repeat_ticks = 0;
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(
+                frame.movement,
+                Some(
+                    StepOutcome::Blocked { .. }
+                        | StepOutcome::BlockedByObject { .. }
+                        | StepOutcome::RuntimeTileOverflow { .. }
+                )
+            ) && matches!(
+                frame.snapshot.mode,
+                MovementMode::Normal | MovementMode::Bike | MovementMode::Skate
+            ) && !runtime_shell.transient_audio_playing
+                && !runtime_shell.pending_audio.iter().any(|command| {
+                    !matches!(command.kind, ModpackAudioKind::Music)
+                })
+                && let Err(error) =
+                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
+            {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
             }
             // A no-input frame still advances the authoritative Game Boy
             // frame counter, but it does not require rebuilding Bevy's
@@ -768,19 +1485,51 @@ fn apply_keyboard_input(
                 mark_runtime_snapshot_dirty(&mut runtime_shell);
             }
             if frame.autonomous_objects_changed {
-                runtime_shell.object_walk_stride = !runtime_shell.object_walk_stride;
+                runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
                 runtime_shell.object_walk_frame_ticks = WALK_FRAME_HOLD_TICKS;
             }
             if player_moved {
-                runtime_shell.player_walk_from = match frame.movement.as_ref() {
-                    Some(StepOutcome::Moved { from, .. }) => Some(*from),
-                    _ => None,
+                let (mut from, speed_multiplier) = match frame.movement.as_ref() {
+                    Some(StepOutcome::Moved { from, speed_multiplier, .. }) => {
+                        (*from, (*speed_multiplier).max(1))
+                    }
+                    _ => unreachable!("player_moved requires a moved outcome"),
                 };
+                if let Some(connection) = frame.connection.as_ref() {
+                    let opposite = match frame.snapshot.facing {
+                        Direction::Up => Direction::Down,
+                        Direction::Down => Direction::Up,
+                        Direction::Left => Direction::Right,
+                        Direction::Right => Direction::Left,
+                    };
+                    if let Some(connection_from) =
+                        crate::core::world::movement::checked_move_by_stride(
+                            connection.destination.tile,
+                            opposite,
+                            crate::core::world::movement::DEFAULT_RUNTIME_TILE_STRIDE,
+                        )
+                    {
+                        // Connection resolution has already translated the
+                        // authority into target-map coordinates. Interpolate
+                        // from the adjacent target-map edge, never from the
+                        // unrelated numeric coordinate in the source map.
+                        from = connection_from;
+                    }
+                }
+                let step_ticks = (WALK_FRAME_HOLD_TICKS / speed_multiplier).max(1);
+                runtime_shell.player_walk_from = Some(from);
+                let previous_stride = runtime_shell.player_walk_stride;
                 runtime_shell.player_walk_stride = next_player_walk_stride(
                     runtime_shell.player_walk_frame_ticks,
                     runtime_shell.player_walk_stride,
                 );
-                runtime_shell.player_walk_frame_ticks = WALK_FRAME_HOLD_TICKS;
+                if previous_stride && !runtime_shell.player_walk_stride {
+                    runtime_shell.player_walk_mirror_stride =
+                        !runtime_shell.player_walk_mirror_stride;
+                }
+                runtime_shell.player_walk_total_ticks = step_ticks;
+                runtime_shell.player_walk_frame_ticks = step_ticks;
+                runtime_shell.overworld_direction_repeat_ticks = step_ticks.saturating_sub(1);
             }
             if let Some(LedgeJumpOutcome::Jumped { from, to, .. }) = frame.ledge_jump {
                 runtime_shell.visible_ledge_jump = Some(VisibleLedgeJump {
@@ -815,10 +1564,26 @@ fn apply_keyboard_input(
             execute_overworld_arrival = frame.warp.is_some() || frame.connection.is_some();
             execute_coord_event_script = frame.coord_event.is_some();
             execute_trainer_sight_script = frame.trainer_sight.is_some();
+            let interaction_targets_walking_object = frame
+                .interaction
+                .as_ref()
+                .and_then(|interaction| match &interaction.target {
+                    crate::core::world::session::OverworldInteractionTarget::Object {
+                        object_identifier: Some(object_id),
+                        ..
+                    } => Some(object_id),
+                    _ => None,
+                })
+                .is_some_and(|object_id| {
+                    runtime_shell.object_walk_from.contains_key(object_id)
+                });
             execute_interaction_script = keys.just_pressed(KeyCode::KeyZ)
+                && runtime_shell.player_walk_frame_ticks == 0
                 && !shell_consumes_a
+                && !interaction_targets_walking_object
                 && frame.interaction.is_some();
             execute_contextual_field_move = keys.just_pressed(KeyCode::KeyZ)
+                && runtime_shell.player_walk_frame_ticks == 0
                 && !shell_consumes_a
                 && frame.interaction.is_none()
                 && frame.wild_battle.is_none();
@@ -845,9 +1610,73 @@ fn apply_keyboard_input(
                     .any(|pokemon| {
                         !pokemon.is_egg
                             && pokemon.species.id != "EGG"
-                            && !pokemon.nickname.eq_ignore_ascii_case("EGG")
                             && pokemon.hp > 0
                     });
+            let movement_is_visibly_in_flight = player_moved
+                || matches!(frame.ledge_jump, Some(LedgeJumpOutcome::Jumped { .. }));
+            if movement_is_visibly_in_flight {
+                if frame.warp.is_some()
+                    && let (
+                        Some(mut source_scene),
+                        Some(StepOutcome::Moved { from, to, .. }),
+                    ) = (movement_scene_before_final_tick, frame.movement.as_ref())
+                {
+                    // Core has already installed the destination session. Keep
+                    // the source map and place its presentation target on the
+                    // triggering warp tile until the walk visibly lands.
+                    source_scene.overworld.tile = *to;
+                    source_scene.overworld.facing = if to.x > from.x {
+                        Direction::Right
+                    } else if to.x < from.x {
+                        Direction::Left
+                    } else if to.y > from.y {
+                        Direction::Down
+                    } else {
+                        Direction::Up
+                    };
+                    runtime_shell.pending_overworld_warp_scene =
+                        Some(Arc::new(source_scene));
+                }
+                runtime_shell.pending_overworld_step_boundary = if execute_overworld_arrival {
+                    Some(PendingOverworldStepBoundary::Arrival)
+                } else if execute_coord_event_script {
+                    Some(PendingOverworldStepBoundary::CoordEvent)
+                } else if execute_trainer_sight_script {
+                    Some(PendingOverworldStepBoundary::TrainerSight)
+                } else if execute_wild_battle_boundary {
+                    Some(PendingOverworldStepBoundary::WildBattle)
+                } else if execute_poison_blackout {
+                    Some(PendingOverworldStepBoundary::PoisonBlackout)
+                } else {
+                    visible_step_event
+                        .clone()
+                        .map(PendingOverworldStepBoundary::StepEvent)
+                };
+                if runtime_shell.pending_overworld_step_boundary.is_some() {
+                    if matches!(
+                        runtime_shell.pending_overworld_step_boundary,
+                        Some(PendingOverworldStepBoundary::WildBattle)
+                    ) {
+                        // Stage the battle data/messages now so the committed
+                        // battle snapshot cannot leak directly onto the map.
+                        // Its transition remains frozen at frame zero until
+                        // the visible step boundary is dispatched.
+                        if let Err(error) =
+                            prepare_visible_battle_entry_after_visible_step(&mut runtime_shell)
+                        {
+                            record_visible_runtime_error(&mut runtime_shell, &error);
+                            runtime_shell.last_error = Some(error.to_string());
+                            return;
+                        }
+                    }
+                    execute_overworld_arrival = false;
+                    execute_coord_event_script = false;
+                    execute_trainer_sight_script = false;
+                    execute_wild_battle_boundary = false;
+                    execute_poison_blackout = false;
+                    visible_step_event = None;
+                }
+            }
             let input_frame =
                 match deterministic_input_frame_from_post_tick_checksum(&frame.state_checksum) {
                     Ok(input_frame) => input_frame,
@@ -908,7 +1737,11 @@ fn apply_keyboard_input(
     } else if execute_interaction_script {
         run_bevy_action(&mut runtime_shell, execute_last_interaction_script);
     } else if execute_wild_battle_boundary {
-        prepare_visible_battle_entry(&mut runtime_shell);
+        if let Err(error) = prepare_visible_battle_entry(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+            return;
+        }
         run_bevy_action(&mut runtime_shell, settle_visible_battle_after_action);
     } else if execute_poison_blackout {
         run_bevy_action(&mut runtime_shell, resolve_visible_blackout);
@@ -931,9 +1764,10 @@ fn apply_keyboard_input(
                 runtime_shell.last_error = Some(error.to_string());
             }
         }
-    } else if input_active
-        || runtime_shell.active_script_cursor.is_some()
-        || runtime_shell.shell.has_pending_script_work()
+    } else if runtime_shell.pending_overworld_step_boundary.is_none()
+        && (input_active
+            || runtime_shell.active_script_cursor.is_some()
+            || runtime_shell.shell.has_pending_script_work())
     {
         // Do not snapshot/scan the entire script state on every idle host
         // frame.  The cheap predicate above only enters this path when a
@@ -1010,8 +1844,10 @@ fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) 
     pending.steps_remaining -= 1;
     // `slow_step` is twice the ordinary eight-frame walking cadence.
     pending.frames_until_step = WALK_FRAME_HOLD_TICKS.saturating_mul(2);
+    advance_object_walk_phase(runtime_shell, &object_id, direction);
     runtime_shell.trainer_walk_from = Some((object_id, current));
     runtime_shell.object_walk_stride = !runtime_shell.object_walk_stride;
+    runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS.saturating_mul(2);
     runtime_shell.object_walk_frame_ticks = WALK_FRAME_HOLD_TICKS.saturating_mul(2);
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -1023,6 +1859,494 @@ fn next_player_walk_stride(_remaining_ticks: u8, current_stride: bool) -> bool {
     // as the previous timer expires. Resetting here made every tile reuse
     // the same stepping image, which looks like sliding.
     !current_stride
+}
+
+fn advance_object_walk_phase(
+    runtime_shell: &mut BevyRuntimeShell,
+    object_id: &str,
+    direction: Direction,
+) {
+    let phase = if runtime_shell.object_walk_directions.get(object_id) == Some(&direction) {
+        runtime_shell
+            .object_walk_phases
+            .get(object_id)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1)
+            % 4
+    } else {
+        1
+    };
+    runtime_shell.object_walk_phases.insert(object_id.to_string(), phase);
+    runtime_shell
+        .object_walk_directions
+        .insert(object_id.to_string(), direction);
+}
+
+fn start_next_visible_script_movement_phase(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<bool> {
+    loop {
+        let next = runtime_shell.visible_script_movement.as_mut().and_then(|movement| {
+            movement
+                .phases
+                .pop_front()
+                .map(|phase| (movement.object_id.clone(), phase))
+        });
+        let Some((object_id, phase)) = next else {
+            let pending = runtime_shell
+                .visible_script_movement
+                .as_mut()
+                .and_then(|movement| movement.pending_programs.pop_front());
+            if let Some(program) = pending {
+                let revealed_object = if !program.previous_hidden && program.object_id != "PLAYER" {
+                    runtime_shell
+                        .shell
+                        .session()
+                        .overworld
+                        .objects
+                        .iter()
+                        .find(|object| {
+                            object.object_identifier.as_deref() == Some(program.object_id.as_str())
+                        })
+                        .cloned()
+                } else {
+                    None
+                };
+                let scene = Arc::make_mut(
+                    runtime_shell
+                        .visible_script_movement_scene
+                        .as_mut()
+                        .context("queued visible script movement has no retained scene")?,
+                );
+                if program.object_id == "PLAYER" {
+                    scene.overworld.tile = program.previous_tile;
+                    scene.overworld.facing = program.previous_facing;
+                    scene.overworld_player_hidden = program.previous_hidden;
+                } else {
+                    scene
+                        .visible_object_runtime_tiles
+                        .insert(program.object_id.clone(), program.previous_tile);
+                    scene
+                        .visible_object_facings
+                        .insert(program.object_id.clone(), program.previous_facing);
+                    if program.previous_hidden {
+                        scene.visible_objects.retain(|object| {
+                            object.object_identifier.as_deref() != Some(program.object_id.as_str())
+                        });
+                    } else if !scene.visible_objects.iter().any(|object| {
+                        object.object_identifier.as_deref() == Some(program.object_id.as_str())
+                    }) {
+                        scene.visible_objects.push(revealed_object.with_context(|| {
+                            format!(
+                                "queued movement cannot restore unknown object {}",
+                                program.object_id
+                            )
+                        })?);
+                    }
+                }
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while switching programs")?;
+                movement.object_id = program.object_id;
+                movement.phases = program.phases;
+                movement.hold_frames_remaining = 0;
+                movement.active_jump_duration = None;
+                movement.active_uses_standing_frame = false;
+                movement.active_tree_shake_duration = None;
+                movement.active_stationary_effect = None;
+                movement.active_stationary_duration = 0;
+                movement.stationary_y_offset = 0;
+                movement.stationary_initial_facing = program.previous_facing;
+                movement.follower_object_id = program.follower_object_id;
+                movement.follower_queued_step = program.follower_queued_step;
+                continue;
+            }
+            runtime_shell.visible_script_movement = None;
+            runtime_shell.visible_script_movement_scene = None;
+            runtime_shell.player_walk_from = None;
+            runtime_shell.player_walk_frame_ticks = 0;
+            runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
+            runtime_shell.trainer_walk_from = None;
+            runtime_shell.object_walk_frame_ticks = 0;
+            runtime_shell.object_walk_total_ticks = WALK_FRAME_HOLD_TICKS;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(false);
+        };
+        match phase {
+            VisibleScriptMovementPhase::Sound { audio_id } => {
+                queue_visible_shell_sound_effect(runtime_shell, &audio_id)?;
+                continue;
+            }
+            VisibleScriptMovementPhase::Hold { duration } => {
+                if duration == 0 {
+                    continue;
+                }
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while starting hold")?;
+                movement.hold_frames_remaining = duration;
+                movement.active_jump_duration = None;
+                movement.active_uses_standing_frame = true;
+                movement.active_tree_shake_duration = None;
+                movement.active_stationary_effect = None;
+                movement.active_stationary_duration = 0;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
+            VisibleScriptMovementPhase::TreeShake { duration } => {
+                if duration == 0 {
+                    continue;
+                }
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while starting tree shake")?;
+                movement.hold_frames_remaining = duration;
+                movement.active_jump_duration = None;
+                movement.active_uses_standing_frame = false;
+                movement.active_tree_shake_duration = Some(duration);
+                movement.active_stationary_effect = None;
+                movement.active_stationary_duration = 0;
+                movement.stationary_y_offset = 0;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
+            VisibleScriptMovementPhase::Visibility { hidden } => {
+                let revealed_object = if !hidden && object_id != "PLAYER" {
+                    runtime_shell
+                        .shell
+                        .session()
+                        .overworld
+                        .objects
+                        .iter()
+                        .find(|object| {
+                            object.object_identifier.as_deref() == Some(object_id.as_str())
+                        })
+                        .cloned()
+                } else {
+                    None
+                };
+                let scene = Arc::make_mut(
+                    runtime_shell
+                        .visible_script_movement_scene
+                        .as_mut()
+                        .context("visible script visibility change has no retained scene")?,
+                );
+                if object_id == "PLAYER" {
+                    scene.overworld_player_hidden = hidden;
+                } else if hidden {
+                    scene.visible_objects.retain(|object| {
+                        object.object_identifier.as_deref() != Some(object_id.as_str())
+                    });
+                } else if !scene.visible_objects.iter().any(|object| {
+                    object.object_identifier.as_deref() == Some(object_id.as_str())
+                }) {
+                    scene.visible_objects.push(revealed_object.with_context(|| {
+                        format!("visible script cannot reveal unknown object {object_id}")
+                    })?);
+                }
+                mark_runtime_snapshot_dirty(runtime_shell);
+                continue;
+            }
+            VisibleScriptMovementPhase::Stationary { duration, effect } => {
+                if duration == 0 {
+                    continue;
+                }
+                let initial_facing = runtime_shell
+                    .visible_script_movement_scene
+                    .as_ref()
+                    .and_then(|scene| {
+                        if object_id == "PLAYER" {
+                            Some(scene.overworld.facing)
+                        } else {
+                            scene.visible_object_facings.get(&object_id).copied()
+                        }
+                    })
+                    .context("stationary movement actor has no retained facing")?;
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while starting stationary effect")?;
+                movement.hold_frames_remaining = duration;
+                movement.active_jump_duration = None;
+                movement.active_uses_standing_frame = !matches!(
+                    effect,
+                    VisibleStationaryMovementEffect::SkyfallFall
+                        | VisibleStationaryMovementEffect::RockSmash
+                );
+                movement.active_tree_shake_duration = None;
+                movement.active_stationary_effect = Some(effect);
+                movement.active_stationary_duration = duration;
+                movement.stationary_initial_facing = initial_facing;
+                update_visible_stationary_movement_frame(runtime_shell)?;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
+            VisibleScriptMovementPhase::ScreenShake { parameter } => {
+                runtime_shell.visible_earthquake = Some(VisibleEarthquake {
+                    intensity: 1_u16 << ((parameter >> 6) & 0x3),
+                    frames_remaining: (parameter & 0x3f).max(1),
+                    phase: 0,
+                });
+                mark_runtime_snapshot_dirty(runtime_shell);
+                continue;
+            }
+            VisibleScriptMovementPhase::Turn { direction, duration } => {
+                let scene = Arc::make_mut(
+                    runtime_shell
+                        .visible_script_movement_scene
+                        .as_mut()
+                        .context("visible script movement turn has no retained scene")?,
+                );
+                if object_id == "PLAYER" {
+                    scene.overworld.facing = direction;
+                } else {
+                    scene.visible_object_facings.insert(object_id, direction);
+                }
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while starting turn")?;
+                movement.hold_frames_remaining = u16::from(duration.max(1));
+                movement.active_jump_duration = None;
+                movement.active_uses_standing_frame = true;
+                movement.active_tree_shake_duration = None;
+                movement.active_stationary_effect = None;
+                movement.active_stationary_duration = 0;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
+            VisibleScriptMovementPhase::Move {
+                from,
+                to,
+                direction,
+                duration,
+                jump,
+                update_facing,
+                standing_frame,
+            } => {
+                let leader_stride = u8::try_from(
+                    (i32::from(to.x) - i32::from(from.x))
+                        .unsigned_abs()
+                        .max((i32::from(to.y) - i32::from(from.y)).unsigned_abs()),
+                )
+                .context("visible leader stride exceeds follower movement range")?;
+                begin_visible_follower_step(
+                    runtime_shell,
+                    direction,
+                    leader_stride,
+                    duration,
+                    jump,
+                    standing_frame,
+                )?;
+                let scene = Arc::make_mut(
+                    runtime_shell
+                        .visible_script_movement_scene
+                        .as_mut()
+                        .context("visible script movement step has no retained scene")?,
+                );
+                if object_id == "PLAYER" {
+                    scene.overworld.tile = to;
+                    if update_facing {
+                        scene.overworld.facing = direction;
+                    }
+                    runtime_shell.player_walk_from = Some(from);
+                    runtime_shell.player_walk_total_ticks = duration;
+                    runtime_shell.player_walk_frame_ticks = duration;
+                    let previous_stride = runtime_shell.player_walk_stride;
+                    runtime_shell.player_walk_stride = !runtime_shell.player_walk_stride;
+                    if previous_stride && !runtime_shell.player_walk_stride {
+                        runtime_shell.player_walk_mirror_stride =
+                            !runtime_shell.player_walk_mirror_stride;
+                    }
+                } else {
+                    scene.visible_object_runtime_tiles.insert(object_id.clone(), to);
+                    if update_facing {
+                        scene.visible_object_facings.insert(object_id.clone(), direction);
+                    }
+                    advance_object_walk_phase(runtime_shell, &object_id, direction);
+                    runtime_shell.trainer_walk_from = Some((object_id, from));
+                    runtime_shell.object_walk_total_ticks = duration;
+                    runtime_shell.object_walk_frame_ticks = duration;
+                    runtime_shell.object_walk_stride = !runtime_shell.object_walk_stride;
+                }
+                let movement = runtime_shell
+                    .visible_script_movement
+                    .as_mut()
+                    .context("visible script movement disappeared while starting step")?;
+                movement.hold_frames_remaining = 0;
+                movement.active_jump_duration = jump.then_some(duration);
+                movement.active_uses_standing_frame = standing_frame;
+                movement.active_tree_shake_duration = None;
+                movement.active_stationary_effect = None;
+                movement.active_stationary_duration = 0;
+                movement.stationary_y_offset = 0;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn advance_visible_script_movement(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    let Some(movement) = runtime_shell.visible_script_movement.as_mut() else {
+        return Ok(false);
+    };
+    let hold_frames_remaining = if movement.hold_frames_remaining > 0 {
+        movement.hold_frames_remaining -= 1;
+        Some(movement.hold_frames_remaining)
+    } else {
+        None
+    };
+    if let Some(hold_frames_remaining) = hold_frames_remaining {
+        update_visible_stationary_movement_frame(runtime_shell)?;
+        if hold_frames_remaining > 0 {
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(true);
+        }
+    } else {
+        let movement = runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .context("visible script movement disappeared while advancing step")?;
+        let movement_in_flight = if movement.object_id == "PLAYER" {
+            runtime_shell.player_walk_frame_ticks > 0
+        } else {
+            runtime_shell.object_walk_frame_ticks > 0
+        };
+        if movement_in_flight {
+            return Ok(true);
+        }
+    }
+    if start_next_visible_script_movement_phase(runtime_shell)? {
+        return Ok(true);
+    }
+    match runtime_shell.visible_field_travel_animation {
+        Some(VisibleFieldTravelAnimation::DigOut) => {
+            settle_visible_overworld_travel(runtime_shell)?;
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_WARP_FROM")?;
+            runtime_shell.visible_field_travel_animation =
+                Some(VisibleFieldTravelAnimation::DigReturn);
+            begin_visible_dig_travel_animation(runtime_shell, true)?;
+        }
+        Some(VisibleFieldTravelAnimation::DigReturn) => {
+            runtime_shell.visible_field_travel_animation = None;
+            runtime_shell.field_notice_scene = None;
+        }
+        Some(VisibleFieldTravelAnimation::TeleportFrom) => {
+            settle_visible_overworld_travel(runtime_shell)?;
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_WARP_FROM")?;
+            runtime_shell.visible_field_travel_animation =
+                Some(VisibleFieldTravelAnimation::TeleportTo);
+            begin_visible_teleport_travel_animation(runtime_shell, true)?;
+        }
+        Some(VisibleFieldTravelAnimation::TeleportTo) => {
+            runtime_shell.visible_field_travel_animation = None;
+            runtime_shell.field_notice_scene = None;
+        }
+        Some(VisibleFieldTravelAnimation::Pitfall) => {
+            runtime_shell.visible_field_travel_animation = None;
+            settle_visible_overworld_arrival(runtime_shell, "pitfall")?;
+        }
+        None => advance_visible_script_until_player_boundary(runtime_shell)?,
+    }
+    Ok(true)
+}
+
+fn update_visible_stationary_movement_frame(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
+    let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
+        return Ok(());
+    };
+    let Some(effect) = movement.active_stationary_effect else {
+        return Ok(());
+    };
+    let elapsed = movement
+        .active_stationary_duration
+        .saturating_sub(movement.hold_frames_remaining.min(movement.active_stationary_duration));
+    let stationary_y_offset = match effect {
+        VisibleStationaryMovementEffect::TeleportRise => {
+            const OFFSETS: [i16; 17] = [
+                0, -1, -2, -5, -8, -12, -17, -22, -29, -36, -43, -51, -60, -69, -78, -87,
+                -96,
+            ];
+            OFFSETS[usize::from(elapsed.min(16))]
+        }
+        VisibleStationaryMovementEffect::TeleportWait => -96,
+        VisibleStationaryMovementEffect::TeleportDescent => {
+            const OFFSETS: [i16; 17] = [
+                -96, -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1,
+                0,
+            ];
+            OFFSETS[usize::from(elapsed.min(16))]
+        }
+        VisibleStationaryMovementEffect::TeleportSpin => 0,
+        VisibleStationaryMovementEffect::SkyfallWait => 96,
+        VisibleStationaryMovementEffect::SkyfallFall => {
+            const OFFSETS: [i16; 17] = [
+                96, -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1,
+                0,
+            ];
+            OFFSETS[usize::from(elapsed.min(16))]
+        }
+        VisibleStationaryMovementEffect::SkyfallTop if elapsed >= 16 => 96,
+        VisibleStationaryMovementEffect::SkyfallTop => 0,
+        VisibleStationaryMovementEffect::DigSpin => 0,
+        VisibleStationaryMovementEffect::RockSmash => 0,
+    };
+    let frames_per_facing = if effect == VisibleStationaryMovementEffect::SkyfallTop {
+        2
+    } else {
+        4
+    };
+    let facing_index = if effect == VisibleStationaryMovementEffect::DigSpin {
+        let initial = match movement.stationary_initial_facing {
+            Direction::Down => 0,
+            Direction::Right => 1,
+            Direction::Up => 2,
+            Direction::Left => 3,
+        };
+        (initial + elapsed / frames_per_facing) % 4
+    } else {
+        (elapsed / frames_per_facing) % 4
+    };
+    let facing = match facing_index {
+        0 => Direction::Down,
+        1 => Direction::Right,
+        2 => Direction::Up,
+        _ => Direction::Left,
+    };
+    let object_id = movement.object_id.clone();
+    runtime_shell
+        .visible_script_movement
+        .as_mut()
+        .context("stationary movement disappeared while storing sprite offset")?
+        .stationary_y_offset = stationary_y_offset;
+    if matches!(
+        effect,
+        VisibleStationaryMovementEffect::TeleportWait
+            | VisibleStationaryMovementEffect::SkyfallWait
+            | VisibleStationaryMovementEffect::SkyfallFall
+            | VisibleStationaryMovementEffect::RockSmash
+    ) {
+        return Ok(());
+    }
+    let scene = Arc::make_mut(
+        runtime_shell
+            .visible_script_movement_scene
+            .as_mut()
+            .context("stationary movement effect has no retained scene")?,
+    );
+    if object_id == "PLAYER" {
+        scene.overworld.facing = facing;
+    } else {
+        scene.visible_object_facings.insert(object_id, facing);
+    }
+    Ok(())
 }
 
 fn collect_overworld_keyboard_buttons(
@@ -1074,10 +2398,52 @@ fn is_direction_button(button: GameButton) -> bool {
     )
 }
 
+fn game_button_direction(button: GameButton) -> Option<Direction> {
+    match button {
+        GameButton::Up => Some(Direction::Up),
+        GameButton::Down => Some(Direction::Down),
+        GameButton::Left => Some(Direction::Left),
+        GameButton::Right => Some(Direction::Right),
+        _ => None,
+    }
+}
+
+fn sync_overworld_held_directions(
+    keys: &ButtonInput<KeyCode>,
+    runtime_shell: &mut BevyRuntimeShell,
+    shell_consumes_direction: bool,
+) {
+    if shell_consumes_direction {
+        runtime_shell.overworld_held_directions.clear();
+        runtime_shell.overworld_held_direction = None;
+        runtime_shell.overworld_buffered_direction = None;
+        return;
+    }
+    for (key, direction) in [
+        (KeyCode::ArrowUp, GameButton::Up),
+        (KeyCode::ArrowDown, GameButton::Down),
+        (KeyCode::ArrowLeft, GameButton::Left),
+        (KeyCode::ArrowRight, GameButton::Right),
+    ] {
+        if !keys.pressed(key) {
+            runtime_shell
+                .overworld_held_directions
+                .retain(|held| *held != direction);
+        }
+        if keys.just_pressed(key) {
+            runtime_shell
+                .overworld_held_directions
+                .retain(|held| *held != direction);
+            runtime_shell.overworld_held_directions.push_back(direction);
+        }
+    }
+}
+
 /// The core advances movement at tile granularity.  Preserve the Game Boy's
 /// visible walking pace by forwarding a newly held direction immediately and
-/// then at eight-frame intervals.  Button combinations are left untouched so
-/// the core can retain its normal conflicting-direction behavior.
+/// then at eight-frame intervals. Direction arbitration has already reduced
+/// the physical keyboard state to TypeScript's single queued/oldest-held
+/// direction before this cadence gate.
 fn throttle_held_overworld_direction(
     runtime_shell: &mut BevyRuntimeShell,
     buttons: &mut Vec<GameButton>,
@@ -1111,6 +2477,19 @@ fn apply_runtime_hotkeys(
 ) {
     let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    // The frame system above advances these effects and returns before the
+    // authoritative overworld can consume joypad input. Give the visible
+    // animation the same exclusive ownership here as well, otherwise START,
+    // SELECT, or A/B can open a shell surface over Cut, Whirlpool, Headbutt,
+    // fishing, or field travel even though Crystal's animation loop is still
+    // holding the joypad. Field-travel and Cut-family state is installed
+    // before its use text closes, so keep that preceding textbox interactive
+    // until it is gone.
+    if visible_noninteractive_field_animation_owns_input(&runtime_shell) {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        return;
+    }
     if runtime_shell.pending_field_notice_effect_frames.is_some()
         && runtime_shell.field_notice.is_none()
     {
@@ -1318,44 +2697,48 @@ fn apply_runtime_hotkeys(
         return;
     }
     if runtime_shell.options_menu_open {
-        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowDown) {
-            let delta = if keys.just_pressed(KeyCode::ArrowUp) {
-                -1
-            } else {
-                1
-            };
-            match move_visible_options_cursor(&mut runtime_shell, delta) {
-                Ok(()) => runtime_shell.last_error = None,
-                Err(error) => {
-                    record_visible_runtime_error(&mut runtime_shell, &error);
-                    runtime_shell.last_error = Some(error.to_string());
-                }
+        let held = [
+            (KeyCode::ArrowUp, GameButton::Up),
+            (KeyCode::ArrowDown, GameButton::Down),
+            (KeyCode::ArrowLeft, GameButton::Left),
+            (KeyCode::ArrowRight, GameButton::Right),
+        ]
+        .into_iter()
+        .filter_map(|(key, direction)| keys.pressed(key).then_some((key, direction)))
+        .collect::<Vec<_>>();
+        if held.len() == 1 {
+            let (key, direction) = held[0];
+            let newly_pressed = keys.just_pressed(key);
+            let repeated = !newly_pressed
+                && runtime_shell.ui_held_direction == Some(direction)
+                && timer.has_tick()
+                && runtime_shell.ui_direction_repeat_ticks == 0;
+            if newly_pressed || repeated {
+                dispatch_visible_options_direction(&mut runtime_shell, direction);
+                runtime_shell.ui_held_direction = Some(direction);
+                runtime_shell.ui_direction_repeat_ticks = if newly_pressed { 15 } else { 4 };
+            } else if runtime_shell.ui_held_direction == Some(direction) && timer.has_tick() {
+                runtime_shell.ui_direction_repeat_ticks =
+                    runtime_shell.ui_direction_repeat_ticks.saturating_sub(1);
             }
-        }
-        if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::ArrowRight) {
-            let delta = if keys.just_pressed(KeyCode::ArrowLeft) {
-                -1
-            } else {
-                1
-            };
-            match change_visible_options_selection(&mut runtime_shell, delta) {
-                Ok(()) => runtime_shell.last_error = None,
-                Err(error) => {
-                    record_visible_runtime_error(&mut runtime_shell, &error);
-                    runtime_shell.last_error = Some(error.to_string());
-                }
-            }
+        } else {
+            runtime_shell.ui_held_direction = None;
+            runtime_shell.ui_direction_repeat_ticks = 0;
         }
         if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+            runtime_shell.ui_held_direction = None;
+            runtime_shell.ui_direction_repeat_ticks = 0;
             run_bevy_action(&mut runtime_shell, press_visible_a_button);
         }
         if keys.just_pressed(KeyCode::KeyX) {
+            runtime_shell.ui_held_direction = None;
+            runtime_shell.ui_direction_repeat_ticks = 0;
             run_bevy_action(&mut runtime_shell, press_visible_b_button);
         }
         return;
     }
     if runtime_shell.trainer_card_open {
-        apply_visible_runtime_controls(&keys, &mut runtime_shell);
+        apply_visible_runtime_controls(&keys, &mut runtime_shell, timer.has_tick());
         if runtime_shell.trainer_card_open {
             for _ in 0..timer.take_ticks() {
                 runtime_shell.trainer_card_colon_ticks += 1;
@@ -1479,7 +2862,27 @@ fn apply_runtime_hotkeys(
         }
         return;
     }
-    apply_visible_runtime_controls(&keys, &mut runtime_shell);
+    apply_visible_runtime_controls(&keys, &mut runtime_shell, timer.has_tick());
+}
+
+fn dispatch_visible_options_direction(
+    runtime_shell: &mut BevyRuntimeShell,
+    direction: GameButton,
+) {
+    let result = match direction {
+        GameButton::Up => move_visible_options_cursor(runtime_shell, -1),
+        GameButton::Down => move_visible_options_cursor(runtime_shell, 1),
+        GameButton::Left => change_visible_options_selection(runtime_shell, -1),
+        GameButton::Right => change_visible_options_selection(runtime_shell, 1),
+        _ => return,
+    };
+    match result {
+        Ok(()) => runtime_shell.last_error = None,
+        Err(error) => {
+            record_visible_runtime_error(runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+    }
 }
 
 fn drain_unused_runtime_ticks(mut timer: ResMut<RuntimeTickTimer>) {
@@ -1612,37 +3015,79 @@ fn visible_move_screen_shake_offset(
 fn apply_visible_runtime_controls(
     keys: &ButtonInput<KeyCode>,
     runtime_shell: &mut BevyRuntimeShell,
+    advance_repeat: bool,
 ) {
+    if runtime_shell.visible_script_movement.is_some()
+        || visible_noninteractive_field_animation_owns_input(runtime_shell)
+        || visible_noninteractive_battle_animation_owns_input(runtime_shell)
+    {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        return;
+    }
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
 
     let plain_input = !shift_pressed && !alt_pressed && !ctrl_pressed;
+    if keys.just_pressed(KeyCode::KeyZ)
+        || keys.just_pressed(KeyCode::KeyX)
+        || keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(KeyCode::ShiftRight)
+    {
+        // Confirm/cancel commonly replaces the active cursor surface. Each
+        // TypeScript menu owns its own repeat state, so a held direction must
+        // begin a fresh initial delay after that boundary.
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+    }
     if plain_input && has_visible_shell_direction_action(runtime_shell) {
-        if keys.just_pressed(KeyCode::ArrowUp) {
-            run_bevy_input_action(runtime_shell, "input:ui:Up", move_visible_primary_cursor_up);
+        let held_directions = [
+            (KeyCode::ArrowUp, GameButton::Up),
+            (KeyCode::ArrowDown, GameButton::Down),
+            (KeyCode::ArrowLeft, GameButton::Left),
+            (KeyCode::ArrowRight, GameButton::Right),
+        ]
+        .into_iter()
+        .filter_map(|(key, direction)| keys.pressed(key).then_some((key, direction)))
+        .collect::<Vec<_>>();
+        let newly_pressed_direction = held_directions
+            .iter()
+            .find_map(|(key, direction)| keys.just_pressed(*key).then_some(*direction));
+        let active_held_direction = runtime_shell.ui_held_direction.filter(|active| {
+            held_directions
+                .iter()
+                .any(|(_, direction)| direction == active)
+        });
+        if let Some(direction) = newly_pressed_direction {
+            dispatch_visible_ui_direction(runtime_shell, direction);
+            runtime_shell.ui_held_direction = Some(direction);
+            runtime_shell.ui_direction_repeat_ticks =
+                visible_ui_initial_repeat_ticks(runtime_shell);
+        } else if let Some(direction) = active_held_direction {
+            let repeated = advance_repeat
+                && runtime_shell.ui_direction_repeat_ticks == 0;
+            if repeated {
+                dispatch_visible_ui_direction(runtime_shell, direction);
+                runtime_shell.ui_direction_repeat_ticks = 4;
+            } else if advance_repeat {
+                runtime_shell.ui_direction_repeat_ticks =
+                    runtime_shell.ui_direction_repeat_ticks.saturating_sub(1);
+            }
+        } else if let Some((_, direction)) = held_directions.first().copied() {
+            // A surface replacement may occur while a direction remains held.
+            // Adopt it without manufacturing a new press, then give the new
+            // menu its complete initial repeat delay.
+            runtime_shell.ui_held_direction = Some(direction);
+            runtime_shell.ui_direction_repeat_ticks =
+                visible_ui_initial_repeat_ticks(runtime_shell);
+        } else {
+            runtime_shell.ui_held_direction = None;
+            runtime_shell.ui_direction_repeat_ticks = 0;
         }
-        if keys.just_pressed(KeyCode::ArrowDown) {
-            run_bevy_input_action(
-                runtime_shell,
-                "input:ui:Down",
-                move_visible_primary_cursor_down,
-            );
-        }
-        if keys.just_pressed(KeyCode::ArrowLeft) {
-            run_bevy_input_action(
-                runtime_shell,
-                "input:ui:Left",
-                move_visible_primary_cursor_left,
-            );
-        }
-        if keys.just_pressed(KeyCode::ArrowRight) {
-            run_bevy_input_action(
-                runtime_shell,
-                "input:ui:Right",
-                move_visible_primary_cursor_right,
-            );
-        }
+    } else {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
     }
     if keys.just_pressed(KeyCode::KeyZ) && plain_input {
         match has_visible_shell_a_action(runtime_shell) {
@@ -1685,6 +3130,97 @@ fn apply_visible_runtime_controls(
             run_bevy_action(runtime_shell, press_visible_start_button);
         }
     }
+}
+
+fn visible_noninteractive_battle_animation_owns_input(
+    runtime_shell: &BevyRuntimeShell,
+) -> bool {
+    runtime_shell.visible_battle_transition.is_some()
+        || runtime_shell.visible_frontpic_animation.is_some()
+        || runtime_shell
+            .visible_capture_animation
+            .as_ref()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell.visible_send_out_animation.is_some()
+        || runtime_shell.visible_trainer_exit_animation.is_some()
+        || runtime_shell
+            .battle_hp_tween
+            .as_ref()
+            .is_some_and(visible_battle_hp_tween_active)
+}
+
+fn visible_noninteractive_field_animation_owns_input(
+    runtime_shell: &BevyRuntimeShell,
+) -> bool {
+    runtime_shell.pending_trainer_sight.is_some()
+        || runtime_shell.visible_strength_notice_phase
+            == Some(VisibleStrengthNoticePhase::CryPause)
+        || runtime_shell.visible_walk_warp_phase.is_some()
+        || runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell
+            .visible_blackout_phase
+            .is_some_and(|phase| phase != VisibleBlackoutPhase::AwaitText)
+        || runtime_shell.visible_fishing_animation
+        .is_some_and(|animation| animation.phase != VisibleFishingPhase::AwaitText)
+        || runtime_shell.visible_fly_animation.is_some()
+        || (runtime_shell.visible_waterfall_animation.is_some()
+            && runtime_shell.field_notice.is_none())
+        || runtime_shell.visible_flash_animation.is_some()
+        || (runtime_shell.field_notice.is_none()
+            && (runtime_shell.visible_field_travel_animation.is_some()
+                || runtime_shell.visible_cut_animation.is_some()
+                || runtime_shell.visible_whirlpool_animation.is_some()
+                || runtime_shell.visible_headbutt_animation.is_some()))
+}
+
+fn visible_ui_initial_repeat_ticks(runtime_shell: &BevyRuntimeShell) -> u8 {
+    let battle_surface = runtime_shell.battle_action_cursor.is_some()
+        || runtime_shell.battle_move_cursor.is_some()
+        || runtime_shell.battle_switch_cursor.is_some()
+        || runtime_shell.battle_faint_prompt_cursor.is_some()
+        || runtime_shell.battle_shift_prompt_cursor.is_some()
+        || runtime_shell.battle_party_action_cursor.is_some()
+        || runtime_shell.battle_pack_target_mode.is_some();
+    if battle_surface { 8 } else { 12 }
+}
+
+fn dispatch_visible_ui_direction(runtime_shell: &mut BevyRuntimeShell, direction: GameButton) {
+    if runtime_shell
+        .battle_exp_tween
+        .as_ref()
+        .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
+    {
+        return;
+    }
+    let (input_action, action) = match direction {
+        GameButton::Up => (
+            "input:ui:Up",
+            move_visible_primary_cursor_up as fn(&mut BevyRuntimeShell) -> Result<()>,
+        ),
+        GameButton::Down => (
+            "input:ui:Down",
+            move_visible_primary_cursor_down as fn(&mut BevyRuntimeShell) -> Result<()>,
+        ),
+        GameButton::Left => (
+            "input:ui:Left",
+            move_visible_primary_cursor_left as fn(&mut BevyRuntimeShell) -> Result<()>,
+        ),
+        GameButton::Right => (
+            "input:ui:Right",
+            move_visible_primary_cursor_right as fn(&mut BevyRuntimeShell) -> Result<()>,
+        ),
+        _ => return,
+    };
+    run_bevy_input_action(runtime_shell, input_action, action);
 }
 
 fn run_bevy_input_action(
@@ -1794,6 +3330,7 @@ fn visible_player_boundary(
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
     runtime_shell.visible_mom_bank.is_some()
+        || runtime_shell.visible_script_movement.is_some()
         || runtime_shell.visible_card_flip.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_unown_puzzle.is_some()
@@ -1916,7 +3453,73 @@ fn close_visible_noninteractive_runtime_surfaces_until_idle(
     )
 }
 
+fn finish_visible_empty_battle_reward_presentation(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<bool> {
+    if !runtime_shell.battle_messages.is_empty()
+        || runtime_shell.battle_exp_tween.is_some()
+        || !runtime_shell.pending_battle_exp_tweens.is_empty()
+        || !runtime_shell.battle_level_stats.is_empty()
+        || runtime_shell.battle_message_scene.is_none()
+    {
+        return Ok(false);
+    }
+    let snapshot = runtime_shell.shell.snapshot()?;
+    if snapshot.battle.is_none() {
+        runtime_shell.battle_message_scene = None;
+        runtime_shell.battle_hp_tween = None;
+        runtime_shell.battle_fanfare_messages.clear();
+        runtime_shell.battle_evolution_cries.clear();
+        runtime_shell.battle_sounds_after_messages.clear();
+        reset_visible_music_state(runtime_shell);
+        queue_visible_current_music(runtime_shell)?;
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(true);
+    }
+    let resume_trainer_settlement = runtime_shell.battle_shift_prompt_cursor.is_none()
+        && runtime_shell.battle_switch_cursor.is_none()
+        && snapshot.battle.as_ref().is_some_and(|battle| {
+            matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. })
+                && battle.enemy_pokemon.hp == 0
+        });
+    if resume_trainer_settlement {
+        runtime_shell.battle_message_scene = None;
+        settle_visible_battle_after_action(runtime_shell)?;
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.visible_diploma.is_some() {
+        return close_visible_diploma(runtime_shell);
+    }
+    if runtime_shell.visible_unown_words.is_some() {
+        return close_visible_unown_words(runtime_shell);
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+    {
+        return Ok(());
+    }
+    if runtime_shell
+        .battle_exp_tween
+        .as_ref()
+        .is_some_and(|tween| tween.started)
+    {
+        return Ok(());
+    }
+    if let Some(stats) = runtime_shell.battle_level_stats.front()
+        && stats.active
+    {
+        if stats.frames_before_input == 0 {
+            runtime_shell.battle_level_stats.pop_front();
+            mark_runtime_snapshot_dirty(runtime_shell);
+            finish_visible_empty_battle_reward_presentation(runtime_shell)?;
+        }
+        return Ok(());
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return flip_visible_card(runtime_shell);
     }
@@ -1949,9 +3552,116 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         {
             return Ok(());
         }
+        if runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
+        {
+            return Ok(());
+        }
+        let message = runtime_shell
+            .battle_messages
+            .front()
+            .expect("checked nonempty battle message queue");
+        if !visible_battle_message_is_complete(runtime_shell, message) {
+            return Ok(());
+        }
+        if visible_battle_message_has_more_pages(runtime_shell, message) {
+            let message = message.clone();
+            if advance_visible_battle_message_page(runtime_shell, &message) {
+                queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+                mark_runtime_snapshot_dirty(runtime_shell);
+            }
+            return Ok(());
+        }
         let staged_scenes_aligned = runtime_shell.battle_message_scenes.len()
             == runtime_shell.battle_messages.len();
         let dismissed_battle_message = runtime_shell.battle_messages.pop_front();
+        runtime_shell.battle_text_reveal = None;
+        if dismissed_battle_message.is_some() {
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+        }
+        if runtime_shell
+            .battle_evolution_cries
+            .front()
+            .is_some_and(|(_, trigger)| dismissed_battle_message.as_deref() == Some(trigger.as_str()))
+        {
+            let (species_id, _) = runtime_shell.battle_evolution_cries.pop_front().unwrap();
+            queue_visible_pokemon_cry(runtime_shell, &species_id, "battle_evolution")?;
+        }
+        if runtime_shell
+            .battle_sounds_after_messages
+            .front()
+            .is_some_and(|(_, trigger)| dismissed_battle_message.as_deref() == Some(trigger.as_str()))
+        {
+            let (sound_id, _) = runtime_shell.battle_sounds_after_messages.pop_front().unwrap();
+            queue_visible_shell_sound_effect(runtime_shell, &sound_id)?;
+        }
+        let starts_exp_animation = runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| {
+                !tween.started
+                    && (dismissed_battle_message.as_deref()
+                        == Some(tween.trigger_message.as_str())
+                        || (tween.pixels == tween.target_pixels
+                            && !tween.remaining_targets.is_empty()
+                            && dismissed_battle_message
+                                .as_deref()
+                                .is_some_and(|message| message.contains(" grew to\nlevel "))))
+            });
+        if starts_exp_animation {
+            let tween = runtime_shell.battle_exp_tween.as_mut().unwrap();
+            if tween.pixels == tween.target_pixels {
+                tween.pixels = 0;
+                tween.target_pixels = tween
+                    .remaining_targets
+                    .pop_front()
+                    .context("multi-level EXP continuation has no next bar target")?;
+            }
+            tween.steps_in_segment = 0;
+            tween.frames_until_step = 9;
+            tween.started = true;
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_EXP_BAR")?;
+        }
+        if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
+            && dismissed_battle_message.as_deref() == Some(stats.trigger_message.as_str())
+        {
+            stats.triggered = true;
+            stats.active = !starts_exp_animation;
+            if stats.active {
+                stats.frames_before_input = 30;
+            }
+        }
+        if !starts_exp_animation
+            && runtime_shell
+                .battle_fanfare_messages
+                .front()
+                .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
+        {
+            if runtime_shell
+                .battle_level_stats
+                .front()
+                .is_some_and(|stats| {
+                    !stats.triggered
+                        && runtime_shell.battle_messages.front()
+                            == Some(&stats.trigger_message)
+                })
+            {
+                queue_visible_shell_sound_effect(runtime_shell, "SFX_HIT_END_OF_EXP_BAR")?;
+            }
+            runtime_shell.battle_fanfare_messages.pop_front();
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_DEX_FANFARE_50_79")?;
+        }
+        if starts_exp_animation
+            || runtime_shell
+                .battle_level_stats
+                .front()
+                .is_some_and(|stats| stats.active)
+        {
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
         if runtime_shell
             .battle_messages
             .front()
@@ -1965,7 +3675,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         let starts_enemy_trainer_exit = entry_messages_before == 3
             && dismissed_battle_message
                 .as_deref()
-                .is_some_and(|message| message.ends_with(" wants to battle!"));
+                .is_some_and(|message| message.ends_with("\nwants to battle!"));
         let starts_wild_frontpic = entry_messages_before == 2
             && dismissed_battle_message
                 .as_deref()
@@ -1973,11 +3683,11 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         let starts_enemy_send_out = runtime_shell.battle_enemy_send_out_pending
             || dismissed_battle_message
                 .as_deref()
-                .is_some_and(|message| message.contains(" sent out "));
+                .is_some_and(visible_message_is_enemy_send_out);
         let starts_player_send_out = runtime_shell.battle_player_send_out_pending
             || dismissed_battle_message
                 .as_deref()
-                .is_some_and(|message| message.starts_with("Go! "));
+                .is_some_and(visible_message_is_player_send_out);
         let starts_capture_animation = runtime_shell
             .visible_capture_animation
             .as_ref()
@@ -1986,9 +3696,48 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                     && dismissed_battle_message.as_deref()
                         == Some(animation.trigger_message.as_str())
             });
+        let starts_capture_pokedex_entry = dismissed_battle_message
+            .as_deref()
+            .is_some_and(|message| message.contains("was newly added to\nthe POKéDEX."));
         if starts_capture_animation {
             runtime_shell.visible_capture_animation.as_mut().unwrap().started = true;
             queue_visible_shell_sound_effect(runtime_shell, "SFX_THROW_BALL")?;
+        }
+        if starts_capture_pokedex_entry {
+            let snapshot = runtime_shell.shell.snapshot()?;
+            let species_id = snapshot
+                .battle
+                .as_ref()
+                .context("capture Pokedex entry lost its battle species")?
+                .enemy_pokemon
+                .species
+                .id
+                .clone();
+            let species_index = snapshot
+                .pokemon
+                .iter()
+                .position(|species| species.species_id == species_id)
+                .with_context(|| format!("captured species {species_id} is absent from the Pokedex catalog"))?;
+            anyhow::ensure!(
+                snapshot.presentation.pokedex_entries.contains_key(&species_id),
+                "captured species {species_id} has no compiled Pokedex entry"
+            );
+            // Item_effects clears the retained ball/battler sprites before
+            // NewPokedexEntry owns the LCD. The capture mutation itself is
+            // still deferred until nickname choice, so this scripted entry
+            // deliberately renders the known captured species without
+            // consulting the not-yet-committed caught bit.
+            runtime_shell.visible_capture_animation = None;
+            runtime_shell.battle_message_scene = None;
+            runtime_shell.pokedex_cursor = species_index;
+            runtime_shell.pokedex_menu_open = true;
+            runtime_shell.pokedex_detail_open = true;
+            runtime_shell.pokedex_detail_page = 0;
+            runtime_shell.pokedex_scripted_entry = true;
+            queue_visible_pokemon_cry(runtime_shell, &species_id, "new_pokedex_entry")?;
+            set_shell_action_status(runtime_shell, format!("NEW POKEDEX ENTRY {species_id}"));
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
         }
         let starts_move_animation = runtime_shell
             .visible_move_animations
@@ -2037,15 +3786,19 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         runtime_shell.battle_enemy_send_out_pending = false;
         runtime_shell.battle_player_send_out_pending = false;
-        if !starts_send_out_animation && let Some((species_id, reason, trigger_message)) =
-            runtime_shell.pending_battle_cry_after_message.take()
+        if !starts_send_out_animation
+            && runtime_shell
+                .pending_battle_cries_after_messages
+                .front()
+                .is_some_and(|(_, _, trigger_message)| {
+                    dismissed_battle_message.as_deref() == Some(trigger_message.as_str())
+                })
         {
-            if dismissed_battle_message.as_deref() == Some(trigger_message.as_str()) {
-                queue_visible_pokemon_cry(runtime_shell, &species_id, &reason)?;
-            } else {
-                runtime_shell.pending_battle_cry_after_message =
-                    Some((species_id, reason, trigger_message));
-            }
+            let (species_id, reason, _) = runtime_shell
+                .pending_battle_cries_after_messages
+                .pop_front()
+                .unwrap();
+            queue_visible_pokemon_cry(runtime_shell, &species_id, &reason)?;
         }
         if !starts_move_animation {
             if staged_scenes_aligned {
@@ -2134,6 +3887,13 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             {
                 runtime_shell.visible_capture_animation = None;
             }
+            if runtime_shell.shell.snapshot()?.pending_move_learn.is_some() {
+                // Move learning is a retained battle-result surface. Do not
+                // expose the overworld between its announcement and the
+                // delete/stop decision.
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             let automatic_move_slot = runtime_shell
                 .shell
                 .snapshot()?
@@ -2166,8 +3926,17 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                     });
             if terminal_scene {
                 runtime_shell.battle_hp_tween = None;
+                runtime_shell.battle_exp_tween = None;
+                runtime_shell.pending_battle_exp_tweens.clear();
+                runtime_shell.battle_fanfare_messages.clear();
+                runtime_shell.battle_evolution_cries.clear();
+                runtime_shell.battle_sounds_after_messages.clear();
+                runtime_shell.battle_level_stats.clear();
                 reset_visible_music_state(runtime_shell);
                 queue_visible_current_music(runtime_shell)?;
+                if runtime_shell.pending_plain_battle_map_reload {
+                    begin_visible_plain_battle_map_reload(runtime_shell)?;
+                }
             }
             if resume_trainer_settlement {
                 return settle_visible_battle_after_action(runtime_shell);
@@ -2243,12 +4012,32 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         .context("held-item swap prompt requires a valid cursor")?;
         return resolve_visible_held_item_swap_prompt(runtime_shell, selected == 0);
     }
+    if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
+        && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
+    {
+        return Ok(());
+    }
+    if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
+        && advance_visible_completed_field_text_page(runtime_shell, &snapshot)?
+    {
+        return Ok(());
+    }
     if runtime_shell.field_notice.is_some()
         && runtime_shell.pending_field_travel_delay_frames.is_some()
     {
         return Ok(());
     }
+    if runtime_shell.field_notice.is_some()
+        && visible_field_notice_uses_prompt_arrow(runtime_shell)
+    {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    }
     if runtime_shell.field_notice.take().is_some() {
+        if runtime_shell.visible_strength_notice_phase
+            == Some(VisibleStrengthNoticePhase::MoveText)
+        {
+            runtime_shell.visible_strength_notice_phase = None;
+        }
         if runtime_shell
             .visible_fishing_animation
             .is_some_and(|animation| animation.phase == VisibleFishingPhase::AwaitText)
@@ -2261,8 +4050,23 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
+        runtime_shell.pending_sweet_scent_nothing_notice = false;
+        if runtime_shell.pending_tmhm_teach_prompt_after_boot {
+            runtime_shell.field_notice_scene = None;
+            open_visible_tmhm_teach_prompt_after_boot(runtime_shell)?;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
         if runtime_shell.pending_field_travel_arrival {
             runtime_shell.pending_field_travel_arrival = false;
+            if runtime_shell.visible_field_travel_animation
+                == Some(VisibleFieldTravelAnimation::DigOut)
+            {
+                queue_visible_shell_sound_effect(runtime_shell, "SFX_WARP_TO")?;
+                begin_visible_dig_travel_animation(runtime_shell, false)?;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             settle_visible_overworld_travel(runtime_shell)?;
         }
         if begin_pending_field_notice_effect(runtime_shell) {
@@ -2276,14 +4080,22 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
+    if runtime_shell.pc_notice.is_some() {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    }
     if runtime_shell.pc_notice.take().is_some() {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
-    // A is first a text-speed affordance: while a page is printing it reveals
-    // that page immediately.  Only a subsequent press may dismiss/advance
-    // the script, matching the original textbox interaction.
-    if complete_visible_field_text_reveal(runtime_shell, &snapshot) {
+    // A/B accelerate the active printer to one character per frame;
+    // they do not reveal a whole page atomically. Only a completed page may
+    // advance the script, matching PrintLetterDelay and TypeScript main.
+    if runtime_shell.field_text_reveal.is_some()
+        && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
+    {
+        return Ok(());
+    }
+    if advance_visible_completed_field_text_page(runtime_shell, &snapshot)? {
         return Ok(());
     }
     if runtime_shell.pending_phone_prompt.is_some() {
@@ -2305,6 +4117,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
             runtime_shell.shop_welcome_seen = true;
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
@@ -2437,6 +4250,15 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             {
                 record_visible_runtime_action(runtime_shell, "pokedex:scripted_entry:close")?;
                 close_visible_pokedex_menu(runtime_shell);
+                if runtime_shell.pending_standard_capture.is_some() {
+                    runtime_shell.pending_name_choice = Some(VisibleNameChoice {
+                        options: vec!["YES".to_string(), "NO".to_string()],
+                        selected: 0,
+                    });
+                    set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
+                    mark_runtime_snapshot_dirty(runtime_shell);
+                    return Ok(());
+                }
                 continue_visible_script_after_prompt(runtime_shell)?;
                 return Ok(());
             }
@@ -2600,6 +4422,39 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 }
 
 fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    if runtime_shell.player_walk_frame_ticks > 0 {
+        return Ok(false);
+    }
+    if !runtime_shell.battle_messages.is_empty()
+        || runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
+    {
+        return Ok(true);
+    }
+    // These text surfaces are owned entirely by the Bevy presentation shell;
+    // the authoritative snapshot need not have `ui.window_open` set. Their
+    // A/B handlers already implement reveal, queue, prompt, and travel
+    // continuation, so route the physical button to that visible owner.
+    if runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_diploma.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_unown_words.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+    {
+        return Ok(true);
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return Ok(true);
     }
@@ -2703,6 +4558,34 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
 }
 
 fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.visible_diploma.is_some() {
+        return close_visible_diploma(runtime_shell);
+    }
+    if runtime_shell.visible_unown_words.is_some() {
+        return close_visible_unown_words(runtime_shell);
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+    {
+        return Ok(());
+    }
+    if runtime_shell
+        .battle_exp_tween
+        .as_ref()
+        .is_some_and(|tween| tween.started)
+    {
+        return Ok(());
+    }
+    if let Some(stats) = runtime_shell.battle_level_stats.front()
+        && stats.active
+    {
+        if stats.frames_before_input == 0 {
+            runtime_shell.battle_level_stats.pop_front();
+            mark_runtime_snapshot_dirty(runtime_shell);
+            finish_visible_empty_battle_reward_presentation(runtime_shell)?;
+        }
+        return Ok(());
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return close_visible_card_flip(runtime_shell);
     }
@@ -2725,7 +4608,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return Ok(());
     }
     if !runtime_shell.battle_messages.is_empty() {
-        return Ok(());
+        return press_visible_a_button(runtime_shell);
     }
     if runtime_shell.kurt_apricorn_cursor.is_some() {
         if runtime_shell.kurt_apricorn_quantity.take().is_some() {
@@ -2799,12 +4682,33 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.held_item_swap_prompt {
         return resolve_visible_held_item_swap_prompt(runtime_shell, false);
     }
+    let snapshot = runtime_shell.shell.snapshot()?;
+    if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
+        && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
+    {
+        return Ok(());
+    }
+    if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
+        && advance_visible_completed_field_text_page(runtime_shell, &snapshot)?
+    {
+        return Ok(());
+    }
     if runtime_shell.field_notice.is_some()
         && runtime_shell.pending_field_travel_delay_frames.is_some()
     {
         return Ok(());
     }
+    if runtime_shell.field_notice.is_some()
+        && visible_field_notice_uses_prompt_arrow(runtime_shell)
+    {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    }
     if runtime_shell.field_notice.take().is_some() {
+        if runtime_shell.visible_strength_notice_phase
+            == Some(VisibleStrengthNoticePhase::MoveText)
+        {
+            runtime_shell.visible_strength_notice_phase = None;
+        }
         if runtime_shell
             .visible_fishing_animation
             .is_some_and(|animation| animation.phase == VisibleFishingPhase::AwaitText)
@@ -2817,8 +4721,23 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
+        runtime_shell.pending_sweet_scent_nothing_notice = false;
+        if runtime_shell.pending_tmhm_teach_prompt_after_boot {
+            runtime_shell.field_notice_scene = None;
+            open_visible_tmhm_teach_prompt_after_boot(runtime_shell)?;
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
         if runtime_shell.pending_field_travel_arrival {
             runtime_shell.pending_field_travel_arrival = false;
+            if runtime_shell.visible_field_travel_animation
+                == Some(VisibleFieldTravelAnimation::DigOut)
+            {
+                queue_visible_shell_sound_effect(runtime_shell, "SFX_WARP_TO")?;
+                begin_visible_dig_travel_animation(runtime_shell, false)?;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             settle_visible_overworld_travel(runtime_shell)?;
         }
         if begin_pending_field_notice_effect(runtime_shell) {
@@ -2831,6 +4750,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
+    }
+    if runtime_shell.pc_notice.is_some() {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     if runtime_shell.pc_notice.take().is_some() {
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -2859,11 +4781,18 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if snapshot.ui.pending_yes_no.is_some() {
         return decline_visible_pending_yes_no(runtime_shell);
     }
+    if runtime_shell.field_text_reveal.is_some() {
+        // JoyTextDelay, JoyWaitAorB, and PromptButton all accept PAD_A or
+        // PAD_B. Higher-priority YES/NO, selection, and cancelable modal
+        // surfaces have already handled B above this ordinary text boundary.
+        return press_visible_a_button(runtime_shell);
+    }
     if snapshot.ui.pending_text_wait.is_some() {
         return advance_visible_pending_text_wait(runtime_shell);
     }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
+            queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
             runtime_shell.shop_welcome_seen = true;
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
@@ -2965,6 +4894,8 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
             runtime_shell.tmhm_teach_prompt_cursor = None;
             record_visible_runtime_action(runtime_shell, "pack:tmhm:teach:b")?;
+            runtime_shell.field_notice = Some("The TM wasn't used.".to_string());
+            mark_runtime_snapshot_dirty(runtime_shell);
             set_shell_action_status(runtime_shell, "THE TM WASN'T USED");
             return Ok(());
         }
@@ -2978,8 +4909,10 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell.tmhm_forget_menu_open {
             runtime_shell.tmhm_forget_menu_open = false;
             runtime_shell.party_move_cursor = None;
-            set_shell_action_status(runtime_shell, "DID NOT LEARN THE MOVE");
-            return Ok(());
+            return open_visible_tmhm_decision_prompt(
+                runtime_shell,
+                VisibleTmHmDecision::StopLearning,
+            );
         }
         if runtime_shell.field_pack_target_mode.is_some() {
             close_visible_field_pack_target(runtime_shell)?;
@@ -3083,7 +5016,35 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell.pokedex_detail_open {
             record_visible_runtime_action(runtime_shell, "pokedex:detail:close")?;
             if runtime_shell.pokedex_scripted_entry {
+                let snapshot = runtime_shell.shell.snapshot()?;
+                let species =
+                    selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
+                let page_count = snapshot
+                    .presentation
+                    .pokedex_entries
+                    .get(&species.species_id)
+                    .map(|entry| entry.pages.len().max(1))
+                    .unwrap_or(1);
+                if runtime_shell.pokedex_detail_page + 1 < page_count {
+                    runtime_shell.pokedex_detail_page += 1;
+                    let page_number = runtime_shell.pokedex_detail_page + 1;
+                    record_visible_runtime_action(
+                        runtime_shell,
+                        format!("pokedex:scripted_entry:page:{page_number}:b"),
+                    )?;
+                    mark_runtime_snapshot_dirty(runtime_shell);
+                    return Ok(());
+                }
                 close_visible_pokedex_menu(runtime_shell);
+                if runtime_shell.pending_standard_capture.is_some() {
+                    runtime_shell.pending_name_choice = Some(VisibleNameChoice {
+                        options: vec!["YES".to_string(), "NO".to_string()],
+                        selected: 0,
+                    });
+                    set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
+                    mark_runtime_snapshot_dirty(runtime_shell);
+                    return Ok(());
+                }
                 continue_visible_script_after_prompt(runtime_shell)?;
                 return Ok(());
             }
@@ -3177,7 +5138,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return Ok(());
     }
     if snapshot.battle.is_some() && runtime_shell.battle_pack_target_mode.is_some() {
-        let _ = close_visible_battle_pack_target(runtime_shell);
+        close_visible_battle_pack_target(runtime_shell)?;
         return Ok(());
     }
     if snapshot.battle.is_some() && runtime_shell.field_pack_action_cursor.is_some() {
@@ -3208,6 +5169,11 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         {
             return press_visible_battle_b_button(runtime_shell);
         }
+        // MoveSelectionScreen returns through ParsePlayerAction's
+        // PlayClickSFX even when B canceled it. The party menu likewise owns
+        // the ordinary menu-button click. Keep the disabled B input on the
+        // main battle command grid silent by limiting this to open submenus.
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
         record_visible_runtime_action(runtime_shell, "battle:submenu:reset")?;
         runtime_shell.battle_move_cursor = None;
         runtime_shell.battle_move_swap_origin = None;
@@ -3503,6 +5469,28 @@ fn move_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell, delta: isize, hor
 }
 
 fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if !runtime_shell.battle_messages.is_empty()
+        || runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
+    {
+        return Ok(());
+    }
+    if runtime_shell.pc_notice.is_some() {
+        return Ok(());
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
+    {
+        return Ok(());
+    }
     if runtime_shell.visible_slot_machine.is_some() || runtime_shell.visible_card_flip.is_some() {
         return Ok(());
     }
@@ -3544,6 +5532,10 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
             .last_audio_events
             .push("gender Select ignored".to_string());
         trim_event_log(&mut runtime_shell.last_audio_events);
+        return Ok(());
+    }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        record_visible_runtime_action(runtime_shell, "pc:hall_of_fame:select:ignored")?;
         return Ok(());
     }
     if runtime_shell.special_boundary.is_some() {
@@ -3632,7 +5624,38 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
 }
 
 fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .battle_exp_tween
+        .as_ref()
+        .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
+    {
+        return Ok(());
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
+    {
+        return Ok(());
+    }
     if runtime_shell.visible_slot_machine.is_some() || runtime_shell.visible_card_flip.is_some() {
+        return Ok(());
+    }
+    if runtime_shell.field_text_reveal.is_some() {
+        // An active field textbox consumes non-confirm buttons. Do not let
+        // Start open the field menu beneath a running interaction.
+        return Ok(());
+    }
+    if !runtime_shell.battle_messages.is_empty() {
+        // ASM PromptButton and PrintLetterDelay consume PAD_A/PAD_B only.
+        // Start must not accelerate or dismiss battle dialogue.
+        return Ok(());
+    }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
         return Ok(());
     }
     if runtime_shell.visible_mom_bank.is_some() {
@@ -3680,6 +5703,35 @@ fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()
 }
 
 fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell.player_walk_frame_ticks > 0 {
+        return false;
+    }
+    if !runtime_shell.battle_messages.is_empty()
+        || runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
+    {
+        return true;
+    }
+    if runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_diploma.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_unown_words.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+    {
+        return true;
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return true;
     }
@@ -3758,6 +5810,19 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
 }
 
 fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell.player_walk_frame_ticks > 0 {
+        return false;
+    }
+    if retained_text_surface_owns_gameplay_input(runtime_shell) {
+        return true;
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
+    {
+        return true;
+    }
     if runtime_shell.visible_unown_puzzle.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_card_flip.is_some()
@@ -3814,6 +5879,22 @@ fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool
 }
 
 fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell.player_walk_frame_ticks > 0 {
+        return false;
+    }
+    if retained_text_surface_owns_gameplay_input(runtime_shell) {
+        return true;
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
+    {
+        return true;
+    }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        return true;
+    }
     if runtime_shell.visible_unown_puzzle.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_card_flip.is_some()
@@ -3872,6 +5953,19 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
 }
 
 fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if retained_text_surface_owns_gameplay_input(runtime_shell) {
+        return true;
+    }
+    if runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
+    {
+        return true;
+    }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        return true;
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return true;
     }
@@ -3935,6 +6029,20 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
                 || has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
         })
         .unwrap_or(false)
+}
+
+fn retained_text_surface_owns_gameplay_input(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.field_notice.is_some()
+        || runtime_shell.pc_notice.is_some()
+        || !runtime_shell.battle_messages.is_empty()
+        || runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
+        || runtime_shell
+            .battle_level_stats
+            .front()
+            .is_some_and(|stats| stats.active)
 }
 
 fn has_visible_direction_blocking_script_work(
@@ -4008,6 +6116,12 @@ fn visible_pending_text_wait_active(runtime_shell: &BevyRuntimeShell) -> bool {
 }
 
 fn advance_visible_pending_text_wait(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    // TextCommand_PROMPT_BUTTON plays this only after a fully printed page is
+    // acknowledged. The earlier reveal-completion branch returns before this
+    // function, so fast-forwarding text remains silent.
+    if pending_text_wait_uses_prompt_button(runtime_shell) {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    }
     record_visible_runtime_action(runtime_shell, "ui:text_wait:advance")?;
     let next_cursor = visible_active_compiled_script_cursor(runtime_shell);
     if let Some(cursor) = next_cursor {
@@ -4207,6 +6321,9 @@ fn resolve_visible_pending_yes_no(
 }
 
 fn play_pending_field_notice_sound(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if let Some(species) = runtime_shell.pending_field_notice_cry.take() {
+        queue_visible_pokemon_cry(runtime_shell, &species, "field_notice")?;
+    }
     let Some(audio_id) = runtime_shell.pending_field_notice_sound.take() else {
         return Ok(());
     };
@@ -4231,10 +6348,25 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> bo
     if runtime_shell.pending_field_notice_effect_frames.is_none() {
         return false;
     }
-    if runtime_shell.visible_cut_animation.is_some() {
-        // CutDownTree has already installed the replacement block.  Once the
-        // use text closes, OWCutAnimation draws its OAM over that cleared
-        // tilemap rather than over the retained intact tree/grass block.
+    if runtime_shell.visible_sweet_scent_delay {
+        return true;
+    }
+    if let Some(from_tile) = runtime_shell.pending_surf_start_from {
+        // UsedSurfScript switches to the surf sprite and then applies one
+        // sixteen-frame `slow_step`. The core has committed the destination;
+        // interpolate there from the retained land tile after the text closes.
+        runtime_shell.field_notice_scene = None;
+        runtime_shell.player_walk_from = Some(from_tile);
+        runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS.saturating_mul(2);
+        runtime_shell.player_walk_frame_ticks = runtime_shell.player_walk_total_ticks;
+        runtime_shell.player_walk_stride = true;
+        runtime_shell.player_walk_mirror_stride = false;
+    } else if runtime_shell.visible_cut_animation.is_some()
+        || runtime_shell.visible_whirlpool_animation.is_some()
+    {
+        // CutDownTree/DisappearWhirlpool have already installed the
+        // replacement block. Once the use text closes, their OAM draws over
+        // that cleared tilemap rather than the retained obstacle block.
         runtime_shell.field_notice_scene = None;
     } else if runtime_shell.visible_whirlpool_animation.is_none()
         && runtime_shell.visible_headbutt_animation.is_none()
@@ -4249,6 +6381,21 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> bo
     true
 }
 
+fn visible_field_notice_uses_prompt_arrow(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.pending_field_travel_delay_frames.is_none()
+        && runtime_shell.visible_field_travel_animation.is_none()
+        && runtime_shell.pending_surf_start_from.is_none()
+        && runtime_shell.visible_waterfall_animation.is_none()
+        && runtime_shell.visible_flash_animation.is_none()
+        && runtime_shell.visible_cut_animation.is_none()
+        && runtime_shell.visible_whirlpool_animation.is_none()
+        && runtime_shell.visible_headbutt_animation.is_none()
+        && runtime_shell.visible_rock_smash_target.is_none()
+        && !runtime_shell.pending_field_battle_entry
+        && runtime_shell.field_notice_queue.is_empty()
+        && !runtime_shell.pending_sweet_scent_nothing_notice
+}
+
 fn settle_pending_field_battle_entry_after_notice(
     runtime_shell: &mut BevyRuntimeShell,
 ) -> Result<bool> {
@@ -4256,7 +6403,7 @@ fn settle_pending_field_battle_entry_after_notice(
         return Ok(false);
     }
     mark_runtime_snapshot_dirty(runtime_shell);
-    prepare_visible_battle_entry(runtime_shell);
+    prepare_visible_battle_entry(runtime_shell)?;
     settle_visible_battle_after_action(runtime_shell)?;
     Ok(true)
 }
@@ -4338,6 +6485,112 @@ fn queue_visible_heal_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
         .push("queued heal-machine music MUSIC_HEAL".to_string());
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
+}
+
+fn queue_visible_magnet_train_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    const MUSIC_ID: &str = "MUSIC_MAGNET_TRAIN";
+    let playback = runtime_shell
+        .shell
+        .runtime()
+        .audio()
+        .require_playback_entry(AudioKind::Music, MUSIC_ID)?;
+    enqueue_bevy_audio_command(
+        &mut runtime_shell.pending_audio,
+        BevyAudioCommand {
+            audio_id: MUSIC_ID.to_string(),
+            kind: ModpackAudioKind::Music,
+            mode: playback.mode,
+            looped: matches!(
+                playback.loop_policy,
+                crate::assets::ModpackAudioLoopPolicy::Loop
+            ),
+        },
+    );
+    runtime_shell.pending_music_stop = true;
+    runtime_shell.active_music = Some(MUSIC_ID.to_string());
+    runtime_shell.faded_music = None;
+    Ok(())
+}
+
+fn advance_visible_magnet_train(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .visible_magnet_train
+        .as_ref()
+        .is_some_and(|animation| animation.phase >= 7 && animation.arrival_sfx_played)
+    {
+        runtime_shell.visible_magnet_train = None;
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return continue_visible_script_after_prompt(runtime_shell);
+    }
+    let animation = runtime_shell
+        .visible_magnet_train
+        .as_mut()
+        .context("MagnetTrain disappeared during its retained frame")?;
+    match animation.phase {
+        0 => {
+            animation.wait_counter = 128;
+            animation.phase = 1;
+        }
+        1 | 3 | 5 => {
+            if animation.wait_counter > 0 {
+                animation.wait_counter -= 1;
+            } else {
+                animation.phase += 1;
+            }
+        }
+        2 => {
+            if animation.position == animation.hold_position {
+                animation.wait_counter = 128;
+                animation.phase = 3;
+            } else {
+                animation.position -= animation.direction;
+            }
+        }
+        4 => {
+            if animation.position == animation.final_position {
+                animation.phase = 5;
+            } else {
+                animation.position -= animation.direction * 2;
+            }
+        }
+        6 => animation.phase = 7,
+        _ => {}
+    }
+    animation.offset += animation.direction * 2;
+    if animation.phase < 7 {
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+    let BevyRuntimeShell { shell, pending_audio, last_audio_events, .. } = runtime_shell;
+    queue_visible_sound_effect(
+        shell.runtime().audio(),
+        pending_audio,
+        last_audio_events,
+        "SFX_TRAIN_ARRIVED",
+    )?;
+    runtime_shell
+        .visible_magnet_train
+        .as_mut()
+        .unwrap()
+        .arrival_sfx_played = true;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn close_visible_unown_words(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    anyhow::ensure!(
+        runtime_shell.visible_unown_words.take().is_some(),
+        "Unown word display disappeared before acknowledgement"
+    );
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    continue_visible_script_after_prompt(runtime_shell)
+}
+
+fn close_visible_diploma(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    anyhow::ensure!(runtime_shell.visible_diploma.take().is_some(), "Diploma disappeared before acknowledgement");
+    mark_runtime_snapshot_dirty(runtime_shell);
+    continue_visible_script_after_prompt(runtime_shell)
 }
 
 fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {

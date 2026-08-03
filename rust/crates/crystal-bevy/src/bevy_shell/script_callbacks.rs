@@ -112,6 +112,7 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
         return;
     }
     let blackout_phase = runtime_shell.visible_blackout_phase;
+    let walk_warp_phase = runtime_shell.visible_walk_warp_phase;
     if let Some(fade) = runtime_shell.screen_fade.as_mut() {
         // A stalled host frame must never fast-forward a Game Boy fade.  The
         // original advances one palette step per frame; limiting the input
@@ -119,6 +120,90 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
         // exposing intermediate half-rendered surfaces after a hiccup.
         fade.advance(time.delta_seconds().min(GAME_TICK_SECONDS));
         if fade.elapsed_frames >= fade.total_frames {
+            if walk_warp_phase == Some(VisibleWalkWarpPhase::FadeOut) {
+                // MAPSETUP_DOOR exposes the loaded destination beneath the
+                // white palette before FadeInFromWhite. Scene scripts and map
+                // callbacks resume only after that fade, so their text,
+                // emotes, and audio cannot begin invisibly at full white.
+                reset_visible_navigation_state(&mut runtime_shell);
+                if let Err(error) =
+                    suppress_visible_map_name_sign_for_current_map(&mut runtime_shell)
+                {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    runtime_shell.visible_walk_warp_phase = None;
+                    runtime_shell.screen_fade = None;
+                    return;
+                }
+                if let Err(error) = queue_visible_current_music(&mut runtime_shell) {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    runtime_shell.visible_walk_warp_phase = None;
+                    runtime_shell.screen_fade = None;
+                    return;
+                }
+                runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::FadeIn);
+                runtime_shell.screen_fade = Some(VisibleScreenFade::new(
+                    ScriptFadeColor::White,
+                    ScriptFadeDirection::In,
+                    8,
+                ));
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+                return;
+            }
+            if walk_warp_phase == Some(VisibleWalkWarpPhase::FadeIn) {
+                runtime_shell.visible_walk_warp_phase = None;
+                runtime_shell.screen_fade = None;
+                let pitfall = runtime_shell
+                    .shell
+                    .last_frame()
+                    .and_then(|frame| frame.warp.as_ref())
+                    .is_some_and(|warp| {
+                        matches!(
+                            warp.trigger.permission,
+                            crate::core::world::collision::permissions::PIT
+                                | crate::core::world::collision::permissions::PIT_68
+                        )
+                    });
+                let result = if pitfall {
+                    begin_visible_pitfall_landing(&mut runtime_shell)
+                } else {
+                    settle_visible_overworld_arrival(&mut runtime_shell, "walk_warp")
+                };
+                if let Err(error) = result {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    return;
+                }
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+                return;
+            }
+            if walk_warp_phase == Some(VisibleWalkWarpPhase::ScriptFadeIn) {
+                runtime_shell.visible_walk_warp_phase = None;
+                runtime_shell.screen_fade = None;
+                if let Err(error) =
+                    settle_visible_overworld_arrival(&mut runtime_shell, "script_warp")
+                {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    return;
+                }
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+                return;
+            }
+            if walk_warp_phase == Some(VisibleWalkWarpPhase::MapReloadFadeIn) {
+                runtime_shell.visible_walk_warp_phase = None;
+                runtime_shell.screen_fade = None;
+                if let Some(cursor) = runtime_shell.map_reload_return_cursor.take() {
+                    arm_visible_active_script_cursor(
+                        &mut runtime_shell,
+                        &cursor.source_script,
+                        cursor.command_index,
+                    );
+                }
+                if let Err(error) = continue_visible_script_after_prompt(&mut runtime_shell) {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    return;
+                }
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+                return;
+            }
             if blackout_phase == Some(VisibleBlackoutPhase::FadeOut) {
                 runtime_shell.visible_blackout_phase = Some(VisibleBlackoutPhase::WhiteHold {
                     // TypeScript's 40-frame whiteout wait begins with the
@@ -130,6 +215,12 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
             if blackout_phase == Some(VisibleBlackoutPhase::FadeIn) {
                 runtime_shell.visible_blackout_phase = None;
                 runtime_shell.screen_fade = None;
+                if let Err(error) =
+                    settle_visible_overworld_arrival(&mut runtime_shell, "blackout")
+                {
+                    record_visible_runtime_system_error(&mut runtime_shell, error);
+                    return;
+                }
                 mark_runtime_snapshot_dirty(&mut runtime_shell);
                 return;
             }
@@ -153,19 +244,61 @@ fn completed_screen_fade_should_clear(fade: &VisibleScreenFade) -> bool {
 fn sync_visible_player_sprite(
     runtime_shell: Res<BevyRuntimeShell>,
     mut rendered: ResMut<RenderedViewport>,
-    mut players: Query<(&mut Handle<Image>, &PlayerSpriteFrames), With<PlayerMarker>>,
+    mut players: Query<(&mut Handle<Image>, &mut Sprite, &PlayerSpriteFrames), With<PlayerMarker>>,
 ) {
-    let walking = runtime_shell.player_walk_frame_ticks > 0 && runtime_shell.player_walk_stride;
-    if rendered.player_sprite_walking == Some(walking) {
-        return;
-    }
+    let scripted_standing = runtime_shell
+        .visible_script_movement
+        .as_ref()
+        .is_some_and(|movement| {
+            movement.object_id == "PLAYER" && movement.active_uses_standing_frame
+        });
+    let scripted_tree_shake = runtime_shell
+        .visible_script_movement
+        .as_ref()
+        .is_some_and(|movement| {
+            movement.object_id == "PLAYER" && movement.active_tree_shake_duration.is_some()
+        });
+    let scripted_skyfall_step = runtime_shell
+        .visible_script_movement
+        .as_ref()
+        .is_some_and(|movement| {
+            movement.object_id == "PLAYER"
+                && movement.active_stationary_effect
+                    == Some(VisibleStationaryMovementEffect::SkyfallFall)
+                && ((movement.active_stationary_duration.saturating_sub(
+                    movement
+                        .hold_frames_remaining
+                        .min(movement.active_stationary_duration),
+                ) / 4)
+                    % 2
+                    == 1)
+        });
+    let scripted_rock_smash_action = runtime_shell
+        .visible_script_movement
+        .as_ref()
+        .is_some_and(|movement| {
+            movement.object_id == "PLAYER"
+                && movement.active_stationary_effect
+                    == Some(VisibleStationaryMovementEffect::RockSmash)
+                && movement.hold_frames_remaining % 2 == 0
+        });
+    let walking = scripted_tree_shake
+        || scripted_skyfall_step
+        || scripted_rock_smash_action
+        || (!scripted_standing
+            && (runtime_shell.visible_ledge_jump.is_some()
+                || (runtime_shell.player_walk_frame_ticks > 0
+                    && runtime_shell.player_walk_stride)));
     rendered.player_sprite_walking = Some(walking);
-    for (mut texture, frames) in &mut players {
+    for (mut texture, mut sprite, frames) in &mut players {
         let next = if walking {
             frames.walking.as_ref().unwrap_or(&frames.standing)
         } else {
             &frames.standing
         };
+        sprite.flip_x = walking
+            && frames.mirror_walking
+            && runtime_shell.player_walk_mirror_stride;
         if texture.id() != next.id() {
             *texture = next.clone();
         }
@@ -200,38 +333,217 @@ fn sync_visible_ledge_jump(
     let Some((to_x, to_y)) = runtime_tile_playfield_position(jump.to, start_x, start_y) else {
         return;
     };
+    // TypeScript advances two source pixels on each of sixteen updates. Frame
+    // 15 is therefore 30 px into the 32 px jump; clearing the state performs
+    // the sixteenth two-pixel landing update.
     let progress = f32::from(jump.frame) / 16.0;
     let base_x = from_x + (to_x - from_x) * progress;
     let base_y = from_y + (to_y - from_y) * progress;
     let (sprite_x, sprite_y) = overworld_sprite_position_from_base(base_x, base_y, size);
-    transform.translation.x = sprite_x;
+    let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
+    transform.translation.x = sprite_x + camera_offset.x;
     transform.translation.y =
-        sprite_y - f32::from(OFFSETS[usize::from(jump.frame)]) * BATTLE_HUD_SCALE;
+        sprite_y + camera_offset.y
+            - f32::from(OFFSETS[usize::from(jump.frame)]) * BATTLE_HUD_SCALE;
     if let Ok(mut shadow) = shadows.get_single_mut() {
-        shadow.translation.x = sprite_x;
-        shadow.translation.y = sprite_y - size.y * 0.5;
+        shadow.translation.x = sprite_x + camera_offset.x;
+        shadow.translation.y = sprite_y + camera_offset.y - size.y * 0.5;
+    }
+}
+
+fn sync_visible_script_jump(
+    runtime_shell: Res<BevyRuntimeShell>,
+    mut players: Query<&mut Transform, (With<PlayerMarker>, Without<ObjectMarker>)>,
+    mut objects: Query<(&VisibleObjectSprite, &mut Transform), With<ObjectMarker>>,
+) {
+    const OFFSETS: [i16; 16] = [
+        -4, -6, -8, -10, -11, -12, -12, -12, -11, -10, -9, -8, -6, -4, 0, 0,
+    ];
+    let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
+        return;
+    };
+    let jump_offset = |total: u8, remaining: u8| {
+        let elapsed = total.saturating_sub(remaining.min(total));
+        let height = u16::from(elapsed)
+            .saturating_mul(32)
+            .checked_div(u16::from(total.max(1)))
+            .unwrap_or(0);
+        let index = usize::from((height / 2).min(15));
+        -f32::from(OFFSETS[index]) * BATTLE_HUD_SCALE
+    };
+    if let Some(total) = movement.active_jump_duration {
+        let remaining = if movement.object_id == "PLAYER" {
+            runtime_shell.player_walk_frame_ticks
+        } else {
+            runtime_shell.object_walk_frame_ticks
+        };
+        let y_offset = jump_offset(total, remaining);
+        if movement.object_id == "PLAYER" {
+            if let Ok(mut transform) = players.get_single_mut() {
+                transform.translation.y += y_offset;
+            }
+        } else if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
+            object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+        }) {
+            transform.translation.y += y_offset;
+        }
+    }
+    if let (Some(total), Some(follower_id)) = (
+        movement.follower_active_jump_duration,
+        movement.follower_object_id.as_deref(),
+    ) {
+        let remaining = if follower_id == "PLAYER" {
+            runtime_shell.player_walk_frame_ticks
+        } else {
+            runtime_shell
+                .object_walk_frame_ticks_by_id
+                .get(follower_id)
+                .copied()
+                .unwrap_or(0)
+        };
+        let y_offset = jump_offset(total, remaining);
+        if follower_id == "PLAYER" {
+            if let Ok(mut transform) = players.get_single_mut() {
+                transform.translation.y += y_offset;
+            }
+        } else if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
+            object.object_identifier.as_deref() == Some(follower_id)
+        }) {
+            transform.translation.y += y_offset;
+        }
+    }
+}
+
+fn sync_visible_script_tree_shake(
+    runtime_shell: Res<BevyRuntimeShell>,
+    mut players: Query<&mut Transform, (With<PlayerMarker>, Without<ObjectMarker>)>,
+    mut objects: Query<(&VisibleObjectSprite, &mut Transform), With<ObjectMarker>>,
+) {
+    const OFFSETS: [i16; 6] = [0, -1, 1, -1, 1, 0];
+    let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
+        return;
+    };
+    let Some(total) = movement.active_tree_shake_duration else {
+        return;
+    };
+    let elapsed = total.saturating_sub(movement.hold_frames_remaining.min(total));
+    let frame = elapsed.saturating_sub(1);
+    let x_offset = f32::from(OFFSETS[usize::from(frame % OFFSETS.len() as u16)])
+        * BATTLE_HUD_SCALE;
+    if movement.object_id == "PLAYER" {
+        if let Ok(mut transform) = players.get_single_mut() {
+            transform.translation.x += x_offset;
+        }
+        return;
+    }
+    if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
+        object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+    }) {
+        transform.translation.x += x_offset;
+    }
+}
+
+fn sync_visible_stationary_movement_effect(
+    runtime_shell: Res<BevyRuntimeShell>,
+    mut players: Query<&mut Transform, (With<PlayerMarker>, Without<ObjectMarker>)>,
+    mut objects: Query<(&VisibleObjectSprite, &mut Transform), With<ObjectMarker>>,
+) {
+    let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
+        return;
+    };
+    let y_offset = -f32::from(movement.stationary_y_offset) * BATTLE_HUD_SCALE;
+    if movement.object_id == "PLAYER" {
+        if let Ok(mut transform) = players.get_single_mut() {
+            transform.translation.y += y_offset;
+        }
+        return;
+    }
+    if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
+        object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+    }) {
+        transform.translation.y += y_offset;
     }
 }
 
 fn sync_visible_object_sprites(
     runtime_shell: Res<BevyRuntimeShell>,
     mut rendered: ResMut<RenderedViewport>,
-    mut objects: Query<(&VisibleObjectSprite, &mut Handle<Image>)>,
+    mut objects: Query<(&VisibleObjectSprite, &mut Handle<Image>, &mut Sprite)>,
 ) {
-    let walking = runtime_shell.object_walk_frame_ticks > 0 && runtime_shell.object_walk_stride;
-    if rendered.object_sprite_walking == Some(walking) {
-        return;
-    }
-    rendered.object_sprite_walking = Some(walking);
-    for (frames, mut texture) in &mut objects {
+    let walking_phase = (runtime_shell.object_walk_frame_ticks > 0
+        && runtime_shell.object_walk_stride)
+        || runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| {
+                movement.active_tree_shake_duration.is_some()
+                    || (movement.active_stationary_effect
+                        == Some(VisibleStationaryMovementEffect::SkyfallFall)
+                        && ((movement.active_stationary_duration.saturating_sub(
+                            movement
+                                .hold_frames_remaining
+                                .min(movement.active_stationary_duration),
+                        ) / 4)
+                            % 2
+                            == 1))
+                    || (movement.active_stationary_effect
+                        == Some(VisibleStationaryMovementEffect::RockSmash)
+                        && movement.hold_frames_remaining % 2 == 0)
+            });
+    rendered.object_sprite_walking = Some(walking_phase);
+    for (frames, mut texture, mut sprite) in &mut objects {
         if !frames.animated {
             continue;
         }
-        let next = if walking {
+        let object_is_moving = frames.object_identifier.as_ref().is_some_and(|object_id| {
+            runtime_shell.object_walk_from.contains_key(object_id)
+                || runtime_shell
+                    .trainer_walk_from
+                    .as_ref()
+                    .is_some_and(|(walking_id, _)| walking_id == object_id)
+                || runtime_shell
+                    .visible_script_movement
+                    .as_ref()
+                    .is_some_and(|movement| {
+                        (movement.active_tree_shake_duration.is_some()
+                            || movement.active_stationary_effect
+                                == Some(VisibleStationaryMovementEffect::SkyfallFall)
+                            || movement.active_stationary_effect
+                                == Some(VisibleStationaryMovementEffect::RockSmash))
+                            && movement.object_id == *object_id
+                    })
+        });
+        let scripted_standing = runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| {
+                (movement.active_uses_standing_frame
+                    && frames.object_identifier.as_deref() == Some(movement.object_id.as_str()))
+                    || (movement.follower_active_uses_standing_frame
+                        && frames.object_identifier.as_deref()
+                            == movement.follower_object_id.as_deref())
+            });
+        let autonomous_phase = frames.object_identifier.as_ref().and_then(|object_id| {
+            (runtime_shell.object_walk_from.contains_key(object_id)
+                || runtime_shell
+                    .trainer_walk_from
+                    .as_ref()
+                    .is_some_and(|(walking_id, _)| walking_id == object_id))
+            .then(|| runtime_shell.object_walk_phases.get(object_id).copied().unwrap_or(1))
+        });
+        let autonomous_action = autonomous_phase.is_some_and(|phase| matches!(phase, 1 | 3));
+        let scripted_action = walking_phase
+            && object_is_moving
+            && autonomous_phase.is_none();
+        let action_frame = !scripted_standing && (autonomous_action || scripted_action);
+        let next = if action_frame {
             frames.walking.as_ref().unwrap_or(&frames.standing)
         } else {
             &frames.standing
         };
+        sprite.flip_x = action_frame
+            && frames.mirror_walking
+            && autonomous_phase == Some(3);
         if texture.id() != next.id() {
             *texture = next.clone();
         }
@@ -729,7 +1041,14 @@ fn consume_visible_runtime_flag_kind(
         .last_audio_events
         .push(format!("consumed runtime flag {:?}", consumed));
     if matches!(consumed, RuntimeScriptRuntimeFlagValue::CreditsRequested) {
-        open_visible_credits_screen(runtime_shell, false)?;
+        let snapshot = runtime_shell.shell.snapshot()?;
+        let allow_skip = snapshot
+            .progression
+            .active_engine_flags
+            .contains("STATUSFLAGS_HALL_OF_FAME_F")
+            || snapshot.progression.hall_of_fame.count > 0
+            || !snapshot.progression.hall_of_fame.entries.is_empty();
+        open_visible_credits_screen(runtime_shell, allow_skip)?;
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
@@ -741,7 +1060,13 @@ fn consume_visible_runtime_flag_kind(
         // the canonical core record has been committed, so a natural Elite
         // Four completion cannot strand the player at a special-boundary
         // placeholder.
-        open_visible_credits_screen(runtime_shell, false)?;
+        let hall_of_fame = &runtime_shell.shell.snapshot()?.progression.hall_of_fame;
+        // The core has already inserted the newly crowned team. A second
+        // entry or a count above one therefore proves the source status flag
+        // was set before this Hall of Fame call; the first clear remains
+        // unskippable exactly as the old wStatusFlags value passed in B.
+        let allow_skip = hall_of_fame.count > 1 || hall_of_fame.entries.len() > 1;
+        open_visible_credits_screen(runtime_shell, allow_skip)?;
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
@@ -2913,9 +3238,6 @@ fn use_selected_evolution_item(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         "evolution item item={} party_index={} item_use={:?} effect={:?} checksum={:?}",
         item_id, party_index, used.item_use, used.item_effect, used.state_checksum
     ));
-    if let Some(target_species) = used.item_effect.evolution_target.as_ref() {
-        queue_visible_pokemon_cry(runtime_shell, target_species, "evolution_item")?;
-    }
     for learned in &used.item_effect.learned_moves {
         runtime_shell
             .last_audio_events
@@ -2926,14 +3248,15 @@ fn use_selected_evolution_item(runtime_shell: &mut BevyRuntimeShell) -> Result<(
             .last_audio_events
             .push(format!("evolution item pending move learn {}", learned.name));
     }
-    let notice = if let Some(target_species) = used.item_effect.evolution_target.as_ref() {
-        format!(
-            "Congratulations! {source_name} evolved into {}!",
-            crate::core::models::pokemon_species_display_name(target_species)
+    let evolution_result = used.item_effect.evolution_target.as_ref().map(|target_species| {
+        (
+            target_species.clone(),
+            format!(
+                "Congratulations! {source_name} evolved into {}!",
+                crate::core::models::pokemon_species_display_name(target_species)
+            ),
         )
-    } else {
-        "It won't have any effect.".to_string()
-    };
+    });
     set_shell_action_status(
         runtime_shell,
         if let Some(target_species) = used.item_effect.evolution_target.as_ref() {
@@ -2946,7 +3269,13 @@ fn use_selected_evolution_item(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         },
     );
     close_visible_field_pack_without_log(runtime_shell);
-    runtime_shell.field_notice = Some(notice);
+    if let Some((target_species, evolved_notice)) = evolution_result {
+        runtime_shell.field_notice = Some(format!("What? {source_name} is evolving!"));
+        runtime_shell.field_notice_queue.push_back(evolved_notice);
+        runtime_shell.pending_field_notice_cry = Some(target_species);
+    } else {
+        runtime_shell.field_notice = Some("It won't have any effect.".to_string());
+    }
     mark_runtime_snapshot_dirty(runtime_shell);
     if runtime_shell.shell.snapshot()?.pending_move_learn.is_none() {
         continue_visible_script_after_prompt(runtime_shell)?;
@@ -3048,7 +3377,6 @@ fn give_selected_held_item_with_swap_confirmation(
     let pokemon_name = target.pokemon.nickname.clone();
     if target.pokemon.is_egg
         || target.pokemon.species.id == "EGG"
-        || target.pokemon.nickname.eq_ignore_ascii_case("EGG")
     {
         runtime_shell.field_notice = Some("Eggs cannot hold or receive items.".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);

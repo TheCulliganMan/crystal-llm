@@ -51,9 +51,19 @@ pub struct CollisionSample {
 pub mod permissions {
     pub const FLOOR: u8 = 0x00;
     pub const WALL: u8 = 0x07;
+    pub const CUT_GRASS: u8 = 0x08;
+    pub const TALL_GRASS_10: u8 = 0x10;
+    pub const LONG_GRASS: u8 = 0x14;
     pub const HEADBUTT_TREE: u8 = 0x15;
     pub const HEADBUTT_TREE_1D: u8 = 0x1d;
     pub const TALL_GRASS: u8 = 0x18;
+    pub const LONG_GRASS_1C: u8 = 0x1c;
+    pub const CUT_GRASS_28: u8 = 0x28;
+    pub const GRASS_48: u8 = 0x48;
+    pub const GRASS_49: u8 = 0x49;
+    pub const GRASS_4A: u8 = 0x4a;
+    pub const GRASS_4B: u8 = 0x4b;
+    pub const GRASS_4C: u8 = 0x4c;
     pub const PIT: u8 = 0x60;
     pub const PIT_68: u8 = 0x68;
     pub const WARP_CARPET_DOWN: u8 = 0x70;
@@ -95,6 +105,14 @@ pub mod permissions {
     pub const CURRENT_UP: u8 = 0x3a;
     pub const ICE: u8 = 0x23;
     pub const ICE_2B: u8 = 0x2b;
+    pub const WALK_RIGHT: u8 = 0x41;
+    pub const WALK_LEFT: u8 = 0x42;
+    pub const WALK_UP: u8 = 0x43;
+    pub const WALK_DOWN: u8 = 0x44;
+    pub const WALK_RIGHT_ALT: u8 = 0x50;
+    pub const WALK_LEFT_ALT: u8 = 0x51;
+    pub const WALK_UP_ALT: u8 = 0x52;
+    pub const WALK_DOWN_ALT: u8 = 0x53;
     pub const HOP_RIGHT: u8 = 0xa0;
     pub const HOP_LEFT: u8 = 0xa1;
     pub const HOP_UP: u8 = 0xa2;
@@ -115,6 +133,23 @@ pub mod permissions {
     pub const LEFT_BUOY: u8 = 0xc1;
     pub const UP_BUOY: u8 = 0xc2;
     pub const DOWN_BUOY: u8 = 0xc3;
+}
+
+pub const fn is_grass_encounter_permission(permission: u8) -> bool {
+    matches!(
+        permission,
+        permissions::CUT_GRASS
+            | permissions::TALL_GRASS_10
+            | permissions::LONG_GRASS
+            | permissions::LONG_GRASS_1C
+            | permissions::TALL_GRASS
+            | permissions::CUT_GRASS_28
+            | permissions::GRASS_48
+            | permissions::GRASS_49
+            | permissions::GRASS_4A
+            | permissions::GRASS_4B
+            | permissions::GRASS_4C
+    )
 }
 
 pub fn is_warp_permission(permission: u8) -> bool {
@@ -168,33 +203,16 @@ pub fn describe_collision(permission: u8) -> CollisionAttributes {
     CollisionAttributes {
         value: permission,
         terrain: match permission {
-            permissions::WALL
-            | permissions::RIGHT_WALL
-            | permissions::LEFT_WALL
-            | permissions::UP_WALL
-            | permissions::DOWN_WALL
-            | permissions::DOWN_RIGHT_WALL
-            | permissions::DOWN_LEFT_WALL
-            | permissions::UP_RIGHT_WALL
-            | permissions::UP_LEFT_WALL => Terrain::Wall,
-            permissions::WATER
-            | permissions::WHIRLPOOL
-            | permissions::WHIRLPOOL_2C
-            | permissions::WATERFALL
-            | permissions::WATERFALL_RIGHT
-            | permissions::WATERFALL_LEFT
-            | permissions::WATERFALL_UP
-            | permissions::CURRENT_RIGHT
-            | permissions::CURRENT_LEFT
-            | permissions::CURRENT_UP
-            | permissions::CURRENT_DOWN
-            | permissions::RIGHT_BUOY
-            | permissions::LEFT_BUOY
-            | permissions::UP_BUOY
-            | permissions::DOWN_BUOY => Terrain::Water,
+            // `data/collision/collision_permissions.asm` is the authority.
+            // Side walls deliberately remain land: their direction masks,
+            // not their terrain class, decide which approaches are blocked.
+            0x07 | 0x0f | 0x12 | 0x15 | 0x1a | 0x1d | 0x27 | 0x2f | 0x62 | 0x6a
+            | 0x80..=0x84 | 0x88..=0x8c | 0x90..=0x9f | 0xff => Terrain::Wall,
+            0x20..=0x22 | 0x24..=0x26 | 0x28..=0x2a | 0x2c..=0x2e | 0x30..=0x3f
+            | 0xc0..=0xcf => Terrain::Water,
             _ => Terrain::Land,
         },
-        talk: permission >= 0x90,
+        talk: matches!(permission, 0x12 | 0x15 | 0x1a | 0x1d | 0x22 | 0x24 | 0x2a | 0x2c),
     }
 }
 
@@ -251,6 +269,46 @@ pub fn is_direction_blocked(permission: u8, facing: Direction) -> bool {
             permissions::LEFT_WALL,
             permissions::DOWN_LEFT_WALL,
             permissions::UP_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+    }
+}
+
+/// Mirror `CanObjectLeaveTile`: side-wall and side-buoy permissions constrain
+/// autonomous objects both when entering a tile and when walking off one.
+pub fn is_direction_blocked_leaving(permission: u8, facing: Direction) -> bool {
+    let hi = permission & 0xf0;
+    if hi != (permissions::RIGHT_WALL & 0xf0) && hi != (permissions::RIGHT_BUOY & 0xf0) {
+        return false;
+    }
+    let low = permission & 0x07;
+    match facing {
+        Direction::Down => [
+            permissions::DOWN_WALL,
+            permissions::DOWN_RIGHT_WALL,
+            permissions::DOWN_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Up => [
+            permissions::UP_WALL,
+            permissions::UP_RIGHT_WALL,
+            permissions::UP_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Left => [
+            permissions::LEFT_WALL,
+            permissions::DOWN_LEFT_WALL,
+            permissions::UP_LEFT_WALL,
+        ]
+        .iter()
+        .any(|value| (*value & 0x07) == low),
+        Direction::Right => [
+            permissions::RIGHT_WALL,
+            permissions::DOWN_RIGHT_WALL,
+            permissions::UP_RIGHT_WALL,
         ]
         .iter()
         .any(|value| (*value & 0x07) == low),
@@ -444,6 +502,21 @@ pub fn is_permission_passable(
     match traversal_state {
         PlayerTraversalState::Walk => attributes.terrain == Terrain::Land,
         PlayerTraversalState::Surf => {
+            // Crystal permits a surfer to travel down a waterfall without
+            // using the field move. Upward and sideways entry still require
+            // the dedicated Waterfall path.
+            if facing == Direction::Down
+                && matches!(
+                    permission,
+                    permissions::WATERFALL
+                        | permissions::WATERFALL_RIGHT
+                        | permissions::WATERFALL_LEFT
+                        | permissions::WATERFALL_UP
+                        | permissions::CURRENT_DOWN
+                )
+            {
+                return attributes.terrain != Terrain::Wall;
+            }
             attributes.terrain != Terrain::Wall
                 && permission != permissions::WHIRLPOOL
                 && permission != permissions::WHIRLPOOL_2C
@@ -453,6 +526,7 @@ pub fn is_permission_passable(
                         | permissions::WATERFALL_RIGHT
                         | permissions::WATERFALL_LEFT
                         | permissions::WATERFALL_UP
+                        | permissions::CURRENT_DOWN
                 )
         }
     }

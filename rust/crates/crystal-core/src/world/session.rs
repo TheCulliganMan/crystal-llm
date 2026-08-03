@@ -12,12 +12,14 @@ use crate::state::{EventFlagMemory, GameState, GameStateFrameError};
 
 use super::collision::{
     Terrain, TilesetCollision, can_jump_ledge, describe_collision, directional_warp_facing,
-    is_warp_permission, permissions, sample_collision, standard_interaction_script,
+    is_direction_blocked, is_direction_blocked_leaving, is_warp_permission, permissions,
+    sample_collision, standard_interaction_script,
 };
 use super::encounters::{
     EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
     ResolvedWildEncounter, SpecialWildEncounterEntry, TimeOfDay, WildEncounter, WildEncounterData,
-    encounter_threshold, passes_encounter_roll, select_wild_encounter,
+    apply_cleanse_tag_effect, apply_encounter_music_effect, encounter_threshold,
+    passes_encounter_roll, percent_to_byte, select_wild_encounter,
 };
 use super::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
 use super::movement::{
@@ -44,8 +46,30 @@ pub struct OverworldSession {
     pub map_events: MapEvents,
     pub objects: Vec<ObjectEvent>,
     pub object_runtime_tiles: BTreeMap<String, TilePosition>,
+    #[serde(default)]
+    pub object_last_runtime_tiles: BTreeMap<String, TilePosition>,
+    #[serde(default)]
+    pub object_last_tiles_occupied_until_frame: BTreeMap<String, u64>,
     pub object_facings: BTreeMap<String, Direction>,
+    /// Remaining LCD frames before an autonomous object may select its next
+    /// movement function. Crystal stores this independently in each object's
+    /// OBJECT_STEP_DURATION byte.
+    #[serde(default)]
+    pub object_step_durations: BTreeMap<String, u8>,
+    /// Objects whose current duration is the visible stride itself. On
+    /// landing, ContinueWalk performs the separate Random call that installs
+    /// the slow idle duration.
+    #[serde(default)]
+    pub object_pending_random_wait: BTreeSet<String>,
+    #[serde(default)]
+    pub initialized_fixed_spin_objects: BTreeSet<String>,
     pub following: Option<OverworldFollowState>,
+    /// The movement command the follower consumes when its leader completes
+    /// the next step. Crystal's follower queue survives separate
+    /// `applymovement` programs; retaining it here prevents each program from
+    /// reconstructing a lossy direction-only approximation from geometry.
+    #[serde(default)]
+    pub following_queued_step: Option<FollowQueuedStep>,
     pub last_talked_object_identifier: Option<String>,
     pub player_hidden: bool,
     pub hidden_event_flags: BTreeSet<String>,
@@ -59,6 +83,12 @@ pub struct OverworldSession {
     pub player: PlayerMovementState,
     #[serde(default)]
     pub last_step_direction: Option<Direction>,
+    /// While a player step is active, Crystal collision owns both the
+    /// destination (`OBJECT_MAP_*`) and origin (`OBJECT_LAST_MAP_*`).
+    #[serde(default)]
+    pub player_last_runtime_tile: Option<TilePosition>,
+    #[serde(default)]
+    pub player_last_tile_occupied_until_frame: u64,
 }
 
 const fn default_session_time_of_day() -> TimeOfDay {
@@ -72,11 +102,22 @@ pub struct OverworldFollowState {
     pub follower_object_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowQueuedStep {
+    pub direction: Direction,
+    pub stride: i16,
+    pub duration: u8,
+    pub jump: bool,
+    pub standing_frame: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarpTrigger {
     pub map_name: String,
     pub tile: TilePosition,
+    pub permission: u8,
     pub warp: WarpEvent,
 }
 
@@ -280,6 +321,10 @@ pub struct EncounterCheckOptions {
     pub roaming_candidates: Vec<Option<(String, u8)>>,
     #[serde(default)]
     pub special_wild_encounters: Vec<SpecialWildEncounterEntry>,
+    /// CAVE and DUNGEON environments permit encounters on ordinary land,
+    /// except ice, without requiring a grass collision byte.
+    #[serde(default)]
+    pub land_encounters_on_any_land: bool,
 }
 
 impl Default for EncounterCheckOptions {
@@ -292,6 +337,7 @@ impl Default for EncounterCheckOptions {
             lead_party_level: None,
             roaming_candidates: Vec::new(),
             special_wild_encounters: Vec::new(),
+            land_encounters_on_any_land: false,
         }
     }
 }
@@ -392,8 +438,14 @@ impl OverworldSession {
             map_events,
             objects,
             object_runtime_tiles: BTreeMap::new(),
+            object_last_runtime_tiles: BTreeMap::new(),
+            object_last_tiles_occupied_until_frame: BTreeMap::new(),
             object_facings,
+            object_step_durations: BTreeMap::new(),
+            object_pending_random_wait: BTreeSet::new(),
+            initialized_fixed_spin_objects: BTreeSet::new(),
             following: None,
+            following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
@@ -402,6 +454,8 @@ impl OverworldSession {
             tileset,
             player: PlayerMovementState::new(player_tile),
             last_step_direction: None,
+            player_last_runtime_tile: None,
+            player_last_tile_occupied_until_frame: 0,
         }
     }
 
@@ -422,7 +476,14 @@ impl OverworldSession {
     pub fn current_encounter_surface_checked(
         &self,
     ) -> Result<Option<EncounterSurface>, EncounterError> {
-        encounter_surface_for_player_tile_checked(self)
+        encounter_surface_for_player_tile_checked(self, false)
+    }
+
+    pub fn current_encounter_surface_checked_with_land_encounters(
+        &self,
+        land_encounters_on_any_land: bool,
+    ) -> Result<Option<EncounterSurface>, EncounterError> {
+        encounter_surface_for_player_tile_checked(self, land_encounters_on_any_land)
     }
 
     pub fn current_encounter_surface(&self) -> Option<EncounterSurface> {
@@ -493,12 +554,56 @@ impl OverworldSession {
             options,
             &occupied_tiles,
         );
-        if let StepOutcome::Moved { from, to, .. } = outcome {
+        if let StepOutcome::Moved {
+            from,
+            to,
+            speed_multiplier,
+        } = outcome
+        {
             self.update_follow_after_entity_move("PLAYER", from, to);
             self.last_step_direction = Some(direction);
+            self.player_last_runtime_tile = Some(from);
+            self.player_last_tile_occupied_until_frame = self
+                .frame
+                .saturating_add(u64::from((8 / speed_multiplier.max(1)).max(1)));
         }
         self.frame += 1;
         Ok(outcome)
+    }
+
+    /// Execute CheckTile's direct `.DoStep` path for current and directional
+    /// walk collisions. These source movement functions do not enter
+    /// TryStep, so they deliberately skip destination terrain, ledge, and
+    /// object collision checks. Ice is not a caller: it continues through
+    /// TryStep and retains ordinary collision behavior.
+    pub fn forced_tile_step_checked(
+        &mut self,
+        direction: Direction,
+        options: StepOptions,
+    ) -> Result<StepOutcome, OverworldCoordinateError> {
+        require_runtime_stride(options.stride_tiles)?;
+        self.require_checked_tile_bounds()?;
+        self.validate_follow_after_entity_move("PLAYER", self.player.tile)?;
+        self.player.facing = direction;
+        let from = self.player.tile;
+        let Some(to) = checked_move_by_stride(from, direction, options.stride_tiles) else {
+            self.frame += 1;
+            return Ok(StepOutcome::RuntimeTileOverflow {
+                from,
+                facing: direction,
+            });
+        };
+        self.player.tile = to;
+        self.update_follow_after_entity_move("PLAYER", from, to);
+        self.last_step_direction = Some(direction);
+        self.player_last_runtime_tile = Some(from);
+        self.player_last_tile_occupied_until_frame = self.frame.saturating_add(8);
+        self.frame += 1;
+        Ok(StepOutcome::Moved {
+            from,
+            to,
+            speed_multiplier: 1,
+        })
     }
 
     pub fn ledge_jump(&mut self, direction: Direction, options: StepOptions) -> LedgeJumpOutcome {
@@ -523,9 +628,19 @@ impl OverworldSession {
             options,
             &occupied_tiles,
         );
-        if let LedgeJumpOutcome::Jumped { from, to, .. } = outcome {
+        if let LedgeJumpOutcome::Jumped {
+            from,
+            to,
+            speed_multiplier,
+            ..
+        } = outcome
+        {
             self.update_follow_after_entity_move("PLAYER", from, to);
             self.last_step_direction = Some(direction);
+            self.player_last_runtime_tile = Some(from);
+            self.player_last_tile_occupied_until_frame = self
+                .frame
+                .saturating_add(u64::from((16 / speed_multiplier.max(1)).max(1)));
         }
         self.frame += 1;
         Ok(outcome)
@@ -551,9 +666,51 @@ impl OverworldSession {
         if following.leader_object_id != moved_object_id {
             return;
         }
-        self.set_follow_entity_tile(&following.follower_object_id, from);
+        let current = if following.follower_object_id == "PLAYER" {
+            Some(self.player.tile)
+        } else {
+            self.object_runtime_tiles
+                .get(&following.follower_object_id)
+                .copied()
+                .or_else(|| {
+                    self.objects
+                        .iter()
+                        .enumerate()
+                        .find(|(_, object)| {
+                            object.object_identifier.as_deref()
+                                == Some(following.follower_object_id.as_str())
+                        })
+                        .and_then(|(index, object)| {
+                            self.object_runtime_tile_checked(index, object).ok()
+                        })
+                })
+        };
+        let queued = self.following_queued_step.or_else(|| {
+            current.and_then(|tile| {
+                direction_between_tiles(tile, from).map(|direction| FollowQueuedStep {
+                    direction,
+                    stride: DEFAULT_RUNTIME_TILE_STRIDE,
+                    duration: 8,
+                    jump: false,
+                    standing_frame: false,
+                })
+            })
+        });
+        if let (Some(current), Some(queued)) = (current, queued) {
+            if let Some(tile) = checked_move_by_stride(current, queued.direction, queued.stride) {
+                self.set_follow_entity_tile(&following.follower_object_id, tile);
+                self.set_follow_entity_facing(&following.follower_object_id, queued.direction);
+            }
+        }
         if let Some(direction) = direction_between_tiles(from, to) {
-            self.set_follow_entity_facing(&following.follower_object_id, direction);
+            let stride = (to.x - from.x).abs().max((to.y - from.y).abs());
+            self.following_queued_step = Some(FollowQueuedStep {
+                direction,
+                stride,
+                duration: 8,
+                jump: false,
+                standing_frame: false,
+            });
         }
     }
 
@@ -706,6 +863,27 @@ impl OverworldSession {
                 object_identifier: object.object_identifier.clone(),
             });
         }
+        for (object_id, tile) in &self.object_last_runtime_tiles {
+            let retained = self
+                .object_last_tiles_occupied_until_frame
+                .get(object_id)
+                .is_some_and(|until_frame| self.frame < *until_frame);
+            if retained
+                && self.objects.iter().any(|object| {
+                    object.object_identifier.as_deref() == Some(object_id.as_str())
+                        && self.is_object_visible(object)
+                })
+                && !occupied.iter().any(|entry| {
+                    entry.tile == *tile
+                        && entry.object_identifier.as_deref() == Some(object_id.as_str())
+                })
+            {
+                occupied.push(OccupiedTile {
+                    tile: *tile,
+                    object_identifier: Some(object_id.clone()),
+                });
+            }
+        }
         Ok(occupied)
     }
 
@@ -797,11 +975,27 @@ impl OverworldSession {
 
     pub fn forced_movement_direction(&self) -> Option<Direction> {
         let sample = sample_collision(&self.map, &self.tileset, self.player.tile)?;
+        // `CheckTile` dispatches the complete HI_NYBBLE_CURRENT range and
+        // indexes its four-direction table with the low two bits. Do not
+        // narrow this to only the collision values that happen to be named.
+        if (sample.permission & 0xf0) == (permissions::WATERFALL_RIGHT & 0xf0) {
+            return match sample.permission & 0x03 {
+                0 => Some(Direction::Right),
+                1 => Some(Direction::Left),
+                2 => Some(Direction::Up),
+                _ => Some(Direction::Down),
+            };
+        }
         match sample.permission {
-            permissions::CURRENT_RIGHT => Some(Direction::Right),
-            permissions::CURRENT_LEFT => Some(Direction::Left),
-            permissions::CURRENT_UP => Some(Direction::Up),
-            permissions::CURRENT_DOWN => Some(Direction::Down),
+            permissions::WALK_RIGHT | permissions::WALK_RIGHT_ALT => Some(Direction::Right),
+            permissions::WALK_LEFT | permissions::WALK_LEFT_ALT => Some(Direction::Left),
+            permissions::WALK_UP | permissions::WALK_UP_ALT => Some(Direction::Up),
+            permissions::WALK_DOWN
+            | permissions::WALK_DOWN_ALT
+            | permissions::DOOR
+            | permissions::DOOR_79
+            | permissions::STAIRCASE
+            | permissions::CAVE => Some(Direction::Down),
             // Ice keeps the direction of the step that entered it.  Merely
             // facing a direction on an ice tile must not start sliding.
             permissions::ICE | permissions::ICE_2B => self.last_step_direction,
@@ -831,13 +1025,6 @@ impl OverworldSession {
         &mut self,
         mut rng: Option<&mut Random>,
     ) -> Result<(), OverworldObjectCoordinateError> {
-        // Crystal's movement task advances on a 16-frame cadence. Keeping the
-        // cadence in the session makes this deterministic for both Bevy and
-        // headless replay callers.
-        if self.frame == 0 || self.frame % 16 != 0 {
-            return Ok(());
-        }
-
         let visible_indices: Vec<usize> = self
             .objects
             .iter()
@@ -858,12 +1045,39 @@ impl OverworldSession {
             })
             .map(|(index, _)| index)
             .collect();
+        // Runtime object coordinates commit atomically here, but Crystal keeps
+        // OBJECT_LAST_MAP_* collision-owned through the visible stride. A
+        // later object in this same scheduler batch must therefore not enter
+        // a tile that an earlier object has just begun walking out of.
+        let mut vacated_tiles = Vec::new();
 
         for index in visible_indices {
             let object = &self.objects[index];
             let Some(object_id) = object.object_identifier.as_deref() else {
                 continue;
             };
+            if let Some(duration) = self.object_step_durations.get_mut(object_id) {
+                *duration = duration.wrapping_sub(1);
+                if *duration != 0 {
+                    continue;
+                }
+                self.object_step_durations.remove(object_id);
+                if self.object_pending_random_wait.remove(object_id) {
+                    let Some(rng) = rng.as_deref_mut() else {
+                        self.object_pending_random_wait
+                            .insert(object_id.to_string());
+                        self.object_step_durations
+                            .insert(object_id.to_string(), 1);
+                        continue;
+                    };
+                    let (duration_roll, _) = rng.crystal_random_add_sub();
+                    self.object_step_durations
+                        .insert(object_id.to_string(), duration_roll & 0x7f);
+                }
+                // StepFunction_Sleep/ContinueWalk only returns control to the
+                // movement function on the following object-update frame.
+                continue;
+            }
             let current = self.object_runtime_tile_checked(index, object)?;
             // Object movement uses the same one-runtime-tile stride as the
             // player.  METATILE_WIDTH is the map-art block size, not the
@@ -883,6 +1097,14 @@ impl OverworldSession {
             if movement == "SPRITEMOVEDATA_SPINCLOCKWISE"
                 || movement == "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
             {
+                if self
+                    .initialized_fixed_spin_objects
+                    .insert(object_id.to_string())
+                {
+                    self.object_step_durations
+                        .insert(object_id.to_string(), 16);
+                    continue;
+                }
                 direction = match (movement, direction) {
                     ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Up) => Direction::Right,
                     ("SPRITEMOVEDATA_SPINCLOCKWISE", Direction::Right) => Direction::Down,
@@ -895,6 +1117,8 @@ impl OverworldSession {
                     _ => Direction::Up,
                 };
                 self.object_facings.insert(object_id.to_string(), direction);
+                self.object_step_durations
+                    .insert(object_id.to_string(), 16);
                 continue;
             } else if movement == "SPRITEMOVEDATA_SPINRANDOM_SLOW"
                 || movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
@@ -902,111 +1126,76 @@ impl OverworldSession {
                 let Some(rng) = rng.as_deref_mut() else {
                     continue;
                 };
-                direction = match rng.randrange(4) {
-                    0 => Direction::Up,
-                    1 => Direction::Right,
-                    2 => Direction::Down,
-                    _ => Direction::Left,
+                let (direction_roll, _) = rng.crystal_random_add_sub();
+                direction = match (direction_roll >> 2) & 3 {
+                    0 => Direction::Down,
+                    1 => Direction::Up,
+                    2 => Direction::Left,
+                    _ => Direction::Right,
                 };
-                if direction
-                    == *self
-                        .object_facings
-                        .get(object_id)
-                        .unwrap_or(&Direction::Down)
+                if movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                    && direction
+                        == *self
+                            .object_facings
+                            .get(object_id)
+                            .unwrap_or(&Direction::Down)
                 {
                     direction = match direction {
-                        Direction::Up => Direction::Right,
-                        Direction::Right => Direction::Down,
-                        Direction::Down => Direction::Left,
+                        Direction::Down => Direction::Right,
+                        Direction::Up => Direction::Left,
                         Direction::Left => Direction::Up,
+                        Direction::Right => Direction::Down,
                     };
                 }
                 self.object_facings.insert(object_id.to_string(), direction);
+                let (duration_roll, _) = rng.crystal_random_add_sub();
+                let mask = if movement == "SPRITEMOVEDATA_SPINRANDOM_FAST" {
+                    0x1f
+                } else {
+                    0x7f
+                };
+                self.object_step_durations
+                    .insert(object_id.to_string(), duration_roll & mask);
                 continue;
             } else if movement == "SPRITEMOVEDATA_WALK_LEFT_RIGHT" {
-                if current.x <= min_x {
-                    direction = Direction::Right;
-                } else if current.x >= max_x {
-                    direction = Direction::Left;
-                } else if !matches!(direction, Direction::Left | Direction::Right) {
-                    direction = Direction::Left;
-                }
+                let Some(rng) = rng.as_deref_mut() else {
+                    continue;
+                };
+                let (roll, _) = rng.crystal_random_add_sub();
+                direction = if roll & 1 == 0 {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
             } else if movement == "SPRITEMOVEDATA_WALK_UP_DOWN" {
-                if current.y <= min_y {
-                    direction = Direction::Down;
-                } else if current.y >= max_y {
-                    direction = Direction::Up;
-                } else if !matches!(direction, Direction::Up | Direction::Down) {
-                    direction = Direction::Up;
-                }
+                let Some(rng) = rng.as_deref_mut() else {
+                    continue;
+                };
+                let (roll, _) = rng.crystal_random_add_sub();
+                direction = if roll & 1 == 0 {
+                    Direction::Down
+                } else {
+                    Direction::Up
+                };
             } else {
                 let Some(rng) = rng.as_deref_mut() else {
                     continue;
                 };
-                let candidates = [
-                    Direction::Up,
-                    Direction::Down,
-                    Direction::Left,
-                    Direction::Right,
-                ];
-                let mut available = Vec::new();
-                for candidate in candidates {
-                    let (candidate_dx, candidate_dy) = candidate.delta();
-                    let candidate_tile = TilePosition::new(
-                        current.x + candidate_dx * stride,
-                        current.y + candidate_dy * stride,
-                    );
-                    if candidate_tile.x < min_x
-                        || candidate_tile.x > max_x
-                        || candidate_tile.y < min_y
-                        || candidate_tile.y > max_y
-                        || candidate_tile == self.player.tile
-                    {
-                        continue;
-                    }
-                    let occupied = self
-                        .objects
-                        .iter()
-                        .enumerate()
-                        .filter(|(other_index, other)| {
-                            *other_index != index && self.is_object_visible(other)
-                        })
-                        .filter_map(|(other_index, other)| {
-                            self.object_runtime_tile_checked(other_index, other).ok()
-                        })
-                        .any(|tile| tile == candidate_tile);
-                    let walkable = sample_collision(&self.map, &self.tileset, candidate_tile)
-                        .map(|sample| {
-                            let terrain = describe_collision(sample.permission).terrain;
-                            if movement == "SPRITEMOVEDATA_SWIM_WANDER" {
-                                terrain == Terrain::Water
-                            } else {
-                                terrain != Terrain::Wall
-                            }
-                        })
-                        .unwrap_or(false);
-                    if !occupied && walkable {
-                        available.push(candidate);
-                    }
-                }
-                let Some(selected) = available
-                    .get(rng.randrange(available.len() as u32) as usize)
-                    .copied()
-                else {
-                    continue;
+                let (roll, _) = rng.crystal_random_add_sub();
+                direction = match roll & 3 {
+                    0 => Direction::Down,
+                    1 => Direction::Up,
+                    2 => Direction::Left,
+                    _ => Direction::Right,
                 };
-                direction = selected;
             }
             let (dx, dy) = direction.delta();
             let target = TilePosition::new(current.x + dx * stride, current.y + dy * stride);
-            if target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y {
-                self.object_facings.insert(object_id.to_string(), direction);
-                continue;
-            }
-            if target == self.player.tile {
-                self.object_facings.insert(object_id.to_string(), direction);
-                continue;
-            }
+            let outside_range =
+                target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y;
+            let player_occupied = target == self.player.tile
+                || (self.frame < self.player_last_tile_occupied_until_frame
+                    && self.player_last_runtime_tile == Some(target));
             let occupied = self
                 .objects
                 .iter()
@@ -1017,14 +1206,61 @@ impl OverworldSession {
                 .filter_map(|(other_index, other)| {
                     self.object_runtime_tile_checked(other_index, other).ok()
                 })
-                .any(|tile| tile == target);
+                .any(|tile| tile == target)
+                || self.object_last_runtime_tiles.iter().any(|(other_id, tile)| {
+                    other_id != object_id
+                        && *tile == target
+                        && self
+                            .object_last_tiles_occupied_until_frame
+                            .get(other_id)
+                            .is_some_and(|until_frame| self.frame < *until_frame)
+                        && self.objects.iter().any(|other| {
+                            other.object_identifier.as_deref() == Some(other_id.as_str())
+                                && self.is_object_visible(other)
+                        })
+                })
+                || vacated_tiles.contains(&target);
             self.object_facings.insert(object_id.to_string(), direction);
+            let blocked_leaving = sample_collision(&self.map, &self.tileset, current)
+                .is_some_and(|sample| is_direction_blocked_leaving(sample.permission, direction));
             let walkable = sample_collision(&self.map, &self.tileset, target)
-                .map(|sample| describe_collision(sample.permission).terrain != Terrain::Wall)
+                .map(|sample| {
+                    if is_direction_blocked(sample.permission, direction) {
+                        return false;
+                    }
+                    let terrain = describe_collision(sample.permission).terrain;
+                    if movement == "SPRITEMOVEDATA_SWIM_WANDER" {
+                        terrain == Terrain::Water
+                    } else {
+                        terrain == Terrain::Land
+                    }
+                })
                 .unwrap_or(false);
-            if !occupied && walkable {
+            let moved = !outside_range
+                && !player_occupied
+                && !occupied
+                && !blocked_leaving
+                && walkable;
+            if moved {
                 self.object_runtime_tiles
                     .insert(object_id.to_string(), target);
+                self.object_last_runtime_tiles
+                    .insert(object_id.to_string(), current);
+                self.object_last_tiles_occupied_until_frame
+                    .insert(object_id.to_string(), self.frame.saturating_add(8));
+                vacated_tiles.push(current);
+            }
+            if moved {
+                self.object_step_durations
+                    .insert(object_id.to_string(), 8);
+                self.object_pending_random_wait
+                    .insert(object_id.to_string());
+            } else if let Some(rng) = rng.as_deref_mut() {
+                let (duration_roll, _) = rng.crystal_random_add_sub();
+                self.object_step_durations.insert(
+                    object_id.to_string(),
+                    duration_roll & 0x7f,
+                );
             }
         }
         Ok(())
@@ -1049,7 +1285,9 @@ impl OverworldSession {
 
         if let Some((object_index, object)) = self
             .visible_object_at_checked(facing_tile)?
-            .filter(|(_, object)| object_has_dispatchable_script(object))
+            .filter(|(_, object)| {
+                object_has_dispatchable_script(object) && !self.object_is_visibly_walking(object)
+            })
         {
             return Ok(Some(self.object_interaction(
                 object_index,
@@ -1062,7 +1300,10 @@ impl OverworldSession {
         if adjusted_tile != facing_tile {
             if let Some((object_index, object)) = self
                 .visible_object_at_checked(adjusted_tile)?
-                .filter(|(_, object)| object_has_dispatchable_script(object))
+                .filter(|(_, object)| {
+                    object_has_dispatchable_script(object)
+                        && !self.object_is_visibly_walking(object)
+                })
             {
                 return Ok(Some(self.object_interaction(
                     object_index,
@@ -1163,6 +1404,7 @@ impl OverworldSession {
                 object.object_type == "OBJECTTYPE_TRAINER"
                     && object.radius > 0
                     && object_has_dispatchable_script(object)
+                    && !self.object_is_visibly_walking(object)
             })
             .try_fold(None, |matched, (index, object)| {
                 if matched.is_some() {
@@ -1183,13 +1425,7 @@ impl OverworldSession {
                 let Some(direction) = direction else {
                     return Ok(None);
                 };
-                if !tile_is_in_sightline(object_tile, direction, self.player.tile, object.radius)
-                    || !self.has_clear_sightline_checked(
-                        object_tile,
-                        direction,
-                        self.player.tile,
-                    )?
-                {
+                if !tile_is_in_sightline(object_tile, direction, self.player.tile, object.radius) {
                     return Ok(None);
                 }
                 Ok(Some(self.object_interaction(
@@ -1198,42 +1434,6 @@ impl OverworldSession {
                     object_tile,
                 )))
             })
-    }
-
-    fn has_clear_sightline_checked(
-        &self,
-        object_tile: TilePosition,
-        direction: Direction,
-        player_tile: TilePosition,
-    ) -> Result<bool, OverworldCoordinateError> {
-        let stride = StepOptions::default().stride_tiles;
-        let mut cursor =
-            checked_move_by_stride(object_tile, direction, stride).ok_or_else(|| {
-                OverworldCoordinateError::RuntimeTileOverflow {
-                    x: object_tile.x,
-                    y: object_tile.y,
-                    facing: direction,
-                }
-            })?;
-        while cursor != player_tile {
-            if self.visible_object_at_checked(cursor)?.is_some() {
-                return Ok(false);
-            }
-            if sample_collision(&self.map, &self.tileset, cursor)
-                .map(|sample| describe_collision(sample.permission).terrain == Terrain::Wall)
-                .unwrap_or(true)
-            {
-                return Ok(false);
-            }
-            cursor = checked_move_by_stride(cursor, direction, stride).ok_or_else(|| {
-                OverworldCoordinateError::RuntimeTileOverflow {
-                    x: cursor.x,
-                    y: cursor.y,
-                    facing: direction,
-                }
-            })?;
-        }
-        Ok(true)
     }
 
     pub fn visible_object_at(&self, tile: TilePosition) -> Option<(u16, &ObjectEvent)> {
@@ -1349,6 +1549,15 @@ impl OverworldSession {
         }
     }
 
+    fn object_is_visibly_walking(&self, object: &ObjectEvent) -> bool {
+        let Some(object_id) = object.object_identifier.as_deref() else {
+            return false;
+        };
+        self.object_last_tiles_occupied_until_frame
+            .get(object_id)
+            .is_some_and(|until_frame| self.frame < *until_frame)
+    }
+
     pub fn check_warp_checked(&self) -> Result<Option<WarpTrigger>, OverworldEventCoordinateError> {
         for warp in &self.map_events.warps {
             if warp_tile_position_checked(warp).is_none() {
@@ -1390,6 +1599,7 @@ impl OverworldSession {
                 Ok(Some(WarpTrigger {
                     map_name: self.map.name.clone(),
                     tile: self.player.tile,
+                    permission: collision.permission,
                     warp: warp.clone(),
                 }))
             })
@@ -1653,19 +1863,50 @@ impl OverworldSession {
         rng: &mut Random,
         options: EncounterCheckOptions,
     ) -> Result<Option<WildEncounterRoll>, EncounterError> {
-        let Some(surface) = encounter_surface_for_player_tile_checked(self)? else {
+        let Some(surface) = encounter_surface_for_player_tile_checked(
+            self,
+            options.land_encounters_on_any_land,
+        )? else {
             return Ok(None);
         };
-        let threshold = encounter_threshold(
-            encounters,
-            surface,
-            options.time,
-            options.music_token.as_deref(),
-            music_modifiers,
-            options.has_cleanse_tag,
-        )?;
-        let encounter_roll = rng.randrange(256) as u8;
-        if !passes_encounter_roll(threshold, encounter_roll) {
+        let contest_encounter = !options.special_wild_encounters.is_empty();
+        let threshold = if contest_encounter {
+            let permission = sample_collision(&self.map, &self.tileset, self.player.tile)
+                .ok_or_else(|| EncounterError::MissingRuntimeCollision {
+                    map_name: self.map.name.clone(),
+                    x: self.player.tile.x,
+                    y: self.player.tile.y,
+                })?
+                .permission;
+            let base = percent_to_byte(if matches!(permission, 0x14 | 0x1c) {
+                40.0
+            } else {
+                20.0
+            });
+            let adjusted = apply_encounter_music_effect(
+                base,
+                options.music_token.as_deref(),
+                music_modifiers,
+            )?;
+            apply_cleanse_tag_effect(adjusted, options.has_cleanse_tag)
+        } else {
+            encounter_threshold(
+                encounters,
+                surface,
+                options.time,
+                options.music_token.as_deref(),
+                music_modifiers,
+                options.has_cleanse_tag,
+            )?
+        };
+        let (encounter_roll, passes_rate) = if contest_encounter {
+            let (add, _) = rng.crystal_random_add_sub();
+            (add, passes_encounter_roll(threshold, add))
+        } else {
+            let roll = rng.battle_random_byte();
+            (roll, passes_encounter_roll(threshold, roll))
+        };
+        if !passes_rate {
             return Ok(Some(WildEncounterRoll {
                 map_name: self.map.name.clone(),
                 tile: self.player.tile,
@@ -1685,12 +1926,16 @@ impl OverworldSession {
         // before selecting a normal wild slot. The roll is deliberately kept
         // byte-wide: values >= 100 miss, then bits 0..1 select one of the
         // three roaming slots. Water encounters never use roamers.
-        if surface != EncounterSurface::Water && options.roaming_candidates.len() >= 3 {
+        if !contest_encounter && surface != EncounterSurface::Water {
             let roaming_roll = rng.battle_random_byte();
             if roaming_roll < 100 {
                 let slot = usize::from(roaming_roll & 0x03);
                 if slot != 0 {
-                    if let Some((species, level)) = options.roaming_candidates[slot - 1].clone() {
+                    if let Some((species, level)) = options
+                        .roaming_candidates
+                        .get(slot - 1)
+                        .and_then(Clone::clone)
+                    {
                         let resolved = ResolvedWildEncounter {
                             level,
                             encounter: crate::world::encounters::WildEncounter {
@@ -1720,12 +1965,18 @@ impl OverworldSession {
         }
 
         if !options.special_wild_encounters.is_empty() {
-            let mut roll = rng.randrange(100) as i16;
+            let mut roll = loop {
+                let (_, sub) = rng.crystal_random_add_sub();
+                if sub < 200 {
+                    break i16::from(sub >> 1);
+                }
+            };
             for entry in &options.special_wild_encounters {
                 roll -= i16::from(entry.percent);
                 if roll < 0 {
                     let range = entry.max_level.saturating_sub(entry.min_level) + 1;
-                    let level = entry.min_level + rng.randrange(u32::from(range)) as u8;
+                    let (add, _) = rng.crystal_random_add_sub();
+                    let level = entry.min_level + add % range;
                     let resolved = ResolvedWildEncounter {
                         level,
                         encounter: WildEncounter {
@@ -1759,14 +2010,15 @@ impl OverworldSession {
         }
 
         let slot_percent_roll = next_percent_roll(rng);
-        let level_roll = rng.randrange(256) as u8;
+        let level_roll = (surface == EncounterSurface::Water)
+            .then(|| rng.battle_random_byte());
         let resolved = select_wild_encounter(
             encounters,
             slot_tables,
             surface,
             options.time,
             slot_percent_roll,
-            level_roll,
+            level_roll.unwrap_or(0),
         )?;
         let (resolved, repelled_by) = apply_repel_to_wild_encounter(resolved, &options)?;
         Ok(Some(WildEncounterRoll {
@@ -1777,7 +2029,7 @@ impl OverworldSession {
             threshold,
             encounter_roll,
             slot_percent_roll: Some(slot_percent_roll),
-            level_roll: Some(level_roll),
+            level_roll,
             resolved,
             repelled_by,
             rng_seed_after: rng.seed(),
@@ -1907,13 +2159,9 @@ fn initial_object_facings(objects: &[ObjectEvent]) -> BTreeMap<String, Direction
         .collect()
 }
 
-fn encounter_surface_for_player_tile(session: &OverworldSession) -> Option<EncounterSurface> {
-    encounter_surface_for_player_tile_checked(session)
-        .expect("encounter surface query requires valid runtime coordinate and collision state")
-}
-
 fn encounter_surface_for_player_tile_checked(
     session: &OverworldSession,
+    land_encounters_on_any_land: bool,
 ) -> Result<Option<EncounterSurface>, EncounterError> {
     session.require_encounter_runtime_tile()?;
     let sample =
@@ -1924,21 +2172,25 @@ fn encounter_surface_for_player_tile_checked(
                 y: session.player.tile.y,
             }
         })?;
-    if sample.permission == permissions::TALL_GRASS {
+    if super::collision::is_grass_encounter_permission(sample.permission) {
         return Ok(Some(EncounterSurface::Grass));
     }
     let attributes = describe_collision(sample.permission);
-    if matches!(session.player.mode, MovementMode::Surf | MovementMode::SurfPika)
-        && attributes.terrain == Terrain::Water
-    {
+    if attributes.terrain == Terrain::Water {
         return Ok(Some(EncounterSurface::Water));
+    }
+    if land_encounters_on_any_land
+        && attributes.terrain == Terrain::Land
+        && !matches!(sample.permission, permissions::ICE | permissions::ICE_2B)
+    {
+        return Ok(Some(EncounterSurface::Grass));
     }
     Ok(None)
 }
 
 fn next_percent_roll(rng: &mut Random) -> u8 {
     loop {
-        let value = rng.randrange(256) as u8;
+        let value = rng.battle_random_byte();
         if value < 100 {
             return value + 1;
         }
@@ -2073,8 +2325,14 @@ impl WarpTransition {
             map_events,
             objects,
             object_runtime_tiles: BTreeMap::new(),
+            object_last_runtime_tiles: BTreeMap::new(),
+            object_last_tiles_occupied_until_frame: BTreeMap::new(),
             object_facings: BTreeMap::new(),
+            object_step_durations: BTreeMap::new(),
+            object_pending_random_wait: BTreeSet::new(),
+            initialized_fixed_spin_objects: BTreeSet::new(),
             following: None,
+            following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
@@ -2083,6 +2341,8 @@ impl WarpTransition {
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
             last_step_direction: None,
+            player_last_runtime_tile: None,
+            player_last_tile_occupied_until_frame: 0,
         }
     }
 }
@@ -2103,8 +2363,14 @@ impl ConnectionTransition {
             map_events,
             objects,
             object_runtime_tiles: BTreeMap::new(),
+            object_last_runtime_tiles: BTreeMap::new(),
+            object_last_tiles_occupied_until_frame: BTreeMap::new(),
             object_facings: BTreeMap::new(),
+            object_step_durations: BTreeMap::new(),
+            object_pending_random_wait: BTreeSet::new(),
+            initialized_fixed_spin_objects: BTreeSet::new(),
             following: None,
+            following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
@@ -2113,6 +2379,8 @@ impl ConnectionTransition {
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
             last_step_direction: None,
+            player_last_runtime_tile: None,
+            player_last_tile_occupied_until_frame: 0,
         }
     }
 }
@@ -2673,6 +2941,7 @@ mod tests {
             Some(WarpTrigger {
                 map_name: "test".to_string(),
                 tile: TilePosition::new(51, 2),
+                permission: permissions::DOOR,
                 warp,
             })
         );
@@ -3639,8 +3908,9 @@ mod tests {
     }
 
     #[test]
-    fn trainer_sight_checks_raw_intermediate_tiles_for_blockers() {
+    fn trainer_sight_ignores_intermediate_objects_like_crystal() {
         let mut trainer = object("ROUTE29_YOUNGSTER", 2, 0, "-1");
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
         trainer.radius = 2;
         trainer.sightline_direction_override = Some("DOWN".to_string());
         let blocker = object("ROUTE29_TEACHER", 2, 1, "-1");
@@ -3652,12 +3922,11 @@ mod tests {
             TilePosition::new(2, 2),
         );
 
-        assert_eq!(
-            session
-                .check_trainer_sight_checked()
-                .expect("checked trainer sight"),
-            None
-        );
+        let sight = session
+            .check_trainer_sight_checked()
+            .expect("checked trainer sight")
+            .expect("intermediate objects do not block trainer sight");
+        assert_eq!(sight.target_tile, TilePosition::new(2, 0));
     }
 
     #[test]
@@ -3921,6 +4190,58 @@ mod tests {
                 width: 4,
                 height: 2,
             }
+        );
+    }
+
+    #[test]
+    fn encounter_surface_uses_crystals_complete_grass_catalog() {
+        let session = OverworldSession::new(
+            map(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::LONG_GRASS; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        assert_eq!(
+            session
+                .current_encounter_surface_checked()
+                .expect("long-grass surface"),
+            Some(EncounterSurface::Grass)
+        );
+    }
+
+    #[test]
+    fn cave_environment_allows_non_ice_floor_encounters() {
+        let floor = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
+        assert_eq!(
+            floor
+                .current_encounter_surface_checked_with_land_encounters(false)
+                .expect("outdoor floor surface"),
+            None
+        );
+        assert_eq!(
+            floor
+                .current_encounter_surface_checked_with_land_encounters(true)
+                .expect("cave floor surface"),
+            Some(EncounterSurface::Grass)
+        );
+
+        let ice = OverworldSession::new(
+            map(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::ICE; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        assert_eq!(
+            ice.current_encounter_surface_checked_with_land_encounters(true)
+                .expect("cave ice surface"),
+            None
         );
     }
 
@@ -4213,6 +4534,7 @@ mod tests {
             Some(WarpTrigger {
                 map_name: "test".to_string(),
                 tile: TilePosition::new(1, 2),
+                permission: permissions::DOOR,
                 warp,
             })
         );
@@ -4437,6 +4759,7 @@ mod tests {
         let trigger = WarpTrigger {
             map_name: "source".to_string(),
             tile: TilePosition::new(1, 1),
+            permission: permissions::DOOR,
             warp: WarpEvent {
                 index: 1,
                 x: 0,

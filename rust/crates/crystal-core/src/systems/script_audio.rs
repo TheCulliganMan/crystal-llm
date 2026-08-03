@@ -13,7 +13,6 @@ pub struct ScriptAudioCommand {
     #[serde(deserialize_with = "required_nullable_audio_token")]
     pub audio_id: Option<String>,
     pub fade_frames: Option<u16>,
-    #[serde(deserialize_with = "required_audio_token")]
     pub source_script: String,
     pub command_index: usize,
 }
@@ -503,20 +502,6 @@ where
     } else {
         Err(serde::de::Error::custom(format!(
             "script audio command must be exact lowercase ASCII, found {value:?}"
-        )))
-    }
-}
-
-fn required_audio_token<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if is_exact_audio_token(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format!(
-            "script audio token must be exact ASCII alphanumeric/underscore, found {value:?}"
         )))
     }
 }

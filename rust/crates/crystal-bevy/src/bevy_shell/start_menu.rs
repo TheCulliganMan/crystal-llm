@@ -32,12 +32,17 @@ fn visible_field_pack_entries(
         ) else {
             return vec![compact_scene_label("INVALID CURSOR pack:tmhm:decision", 30)];
         };
-        let party = snapshot
+        let Some(party) = snapshot
             .party
             .slots
             .get(runtime_shell.party_cursor)
             .map(|slot| slot.pokemon.nickname.as_str())
-            .unwrap_or("POKEMON");
+        else {
+            return vec![compact_scene_label(
+                "INVALID TM/HM PARTY SELECTION",
+                30,
+            )];
+        };
         let prompt = match runtime_shell.tmhm_decision {
             Some(VisibleTmHmDecision::ForgetMove) => {
                 format!("DELETE A MOVE FOR {party}?")
@@ -75,10 +80,9 @@ fn visible_field_pack_entries(
             .and_then(|index| snapshot.bag.tm_hm.get(index))
             .and_then(|tmhm| tmhm.move_id.as_deref())
             .unwrap_or(&item);
-        let boot_kind = if item.starts_with("HM") { "AN HM" } else { "A TM" };
+        let move_name = battle_move_display_name(snapshot, move_id);
         return vec![
-            compact_scene_label(&format!("BOOTED UP {boot_kind}"), 30),
-            compact_scene_label(&format!("TEACH {move_id}?"), 30),
+            compact_scene_label(&format!("TEACH {move_name}?"), 30),
             format!("{}YES", if selected == 0 { ">" } else { " " }),
             format!("{}NO", if selected == 1 { ">" } else { " " }),
         ];
@@ -255,8 +259,7 @@ fn visible_field_pack_target_entries(
             |index| {
                 let slot = &snapshot.party.slots[index];
                 let is_egg = slot.pokemon.is_egg
-                    || slot.pokemon.species.id == "EGG"
-                    || slot.pokemon.nickname.eq_ignore_ascii_case("EGG");
+                    || slot.pokemon.species.id == "EGG";
                 let able = !is_egg
                     && item_id.is_some_and(|item_id| {
                         match runtime_shell.shell.preview_tmhm_on_party_pokemon(
@@ -752,82 +755,19 @@ fn visible_pokegear_radio_handler_name(
     snapshot: &RuntimeShellSnapshot,
     handler: &str,
 ) -> &'static str {
-    let landmark = snapshot
-        .presentation
-        .pokegear_landmarks
-        .map_to_landmark
-        .get(&snapshot.overworld.map_name)
-        .and_then(|constant| {
-            snapshot
-                .presentation
-                .pokegear_landmarks
-                .landmarks
-                .iter()
-                .find(|landmark| landmark.constant == *constant)
-        });
-    let in_johto = landmark.is_none_or(|landmark| landmark.region == "JOHTO");
-    if in_johto
-        && snapshot
-            .progression
-            .active_engine_flags
-            .contains("ENGINE_ROCKETS_IN_RADIO_TOWER")
-    {
-        return "ROCKET RADIO";
-    }
-    match handler {
-        "PKMNTalkAndPokedexShow" if in_johto => "OAK'S POKEMON TALK",
-        "PokemonMusic" if in_johto => "POKEMON MUSIC",
-        "LuckyChannel" if in_johto => "LUCKY CHANNEL",
-        "BuenasPassword" if in_johto => "BUENA'S PASSWORD",
-        "RuinsOfAlphRadio"
-            if landmark.is_some_and(|landmark| landmark.constant == "LANDMARK_RUINS_OF_ALPH") =>
-        {
-            "RUINS OF ALPH"
-        }
-        "PlacesAndPeople"
-            if !in_johto
-                && snapshot
-                    .progression
-                    .active_engine_flags
-                    .contains("ENGINE_EXPN_CARD") =>
-        {
-            "PLACES AND PEOPLE"
-        }
-        "LetsAllSing"
-            if !in_johto
-                && snapshot
-                    .progression
-                    .active_engine_flags
-                    .contains("ENGINE_EXPN_CARD") =>
-        {
-            "LET'S ALL SING"
-        }
-        "PokeFluteRadio"
-            if !in_johto
-                && snapshot
-                    .progression
-                    .active_engine_flags
-                    .contains("ENGINE_EXPN_CARD") =>
-        {
-            "POKE FLUTE"
-        }
-        "EvolutionRadio"
-            if snapshot
-                .progression
-                .active_engine_flags
-                .contains("ENGINE_ROCKET_SIGNAL_ON_CH20")
-                && landmark.is_some_and(|landmark| {
-                    matches!(
-                        landmark.constant.as_str(),
-                        "LANDMARK_MAHOGANY_TOWN"
-                            | "LANDMARK_ROUTE_43"
-                            | "LANDMARK_LAKE_OF_RAGE"
-                    )
-                }) =>
-        {
-            "EVOLUTION RADIO"
-        }
-        _ => "NO STATION",
+    match visible_pokegear_radio_station(snapshot, handler).map(|(constant, _)| constant) {
+        Some("OAKS_POKEMON_TALK") => "OAK'S POKEMON TALK",
+        Some("POKEDEX_SHOW") => "POKEDEX SHOW",
+        Some("POKEMON_MUSIC") => "POKEMON MUSIC",
+        Some("LUCKY_CHANNEL") => "LUCKY CHANNEL",
+        Some("BUENAS_PASSWORD") => "BUENA'S PASSWORD",
+        Some("UNOWN_RADIO") => "?????",
+        Some("PLACES_AND_PEOPLE") => "PLACES & PEOPLE",
+        Some("LETS_ALL_SING") => "LET'S ALL SING",
+        Some("POKE_FLUTE_RADIO") => "POKE FLUTE",
+        Some("EVOLUTION_RADIO") => "EVOLUTION RADIO",
+        Some("ROCKET_RADIO") => "ROCKET RADIO",
+        _ => "NO SIGNAL",
     }
 }
 
@@ -1054,9 +994,12 @@ fn visible_special_boundary_entries(runtime_shell: &BevyRuntimeShell) -> Vec<Str
 }
 
 fn visible_special_boundary_display_entries(boundary: &SpecialBoundaryDisplay) -> Vec<String> {
+    if boundary.label == "HallOfFamePC" {
+        return boundary.details.clone();
+    }
     if matches!(
         boundary.label.as_str(),
-        "PokecenterPCCantUseText" | "ProfOaksPcBoot" | "HallOfFamePC" | "BugContestJudging"
+        "PokecenterPCCantUseText" | "ProfOaksPcBoot" | "BugContestJudging"
     ) {
         return boundary
             .details
@@ -1432,6 +1375,34 @@ fn visible_move_battler_visibility(
     (player_visible, enemy_visible)
 }
 
+fn visible_move_controls_battler_visibility(
+    animation: Option<&VisibleMoveAnimation>,
+    player: bool,
+) -> bool {
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return false;
+    };
+    animation.bg_events.iter().any(|effect| {
+        if !matches!(
+            effect.effect_id.as_str(),
+            "BATTLE_BG_EFFECT_HIDE_MON"
+                | "BATTLE_BG_EFFECT_SHOW_MON"
+                | "BATTLE_BG_EFFECT_WITHDRAW"
+                | "BATTLE_BG_EFFECT_REMOVE_MON"
+                | "BATTLE_BG_EFFECT_ENTER_MON"
+                | "BATTLE_BG_EFFECT_RETURN_MON"
+        ) {
+            return false;
+        }
+        let targets_player = match effect.target.as_str() {
+            "BG_EFFECT_USER" => animation.player_move,
+            "BG_EFFECT_TARGET" => !animation.player_move,
+            _ => false,
+        };
+        targets_player == player
+    })
+}
+
 fn visible_move_battler_clip_tiles(
     animation: Option<&VisibleMoveAnimation>,
 ) -> (Option<u8>, Option<u8>) {
@@ -1553,7 +1524,11 @@ fn visible_move_battler_overlays(
                     None
                 } else {
                     let step_delay = u16::from((effect.param >> 4).max(1));
-                    let initial_delay = u16::from((effect.param & 0x0f).max(effect.param >> 4).max(1));
+                    let initial_delay = u16::from(if effect.param & 0x0f == 0 {
+                        (effect.param >> 4).max(1)
+                    } else {
+                        effect.param & 0x0f
+                    });
                     let index = if age < initial_delay {
                         0
                     } else {
@@ -1593,7 +1568,9 @@ fn visible_move_battler_overlays(
 fn visible_move_battler_art_overrides(
     animation: Option<&VisibleMoveAnimation>,
 ) -> (VisibleBattlerArtOverride, VisibleBattlerArtOverride) {
-    let Some(animation) = animation.filter(|animation| animation.started) else {
+    let Some(animation) = animation.filter(|animation| {
+        animation.started || animation.waiting_for_hp
+    }) else {
         return (
             VisibleBattlerArtOverride::Unchanged,
             VisibleBattlerArtOverride::Unchanged,
@@ -1613,6 +1590,7 @@ fn visible_move_battler_art_overrides(
             "BATTLE_ACTOR_DROPSUB" | "BATTLE_ACTOR_UPDATEACTORPIC" => {
                 VisibleBattlerArtOverride::Pokemon
             }
+            "BATTLE_ACTOR_BEATUP" => VisibleBattlerArtOverride::Pokemon,
             "BATTLE_ACTOR_MINIMIZE" => VisibleBattlerArtOverride::Minimize,
             "BATTLE_ACTOR_MINIMIZEOPP" => {
                 target_player = !target_player;
@@ -1627,6 +1605,45 @@ fn visible_move_battler_art_overrides(
         }
     }
     (player, enemy)
+}
+
+fn visible_move_battler_species_overrides(
+    animation: Option<&VisibleMoveAnimation>,
+) -> (Option<&str>, Option<&str>) {
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return (None, None);
+    };
+    let beat_up_active = animation.bg_events.iter().any(|event| {
+        event.frame <= animation.frame && event.effect_id == "BATTLE_ACTOR_BEATUP"
+    });
+    if !beat_up_active {
+        return (None, None);
+    }
+    let species = animation.actor_species_override.as_deref();
+    if animation.player_move {
+        (species, None)
+    } else {
+        (None, species)
+    }
+}
+
+fn visible_move_battler_shiny_overrides(
+    animation: Option<&VisibleMoveAnimation>,
+) -> (Option<bool>, Option<bool>) {
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return (None, None);
+    };
+    let beat_up_active = animation.bg_events.iter().any(|event| {
+        event.frame <= animation.frame && event.effect_id == "BATTLE_ACTOR_BEATUP"
+    });
+    if !beat_up_active {
+        return (None, None);
+    }
+    if animation.player_move {
+        (animation.actor_shiny_override, None)
+    } else {
+        (None, animation.actor_shiny_override)
+    }
 }
 
 fn visible_surf_line_offsets(
@@ -1708,6 +1725,7 @@ fn spawn_battle_battler_markers(
     player_send_out_pending: bool,
     capture_enemy_hidden: bool,
     capture_enemy_clip_tiles: Option<u8>,
+    capture_throw_active: bool,
     send_out_animation: Option<&VisibleSendOutAnimation>,
     trainer_exit_animation: Option<&VisibleTrainerExitAnimation>,
     frontpic_animation: Option<&VisibleFrontpicAnimation>,
@@ -1720,13 +1738,24 @@ fn spawn_battle_battler_markers(
         visible_move_battler_offsets(move_animation);
     let (move_player_visible, move_enemy_visible) =
         visible_move_battler_visibility(move_animation);
+    let move_player_visible = move_player_visible
+        && (!battle.player_semi_invulnerable
+            || visible_move_controls_battler_visibility(move_animation, true));
+    let move_enemy_visible = move_enemy_visible
+        && (!battle.enemy_semi_invulnerable
+            || visible_move_controls_battler_visibility(move_animation, false));
     let (move_player_clip_tiles, move_enemy_clip_tiles) =
         visible_move_battler_clip_tiles(move_animation);
     let (move_player_overlay, move_enemy_overlay) =
         visible_move_battler_overlays(move_animation);
     let (move_player_art, move_enemy_art) =
         visible_move_battler_art_overrides(move_animation);
+    let (move_player_species, move_enemy_species) =
+        visible_move_battler_species_overrides(move_animation);
+    let (move_player_shiny, move_enemy_shiny) =
+        visible_move_battler_shiny_overrides(move_animation);
     let surf_line_offsets = visible_surf_line_offsets(move_animation);
+    let render_hp = |side, hp| visible_faint_animation_render_hp(move_animation, side, hp);
     let active_player_species = battle.player_transformed_species.as_deref().or_else(|| {
         battle
             .active_player_party_index
@@ -1737,12 +1766,18 @@ fn spawn_battle_battler_markers(
         .enemy_transformed_species
         .as_deref()
         .unwrap_or(&battle.enemy_pokemon.species.id);
-    let enemy_render_species = if move_enemy_art == VisibleBattlerArtOverride::Transform {
-        active_player_species.unwrap_or(enemy_default_species)
+    let enemy_render_species = if let Some(species) = move_enemy_species {
+        species
+    } else if move_enemy_art == VisibleBattlerArtOverride::Transform {
+        active_player_species.context(
+            "enemy Transform animation requires a concrete active player species",
+        )?
     } else {
         enemy_default_species
     };
-    let player_transform_species = if move_player_art == VisibleBattlerArtOverride::Transform {
+    let player_transform_species = if let Some(species) = move_player_species {
+        Some(species)
+    } else if move_player_art == VisibleBattlerArtOverride::Transform {
         Some(enemy_default_species)
     } else {
         None
@@ -1772,10 +1807,10 @@ fn spawn_battle_battler_markers(
             images,
             enemy_render_species,
             PokemonSpriteSide::Front,
-            battle.enemy_pokemon.hp,
+            render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            visible_pokemon_is_shiny(&battle.enemy_pokemon),
+            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
             enemy_animation_frame,
             enemy_move_offset,
             1.0,
@@ -1804,38 +1839,41 @@ fn spawn_battle_battler_markers(
         return Ok(());
     }
     if enemy_send_out_pending {
-        if let Some(active_index) = battle.active_player_party_index
-            && let Some(slot) = snapshot
-                .party
-                .slots
-                .iter()
-                .find(|slot| slot.index == active_index)
-        {
-            spawn_battler_marker(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                player_transform_species.unwrap_or_else(|| {
-                    battle
-                        .player_transformed_species
-                        .as_deref()
-                        .unwrap_or(&slot.pokemon.species.id)
-                }),
-                PokemonSpriteSide::Back,
-                slot.pokemon.hp,
-                slot.pokemon.max_hp,
-                battle.player_substitute_hp > 0,
-                visible_pokemon_is_shiny(&slot.pokemon),
-                0,
-                player_move_offset,
-                1.0,
-                move_player_overlay,
-                move_player_art,
-                move_player_clip_tiles,
-                surf_line_offsets.as_ref(),
-            )?;
-        }
+        let active_index = battle.active_player_party_index.context(
+            "enemy send-out presentation requires an active player party slot",
+        )?;
+        let slot = snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.index == active_index)
+            .with_context(|| {
+                format!("active player party slot {active_index} is absent during enemy send-out")
+            })?;
+        spawn_battler_marker(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            player_transform_species.unwrap_or_else(|| {
+                battle
+                    .player_transformed_species
+                    .as_deref()
+                    .unwrap_or(&slot.pokemon.species.id)
+            }),
+            PokemonSpriteSide::Back,
+            render_hp(crate::core::battle::turn::BattleSide::Player, slot.pokemon.hp),
+            slot.pokemon.max_hp,
+            battle.player_substitute_hp > 0,
+            move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon)),
+            0,
+            player_move_offset,
+            1.0,
+            move_player_overlay,
+            move_player_art,
+            move_player_clip_tiles,
+            surf_line_offsets.as_ref(),
+        )?;
         return Ok(());
     }
     if player_send_out_pending {
@@ -1846,10 +1884,10 @@ fn spawn_battle_battler_markers(
             images,
             enemy_render_species,
             PokemonSpriteSide::Front,
-            battle.enemy_pokemon.hp,
+            render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            visible_pokemon_is_shiny(&battle.enemy_pokemon),
+            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
             enemy_animation_frame,
             enemy_move_offset,
             1.0,
@@ -1948,10 +1986,10 @@ fn spawn_battle_battler_markers(
             images,
             enemy_render_species,
             PokemonSpriteSide::Front,
-            battle.enemy_pokemon.hp,
+            render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            visible_pokemon_is_shiny(&battle.enemy_pokemon),
+            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
             enemy_animation_frame,
             enemy_move_offset,
             enemy_scale,
@@ -1964,18 +2002,20 @@ fn spawn_battle_battler_markers(
         )?;
     }
     if battle.battle_type == "BATTLETYPE_TUTORIAL" {
-        spawn_battle_trainer_marker(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            "battle-player:dude",
-            Vec3::new(
-                PLAYFIELD_LEFT + TILE_SIZE * 2.0,
-                PLAYFIELD_TOP - TILE_SIZE * 6.0,
-                3.0,
-            ),
-        )?;
+        if !capture_throw_active {
+            spawn_battle_trainer_marker(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                "battle-player:dude",
+                Vec3::new(
+                    PLAYFIELD_LEFT + TILE_SIZE * 2.0,
+                    PLAYFIELD_TOP - TILE_SIZE * 6.0,
+                    3.0,
+                ),
+            )?;
+        }
         return Ok(());
     }
     if entry_messages_remaining == 1 {
@@ -2004,42 +2044,61 @@ fn spawn_battle_battler_markers(
         if player_scale <= 0.0 {
             return Ok(());
         }
-        if let Some(active_index) = battle.active_player_party_index {
-            if let Some(slot) = snapshot
-                .party
-                .slots
-                .iter()
-                .find(|slot| slot.index == active_index)
-            {
-                spawn_battler_marker(
-                    commands,
-                    rendered_art,
-                    asset_root,
-                    images,
-                    player_transform_species.unwrap_or_else(|| {
-                        battle
-                            .player_transformed_species
-                            .as_deref()
-                            .unwrap_or(&slot.pokemon.species.id)
-                    }),
-                    PokemonSpriteSide::Back,
-                    slot.pokemon.hp,
-                    slot.pokemon.max_hp,
-                    battle.player_substitute_hp > 0,
-                    visible_pokemon_is_shiny(&slot.pokemon),
-                    0,
-                    player_move_offset,
-                    player_scale,
-                    move_player_overlay,
-                    move_player_art,
-                    send_out_clip_tiles(crate::core::battle::turn::BattleSide::Player)
-                        .or(move_player_clip_tiles),
-                    surf_line_offsets.as_ref(),
-                )?;
-            }
-        }
+        let active_index = battle
+            .active_player_party_index
+            .context("visible player battler requires an active party slot")?;
+        let slot = snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.index == active_index)
+            .with_context(|| format!("active player party slot {active_index} is absent"))?;
+        spawn_battler_marker(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            player_transform_species.unwrap_or_else(|| {
+                battle
+                    .player_transformed_species
+                    .as_deref()
+                    .unwrap_or(&slot.pokemon.species.id)
+            }),
+            PokemonSpriteSide::Back,
+            render_hp(crate::core::battle::turn::BattleSide::Player, slot.pokemon.hp),
+            slot.pokemon.max_hp,
+            battle.player_substitute_hp > 0,
+            move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon)),
+            0,
+            player_move_offset,
+            player_scale,
+            move_player_overlay,
+            move_player_art,
+            send_out_clip_tiles(crate::core::battle::turn::BattleSide::Player)
+                .or(move_player_clip_tiles),
+            surf_line_offsets.as_ref(),
+        )?;
     }
     Ok(())
+}
+
+fn visible_faint_animation_render_hp(
+    move_animation: Option<&VisibleMoveAnimation>,
+    side: crate::core::battle::turn::BattleSide,
+    hp: u16,
+) -> u16 {
+    if hp == 0
+        && move_animation.is_some_and(|animation| {
+            animation.started
+                && animation.animation_label == "BattleAnim_FaintMon"
+                && animation.player_move
+                    == (side == crate::core::battle::turn::BattleSide::Player)
+        })
+    {
+        1
+    } else {
+        hp
+    }
 }
 
 fn normalize_battle_trainer_sprite_id(trainer_class: &str) -> String {
@@ -2047,8 +2106,8 @@ fn normalize_battle_trainer_sprite_id(trainer_class: &str) -> String {
     if normalized == "pokemon_prof" {
         return "oak".to_string();
     }
-    if normalized == "champion" {
-        return "lance".to_string();
+    if normalized == "medium" {
+        return normalized;
     }
     if normalized.ends_with('m') && !normalized.ends_with("_m") {
         format!("{}_m", &normalized[..normalized.len() - 1])
@@ -2464,12 +2523,15 @@ fn spawn_battle_hud(
     entry_messages_remaining: usize,
     enemy_send_out_pending: bool,
     player_send_out_pending: bool,
+    trainer_exit_active: bool,
     hp_tween: Option<&VisibleBattleHpTween>,
+    exp_tween: Option<&VisibleBattleExpTween>,
     growth_rates: &crate::core::systems::experience::GrowthRateCatalog,
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
+    require_bitmap_font_art(rendered_art, asset_root, images)?;
     if enemy_send_out_pending {
         spawn_battle_hud_borders(
             commands,
@@ -2478,20 +2540,29 @@ fn spawn_battle_hud(
             images,
             false,
             true,
+            false,
         )?;
-        if let Some(active_index) = battle.active_player_party_index
-            && let Some(slot) = snapshot.party.slots.iter().find(|slot| slot.index == active_index)
-        {
-            spawn_battle_hud_side(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                &slot.pokemon,
-                BattleHpSide::Player,
-                hp_tween.map(|tween| tween.player_pixels),
-            )?;
-        }
+        let active_index = battle.active_player_party_index.context(
+            "enemy send-out HUD requires an active player party slot",
+        )?;
+        let slot = snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.index == active_index)
+            .with_context(|| {
+                format!("active player party slot {active_index} is absent from the send-out HUD")
+            })?;
+        spawn_battle_hud_side(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &slot.pokemon,
+            BattleHpSide::Player,
+            hp_tween.map(|tween| tween.player_pixels),
+            hp_tween.map(|tween| tween.player_hp),
+        )?;
         return Ok(());
     }
     if player_send_out_pending {
@@ -2502,6 +2573,7 @@ fn spawn_battle_hud(
             images,
             true,
             false,
+            false,
         )?;
         spawn_battle_hud_side(
             commands,
@@ -2511,26 +2583,34 @@ fn spawn_battle_hud(
             &battle.enemy_pokemon,
             BattleHpSide::Enemy,
             hp_tween.map(|tween| tween.enemy_pixels),
+            None,
         )?;
         return Ok(());
     }
-    let trainer_intro = matches!(battle.kind, RuntimeBattleKind::Trainer { .. })
-        && entry_messages_remaining >= 3;
     let trainer_enemy_pending = matches!(battle.kind, RuntimeBattleKind::Trainer { .. })
         && entry_messages_remaining >= 2;
     let player_pokemon_visible = battle.battle_type != "BATTLETYPE_TUTORIAL"
         && entry_messages_remaining == 0;
-    if !trainer_enemy_pending {
+    let party_hud_visible = match &battle.kind {
+        RuntimeBattleKind::Trainer { .. } => entry_messages_remaining >= 3 || trainer_exit_active,
+        RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+            if battle.battle_type == "BATTLETYPE_TUTORIAL" {
+                entry_messages_remaining > 0
+            } else {
+                entry_messages_remaining >= 2
+            }
+        }
+    };
+    if party_hud_visible {
         spawn_battle_hud_borders(
             commands,
             rendered_art,
             asset_root,
             images,
             true,
-            player_pokemon_visible,
+            true,
+            true,
         )?;
-    }
-    if entry_messages_remaining > 0 {
         spawn_battle_party_balls(
             commands,
             snapshot,
@@ -2538,6 +2618,16 @@ fn spawn_battle_hud(
             rendered_art,
             asset_root,
             images,
+        )?;
+    } else if !trainer_enemy_pending {
+        spawn_battle_hud_borders(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            true,
+            player_pokemon_visible,
+            false,
         )?;
     }
     if trainer_enemy_pending {
@@ -2559,37 +2649,42 @@ fn spawn_battle_hud(
         &battle.enemy_pokemon,
         BattleHpSide::Enemy,
         hp_tween.map(|tween| tween.enemy_pixels),
+        None,
     )?;
     if !player_pokemon_visible {
         return Ok(());
     }
-    let Some(active_index) = battle.active_player_party_index else {
-        return Ok(());
-    };
-    let Some(slot) = snapshot
+    let active_index = battle
+        .active_player_party_index
+        .context("visible player battle HUD requires an active party slot")?;
+    let slot = snapshot
         .party
         .slots
         .iter()
         .find(|slot| slot.index == active_index)
-    else {
-        return Ok(());
-    };
+        .with_context(|| format!("active player party slot {active_index} is absent from the HUD"))?;
+    let mut display_pokemon = slot.pokemon.clone();
+    if let Some(tween) = exp_tween {
+        display_pokemon.level = tween.level;
+    }
     spawn_battle_hud_side(
         commands,
         rendered_art,
         asset_root,
         images,
-        &slot.pokemon,
+        &display_pokemon,
         BattleHpSide::Player,
         hp_tween.map(|tween| tween.player_pixels),
+        hp_tween.map(|tween| tween.player_hp),
     )?;
     spawn_battle_exp_bar(
         commands,
-        &slot.pokemon,
+        &display_pokemon,
         growth_rates,
         rendered_art,
         asset_root,
         images,
+        exp_tween.map(|tween| tween.pixels),
     )?;
     Ok(())
 }
@@ -2606,7 +2701,7 @@ fn spawn_battle_party_balls(
     let tile_for = |pokemon: Option<&crate::core::models::Pokemon>| match pokemon {
         None => 3,
         Some(pokemon) if pokemon.hp == 0 => 2,
-        Some(pokemon) if pokemon.status.as_deref().is_some_and(|status| status != "NONE") => 1,
+        Some(pokemon) if battle_status_token(pokemon.status.as_deref()).is_some() => 1,
         Some(_) => 0,
     };
     let mut spawn = |frame_index: usize, tile_x: f32, tile_y: f32| {
@@ -2715,8 +2810,22 @@ fn spawn_battle_hud_borders(
     images: &mut Assets<Image>,
     enemy_visible: bool,
     player_visible: bool,
+    player_party_icons: bool,
 ) -> Result<()> {
-    let tiles = battle_hud_border_tiles(rendered_art, asset_root, images)?;
+    let player_party_corner = if player_party_icons {
+        Some(
+            battle_exp_bar_tiles(rendered_art, asset_root, images)?
+                .get(&0x5c)
+                .context("battle party HUD corner tile $5c was not loaded")?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let mut tiles = battle_hud_border_tiles(rendered_art, asset_root, images)?.clone();
+    if let Some(frame) = player_party_corner {
+        tiles.insert(0x5c, frame);
+    }
     let mut place = |tile_id: u8, tile_x: f32, tile_y: f32| -> Result<()> {
         let frame = tiles
             .get(&tile_id)
@@ -2749,10 +2858,10 @@ fn spawn_battle_hud_borders(
     }
 
     if player_visible {
-        // DrawPlayerHUD: two-tile right edge and a bottom run drawn right-to-left.
-        place(0x73, 18.0, 9.0)?;
+        // DrawPlayerHUD starts its border at (18,10); the HP bar contributes
+        // its own distinct end tile at (18,9).
         place(0x73, 18.0, 10.0)?;
-        place(0x77, 18.0, 11.0)?;
+        place(if player_party_icons { 0x5c } else { 0x77 }, 18.0, 11.0)?;
         for x in 10..18 {
             place(0x76, x as f32, 11.0)?;
         }
@@ -2870,9 +2979,12 @@ fn spawn_battle_exp_bar(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
+    fill_override: Option<u16>,
 ) -> Result<()> {
     const EXP_BAR_PIXELS: i32 = 64;
-    let fill_pixels = if pokemon.level >= 100 {
+    let fill_pixels = if let Some(fill_pixels) = fill_override {
+        i32::from(fill_pixels)
+    } else if pokemon.level >= 100 {
         0
     } else {
         let level = pokemon.level.clamp(1, 99);
@@ -3010,10 +3122,20 @@ fn spawn_battle_hud_side(
     pokemon: &crate::core::models::pokemon::Pokemon,
     side: BattleHpSide,
     hp_pixel_override: Option<u16>,
+    hp_value_override: Option<u16>,
 ) -> Result<()> {
-    let (name_tile_x, name_tile_y, level_tile_x, level_tile_y, hp_tile_x, hp_tile_y) = match side {
-        BattleHpSide::Enemy => (1.0, 0.0, 6.0, 1.0, 2.0, 2.0),
-        BattleHpSide::Player => (10.0, 7.0, 14.0, 8.0, 10.0, 9.0),
+    let (
+        name_tile_x,
+        name_tile_y,
+        level_tile_x,
+        level_tile_y,
+        status_tile_x,
+        status_tile_y,
+        hp_tile_x,
+        hp_tile_y,
+    ) = match side {
+        BattleHpSide::Enemy => (1.0, 0.0, 6.0, 1.0, 6.0, 1.0, 2.0, 2.0),
+        BattleHpSide::Player => (10.0, 7.0, 14.0, 8.0, 14.0, 8.0, 10.0, 9.0),
     };
     spawn_battle_hud_bitmap_text(
         commands,
@@ -3026,16 +3148,28 @@ fn spawn_battle_hud_side(
         3.7,
     );
     let status = battle_status_token(pokemon.status.as_deref());
+    if let Some(raw_status) = pokemon.status.as_deref() {
+        anyhow::ensure!(
+            status.is_some()
+                || ["", "OK", "NONE", "HEALTHY", "CONFUSION", "CNF"]
+                    .iter()
+                    .any(|token| raw_status.eq_ignore_ascii_case(token)),
+            "battle HUD has unknown status {raw_status} for {}",
+            pokemon.nickname
+        );
+    }
     let gender = crate::core::battle::turn::battle_pokemon_gender(pokemon);
     let level_or_status = status
         .map(str::to_string)
         .unwrap_or_else(|| format!("\u{e10a}{}", pokemon.level));
     // PrintPlayerHUD/DrawEnemyHUD decrement the level destination for a
     // genderless battler. Status text keeps the fixed three-tile position.
-    let level_or_status_tile_x = if status.is_none() && gender.is_none() {
-        level_tile_x - 1.0
+    let (level_or_status_tile_x, level_or_status_tile_y) = if status.is_some() {
+        (status_tile_x, status_tile_y)
+    } else if gender.is_none() {
+        (level_tile_x - 1.0, level_tile_y)
     } else {
-        level_tile_x
+        (level_tile_x, level_tile_y)
     };
     spawn_battle_hud_bitmap_text(
         commands,
@@ -3044,7 +3178,7 @@ fn spawn_battle_hud_side(
         images,
         &level_or_status,
         level_or_status_tile_x,
-        level_tile_y,
+        level_or_status_tile_y,
         3.7,
     );
     if let Some(gender) = gender {
@@ -3080,12 +3214,13 @@ fn spawn_battle_hud_side(
         hp_pixel_override,
     )?;
     if side == BattleHpSide::Player {
+        let displayed_hp = hp_value_override.unwrap_or(pokemon.hp);
         spawn_battle_hud_bitmap_text(
             commands,
             rendered_art,
             asset_root,
             images,
-            &format!("{:>3}/{:>3}", pokemon.hp.min(999), pokemon.max_hp.min(999)),
+            &format!("{:>3}/{:>3}", displayed_hp.min(999), pokemon.max_hp.min(999)),
             hp_tile_x + 1.0,
             hp_tile_y + 1.0,
             3.7,
@@ -3138,8 +3273,13 @@ fn spawn_battle_hud_hp_bar(
     hp_pixel_override: Option<u16>,
 ) -> Result<()> {
     let tiles = battle_hp_bar_tiles(rendered_art, asset_root, images)?;
-    let palette_pixels = battle_hud_hp_pixels(hp, max_hp);
-    let zone = visible_hp_zone(palette_pixels);
+    let fill_pixels = hp_pixel_override
+        .unwrap_or_else(|| battle_hud_hp_pixels(hp, max_hp))
+        .min(BATTLE_HUD_HP_BAR_LENGTH_PX);
+    // HPBarAnim_PaletteUpdate passes the currently drawn pixel length to
+    // SetHPPal.  The authoritative HP value is already committed while the
+    // bar drains, so deriving the palette from `hp` changes color too early.
+    let zone = visible_hp_zone(fill_pixels);
     for (offset, tile_id) in [0x60_u8, 0x61].into_iter().enumerate() {
         let frame = tiles
             .get(&(tile_id, zone))
@@ -3156,9 +3296,6 @@ fn spawn_battle_hud_hp_bar(
             BattleCommandMarker,
         ));
     }
-    let fill_pixels = hp_pixel_override
-        .unwrap_or_else(|| battle_hud_hp_pixels(hp, max_hp))
-        .min(BATTLE_HUD_HP_BAR_LENGTH_PX);
     let full_tiles = fill_pixels / SOURCE_TILE_SIZE as u16;
     let remainder = fill_pixels % SOURCE_TILE_SIZE as u16;
     for index in 0..BATTLE_HUD_HP_BAR_LENGTH_TILES as u16 {
@@ -3169,9 +3306,11 @@ fn spawn_battle_hud_hp_bar(
         } else {
             0x62
         };
-        let Some(frame) = tiles.get(&(tile_id, zone)) else {
-            continue;
-        };
+        let frame = tiles.get(&(tile_id, zone)).with_context(|| {
+            format!(
+                "battle HP fill tile ${tile_id:02x} for palette zone {zone} was not loaded"
+            )
+        })?;
         let (x, y) = battle_hud_tile_origin(tile_x + 2.0 + index as f32, tile_y);
         commands.spawn((
             SpriteBundle {
@@ -3185,22 +3324,25 @@ fn spawn_battle_hud_hp_bar(
         ));
     }
     let end_tile = if side == BattleHpSide::Player { 0x6c } else { 0x6b };
-    if let Some(frame) = tiles.get(&(end_tile, zone)) {
-        let (x, y) = battle_hud_tile_origin(
-            tile_x + 2.0 + BATTLE_HUD_HP_BAR_LENGTH_TILES,
-            tile_y,
-        );
-        commands.spawn((
-            SpriteBundle {
-                texture: frame.handle.clone(),
-                sprite: Sprite { custom_size: Some(frame.size), ..default() },
-                transform: Transform::from_xyz(x, y, 3.62),
-                ..default()
-            },
-            BattleHudMarker,
-            BattleCommandMarker,
-        ));
-    }
+    let frame = tiles.get(&(end_tile, zone)).with_context(|| {
+        format!(
+            "battle HP end tile ${end_tile:02x} for palette zone {zone} was not loaded"
+        )
+    })?;
+    let (x, y) = battle_hud_tile_origin(
+        tile_x + 2.0 + BATTLE_HUD_HP_BAR_LENGTH_TILES,
+        tile_y,
+    );
+    commands.spawn((
+        SpriteBundle {
+            texture: frame.handle.clone(),
+            sprite: Sprite { custom_size: Some(frame.size), ..default() },
+            transform: Transform::from_xyz(x, y, 3.62),
+            ..default()
+        },
+        BattleHudMarker,
+        BattleCommandMarker,
+    ));
     Ok(())
 }
 
@@ -3307,8 +3449,16 @@ fn battle_hud_hp_pixels(hp: u16, max_hp: u16) -> u16 {
         return 0;
     }
     let clamped_hp = hp.min(max_hp);
-    let pixels = ((u32::from(clamped_hp) * u32::from(BATTLE_HUD_HP_BAR_LENGTH_PX))
-        / u32::from(max_hp)) as u16;
+    let mut product = u32::from(clamped_hp) * u32::from(BATTLE_HUD_HP_BAR_LENGTH_PX);
+    let mut divisor = u32::from(max_hp);
+    // ComputeHPBarPixels has only an eight-bit hardware divisor. When the
+    // maximum HP has a high byte, the cartridge truncates both operands by
+    // two bits before dividing.
+    if max_hp > u16::from(u8::MAX) {
+        product >>= 2;
+        divisor >>= 2;
+    }
+    let pixels = (product / divisor) as u16;
     pixels.max(1).min(BATTLE_HUD_HP_BAR_LENGTH_PX)
 }
 
@@ -3320,7 +3470,11 @@ fn advance_visible_hp_pixels(current: &mut u16, target: u16, frames_until_step: 
         *frames_until_step -= 1;
         return false;
     }
-    *frames_until_step = 2;
+    // HPBarAnim_BGMapUpdate holds an ordinary player/enemy redraw for two
+    // LCD frames total. This countdown is consumed on subsequent updates, so
+    // one deferred update produces the source two-frame pixel spacing; using
+    // 2 here made every pixel last three frames.
+    *frames_until_step = 1;
     if *current < target {
         *current += 1;
     } else {
@@ -3329,15 +3483,40 @@ fn advance_visible_hp_pixels(current: &mut u16, target: u16, frames_until_step: 
     true
 }
 
+fn advance_visible_player_hp_number(tween: &mut VisibleBattleHpTween) {
+    if tween.player_pixels == tween.player_target_pixels {
+        tween.player_hp = tween.player_target_hp;
+        return;
+    }
+    if tween.player_hp < tween.player_target_hp {
+        while tween.player_hp < tween.player_target_hp {
+            tween.player_hp += 1;
+            if battle_hud_hp_pixels(tween.player_hp, tween.player_max_hp) >= tween.player_pixels {
+                break;
+            }
+        }
+    } else {
+        while tween.player_hp > tween.player_target_hp {
+            tween.player_hp -= 1;
+            if battle_hud_hp_pixels(tween.player_hp, tween.player_max_hp) <= tween.player_pixels {
+                break;
+            }
+        }
+    }
+}
+
 fn visible_battle_hp_tween_active(tween: &VisibleBattleHpTween) -> bool {
     tween.player_pixels != tween.player_target_pixels
         || tween.enemy_pixels != tween.enemy_target_pixels
 }
 
 fn visible_hp_zone(pixels: u16) -> u8 {
-    if pixels < ((u32::from(BATTLE_HUD_HP_BAR_LENGTH_PX) * 21) / 100) as u16 {
+    let red_threshold =
+        ((u32::from(BATTLE_HUD_HP_BAR_LENGTH_PX) * 21) / 100) as u16;
+    let yellow_threshold = BATTLE_HUD_HP_BAR_LENGTH_PX / 2;
+    if pixels < red_threshold {
         0
-    } else if pixels < BATTLE_HUD_HP_BAR_LENGTH_PX / 2 {
+    } else if pixels < yellow_threshold {
         1
     } else {
         2
@@ -3353,13 +3532,34 @@ fn battle_hud_hp_color(fill_pixels: u16) -> Color {
 }
 
 fn battle_status_token(status: Option<&str>) -> Option<&'static str> {
-    match status? {
-        "POISON" | "BAD_POISON" => Some("PSN"),
-        "SLEEP" => Some("SLP"),
-        "PARALYSIS" => Some("PAR"),
-        "BURN" => Some("BRN"),
-        "FREEZE" => Some("FRZ"),
-        _ => None,
+    let status = status?;
+    if ["POISON", "BAD_POISON", "BAD POISON", "PSN"]
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        Some("PSN")
+    } else if ["SLEEP", "SLP"]
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        Some("SLP")
+    } else if ["PARALYSIS", "PAR"]
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        Some("PAR")
+    } else if ["BURN", "BRN"]
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        Some("BRN")
+    } else if ["FREEZE", "FRZ"]
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        Some("FRZ")
+    } else {
+        None
     }
 }
 
@@ -3367,15 +3567,19 @@ fn party_status_token(pokemon: &crate::core::models::pokemon::Pokemon) -> &'stat
     if pokemon.hp == 0 {
         return "FNT";
     }
-    match pokemon.status.as_deref() {
-        Some("POISON" | "BAD_POISON") => "PSN",
-        Some("SLEEP") => "SLP",
-        Some("PARALYSIS") => "PAR",
-        Some("BURN") => "BRN",
-        Some("FREEZE") => "FRZ",
-        Some("CONFUSION") => "CNF",
-        _ => "OK",
-    }
+    let Some(status) = pokemon.status.as_deref() else {
+        return "OK";
+    };
+    battle_status_token(Some(status)).unwrap_or_else(|| {
+        if ["CONFUSION", "CNF"]
+            .iter()
+            .any(|candidate| status.eq_ignore_ascii_case(candidate))
+        {
+            "CNF"
+        } else {
+            "OK"
+        }
+    })
 }
 
 fn spawn_visible_move_animation_overlay(
@@ -5105,6 +5309,7 @@ fn spawn_visible_move_animation_objects(
             animation_label: "BattleAnim_SendOutMon.Shiny".to_string(),
             player_move: send_out.side == crate::core::battle::turn::BattleSide::Player,
             started: true,
+            waiting_for_hp: false,
             frame: sparkle_frame,
             total_frames: u16::from(VisibleSendOutAnimation::SHINY_FRAMES),
             sound_events: Vec::new(),
@@ -5123,6 +5328,8 @@ fn spawn_visible_move_animation_objects(
                 })
                 .collect(),
             bg_events: Vec::new(),
+            actor_species_override: None,
+            actor_shiny_override: None,
         };
         &synthetic_shiny
     } else if let Some(capture) = runtime_shell
@@ -5180,6 +5387,7 @@ fn spawn_visible_move_animation_objects(
             animation_label: "BattleAnim_ThrowPokeBall".to_string(),
             player_move: true,
             started: true,
+            waiting_for_hp: false,
             frame: capture.frame,
             total_frames: capture.total_frames(),
             sound_events: Vec::new(),
@@ -5188,6 +5396,8 @@ fn spawn_visible_move_animation_objects(
             next_cry_event: 0,
             object_events,
             bg_events: Vec::new(),
+            actor_species_override: None,
+            actor_shiny_override: None,
         };
         &synthetic_shiny
     } else {
@@ -5209,13 +5419,11 @@ fn spawn_visible_move_animation_objects(
             let VisibleMoveObjectCommand::Spawn { object_id, x, y, param } = &spawn.command else {
                 continue;
             };
-            let Some(object) = bundle.get("objects").and_then(|objects| objects.get(object_id)) else {
-                continue;
-            };
-            let function = object
-                .get("function")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("BATTLE_ANIM_FUNC_NULL");
+            let object = bundle
+                .get("objects")
+                .and_then(|objects| objects.get(object_id))
+                .with_context(|| format!("battle animation object {object_id} is missing from the runtime bundle"))?;
+            let function = battle_anim_object_function(object_id, object)?;
             let age = event.frame.saturating_sub(*spawn_frame);
             let state_age = event.frame.saturating_sub(*state_frame);
             let deleted = if function == "BATTLE_ANIM_FUNC_NULL" {
@@ -5266,6 +5474,51 @@ fn spawn_visible_move_animation_objects(
             }
         }
     }
+    // Replaying object commands reconstructs slot ownership, but an object
+    // may expire on a frame with no subsequent command. Crystal updates all
+    // ten animation structs every frame, so apply the same lifetime/function
+    // deletion check at the actual rendered age before collecting sprites.
+    for slot in &mut slots {
+        let Some((spawn, spawn_frame, state, state_frame)) = slot.as_ref() else {
+            continue;
+        };
+        let VisibleMoveObjectCommand::Spawn { object_id, x, y, param } = &spawn.command else {
+            continue;
+        };
+        let object = bundle
+            .get("objects")
+            .and_then(|objects| objects.get(object_id))
+            .with_context(|| {
+                format!("battle animation object {object_id} is missing from the runtime bundle")
+            })?;
+        let function = battle_anim_object_function(object_id, object)?;
+        let age = animation.frame.saturating_sub(*spawn_frame);
+        let state_age = animation.frame.saturating_sub(*state_frame);
+        let deleted = if function == "BATTLE_ANIM_FUNC_NULL" {
+            object
+                .get("frameset")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|frameset| {
+                    visible_null_battle_animation_object_lifetime(&bundle, frameset)
+                })
+                .is_some_and(|lifetime| age >= lifetime)
+        } else {
+            visible_battle_anim_object_position(
+                function,
+                i32::from(*x),
+                i32::from(*y),
+                *param,
+                age,
+                *state,
+                state_age,
+                animation.player_move,
+            )
+            .is_none()
+        };
+        if deleted {
+            *slot = None;
+        }
+    }
     let active = slots
         .into_iter()
         .flatten()
@@ -5291,10 +5544,7 @@ fn spawn_visible_move_animation_objects(
         else {
             anyhow::bail!("battle animation object {object_id} is missing from the runtime bundle");
         };
-        let function = object
-            .get("function")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("BATTLE_ANIM_FUNC_NULL");
+        let function = battle_anim_object_function(object_id, object)?;
         let VisibleMoveObjectCommand::Spawn { param, .. } = &event.command else {
             continue;
         };
@@ -5374,9 +5624,15 @@ fn spawn_visible_move_animation_objects(
             palette_override,
             images,
         )?;
-        let flags = object.get("flags").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let flags = object
+            .get("flags")
+            .and_then(serde_json::Value::as_i64)
+            .with_context(|| format!("battle animation object {object_id} has no numeric flags"))?;
         let relative = flags & 1 != 0;
-        let fix_y = object.get("fix_y").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let fix_y = object
+            .get("fix_y")
+            .and_then(serde_json::Value::as_i64)
+            .with_context(|| format!("battle animation object {object_id} has no numeric fix_y"))?;
         let dynamic_fix_y = if matches!(
             function,
             "BATTLE_ANIM_FUNC_LEECH_SEED" | "BATTLE_ANIM_FUNC_SPIKES"
@@ -5430,6 +5686,21 @@ fn spawn_visible_move_animation_objects(
     Ok(())
 }
 
+fn battle_anim_object_function<'a>(
+    object_id: &str,
+    object: &'a serde_json::Value,
+) -> Result<&'a str> {
+    let function = object
+        .get("function")
+        .with_context(|| format!("battle animation object {object_id} has no function field"))?;
+    if function.is_null() {
+        return Ok("BATTLE_ANIM_FUNC_NULL");
+    }
+    function
+        .as_str()
+        .with_context(|| format!("battle animation object {object_id} has a non-string function"))
+}
+
 fn battle_anim_render_bundle(
     rendered_art: &mut RenderedTilesetArt,
     snapshot: &RuntimeShellSnapshot,
@@ -5478,7 +5749,7 @@ fn battle_anim_frame_at_age<'a>(
                 let duration = frame
                     .get("duration")
                     .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
+                    .with_context(|| format!("battle animation frame {frameset_name}[{index}] has no duration"))?
                     .max(1) as u32;
                 if remaining < duration {
                     return Ok(Some((index, frame)));
@@ -5492,7 +5763,7 @@ fn battle_anim_frame_at_age<'a>(
                 let duration = frame
                     .get("duration")
                     .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
+                    .with_context(|| format!("battle animation wait {frameset_name}[{index}] has no duration"))?
                     .max(1) as u32;
                 if remaining < duration {
                     return Ok(last_frame);
@@ -5534,10 +5805,19 @@ fn battle_anim_rendered_frame(
     palette_override: Option<&str>,
     images: &mut Assets<Image>,
 ) -> Result<BattleAnimRenderedFrame> {
-    let flags = object.get("flags").and_then(serde_json::Value::as_i64).unwrap_or(0);
-    let frame_xflip = frame.get("xflip").and_then(serde_json::Value::as_bool).unwrap_or(false)
+    let flags = object
+        .get("flags")
+        .and_then(serde_json::Value::as_i64)
+        .with_context(|| format!("battle animation object {object_id} has no numeric flags"))?;
+    let frame_xflip = frame
+        .get("xflip")
+        .and_then(serde_json::Value::as_bool)
+        .with_context(|| format!("battle animation frame {frameset_name}[{frame_index}] has no xflip"))?
         ^ (enemy_move && !suppress_enemy_flips && flags & 0x20 != 0);
-    let frame_yflip = frame.get("yflip").and_then(serde_json::Value::as_bool).unwrap_or(false)
+    let frame_yflip = frame
+        .get("yflip")
+        .and_then(serde_json::Value::as_bool)
+        .with_context(|| format!("battle animation frame {frameset_name}[{frame_index}] has no yflip"))?
         ^ (enemy_move && !suppress_enemy_flips && flags & 0x40 != 0)
         ^ extra_yflip;
     let cache_key = format!(
@@ -5566,7 +5846,7 @@ fn battle_anim_rendered_frame(
         let tile_offset = oam
             .get("tile_offset")
             .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
+            .with_context(|| format!("battle animation OAM set {oam_name} has no tile offset"))?;
         let base_frameset_name = object
             .get("frameset")
             .and_then(serde_json::Value::as_str)
@@ -5579,18 +5859,34 @@ fn battle_anim_rendered_frame(
         // OAM tile offsets remain relative to the graphics block loaded for
         // the object's declared frameset. A runtime frameset override changes
         // OAM selection, not the base VRAM address.
-        let base_offset = base_frames
-            .iter()
-            .filter_map(|entry| entry.get("oam_set").and_then(serde_json::Value::as_str))
-            .filter_map(|name| {
-                bundle
-                    .get("oam_sets")?
-                    .get(name)?
-                    .get("tile_offset")?
-                    .as_i64()
-            })
-            .min()
-            .unwrap_or(0);
+        let mut base_offset = None;
+        for (base_index, base_frame) in base_frames.iter().enumerate() {
+            let Some(base_oam_name) = base_frame
+                .get("oam_set")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let offset = bundle
+                .get("oam_sets")
+                .and_then(|sets| sets.get(base_oam_name))
+                .with_context(|| {
+                    format!(
+                        "battle animation base frame {base_frameset_name}[{base_index}] references missing OAM set {base_oam_name}"
+                    )
+                })?
+                .get("tile_offset")
+                .and_then(serde_json::Value::as_i64)
+                .with_context(|| {
+                    format!(
+                        "battle animation base OAM set {base_oam_name} has no tile offset"
+                    )
+                })?;
+            base_offset = Some(base_offset.map_or(offset, |current: i64| current.min(offset)));
+        }
+        let base_offset = base_offset.with_context(|| {
+            format!("battle animation base frameset {base_frameset_name} has no OAM tile offset")
+        })?;
         let gfx_id = object
             .get("gfx_id")
             .and_then(serde_json::Value::as_str)
@@ -5620,12 +5916,11 @@ fn battle_anim_rendered_frame(
         if tile_data.len() % 16 != 0 {
             anyhow::bail!("battle animation graphics {} are not 2bpp tile aligned", raw_path.display());
         }
-        let palette_name = match palette_override.unwrap_or_else(|| {
-            object
-                .get("palette")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-        }) {
+        let declared_palette = object
+            .get("palette")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("battle animation object {object_id} has no palette"))?;
+        let palette_name = match palette_override.unwrap_or(declared_palette) {
             "PAL_BATTLE_OB_GRAY" | "PAL_BATTLE_OB_ENEMY" => "gray",
             "PAL_BATTLE_OB_YELLOW" => "yellow",
             "PAL_BATTLE_OB_RED" => "red",
@@ -5641,13 +5936,28 @@ fn battle_anim_rendered_frame(
         let mut max_x = 0_i32;
         let mut max_y = 0_i32;
         for entry in entries {
-            let entry_x = entry.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0) as i32;
-            let entry_y = entry.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0) as i32;
+            let entry_x = entry
+                .get("x")
+                .and_then(serde_json::Value::as_i64)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without x"))? as i32;
+            let entry_y = entry
+                .get("y")
+                .and_then(serde_json::Value::as_i64)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without y"))? as i32;
             let x = if frame_xflip { -(entry_x + 8) } else { entry_x };
             let y = if frame_yflip { -(entry_y + 8) } else { entry_y };
-            let entry_xflip = entry.get("xflip").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            let entry_yflip = entry.get("yflip").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            let tile_id = entry.get("tile_id").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let entry_xflip = entry
+                .get("xflip")
+                .and_then(serde_json::Value::as_bool)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without xflip"))?;
+            let entry_yflip = entry
+                .get("yflip")
+                .and_then(serde_json::Value::as_bool)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without yflip"))?;
+            let tile_id = entry
+                .get("tile_id")
+                .and_then(serde_json::Value::as_i64)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without tile_id"))?;
             let tile_index = tile_offset + tile_id - base_offset;
             let tile_start = usize::try_from(tile_index)
                 .ok()
@@ -5774,11 +6084,13 @@ fn spawn_battle_command_menu(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
+    require_bitmap_font_art(rendered_art, asset_root, images)?;
     if runtime_shell
         .visible_capture_animation
         .as_ref()
         .is_some_and(|animation| animation.started)
+        || runtime_shell.visible_frontpic_animation.is_some()
         || runtime_shell
             .visible_move_animations
             .front()
@@ -5789,8 +6101,51 @@ fn spawn_battle_command_menu(
         .battle_hp_tween
         .as_ref()
         .is_some_and(visible_battle_hp_tween_active)
+        || runtime_shell
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
     {
-        return;
+        return Ok(());
+    }
+    if battle_window_frame_art(rendered_art, asset_root, images).is_none() {
+        anyhow::bail!(
+            "{}",
+            rendered_art
+                .window_frame_error
+                .clone()
+                .unwrap_or_else(|| "battle window frame art is unavailable".to_string())
+        );
+    }
+    if let Some(stats) = runtime_shell
+        .battle_level_stats
+        .front()
+        .filter(|stats| stats.active)
+    {
+        spawn_battle_window(
+            commands, rendered_art, asset_root, images, 9.0, 0.0, 11.0, 12.0, 4.0,
+        );
+        for (index, (label, value)) in [
+            ("ATTACK", stats.attack),
+            ("DEFENSE", stats.defense),
+            ("SPCL.ATK", stats.special_attack),
+            ("SPCL.DEF", stats.special_defense),
+            ("SPEED", stats.speed),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let label_row = 1.0 + index as f32 * 2.0;
+            let (x, y) = battle_hud_tile_origin(11.0, label_row);
+            spawn_battle_command_bitmap_text(
+                commands, rendered_art, asset_root, images, label, x, y, 4.2,
+            );
+            let (x, y) = battle_hud_tile_origin(15.0, label_row + 1.0);
+            spawn_battle_command_bitmap_text(
+                commands, rendered_art, asset_root, images, &format!("{:>3}", value), x, y, 4.2,
+            );
+        }
+        return Ok(());
     }
     if let Some(message) = runtime_shell.battle_messages.front() {
         spawn_battle_window(
@@ -5804,8 +6159,13 @@ fn spawn_battle_command_menu(
             BATTLE_TEXT_BOX_HEIGHT_TILES,
             3.5,
         );
-        for (line_index, line) in wrap_boot_text_for_box(message, 18, 4).iter().enumerate() {
-            let (x, y) = battle_hud_tile_origin(1.0, 13.0 + line_index as f32);
+        for (line_index, line) in visible_battle_message_lines(runtime_shell, message)
+            .iter()
+            .enumerate()
+        {
+            // SpeechTextbox prints at TEXTBOX_INNERY and INNERY + 2. Once a
+            // third line begins, TextScroll moves the previous baseline up.
+            let (x, y) = battle_hud_tile_origin(1.0, 14.0 + line_index as f32 * 2.0);
             spawn_battle_command_bitmap_text(
                 commands,
                 rendered_art,
@@ -5817,41 +6177,46 @@ fn spawn_battle_command_menu(
                 3.8,
             );
         }
-        let (x, y) = battle_hud_tile_origin(18.0, 16.0);
-        spawn_battle_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            "▼",
-            x,
-            y,
-            3.85,
-        );
-        return;
+        if visible_battle_message_is_complete(runtime_shell, message)
+            && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+        {
+            let (x, y) = battle_hud_tile_origin(18.0, 16.0);
+            spawn_battle_command_bitmap_text(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                "▼",
+                x,
+                y,
+                3.85,
+            );
+        }
+        return Ok(());
+    }
+    if snapshot.pending_move_learn.is_some() {
+        spawn_battle_pending_move_learn_screen(
+            commands, snapshot, runtime_shell, rendered_art, asset_root, images,
+        )?;
+        return Ok(());
     }
     if runtime_shell.battle_pack_target_mode == Some(BattlePackTargetMode::PartyPokemon)
         || (runtime_shell.battle_pack_target_mode == Some(BattlePackTargetMode::PartyMove)
             && runtime_shell.party_move_cursor.is_none())
     {
-        if let Err(error) = spawn_battle_party_menu(
+        spawn_battle_party_menu(
             commands, snapshot, runtime_shell, rendered_art, asset_root, images,
-        ) {
-            let (x, y) = battle_hud_tile_origin(1.0, 15.0);
-            spawn_battle_command_bitmap_text(
-                commands, rendered_art, asset_root, images,
-                &compact_scene_label(&format!("INVALID PARTY {error:#}"), 18), x, y, 4.2,
-            );
-        }
-        return;
+        )
+        ?;
+        return Ok(());
     }
     if runtime_shell.battle_pack_target_mode == Some(BattlePackTargetMode::PartyMove)
         && runtime_shell.party_move_cursor.is_some()
     {
         spawn_battle_pack_move_target_screen(
             commands, snapshot, runtime_shell, rendered_art, asset_root, images,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     if runtime_shell.battle_pack_target_mode.is_none()
         && (runtime_shell.bag_cursor.is_some()
@@ -5861,8 +6226,8 @@ fn spawn_battle_command_menu(
     {
         spawn_battle_pack_screen(
             commands, snapshot, runtime_shell, rendered_art, asset_root, images,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     if runtime_shell.battle_move_cursor.is_some() {
         spawn_battle_move_menu(
@@ -5873,8 +6238,8 @@ fn spawn_battle_command_menu(
             rendered_art,
             asset_root,
             images,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     if runtime_shell.battle_party_summary_open {
         spawn_field_party_summary_screen(
@@ -5884,59 +6249,50 @@ fn spawn_battle_command_menu(
             rendered_art,
             asset_root,
             images,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     if runtime_shell.battle_switch_cursor.is_some() {
-        if let Err(error) = spawn_battle_party_menu(
+        spawn_battle_party_menu(
             commands,
             snapshot,
             runtime_shell,
             rendered_art,
             asset_root,
             images,
-        ) {
-            let (x, y) = battle_hud_tile_origin(1.0, 15.0);
-            spawn_battle_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                &compact_scene_label(&format!("INVALID PARTY {error:#}"), 18),
-                x,
-                y,
-                4.2,
-            );
-        }
-        return;
+        )
+        ?;
+        return Ok(());
     }
-    let entries = visible_battle_command_menu_entries(snapshot, runtime_shell, battle);
+    let entries = visible_battle_command_menu_entries(snapshot, runtime_shell, battle)?;
     if entries.is_empty() {
-        return;
+        return Ok(());
     }
     if runtime_shell.battle_faint_prompt_cursor.is_some()
         || runtime_shell.battle_shift_prompt_cursor.is_some()
     {
         spawn_battle_yes_no_prompt(
             commands,
+            runtime_shell,
             rendered_art,
             asset_root,
             images,
             &entries,
         );
-        return;
+        return Ok(());
     }
     if battle_command_entries_are_main_menu(&entries) {
         spawn_battle_main_command_menu(
             commands,
             snapshot,
+            runtime_shell,
             battle,
             rendered_art,
             asset_root,
             images,
             &entries,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     spawn_battle_window(
         commands,
@@ -5953,7 +6309,10 @@ fn spawn_battle_command_menu(
     for (index, entry) in entries.iter().enumerate() {
         let (tile_x, tile_y) = battle_submenu_entry_tile(index, two_columns);
         let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
-        let display_entry = compact_scene_label(entry, if two_columns { 9 } else { 18 });
+        let display_entry = compact_scene_label(
+            &animated_battle_cursor_entry(runtime_shell, entry),
+            if two_columns { 9 } else { 18 },
+        );
         spawn_battle_command_bitmap_text(
             commands,
             rendered_art,
@@ -5965,6 +6324,152 @@ fn spawn_battle_command_menu(
             3.8,
         );
     }
+    Ok(())
+}
+
+fn spawn_battle_pending_move_learn_screen(
+    commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let pending = snapshot
+        .pending_move_learn
+        .as_ref()
+        .context("battle move-learning screen has no pending move")?;
+    let pending_move = snapshot
+        .moves
+        .iter()
+        .find(|move_data| move_data.move_id == pending.learned_move.name)
+        .with_context(|| {
+            format!(
+                "battle move-learning metadata {} is missing",
+                pending.learned_move.name
+            )
+        })?;
+    let move_name = pending_move.name.replace('_', " ");
+    let slot = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == pending.party_index)
+        .with_context(|| {
+            format!(
+                "battle move-learning party slot {} is missing",
+                pending.party_index
+            )
+        })?;
+    for learned in &slot.pokemon.moves {
+        snapshot
+            .moves
+            .iter()
+            .find(|move_data| move_data.move_id == learned.name)
+            .with_context(|| {
+                format!("battle move-forget metadata {} is missing", learned.name)
+            })?;
+    }
+
+    if runtime_shell.move_learn_forget_menu_open {
+        let option_count = slot.pokemon.moves.len() + 1;
+        let selected = strict_readonly_cursor_index(
+            &runtime_shell.party_move_cursor,
+            &party_move_cursor_surface_id(pending.party_index),
+            option_count,
+        )
+        .context("battle move-forget screen has no valid cursor")?;
+        commands.spawn((
+            SpriteBundle {
+                sprite: Sprite { color: Color::rgb(1.0, 1.0, 1.0), custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)), ..default() },
+                transform: Transform::from_xyz(0.0, 0.0, 3.4),
+                ..default()
+            },
+            BattleCommandMarker,
+        ));
+        for (line_index, line) in ["Which move should", "be forgotten?"].iter().enumerate() {
+            let (x, y) = battle_hud_tile_origin(1.0, 1.0 + line_index as f32);
+            spawn_battle_command_bitmap_text(
+                commands, rendered_art, asset_root, images, line, x, y, 3.8,
+            );
+        }
+        for (index, learned) in slot.pokemon.moves.iter().enumerate().take(4) {
+            let row = 3.0 + index as f32 * 2.0;
+            let (x, y) = battle_hud_tile_origin(1.0, row);
+            spawn_battle_command_bitmap_text(
+                commands, rendered_art, asset_root, images,
+                &format!(
+                    "{}{}",
+                    if selected == index { battle_cursor_glyph(runtime_shell) } else { " " },
+                    battle_move_display_name(snapshot, &learned.name),
+                ), x, y, 3.8,
+            );
+            let (x, y) = battle_hud_tile_origin(11.0, row + 1.0);
+            spawn_battle_command_bitmap_text(commands, rendered_art, asset_root, images, &visible_move_pp_text(snapshot, learned), x, y, 3.8);
+        }
+        let (x, y) = battle_hud_tile_origin(1.0, 12.0);
+        spawn_battle_command_bitmap_text(
+            commands, rendered_art, asset_root, images,
+            &format!(
+                "{}CANCEL",
+                if selected == slot.pokemon.moves.len() { battle_cursor_glyph(runtime_shell) } else { " " },
+            ), x, y, 3.8,
+        );
+        let (x, y) = battle_hud_tile_origin(1.0, 15.0);
+        spawn_battle_command_bitmap_text(commands, rendered_art, asset_root, images, &format!("Trying to learn {move_name}."), x, y, 3.8);
+        return Ok(());
+    }
+
+    spawn_battle_window(
+        commands, rendered_art, asset_root, images,
+        BATTLE_TEXT_BOX_LEFT_TILE, BATTLE_TEXT_BOX_TOP_TILE,
+        BATTLE_TEXT_BOX_WIDTH_TILES, BATTLE_TEXT_BOX_HEIGHT_TILES, 3.5,
+    );
+    let prompt = match runtime_shell.move_learn_decision {
+        Some(VisibleTmHmDecision::ForgetMove) => format!("Delete a move to make room\nfor {move_name}?"),
+        Some(VisibleTmHmDecision::StopLearning) => format!("Stop learning {move_name}?"),
+        None => format!(
+            "But {} can't learn more\nthan four moves.\nDelete an older move to\nmake room for {move_name}?",
+            slot.pokemon.nickname
+        ),
+    };
+    for (line_index, line) in wrap_boot_text_for_box(&prompt, 18, 4).iter().enumerate() {
+        let (x, y) = battle_hud_tile_origin(1.0, 13.0 + line_index as f32);
+        spawn_battle_command_bitmap_text(commands, rendered_art, asset_root, images, line, x, y, 3.8);
+    }
+    if runtime_shell.move_learn_decision_cursor.is_some() {
+        let selected = strict_readonly_cursor_index(
+            &runtime_shell.move_learn_decision_cursor,
+            "move-learn:decision",
+            2,
+        )
+        .context("battle move-learning decision cursor is invalid")?;
+        spawn_battle_window(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            FIELD_YES_NO_LEFT_TILE,
+            FIELD_YES_NO_TOP_TILE,
+            FIELD_YES_NO_WIDTH_TILES,
+            FIELD_YES_NO_HEIGHT_TILES,
+            4.0,
+        );
+        for (index, label) in ["YES", "NO"].iter().enumerate() {
+            let (x, y) = battle_hud_tile_origin(
+                FIELD_YES_NO_LEFT_TILE,
+                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+            );
+            spawn_battle_command_bitmap_text(
+                commands, rendered_art, asset_root, images,
+                &format!(
+                    "{}{label}",
+                    if selected == index { battle_cursor_glyph(runtime_shell) } else { " " },
+                ), x, y, 4.2,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn spawn_visible_capture_animation(
@@ -5984,7 +6489,7 @@ fn spawn_visible_capture_animation(
     };
     if !animation.blocked {
         let master_ball = animation.ball_id.eq_ignore_ascii_case("MASTER_BALL");
-        let drop_start = if master_ball { 164 } else { 92 };
+        let _drop_start = if master_ball { 164 } else { 92 };
         // BreakFree sets the retained ball directly to stage 11 before its
         // poof and ENTER_MON wait, which deinitializes it immediately.
         if !animation.caught
@@ -6007,16 +6512,15 @@ fn spawn_visible_capture_animation(
         (x as f32, y as f32)
     } else if animation.frame < 36 {
         let master_ball = animation.ball_id.eq_ignore_ascii_case("MASTER_BALL");
-        let Some((x, y)) = visible_capture_object_position(
+        let (x, y) = visible_capture_object_position(
             if master_ball { 64 } else { 68 },
             92,
             if master_ball { 0x20 } else { 0x40 },
             0x88,
             animation.frame,
             false,
-        ) else {
-            unreachable!("ordinary Poké Ball throw object cannot deinitialize during flight")
-        };
+        )
+        .context("ordinary Poké Ball throw deinitialized during its flight")?;
         (x as f32, y as f32)
     } else if animation.frame < 68 {
         // The second object is forced into Poké Ball stage 7. Stage 8 uses a
@@ -6257,23 +6761,16 @@ fn spawn_visible_fishing_animation(
         },
         PlayerFacingMarker,
     ));
-    if matches!(animation.phase, VisibleFishingPhase::Hook | VisibleFishingPhase::Pause) {
+    if animation.phase == VisibleFishingPhase::Pause {
         let shock = emote_frame_for_art(rendered_art, asset_root, "EMOTE_SHOCK", images)
             .context("required fishing bite emote could not be rendered")?;
-        let bounce = if animation.phase == VisibleFishingPhase::Hook
-            && (animation.frame / 4) % 2 == 0
-        {
-            TILE_SIZE * 0.18
-        } else {
-            0.0
-        };
         commands.spawn((
             SpriteBundle {
                 texture: shock.handle,
                 sprite: Sprite { custom_size: Some(shock.size), ..default() },
                 transform: Transform::from_xyz(
                     player_x,
-                    player_y + TILE_SIZE * 1.35 + bounce,
+                    player_y + TILE_SIZE * 1.35,
                     2.9,
                 ),
                 ..default()
@@ -6521,7 +7018,7 @@ fn spawn_battle_pack_screen(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     let (item_ids, cursor, surface_id, pocket_label, show_quantity) =
         if runtime_shell.ball_cursor.is_some() {
             (carried_ball_item_ids(snapshot), &runtime_shell.ball_cursor, "bag:balls", "BALL", true)
@@ -6547,9 +7044,8 @@ fn spawn_battle_pack_screen(
             (carried_battle_non_ball_item_ids(snapshot), &runtime_shell.bag_cursor, "battle:bag-items", "ITEMS", true)
         };
     let row_count = field_pack_selectable_count(item_ids.len());
-    let Some(selected) = strict_readonly_cursor_index(cursor, surface_id, row_count) else {
-        return;
-    };
+    let selected = strict_readonly_cursor_index(cursor, surface_id, row_count)
+        .with_context(|| format!("battle pack surface {surface_id} has no valid cursor"))?;
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -6590,16 +7086,31 @@ fn spawn_battle_pack_screen(
             continue;
         }
         let item_id = &item_ids[index];
+        let item = snapshot
+            .items
+            .iter()
+            .find(|item| item.item_id == *item_id)
+            .with_context(|| format!("battle PACK item {item_id} is missing"))?;
         spawn_battle_command_bitmap_text(
             commands, rendered_art, asset_root, images,
-            &format!("{}{}", if index == selected { ">" } else { " " }, compact_scene_label(&item_display_name(snapshot, item_id), 8)),
+            &format!(
+                "{}{}",
+                if index == selected { ">" } else { " " },
+                compact_scene_label(&item.name.replace('_', " "), 8)
+            ),
             x, y, 3.8,
         );
         if show_quantity {
-            let quantity = carried_item_quantity(snapshot, item_id).unwrap_or_else(|| {
-                snapshot.bag.tm_hm.iter().find(|item| item.item_id == *item_id)
-                    .map(|item| item.quantity).unwrap_or(0)
-            });
+            let quantity = carried_item_quantity(snapshot, item_id)
+                .or_else(|| {
+                    snapshot
+                        .bag
+                        .tm_hm
+                        .iter()
+                        .find(|item| item.item_id == *item_id)
+                        .map(|item| item.quantity)
+                })
+                .with_context(|| format!("battle pack item {item_id} has no carried quantity"))?;
             let (x, y) = battle_hud_tile_origin(16.0, row);
             spawn_battle_command_bitmap_text(
                 commands, rendered_art, asset_root, images,
@@ -6610,10 +7121,13 @@ fn spawn_battle_pack_screen(
     let description = if selected >= item_ids.len() {
         "Close the PACK."
     } else {
-        item_ids.get(selected)
+        item_ids
+            .get(selected)
             .and_then(|item_id| snapshot.items.iter().find(|item| item.item_id == *item_id))
             .map(|item| item.description.as_str())
-            .unwrap_or("INVALID ITEM DESCRIPTION")
+            .with_context(|| {
+                format!("battle pack selection {selected} has no item description")
+            })?
     };
     for (index, line) in wrap_boot_text_for_box(description, 18, 4).iter().enumerate() {
         let (x, y) = battle_hud_tile_origin(1.0, 13.0 + index as f32);
@@ -6623,33 +7137,28 @@ fn spawn_battle_pack_screen(
     }
     if let Some(action_cursor) = &runtime_shell.field_pack_action_cursor {
         let pocket = active_visible_field_pack_pocket(runtime_shell);
-        let Ok(actions) = visible_selected_pack_item_actions(
+        let actions = visible_selected_pack_item_actions(
             snapshot,
             runtime_shell,
             &pocket,
             true,
-        ) else {
-            return;
-        };
-        let Some(action_selected) = strict_readonly_cursor_index(
+        )?;
+        let action_selected = strict_readonly_cursor_index(
             &Some(action_cursor.clone()), "pack:actions", actions.len(),
-        ) else {
-            return;
-        };
+        )
+        .context("battle pack action menu has no valid cursor")?;
         let top = match actions.len() { 4 => 3.0, 3 => 5.0, 2 => 7.0, _ => 9.0 };
-        let (x, y) = battle_hud_tile_origin(16.0, top + actions.len() as f32);
-        commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(1.0, 1.0, 1.0),
-                    custom_size: Some(Vec2::new(TILE_SIZE * 7.0, TILE_SIZE * (actions.len() as f32 * 2.0 + 2.0))),
-                    ..default()
-                },
-                transform: Transform::from_xyz(x, y, 4.1),
-                ..default()
-            },
-            BattleCommandMarker,
-        ));
+        spawn_battle_window(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            13.0,
+            top,
+            7.0,
+            actions.len() as f32 * 2.0 + 1.0,
+            4.1,
+        );
         for (index, action) in actions.iter().enumerate() {
             let (x, y) = battle_hud_tile_origin(14.0, top + 1.0 + index as f32 * 2.0);
             spawn_battle_command_bitmap_text(
@@ -6659,6 +7168,7 @@ fn spawn_battle_pack_screen(
             );
         }
     }
+    Ok(())
 }
 
 fn spawn_battle_party_menu(
@@ -6676,7 +7186,12 @@ fn spawn_battle_party_menu(
         battle_switch_option_count(snapshot)
     };
     let selected = if item_target {
-        runtime_shell.party_cursor.min(option_count.saturating_sub(1))
+        anyhow::ensure!(
+            runtime_shell.party_cursor < option_count,
+            "battle item-target party cursor {} is outside {option_count} rows",
+            runtime_shell.party_cursor
+        );
+        runtime_shell.party_cursor
     } else {
         strict_readonly_cursor_index(
             &runtime_shell.battle_switch_cursor,
@@ -6808,17 +7323,25 @@ fn spawn_battle_party_menu(
         rendered_art,
         asset_root,
         images,
-        if item_target { "Use on which <PKMN>?" } else { "Which <PKMN>?" },
+        if item_target {
+            "Use on which <PKMN>?"
+        } else if visible_active_battle_player_fainted(snapshot) {
+            "Which <PKMN>?"
+        } else {
+            "Choose a <PKMN>."
+        },
         x,
         y,
         4.1,
     );
     if !item_target {
-        if let Some(action_selected) = strict_readonly_cursor_index(
-            &runtime_shell.battle_party_action_cursor,
-            "battle:party-actions",
-            3,
-        ) {
+        if runtime_shell.battle_party_action_cursor.is_some() {
+            let action_selected = strict_readonly_cursor_index(
+                &runtime_shell.battle_party_action_cursor,
+                "battle:party-actions",
+                3,
+            )
+            .context("battle party action cursor is invalid")?;
             spawn_battle_window(
                 commands,
                 rendered_art,
@@ -6830,7 +7353,7 @@ fn spawn_battle_party_menu(
                 7.0,
                 4.2,
             );
-            for (index, label) in ["STATS", "SWITCH", "CANCEL"].iter().enumerate() {
+            for (index, label) in ["SWITCH", "STATS", "CANCEL"].iter().enumerate() {
                 let (x, y) = battle_hud_tile_origin(12.0, 12.0 + index as f32 * 2.0);
                 spawn_battle_command_bitmap_text(
                     commands,
@@ -6855,19 +7378,30 @@ fn spawn_battle_pack_move_target_screen(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
-    let Some(slot) = snapshot.party.slots.get(
-        runtime_shell.party_cursor.min(snapshot.party.slots.len().saturating_sub(1)),
-    ) else {
-        return;
-    };
-    let Some(selected) = strict_readonly_cursor_index(
+) -> Result<()> {
+    let slot = snapshot
+        .party
+        .slots
+        .get(runtime_shell.party_cursor)
+        .with_context(|| {
+            format!(
+                "battle PP-item target party cursor {} is outside {} slots",
+                runtime_shell.party_cursor,
+                snapshot.party.slots.len()
+            )
+        })?;
+    let selected = strict_readonly_cursor_index(
         &runtime_shell.party_move_cursor,
         &party_move_cursor_surface_id(slot.index),
         slot.pokemon.moves.len(),
-    ) else {
-        return;
-    };
+    )
+    .with_context(|| {
+        format!(
+            "battle PP-item target move cursor is invalid for party slot {} with {} moves",
+            slot.index,
+            slot.pokemon.moves.len()
+        )
+    })?;
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -6903,10 +7437,39 @@ fn spawn_battle_pack_move_target_screen(
             3.8,
         );
     }
-    let (x, y) = battle_hud_tile_origin(1.0, 13.0);
-    spawn_battle_command_bitmap_text(
-        commands, rendered_art, asset_root, images, "Restore which move?", x, y, 3.8,
-    );
+    let item_ids = carried_battle_usable_item_ids(snapshot);
+    let item_index = strict_readonly_cursor_index(
+        &runtime_shell.bag_cursor,
+        "battle:bag-items",
+        item_ids.len(),
+    )
+    .with_context(|| {
+        format!(
+            "battle PP-item target bag cursor is invalid for {} usable items",
+            item_ids.len()
+        )
+    })?;
+    let item_id = item_ids
+        .get(item_index)
+        .context("battle PP-item target selection is missing from the usable item list")?;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.item_id == *item_id)
+        .with_context(|| format!("battle PP-item target item {item_id} is missing"))?;
+    let raises_pp = item.pp_up_stages.is_some();
+    let prompt = if raises_pp {
+        ["Raise the PP of", "which move?"]
+    } else {
+        ["Restore the PP of", "which move?"]
+    };
+    for (line_index, line) in prompt.iter().enumerate() {
+        let (x, y) = battle_hud_tile_origin(1.0, 13.0 + line_index as f32);
+        spawn_battle_command_bitmap_text(
+            commands, rendered_art, asset_root, images, line, x, y, 3.8,
+        );
+    }
+    Ok(())
 }
 
 fn spawn_battle_party_icon(
@@ -7186,6 +7749,7 @@ fn load_party_icon_frame(
 
 fn spawn_battle_yes_no_prompt(
     commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
@@ -7233,7 +7797,10 @@ fn spawn_battle_yes_no_prompt(
     }
     for (index, entry) in entries.iter().skip(prompt_count).enumerate() {
         let (x, y) = battle_hud_tile_origin(
-            FIELD_YES_NO_LEFT_TILE + 1.0,
+            // `entry` already contains the cursor/blank prefix. Crystal's
+            // menu header places that prefix on the window's left tile and
+            // the YES/NO label one tile into the window.
+            FIELD_YES_NO_LEFT_TILE,
             FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
         );
         spawn_battle_command_bitmap_text(
@@ -7241,7 +7808,7 @@ fn spawn_battle_yes_no_prompt(
             rendered_art,
             asset_root,
             images,
-            entry,
+            &animated_battle_cursor_entry(runtime_shell, entry),
             x,
             y,
             4.1,
@@ -7268,12 +7835,13 @@ fn battle_submenu_entry_tile(index: usize, two_columns: bool) -> (f32, f32) {
 fn spawn_battle_main_command_menu(
     commands: &mut Commands,
     snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
     battle: &crate::RuntimeBattleSnapshot,
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
     entries: &[String],
-) {
+) -> Result<()> {
     let contest_menu = entries.get(2).is_some_and(|entry| {
         entry
             .trim_start_matches(|ch| ch == '>' || ch == ' ')
@@ -7308,19 +7876,22 @@ fn spawn_battle_main_command_menu(
     );
     if !contest_menu {
         let prompt_name = if battle.battle_type == "BATTLETYPE_TUTORIAL" {
-            "DUDE"
+            "DUDE".to_string()
         } else {
-            battle
+            let active = battle
                 .active_player_party_index
-                .and_then(|active| {
-                    snapshot
-                        .party
-                        .slots
-                        .iter()
-                        .find(|slot| slot.index == active)
-                })
-                .map(|slot| slot.pokemon.nickname.as_str())
-                .unwrap_or("POKEMON")
+                .context("battle command menu requires an active party slot")?;
+            snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.index == active)
+                .with_context(|| {
+                    format!("battle command menu active party slot {active} is missing")
+                })?
+                .pokemon
+                .nickname
+                .clone()
         };
         for (line_index, line) in wrap_boot_text_for_box(
             &format!("What will {prompt_name} do?"),
@@ -7357,12 +7928,16 @@ fn spawn_battle_main_command_menu(
             rendered_art,
             asset_root,
             images,
-            &compact_scene_label(entry, if contest_menu { 12 } else { 7 }),
+            &compact_scene_label(
+                &animated_battle_cursor_entry(runtime_shell, entry),
+                if contest_menu { 12 } else { 7 },
+            ),
             x,
             y,
             3.8,
         );
     }
+    Ok(())
 }
 
 fn battle_command_entries_are_main_menu(entries: &[String]) -> bool {
@@ -7399,7 +7974,7 @@ fn battle_main_menu_panel_center() -> (f32, f32) {
     (
         PLAYFIELD_LEFT
             + (BATTLE_MAIN_MENU_LEFT_TILE + BATTLE_MAIN_MENU_WIDTH_TILES * 0.5) * TILE_SIZE,
-        BATTLE_PLAYFIELD_TOP
+        PLAYFIELD_TOP
             - (BATTLE_MAIN_MENU_TOP_TILE + BATTLE_MAIN_MENU_HEIGHT_TILES * 0.5) * TILE_SIZE,
     )
 }
@@ -7408,7 +7983,10 @@ fn battle_main_menu_entry_tile(index: usize) -> (f32, f32) {
     let row = index / 2;
     let col = index % 2;
     (
-        BATTLE_MAIN_MENU_ORIGIN_TILE_X + col as f32 * BATTLE_MAIN_MENU_COLUMN_SPACING_TILES,
+        // The menu rectangle begins at x=8. Its cursor occupies the first
+        // inner tile at x=9, and the prefixed label therefore starts at x=10.
+        BATTLE_MAIN_MENU_ORIGIN_TILE_X
+            + col as f32 * BATTLE_MAIN_MENU_COLUMN_SPACING_TILES,
         BATTLE_MAIN_MENU_ORIGIN_TILE_Y + row as f32 * BATTLE_MAIN_MENU_ROW_SPACING_TILES,
     )
 }
@@ -7421,12 +7999,9 @@ fn spawn_battle_move_menu(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
-    let Some((_slot, cursor_index, visible_rows, start)) =
-        battle_move_menu_state(snapshot, runtime_shell, battle)
-    else {
-        return;
-    };
+) -> Result<()> {
+    let (_slot, cursor_index, visible_rows, start) =
+        battle_move_menu_state(snapshot, runtime_shell, battle)?;
     spawn_battle_window(
         commands,
         rendered_art,
@@ -7447,7 +8022,7 @@ fn spawn_battle_move_menu(
         let marker = if runtime_shell.battle_move_swap_origin == Some(index) {
             "▷"
         } else if index == cursor_index {
-            ">"
+            battle_cursor_glyph(runtime_shell)
         } else {
             " "
         };
@@ -7478,7 +8053,8 @@ fn spawn_battle_move_menu(
         rendered_art,
         asset_root,
         images,
-    );
+    )?;
+    Ok(())
 }
 
 fn spawn_battle_window(
@@ -7537,7 +8113,7 @@ fn spawn_battle_move_info_window(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     spawn_battle_window(
         commands,
         rendered_art,
@@ -7561,24 +8137,18 @@ fn spawn_battle_move_info_window(
                 1.0,
                 10.0,
             );
-            return;
+            return Ok(());
         }
         let move_data = snapshot
             .moves
             .iter()
-            .find(|move_data| move_data.move_id == selected.name);
-        let Some(move_data) = move_data else {
-            spawn_battle_move_info_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                "INVALID MOVE",
-                1.0,
-                10.0,
-            );
-            return;
-        };
+            .find(|move_data| move_data.move_id == selected.name)
+            .with_context(|| {
+                format!(
+                    "battle move info is missing move metadata for {}",
+                    selected.name
+                )
+            })?;
         let move_type = move_data.move_type.as_str();
         let max_pp = crate::core::models::max_move_pp(move_data.pp, selected.pp_ups);
         spawn_battle_move_info_text(
@@ -7604,12 +8174,21 @@ fn spawn_battle_move_info_window(
             rendered_art,
             asset_root,
             images,
+            "PP",
+            1.0,
+            11.0,
+        );
+        spawn_battle_move_info_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
             &format!(
-                "PP {:>2}/{:>2}",
+                "{:>2}/{:>2}",
                 selected.current_pp.min(99),
                 max_pp.min(99)
             ),
-            1.0,
+            5.0,
             11.0,
         );
     } else {
@@ -7641,6 +8220,7 @@ fn spawn_battle_move_info_window(
             11.0,
         );
     }
+    Ok(())
 }
 
 fn spawn_battle_move_info_text(
@@ -7841,16 +8421,22 @@ fn battle_move_menu_state<'a>(
     snapshot: &'a RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Option<(&'a crate::RuntimePartySlotSnapshot, usize, usize, usize)> {
-    let active_index = battle.active_player_party_index?;
+) -> Result<(&'a crate::RuntimePartySlotSnapshot, usize, usize, usize)> {
+    let active_index = battle
+        .active_player_party_index
+        .context("battle move menu requires an active player party slot")?;
     let slot = snapshot
         .party
         .slots
         .iter()
-        .find(|slot| slot.index == active_index)?;
+        .find(|slot| slot.index == active_index)
+        .with_context(|| {
+            format!("active player party slot {active_index} is absent from the move menu")
+        })?;
     let total = battle.player_moves.len() + 1;
     let cursor_index =
-        strict_readonly_cursor_index(&runtime_shell.battle_move_cursor, "battle:moves", total)?;
+        strict_readonly_cursor_index(&runtime_shell.battle_move_cursor, "battle:moves", total)
+            .with_context(|| format!("battle move cursor is invalid for {total} entries"))?;
     let visible_rows = battle_move_visible_rows(total);
     let start = if total > visible_rows {
         cursor_index
@@ -7859,20 +8445,31 @@ fn battle_move_menu_state<'a>(
     } else {
         0
     };
-    Some((slot, cursor_index, visible_rows, start))
+    Ok((slot, cursor_index, visible_rows, start))
 }
 
 fn battle_move_menu_option_count(
     snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Option<usize> {
-    let active_index = battle.active_player_party_index?;
-    let slot = snapshot
+) -> Result<usize> {
+    let active_index = battle
+        .active_player_party_index
+        .context("battle move menu requires an active player party slot")?;
+    snapshot
         .party
         .slots
         .iter()
-        .find(|slot| slot.index == active_index)?;
-    Some(battle.player_moves.len() + 1)
+        .find(|slot| slot.index == active_index)
+        .with_context(|| {
+            format!("active player party slot {active_index} is absent from the move menu")
+        })?;
+    anyhow::ensure!(
+        battle.commands.player_move_slots.len() == battle.player_moves.len(),
+        "battle move menu exposes {} moves but command selection exposes {} slots",
+        battle.player_moves.len(),
+        battle.commands.player_move_slots.len(),
+    );
+    Ok(battle.player_moves.len() + 1)
 }
 
 fn battle_move_menu_option_count_for_slot(slot: &crate::RuntimePartySlotSnapshot) -> usize {
@@ -7914,9 +8511,22 @@ fn field_window_center(
 
 fn battle_move_menu_entry_tile(visible_index: usize) -> (f32, f32) {
     (
-        BATTLE_MOVE_MENU_ORIGIN_TILE_X,
+        // The rendered string owns the cursor tile; the move name itself
+        // still begins at the ASM move-menu origin (6, 13).
+        BATTLE_MOVE_MENU_ORIGIN_TILE_X - 1.0,
         BATTLE_MOVE_MENU_ORIGIN_TILE_Y + visible_index as f32 * BATTLE_MOVE_MENU_ROW_SPACING_TILES,
     )
+}
+
+fn battle_cursor_glyph(_runtime_shell: &BevyRuntimeShell) -> &'static str {
+    "▶"
+}
+
+fn animated_battle_cursor_entry(runtime_shell: &BevyRuntimeShell, entry: &str) -> String {
+    entry
+        .strip_prefix('>')
+        .map(|label| format!("{}{label}", battle_cursor_glyph(runtime_shell)))
+        .unwrap_or_else(|| entry.to_string())
 }
 
 fn battle_move_display_name(snapshot: &RuntimeShellSnapshot, move_id: &str) -> String {
@@ -7963,7 +8573,7 @@ fn visible_battle_command_menu_entries(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     if runtime_shell.battle_faint_prompt_cursor.is_some() {
         return visible_battle_faint_prompt_entries(runtime_shell);
     }
@@ -7971,59 +8581,59 @@ fn visible_battle_command_menu_entries(
         return visible_battle_shift_prompt_entries(snapshot, runtime_shell, battle);
     }
     if let Some(mode) = runtime_shell.battle_pack_target_mode {
-        return visible_battle_pack_target_entries(snapshot, runtime_shell, mode);
+        return Ok(visible_battle_pack_target_entries(snapshot, runtime_shell, mode));
     }
     if runtime_shell.battle_move_cursor.is_some() {
-        return visible_battle_move_entries(snapshot, runtime_shell, battle);
+        return Ok(visible_battle_move_entries(snapshot, runtime_shell, battle));
     }
     if runtime_shell.battle_switch_cursor.is_some() {
-        return visible_battle_switch_entries(snapshot, runtime_shell, battle);
+        return Ok(visible_battle_switch_entries(snapshot, runtime_shell, battle));
     }
     if runtime_shell.bag_cursor.is_some() {
-        return visible_battle_item_entries(snapshot, runtime_shell);
+        return Ok(visible_battle_item_entries(snapshot, runtime_shell));
     }
     if runtime_shell.ball_cursor.is_some() {
-        return visible_battle_ball_entries(snapshot, runtime_shell);
+        return Ok(visible_battle_ball_entries(snapshot, runtime_shell));
     }
     if runtime_shell.key_item_cursor.is_some() || runtime_shell.tmhm_cursor.is_some() {
-        return visible_field_pack_entries(snapshot, runtime_shell);
+        return Ok(visible_field_pack_entries(snapshot, runtime_shell));
     }
-    if let Some(entries) = battle_outcome_prompt_entries(battle) {
-        return entries;
+    if battle.enemy_pokemon.hp == 0 {
+        // KO settlement is driven by the retained faint/reward presentation.
+        // Crystal never exposes the shell's claim/advance operations as a
+        // selectable battle menu between those boundaries.
+        return Ok(Vec::new());
     }
     let actions = visible_battle_action_ids(snapshot, battle);
     if actions.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let selected = strict_readonly_cursor_index(
         &runtime_shell.battle_action_cursor,
         "battle:actions",
         actions.len(),
     );
-    let Some(selected) = selected else {
-        return vec![compact_scene_label("INVALID CURSOR battle:actions", 30)];
-    };
+    let selected = selected.context("battle main-action cursor is invalid")?;
     let selected_action = actions[selected];
-    battle_main_menu_entries(
+    Ok(battle_main_menu_entries(
         snapshot,
         battle,
         battle_main_menu_index_for_action(selected_action),
-    )
+    ))
 }
 
-fn visible_battle_faint_prompt_entries(runtime_shell: &BevyRuntimeShell) -> Vec<String> {
-    let Some(selected) = strict_readonly_cursor_index(
+fn visible_battle_faint_prompt_entries(runtime_shell: &BevyRuntimeShell) -> Result<Vec<String>> {
+    let selected = strict_readonly_cursor_index(
         &runtime_shell.battle_faint_prompt_cursor,
         "battle:faint-prompt",
         2,
-    ) else {
-        return vec![compact_scene_label("INVALID CURSOR battle:faint-prompt", 30)];
-    };
-    vec![
-        "USE NEXT POKEMON?".to_string(),
+    )
+    .context("battle faint prompt cursor is invalid")?;
+    Ok(vec![
+        "Use next <PKMN>?".to_string(),
         format!("{}YES", if selected == 0 { ">" } else { " " }),
         format!("{}NO", if selected == 1 { ">" } else { " " }),
-    ]
+    ])
 }
 
 fn battle_main_menu_entries(
@@ -8075,65 +8685,10 @@ fn battle_main_menu_index_for_action(action: VisibleBattleAction) -> usize {
     }
 }
 
-fn battle_outcome_prompt_entries(battle: &crate::RuntimeBattleSnapshot) -> Option<Vec<String>> {
-    if battle.enemy_pokemon.hp > 0 {
-        return None;
-    }
-    match &battle.kind {
-        crate::RuntimeBattleKind::Trainer {
-            trainer_name,
-            reward,
-            ..
-        } => {
-            let Some(active_enemy) = battle.active_enemy_party_index else {
-                return Some(vec![compact_scene_label(
-                    &format!("{trainer_name} INVALID ENEMY"),
-                    30,
-                )]);
-            };
-            let active_rewarded = battle.rewarded_enemy_party_indices.contains(&active_enemy);
-            let unresolved_enemy_count = battle
-                .enemy_party
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !battle.rewarded_enemy_party_indices.contains(index))
-                .count();
-            if active_rewarded && unresolved_enemy_count == 0 {
-                Some(vec![
-                    compact_scene_label(&format!("TRAINER {trainer_name}"), 30),
-                    compact_scene_label("FINISH BATTLE", 30),
-                ])
-            } else if !active_rewarded && unresolved_enemy_count == 1 {
-                Some(vec![
-                    compact_scene_label(&format!("TRAINER {trainer_name}"), 30),
-                    compact_scene_label(&format!("CLAIM ${reward}"), 30),
-                ])
-            } else {
-                Some(vec![
-                    compact_scene_label(
-                        &format!("ENEMY {} FAINTED", battle.enemy_pokemon.species.id),
-                        30,
-                    ),
-                    "NEXT POKEMON".to_string(),
-                ])
-            }
-        }
-        crate::RuntimeBattleKind::Wild { .. } | crate::RuntimeBattleKind::StaticWild { .. } => {
-            Some(vec![
-                compact_scene_label(
-                    &format!("WILD {} FAINTED", battle.enemy_pokemon.species.id),
-                    30,
-                ),
-                "CLAIM REWARD".to_string(),
-            ])
-        }
-    }
-}
-
 fn visible_battle_switch_entries(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
-    battle: &crate::RuntimeBattleSnapshot,
+    _battle: &crate::RuntimeBattleSnapshot,
 ) -> Vec<String> {
     let selected = strict_readonly_cursor_index(
         &runtime_shell.battle_switch_cursor,
@@ -8159,25 +8714,21 @@ fn visible_battle_shift_prompt_entries(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Vec<String> {
-    let Some(_next_enemy) = next_unresolved_trainer_enemy_label(battle) else {
-        return vec![compact_scene_label("INVALID TRAINER SHIFT", 30)];
-    };
-    let Some(selected) = strict_readonly_cursor_index(
+) -> Result<Vec<String>> {
+    next_unresolved_trainer_enemy_label(battle)
+        .context("trainer shift prompt has no unresolved enemy")?;
+    let selected = strict_readonly_cursor_index(
         &runtime_shell.battle_shift_prompt_cursor,
         "battle:shift-prompt",
         2,
-    ) else {
-        return vec![compact_scene_label("INVALID CURSOR battle:shift-prompt", 30)];
-    };
-    vec![
-        compact_scene_label(
-            &format!("WILL {} CHANGE #MON?", snapshot.trainer.player_name),
-            30,
-        ),
+    )
+    .context("battle trainer-shift cursor is invalid")?;
+    Ok(vec![
+        compact_scene_label(&format!("Will {}", snapshot.trainer.player_name), 18),
+        "change <PKMN>?".to_string(),
         format!("{}YES", if selected == 0 { ">" } else { " " }),
         format!("{}NO", if selected == 1 { ">" } else { " " }),
-    ]
+    ])
 }
 
 fn next_unresolved_trainer_enemy_label(battle: &crate::RuntimeBattleSnapshot) -> Option<&str> {
@@ -8345,13 +8896,67 @@ fn visible_battle_move_entries(
 }
 
 impl TilesetArt {
+    #[cfg(test)]
     fn tile_handle(&self, metatile_id: u16, sub_x: usize, sub_y: usize) -> Option<Handle<Image>> {
+        self.tile_handle_at_frame(metatile_id, sub_x, sub_y, 0, false)
+    }
+
+    fn tile_handle_at_frame(
+        &self,
+        metatile_id: u16,
+        sub_x: usize,
+        sub_y: usize,
+        frame: u64,
+        forest_restless: bool,
+    ) -> Option<Handle<Image>> {
         let offset = usize::from(metatile_id)
             .checked_mul(METATILE_TILE_COUNT)?
             .checked_add(sub_y.checked_mul(RENDER_METATILE_WIDTH as usize)?)?
             .checked_add(sub_x)?;
         let tile_index = *self.metatile_layout.get(offset)? as usize;
+        if let Some(animation) = self.animated_tiles.get(&tile_index)
+            && !animation.frames.is_empty()
+        {
+            let frame_index = if animation.requires_forest_restless && !forest_restless {
+                0
+            } else if animation.cave_water_composite {
+                let water_frame = (frame / 22) as usize % 4;
+                let scroll_frame = if frame < 4 {
+                    0
+                } else {
+                    (((frame - 4) / 19) + 1) as usize % 8
+                };
+                water_frame * 8 + scroll_frame
+            } else if animation.advance_on_phase_offset {
+                if frame < animation.phase_offset {
+                    0
+                } else {
+                    (((frame - animation.phase_offset) / animation.frame_ticks.max(1)) + 1)
+                        as usize
+                        % animation.frames.len()
+                }
+            } else {
+                (frame.saturating_sub(animation.phase_offset)
+                    / animation.frame_ticks.max(1)) as usize
+                    % animation.frames.len()
+            };
+            return animation.frames.get(frame_index).cloned();
+        }
         self.tile_handles.get(tile_index).cloned()
+    }
+
+    fn priority_tile_handle(
+        &self,
+        metatile_id: u16,
+        sub_x: usize,
+        sub_y: usize,
+    ) -> Option<Handle<Image>> {
+        let offset = usize::from(metatile_id)
+            .checked_mul(METATILE_TILE_COUNT)?
+            .checked_add(sub_y.checked_mul(RENDER_METATILE_WIDTH as usize)?)?
+            .checked_add(sub_x)?;
+        let tile_index = *self.metatile_layout.get(offset)? as usize;
+        self.priority_tile_handles.get(tile_index).cloned()
     }
 }
 
@@ -8401,7 +9006,7 @@ fn load_bitmap_font_art(
             },
         );
     }
-    load_optional_bitmap_font_extra_glyphs(
+    load_bitmap_font_extra_glyphs(
         &asset_root.runtime_assets().join("gfx/font"),
         &mut glyphs,
         images,
@@ -8454,7 +9059,7 @@ fn load_bitmap_font_frame_glyphs(
 /// Load the low-ID tiles installed by `LoadFontsExtra` and
 /// `LoadFontsBattleExtra`.  They are not present in `font.png`, so using its
 /// tile at the same numeric index gives the wrong glyph for control tokens.
-fn load_optional_bitmap_font_extra_glyphs(
+fn load_bitmap_font_extra_glyphs(
     font_root: &std::path::Path,
     glyphs: &mut HashMap<char, SpriteFrame>,
     images: &mut Assets<Image>,
@@ -8478,33 +9083,41 @@ fn load_optional_bitmap_font_extra_glyphs(
         Ok(())
     };
 
-    if let Ok(data) = std::fs::read(font_root.join("font_battle_extra.2bpp")) {
-        for source_tile in 0..data.len() / 16 {
-            install(
-                &data,
-                source_tile,
-                0x60 + source_tile as u16,
-                glyphs,
-                images,
-            )?;
-        }
+    let battle_extra_path = font_root.join("font_battle_extra.2bpp");
+    let battle_extra = std::fs::read(&battle_extra_path)
+        .with_context(|| format!("read bitmap battle font extras {}", battle_extra_path.display()))?;
+    for source_tile in 0..battle_extra.len() / 16 {
+        install(
+            &battle_extra,
+            source_tile,
+            0x60 + source_tile as u16,
+            glyphs,
+            images,
+        )?;
     }
-    if let Ok(data) = std::fs::read(font_root.join("up_arrow.2bpp")) {
-        install(&data, 0, 0x61, glyphs, images)?;
-    }
-    if let Ok(data) = std::fs::read(font_root.join("phone_icon.2bpp")) {
-        install(&data, 0, 0x62, glyphs, images)?;
-    }
-    if let Ok(data) = std::fs::read(font_root.join("font_extra.2bpp")) {
-        // LoadFontsExtra copies source tiles 3..24 into VRAM tiles 0x63..0x78.
-        for offset in 0..22 {
-            install(&data, offset + 3, 0x63 + offset as u16, glyphs, images)?;
-        }
+    let up_arrow_path = font_root.join("up_arrow.2bpp");
+    let up_arrow = std::fs::read(&up_arrow_path)
+        .with_context(|| format!("read bitmap up-arrow glyph {}", up_arrow_path.display()))?;
+    install(&up_arrow, 0, 0x61, glyphs, images)?;
+    let phone_icon_path = font_root.join("phone_icon.2bpp");
+    let phone_icon = std::fs::read(&phone_icon_path)
+        .with_context(|| format!("read bitmap phone glyph {}", phone_icon_path.display()))?;
+    install(&phone_icon, 0, 0x62, glyphs, images)?;
+    let font_extra_path = font_root.join("font_extra.2bpp");
+    let font_extra = std::fs::read(&font_extra_path)
+        .with_context(|| format!("read bitmap font extras {}", font_extra_path.display()))?;
+    // LoadFontsExtra copies source tiles 3..24 into VRAM tiles 0x63..0x78.
+    for offset in 0..22 {
+        install(&font_extra, offset + 3, 0x63 + offset as u16, glyphs, images)?;
     }
     // LoadFontsExtra installs the extras first, then LoadFontsBattleExtra
     // supplies the battle-specific Lv tile at 0x6e.
-    if let Ok(data) = std::fs::read(font_root.join("font_battle_extra.2bpp")) {
-        install(&data, 0x6e - 0x60, 0x6e, glyphs, images)?;
-    }
+    install(
+        &battle_extra,
+        0x6e - 0x60,
+        0x6e,
+        glyphs,
+        images,
+    )?;
     Ok(())
 }

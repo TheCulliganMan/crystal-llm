@@ -990,6 +990,7 @@ fn finish_visible_intro_screen(
     // overlap the title entrance on a busy macOS audio callback.
     runtime_shell.screen_fade = None;
     runtime_shell.visible_blackout_phase = None;
+    runtime_shell.visible_walk_warp_phase = None;
     runtime_shell.pending_audio.clear();
     stop_visible_silent_music(
         runtime_shell,
@@ -2290,6 +2291,9 @@ fn press_visible_title_direction_button(
     input: GameButton,
     delta: isize,
 ) -> Result<()> {
+    if runtime_shell.visible_continue_screen.is_some() {
+        return Ok(());
+    }
     let action = format!("input:title:{input:?}:{delta}");
     move_visible_title_menu_cursor_with_action(runtime_shell, delta, action)
 }
@@ -2321,6 +2325,12 @@ fn press_visible_title_confirm_button(
 }
 
 fn press_visible_title_cancel_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.visible_continue_screen.take().is_some() {
+        record_visible_runtime_action(runtime_shell, "input:title:B:continue_back")?;
+        set_shell_action_status(runtime_shell, "TITLE");
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
     record_visible_runtime_action(runtime_shell, "input:title:B:cancel")?;
     runtime_shell
         .last_audio_events

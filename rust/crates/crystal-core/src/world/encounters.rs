@@ -283,20 +283,6 @@ where
     }
 }
 
-fn required_nullable_encounter_token<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<String>::deserialize(deserializer)?;
-    match value {
-        Some(value) if is_exact_nonempty_encounter_token(&value) => Ok(Some(value)),
-        Some(value) => Err(serde::de::Error::custom(format!(
-            "encounter token must be exact ASCII alphanumeric/underscore, found {value:?}"
-        ))),
-        None => Ok(None),
-    }
-}
-
 fn required_nullable_grass_rates<'de, D>(
     deserializer: D,
 ) -> Result<Option<BTreeMap<String, u8>>, D::Error>
@@ -1396,8 +1382,8 @@ pub fn choose_slot_from_percent(
     })
 }
 
-pub fn apply_grass_level_variance(base_level: u8, surface: EncounterSurface, roll_byte: u8) -> u8 {
-    if surface != EncounterSurface::Grass {
+pub fn apply_surf_level_variance(base_level: u8, surface: EncounterSurface, roll_byte: u8) -> u8 {
+    if surface != EncounterSurface::Water {
         return base_level;
     }
     let mut extra = 0;
@@ -1434,7 +1420,7 @@ pub fn select_wild_encounter(
             species: encounter.species,
         });
     }
-    let level = apply_grass_level_variance(encounter.level, surface, level_roll_byte);
+    let level = apply_surf_level_variance(encounter.level, surface, level_roll_byte);
     Ok(Some(ResolvedWildEncounter {
         encounter,
         slot,
@@ -1499,8 +1485,14 @@ pub fn roll_sweet_scent_encounter(
     rng: &mut Random,
 ) -> Result<crate::world::session::WildEncounterRoll, EncounterError> {
     require_encounter_table_for_surface(data, surface, time)?;
-    let slot_percent_roll = rng.randrange(100) as u8 + 1;
-    let level_roll = rng.randrange(256) as u8;
+    let slot_percent_roll = loop {
+        let value = rng.battle_random_byte();
+        if value < 100 {
+            break value + 1;
+        }
+    };
+    let level_roll = (surface == EncounterSurface::Water)
+        .then(|| rng.battle_random_byte());
     let mut roll = select_sweet_scent_encounter(
         data,
         slot_tables,
@@ -1508,8 +1500,9 @@ pub fn roll_sweet_scent_encounter(
         time,
         tile,
         slot_percent_roll,
-        level_roll,
+        level_roll.unwrap_or(0),
     )?;
+    roll.level_roll = level_roll;
     roll.rng_seed_after = rng.seed();
     Ok(roll)
 }
@@ -2394,22 +2387,22 @@ mod tests {
     }
 
     #[test]
-    fn grass_level_variance_uses_same_thresholds_as_typescript() {
+    fn surf_level_variance_uses_crystals_thresholds() {
         assert_eq!(
-            apply_grass_level_variance(5, EncounterSurface::Water, 255),
+            apply_surf_level_variance(5, EncounterSurface::Grass, 255),
             5
         );
-        assert_eq!(apply_grass_level_variance(5, EncounterSurface::Grass, 0), 5);
+        assert_eq!(apply_surf_level_variance(5, EncounterSurface::Water, 0), 5);
         assert_eq!(
-            apply_grass_level_variance(5, EncounterSurface::Grass, 90),
+            apply_surf_level_variance(5, EncounterSurface::Water, 90),
             6
         );
         assert_eq!(
-            apply_grass_level_variance(5, EncounterSurface::Grass, 166),
+            apply_surf_level_variance(5, EncounterSurface::Water, 166),
             7
         );
         assert_eq!(
-            apply_grass_level_variance(5, EncounterSurface::Grass, 243),
+            apply_surf_level_variance(5, EncounterSurface::Water, 243),
             9
         );
     }

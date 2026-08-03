@@ -638,6 +638,7 @@ fn move_visible_pokegear_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isi
                 VISIBLE_POKEGEAR_RADIO_FREQUENCIES[runtime_shell.pokegear_radio_index].0
             ),
         );
+        sync_visible_pokegear_radio(runtime_shell, &snapshot)?;
         return Ok(());
     }
     if runtime_shell.pokegear_page == PokegearPage::Clock {
@@ -827,6 +828,152 @@ fn handle_visible_no_phone_contacts(
     Ok(())
 }
 
+fn sync_visible_pokegear_radio(
+    runtime_shell: &mut BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) -> Result<()> {
+    let (_, handler) = VISIBLE_POKEGEAR_RADIO_FREQUENCIES[runtime_shell
+        .pokegear_radio_index
+        .min(VISIBLE_POKEGEAR_RADIO_FREQUENCIES.len() - 1)];
+    let station = visible_pokegear_radio_station(snapshot, handler);
+    if station.is_none() {
+        runtime_shell.active_pokegear_radio = None;
+    }
+    let music_id = station
+        .as_ref()
+        .map(|(_, music_id)| music_id.clone())
+        .or_else(|| runtime_shell.shell.current_music_id().map(str::to_string));
+    let Some(music_id) = music_id else {
+        return Ok(());
+    };
+    let retained_radio = station
+        .as_ref()
+        .map(|_| (snapshot.overworld.map_name.clone(), music_id.clone()));
+    if runtime_shell.active_music.as_deref() == Some(music_id.as_str())
+        || pending_music_command_is(&runtime_shell.pending_audio, &music_id)
+    {
+        runtime_shell.active_pokegear_radio = retained_radio;
+        return Ok(());
+    }
+    let playback = runtime_shell
+        .shell
+        .runtime()
+        .audio()
+        .require_playback_entry(AudioKind::Music, &music_id)?;
+    enqueue_bevy_audio_command(
+        &mut runtime_shell.pending_audio,
+        BevyAudioCommand {
+            audio_id: music_id.clone(),
+            kind: ModpackAudioKind::Music,
+            mode: playback.mode,
+            looped: matches!(
+                playback.loop_policy,
+                crate::assets::ModpackAudioLoopPolicy::Loop
+            ),
+        },
+    );
+    runtime_shell.pending_music_stop = true;
+    runtime_shell.active_music = Some(music_id.clone());
+    runtime_shell.faded_music = None;
+    runtime_shell.active_pokegear_radio = retained_radio;
+    runtime_shell.last_audio_events.push(match station {
+        Some((constant, _)) => format!("Pokegear radio tuned {constant} {music_id}"),
+        None => format!("Pokegear radio no signal; restored {music_id}"),
+    });
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    Ok(())
+}
+
+fn visible_pokegear_radio_station(
+    snapshot: &RuntimeShellSnapshot,
+    handler: &str,
+) -> Option<(&'static str, String)> {
+    let landmark = snapshot
+        .presentation
+        .pokegear_landmarks
+        .map_to_landmark
+        .get(&snapshot.overworld.map_name)
+        .and_then(|constant| {
+            snapshot
+                .presentation
+                .pokegear_landmarks
+                .landmarks
+                .iter()
+                .find(|landmark| landmark.constant == *constant)
+        });
+    let landmark_constant = landmark.map(|landmark| landmark.constant.as_str());
+    let in_johto = landmark.is_none_or(|landmark| landmark.region != "KANTO");
+    if in_johto
+        && snapshot
+            .progression
+            .active_engine_flags
+            .contains("ENGINE_ROCKETS_IN_RADIO_TOWER")
+    {
+        return Some(("ROCKET_RADIO", "MUSIC_ROCKET_OVERTURE".to_string()));
+    }
+    let flags = &snapshot.progression.active_engine_flags;
+    match handler {
+        "PKMNTalkAndPokedexShow" if in_johto => {
+            if landmark_constant == Some("LANDMARK_FAST_SHIP")
+                || matches!(
+                    snapshot.progression.time.time_of_day,
+                    crate::core::world::encounters::TimeOfDay::Morning
+                )
+            {
+                Some(("POKEDEX_SHOW", "MUSIC_POKEMON_CENTER".to_string()))
+            } else {
+                Some(("OAKS_POKEMON_TALK", "MUSIC_POKEMON_TALK".to_string()))
+            }
+        }
+        "PokemonMusic" if in_johto => Some((
+            "POKEMON_MUSIC",
+            if snapshot.progression.time.day_of_week % 2 == 0 {
+                "MUSIC_POKEMON_MARCH"
+            } else {
+                "MUSIC_POKEMON_LULLABY"
+            }
+            .to_string(),
+        )),
+        "LuckyChannel" if in_johto => {
+            Some(("LUCKY_CHANNEL", "MUSIC_GAME_CORNER".to_string()))
+        }
+        "BuenasPassword" if in_johto => {
+            Some(("BUENAS_PASSWORD", "MUSIC_BUENAS_PASSWORD".to_string()))
+        }
+        "RuinsOfAlphRadio" if landmark_constant == Some("LANDMARK_RUINS_OF_ALPH") => {
+            Some(("UNOWN_RADIO", "MUSIC_RUINS_OF_ALPH_RADIO".to_string()))
+        }
+        "PlacesAndPeople" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => Some((
+            "PLACES_AND_PEOPLE",
+            "MUSIC_VIRIDIAN_CITY".to_string(),
+        )),
+        "LetsAllSing" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => {
+            Some(("LETS_ALL_SING", "MUSIC_BICYCLE".to_string()))
+        }
+        "PokeFluteRadio" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => Some((
+            "POKE_FLUTE_RADIO",
+            "MUSIC_POKE_FLUTE_CHANNEL".to_string(),
+        )),
+        "EvolutionRadio"
+            if flags.contains("ENGINE_ROCKET_SIGNAL_ON_CH20")
+                && matches!(
+                    landmark_constant,
+                    Some(
+                        "LANDMARK_MAHOGANY_TOWN"
+                            | "LANDMARK_ROUTE_43"
+                            | "LANDMARK_LAKE_OF_RAGE"
+                    )
+                ) =>
+        {
+            Some((
+                "EVOLUTION_RADIO",
+                "MUSIC_LAKE_OF_RAGE_ROCKET_RADIO".to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn toggle_visible_pokegear_page(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     cycle_visible_pokegear_page(runtime_shell, 1)
 }
@@ -921,6 +1068,7 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.field_pack_pocket = None;
     runtime_shell.field_pack_target_mode = None;
     runtime_shell.tmhm_teach_prompt_cursor = None;
+    runtime_shell.pending_tmhm_teach_prompt_after_boot = false;
     runtime_shell.tmhm_decision_prompt_cursor = None;
     runtime_shell.tmhm_decision = None;
     runtime_shell.tmhm_forget_menu_open = false;
@@ -929,10 +1077,14 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pack_toss = None;
     runtime_shell.field_notice = None;
     runtime_shell.field_notice_queue.clear();
+    runtime_shell.pending_sweet_scent_nothing_notice = false;
     runtime_shell.field_notice_scene = None;
     runtime_shell.pending_field_notice_sound = None;
+    runtime_shell.pending_field_notice_cry = None;
+    runtime_shell.visible_strength_notice_phase = None;
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.pending_field_notice_effect_frames = None;
+    runtime_shell.visible_sweet_scent_delay = false;
     runtime_shell.visible_rock_smash_target = None;
     runtime_shell.visible_cut_animation = None;
     runtime_shell.visible_whirlpool_animation = None;
@@ -940,15 +1092,36 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.visible_flash_animation = None;
     runtime_shell.visible_fly_animation = None;
     runtime_shell.visible_waterfall_animation = None;
+    runtime_shell.pending_surf_start_from = None;
+    runtime_shell.hall_of_fame_pc_index = None;
     runtime_shell.visible_heal_machine = None;
+    runtime_shell.visible_magnet_train = None;
+    runtime_shell.visible_unown_words = None;
+    runtime_shell.visible_diploma = None;
     runtime_shell.visible_battle_transition = None;
     runtime_shell.heal_music_active = false;
 }
 
 fn open_visible_tmhm_teach_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let (item_id, move_id) = selected_tmhm(runtime_shell)?;
+    let (item_id, _move_id) = selected_tmhm(runtime_shell)?;
     runtime_shell.field_pack_action_cursor = None;
     runtime_shell.field_pack_target_mode = None;
+    runtime_shell.tmhm_teach_prompt_cursor = None;
+    runtime_shell.pending_tmhm_teach_prompt_after_boot = true;
+    let boot_kind = if item_id.starts_with("HM") { "an HM" } else { "a TM" };
+    runtime_shell.field_notice = Some(format!("Booted up {boot_kind}."));
+    mark_runtime_snapshot_dirty(runtime_shell);
+    record_visible_runtime_action(runtime_shell, format!("pack:tmhm:boot:{item_id}"))?;
+    set_shell_action_status(runtime_shell, format!("BOOTED UP {}", boot_kind.to_uppercase()));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    Ok(())
+}
+
+fn open_visible_tmhm_teach_prompt_after_boot(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
+    let (item_id, move_id) = selected_tmhm(runtime_shell)?;
+    runtime_shell.pending_tmhm_teach_prompt_after_boot = false;
     visible_cursor_index(
         &mut runtime_shell.tmhm_teach_prompt_cursor,
         "pack:tmhm:teach-prompt",
@@ -976,6 +1149,8 @@ fn resolve_visible_tmhm_teach_prompt(runtime_shell: &mut BevyRuntimeShell) -> Re
         return open_visible_field_pack_target(runtime_shell, FieldPackTargetMode::TmHmPokemon);
     }
     record_visible_runtime_action(runtime_shell, "pack:tmhm:teach:no")?;
+    runtime_shell.field_notice = Some("The TM wasn't used.".to_string());
+    mark_runtime_snapshot_dirty(runtime_shell);
     set_shell_action_status(runtime_shell, "THE TM WASN'T USED");
     Ok(())
 }
@@ -1023,8 +1198,11 @@ fn resolve_visible_tmhm_decision_prompt(runtime_shell: &mut BevyRuntimeShell) ->
             open_visible_tmhm_decision_prompt(runtime_shell, VisibleTmHmDecision::StopLearning)?;
         }
         (VisibleTmHmDecision::StopLearning, 0) => {
+            let message = visible_tmhm_did_not_learn_message(runtime_shell)?;
             runtime_shell.party_move_cursor = None;
             runtime_shell.field_pack_target_mode = None;
+            runtime_shell.field_notice = Some(message);
+            mark_runtime_snapshot_dirty(runtime_shell);
             set_shell_action_status(runtime_shell, "DID NOT LEARN THE MOVE");
         }
         (VisibleTmHmDecision::StopLearning, _) => {
@@ -1104,11 +1282,31 @@ fn confirm_visible_tmhm_target(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         if selected == slot.pokemon.moves.len() {
             runtime_shell.tmhm_forget_menu_open = false;
             runtime_shell.party_move_cursor = None;
-            set_shell_action_status(runtime_shell, "DID NOT LEARN THE MOVE");
-            return Ok(());
+            return open_visible_tmhm_decision_prompt(
+                runtime_shell,
+                VisibleTmHmDecision::StopLearning,
+            );
         }
     }
     teach_selected_tmhm_on(runtime_shell, party_index)
+}
+
+fn visible_tmhm_did_not_learn_message(runtime_shell: &mut BevyRuntimeShell) -> Result<String> {
+    let party_index = selected_party_index(runtime_shell)?;
+    let (item_id, move_id) = selected_tmhm(runtime_shell)?;
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let nickname = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == party_index)
+        .map(|slot| slot.pokemon.nickname.as_str())
+        .context("TM/HM result requires the selected party Pokemon")?;
+    let move_name = move_id
+        .as_deref()
+        .map(|move_id| battle_move_display_name(&snapshot, move_id))
+        .unwrap_or_else(|| item_display_name(&snapshot, &item_id));
+    Ok(format!("{nickname} did not learn {move_name}."))
 }
 
 fn open_visible_field_pack_target(
@@ -1318,7 +1516,6 @@ fn confirm_visible_field_pack_target(
     let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
     if slot.pokemon.is_egg
         || slot.pokemon.species.id == "EGG"
-        || slot.pokemon.nickname.eq_ignore_ascii_case("EGG")
     {
         record_visible_runtime_action(
             runtime_shell,
@@ -1594,6 +1791,9 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
+    if boundary.label == "HallOfFamePC" {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_MENU")?;
+    }
     record_visible_runtime_action(runtime_shell, format!("special:ack:{}", boundary.label))?;
     if boundary.label == "WaitSfx"
         && runtime_shell
@@ -1672,6 +1872,7 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
     if runtime_shell.pc_hub_session_open
         && matches!(boundary.label.as_str(), "ProfOaksPcBoot" | "HallOfFamePC")
     {
+        runtime_shell.hall_of_fame_pc_index = None;
         runtime_shell.pc_hub_cursor = Some(MenuCursor {
             surface_id: "pc:hub".to_string(),
             option_index: 0,
@@ -2092,6 +2293,9 @@ fn cycle_visible_party_summary_page(
     runtime_shell: &mut BevyRuntimeShell,
     delta: isize,
 ) -> Result<()> {
+    if !visible_wait_sfx_finished(runtime_shell) {
+        return Ok(());
+    }
     let snapshot = runtime_shell.shell.snapshot()?;
     let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
     if slot.pokemon.is_egg {
@@ -2113,13 +2317,37 @@ fn move_visible_party_summary_pokemon(
     runtime_shell: &mut BevyRuntimeShell,
     delta: isize,
 ) -> Result<()> {
-    let before = runtime_shell.party_cursor;
-    move_visible_party_cursor(runtime_shell, delta)?;
-    if runtime_shell.party_cursor == before {
+    if !visible_wait_sfx_finished(runtime_shell) {
         return Ok(());
     }
-    runtime_shell.party_summary_page = 1;
     let snapshot = runtime_shell.shell.snapshot()?;
+    if snapshot.party.slots.is_empty() {
+        return Ok(());
+    }
+    let current = runtime_shell
+        .party_cursor
+        .min(snapshot.party.slots.len() - 1);
+    // StatsScreen_JoypadAction stops at the first/last party member; unlike
+    // ordinary menu rows, summary-screen Up/Down does not wrap.
+    let next = if delta.is_negative() {
+        current.checked_sub(delta.unsigned_abs())
+    } else {
+        current.checked_add(delta as usize)
+            .filter(|next| *next < snapshot.party.slots.len())
+    };
+    let Some(next) = next else {
+        return Ok(());
+    };
+    runtime_shell.party_cursor = next;
+    if runtime_shell.battle_party_summary_open {
+        // The cartridge updates wPartyMenuCursor while browsing stats, so
+        // leaving STATS returns to the party row that is currently displayed.
+        runtime_shell.battle_switch_cursor = Some(MenuCursor {
+            surface_id: "battle:switch".to_string(),
+            option_index: next,
+        });
+    }
+    runtime_shell.party_summary_page = 1;
     let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
     if !slot.pokemon.is_egg {
         queue_visible_pokemon_cry(runtime_shell, &slot.pokemon.species.id, "party_summary")?;
@@ -2284,12 +2512,14 @@ fn resolve_visible_party_mail_take_prompt(
     let party_index = selected_party_index(runtime_shell)?;
     runtime_shell.field_notice = None;
     runtime_shell.field_notice_queue.clear();
+    runtime_shell.pending_sweet_scent_nothing_notice = false;
+    runtime_shell.visible_strength_notice_phase = None;
     runtime_shell.yes_no_cursor = None;
     if stage == 1 && !accepted {
         runtime_shell.party_mail_take_stage = Some(2);
         runtime_shell.yes_no_cursor = Some(MenuCursor {
             surface_id: "party:mail-lose-message".to_string(),
-            option_index: 1,
+            option_index: 0,
         });
         runtime_shell.field_notice = Some("The MAIL's message will be lost. Is that OK?".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -2418,7 +2648,6 @@ fn cycle_visible_party_move_reorder_pokemon(
         let pokemon = &snapshot.party.slots[next].pokemon;
         if !pokemon.is_egg
             && pokemon.species.id != "EGG"
-            && !pokemon.nickname.eq_ignore_ascii_case("EGG")
         {
             runtime_shell.party_cursor = next;
             runtime_shell.party_move_cursor = None;
@@ -2586,8 +2815,7 @@ fn visible_party_actions(
         .map(|learned| learned.name.as_str())
         .collect::<Vec<_>>();
     let is_egg = selected.pokemon.is_egg
-        || selected.pokemon.species.id == "EGG"
-        || selected.pokemon.nickname.eq_ignore_ascii_case("EGG");
+        || selected.pokemon.species.id == "EGG";
     let link_mode = snapshot.link_session.link_mode != 0;
     let mut actions = Vec::new();
     if !is_egg && !link_mode {
@@ -2742,8 +2970,7 @@ fn confirm_visible_party_hp_transfer_target(runtime_shell: &mut BevyRuntimeShell
         .find(|slot| slot.index == source_index)
         .with_context(|| format!("party HP transfer source {source_index} left the party"))?;
     let target_is_egg = target.pokemon.is_egg
-        || target.pokemon.species.id == "EGG"
-        || target.pokemon.nickname.eq_ignore_ascii_case("EGG");
+        || target.pokemon.species.id == "EGG";
     let invalid_target = target.index == source_index
         || target_is_egg
         || target.pokemon.hp == 0
@@ -2985,6 +3212,9 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
     if !runtime_shell.battle_messages.is_empty() {
         return Ok(());
     }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        return move_visible_hall_of_fame_pc(runtime_shell, -1);
+    }
     if runtime_shell.visible_unown_puzzle.is_some() {
         return move_visible_unown_puzzle_cursor(runtime_shell, -1, 0);
     }
@@ -3144,7 +3374,11 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
         if runtime_shell.battle_move_cursor.is_some() {
             return Ok(());
         }
-        return move_visible_battle_action_cursor_axis(runtime_shell, BattleMenuAxis::Horizontal);
+        return move_visible_battle_action_cursor_axis(
+            runtime_shell,
+            BattleMenuAxis::Horizontal,
+            -1,
+        );
     }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
@@ -3202,6 +3436,9 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
 fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if !runtime_shell.battle_messages.is_empty() {
         return Ok(());
+    }
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        return move_visible_hall_of_fame_pc(runtime_shell, 1);
     }
     if runtime_shell.visible_unown_puzzle.is_some() {
         return move_visible_unown_puzzle_cursor(runtime_shell, 1, 0);
@@ -3362,7 +3599,11 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
         if runtime_shell.battle_move_cursor.is_some() {
             return Ok(());
         }
-        return move_visible_battle_action_cursor_axis(runtime_shell, BattleMenuAxis::Horizontal);
+        return move_visible_battle_action_cursor_axis(
+            runtime_shell,
+            BattleMenuAxis::Horizontal,
+            1,
+        );
     }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
@@ -3525,6 +3766,9 @@ fn shift_visible_battle_pack_pocket(
 }
 
 fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isize) -> Result<()> {
+    if runtime_shell.hall_of_fame_pc_index.is_some() {
+        return move_visible_hall_of_fame_pc(runtime_shell, delta);
+    }
     if runtime_shell.visible_card_flip.is_some() {
         return move_visible_card_flip_cursor(runtime_shell, 0, delta);
     }
@@ -3819,7 +4063,7 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
     }
     if let Some(battle) = &snapshot.battle {
         if runtime_shell.battle_party_summary_open {
-            return Ok(());
+            return move_visible_party_summary_pokemon(runtime_shell, delta);
         }
         if runtime_shell.battle_faint_prompt_cursor.is_some() {
             return move_visible_cursor_slot(
@@ -3863,18 +4107,38 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
             return move_visible_battle_move_cursor(runtime_shell, delta);
         }
         if runtime_shell.battle_party_action_cursor.is_some() {
-            return move_visible_cursor_slot(
+            let current = visible_cursor_index(
                 &mut runtime_shell.battle_party_action_cursor,
-                "battle:party-actions".to_string(),
+                "battle:party-actions",
                 3,
-                delta,
-                &mut runtime_shell.last_audio_events,
             );
+            let next = if delta.is_negative() {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(2)
+            };
+            if next != current {
+                runtime_shell.battle_party_action_cursor = Some(MenuCursor {
+                    surface_id: "battle:party-actions".to_string(),
+                    option_index: next,
+                });
+                runtime_shell.last_audio_events.push(format!(
+                    "battle party action cursor {}->{}",
+                    current + 1,
+                    next + 1
+                ));
+                trim_event_log(&mut runtime_shell.last_audio_events);
+            }
+            return Ok(());
         }
         if runtime_shell.battle_switch_cursor.is_some() {
             return move_visible_battle_switch_cursor(runtime_shell, delta);
         }
-        return move_visible_battle_action_cursor_axis(runtime_shell, BattleMenuAxis::Vertical);
+        return move_visible_battle_action_cursor_axis(
+            runtime_shell,
+            BattleMenuAxis::Vertical,
+            delta,
+        );
     }
     if has_visible_elevator_prompt(&snapshot, runtime_shell) {
         return move_visible_elevator_cursor(runtime_shell, delta);

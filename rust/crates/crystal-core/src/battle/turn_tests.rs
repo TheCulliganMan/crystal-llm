@@ -5506,6 +5506,7 @@
             hp_before,
             hp_after: hp_before + expected_amount,
             amount: expected_amount,
+            animation_param: 2,
         }));
     }
 
@@ -5551,6 +5552,7 @@
             hp_before,
             hp_after: max_hp,
             amount: 3,
+            animation_param: 2,
         }));
     }
 
@@ -5598,6 +5600,7 @@
             hp_before,
             hp_after: max_hp,
             amount: max_hp - hp_before,
+            animation_param: 0,
         }));
         assert!(outcome.events.contains(&BattleEvent::StatusApplied {
             side: BattleSide::Player,
@@ -5751,7 +5754,7 @@
     }
 
     #[test]
-    fn weather_heal_moves_use_crystal_weather_amounts() {
+    fn time_based_heal_moves_use_crystal_time_weather_and_link_multipliers() {
         let synthesis =
             move_data_with_effect("SYNTHESIS", pokemon_type("GRASS"), 0, 100, "SYNTHESIS");
         let morning_sun =
@@ -5760,11 +5763,56 @@
             move_data_with_effect("MOONLIGHT", pokemon_type("NORMAL"), 0, 100, "MOONLIGHT");
         let recover = move_data_with_effect("RECOVER", pokemon_type("NORMAL"), 0, 100, "HEAL");
 
-        assert_eq!(direct_heal_amount(96, &synthesis, Weather::None), 48);
-        assert_eq!(direct_heal_amount(96, &synthesis, Weather::Sun), 64);
-        assert_eq!(direct_heal_amount(96, &morning_sun, Weather::Rain), 24);
-        assert_eq!(direct_heal_amount(96, &moonlight, Weather::Sandstorm), 24);
-        assert_eq!(direct_heal_amount(96, &recover, Weather::Sun), 48);
+        let synthesis_day = time_based_heal_param(
+            &synthesis,
+            TimeOfDay::Day,
+            Weather::None,
+            false,
+        );
+        let synthesis_morning = time_based_heal_param(
+            &synthesis,
+            TimeOfDay::Morning,
+            Weather::None,
+            false,
+        );
+        let synthesis_sun = time_based_heal_param(
+            &synthesis,
+            TimeOfDay::Day,
+            Weather::Sun,
+            false,
+        );
+        let morning_rain = time_based_heal_param(
+            &morning_sun,
+            TimeOfDay::Morning,
+            Weather::Rain,
+            false,
+        );
+        let moonlight_mismatched_sand = time_based_heal_param(
+            &moonlight,
+            TimeOfDay::Day,
+            Weather::Sandstorm,
+            false,
+        );
+        let linked_moonlight = time_based_heal_param(
+            &moonlight,
+            TimeOfDay::Day,
+            Weather::None,
+            true,
+        );
+
+        assert_eq!(synthesis_day, 2);
+        assert_eq!(direct_heal_amount(96, &synthesis, synthesis_day), 48);
+        assert_eq!(synthesis_morning, 1);
+        assert_eq!(direct_heal_amount(96, &synthesis, synthesis_morning), 24);
+        assert_eq!(synthesis_sun, 3);
+        assert_eq!(direct_heal_amount(96, &synthesis, synthesis_sun), 96);
+        assert_eq!(morning_rain, 1);
+        assert_eq!(direct_heal_amount(96, &morning_sun, morning_rain), 24);
+        assert_eq!(moonlight_mismatched_sand, 0);
+        assert_eq!(direct_heal_amount(96, &moonlight, moonlight_mismatched_sand), 12);
+        assert_eq!(linked_moonlight, 2);
+        assert_eq!(direct_heal_amount(96, &moonlight, linked_moonlight), 48);
+        assert_eq!(direct_heal_amount(96, &recover, 3), 48);
     }
 
     #[test]
@@ -13043,6 +13091,7 @@
             hp_before: player_hp,
             hp_after: outcome.state.player.hp,
             amount: outcome.state.player.hp - player_hp,
+            animation_param: 0,
         }));
         assert!(!outcome.events.iter().any(|event| matches!(
             event,

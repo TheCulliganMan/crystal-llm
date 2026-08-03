@@ -346,6 +346,70 @@ fn compose_viewport_tiles(
     images.add(image)
 }
 
+fn compose_priority_viewport_tiles(
+    tile_specs: &[Option<(Handle<Image>, usize)>],
+    existing: Option<Handle<Image>>,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    const SCALE: usize = TILE_SIZE as usize / SOURCE_TILE_SIZE;
+    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE * SCALE;
+    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE * SCALE;
+    let mut data = vec![0_u8; width * height * 4];
+    for (tile_index, spec) in tile_specs.iter().enumerate() {
+        let Some((handle, clip_top)) = spec else {
+            continue;
+        };
+        let Some(tile) = images.get(handle) else {
+            continue;
+        };
+        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
+        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
+        for source_y in (*clip_top).min(SOURCE_TILE_SIZE)..SOURCE_TILE_SIZE {
+            let source_row_start = source_y * SOURCE_TILE_SIZE * 4;
+            let source_row_end = source_row_start + SOURCE_TILE_SIZE * 4;
+            if source_row_end > tile.data.len() {
+                continue;
+            }
+            let mut expanded_row = [0_u8; SOURCE_TILE_SIZE * SCALE * 4];
+            for (source_x, pixel) in tile.data[source_row_start..source_row_end]
+                .chunks_exact(4)
+                .enumerate()
+            {
+                for repeat in 0..SCALE {
+                    let destination = (source_x * SCALE + repeat) * 4;
+                    expanded_row[destination..destination + 4].copy_from_slice(pixel);
+                }
+            }
+            for repeat_y in 0..SCALE {
+                let destination_y = tile_y + source_y * SCALE + repeat_y;
+                let destination_offset = (destination_y * width + tile_x) * 4;
+                data[destination_offset..destination_offset + expanded_row.len()]
+                    .copy_from_slice(&expanded_row);
+            }
+        }
+    }
+    if let Some(handle) = existing {
+        if let Some(image) = images.get_mut(&handle) {
+            image.data = data;
+            image.sampler = ImageSampler::nearest();
+            return handle;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    images.add(image)
+}
+
 fn load_tileset_art(
     asset_root: &AssetRoot,
     tileset_id: &str,
@@ -387,6 +451,7 @@ fn load_tileset_art(
     let palette_bank = load_tileset_palette_bank(asset_root, tileset_id, time_of_day)?;
     let renderable_tile_count = source_tile_count.max(palette_map.len()).max(1);
     let mut tile_handles = Vec::with_capacity(renderable_tile_count);
+    let mut priority_tile_handles = Vec::with_capacity(renderable_tile_count);
     for tile_index in 0..renderable_tile_count {
         let palette_value = palette_map.get(tile_index).copied().unwrap_or(0);
         let palette_index = usize::from(palette_value & 0x07);
@@ -404,6 +469,13 @@ fn load_tileset_art(
             palette,
             &mut data,
         );
+        let mut priority_data = data.clone();
+        clear_source_tile_palette_zero_alpha(
+            &source,
+            width as usize,
+            source_tile_index,
+            &mut priority_data,
+        );
         let mut image = Image::new(
             Extent3d {
                 width: SOURCE_TILE_SIZE as u32,
@@ -417,11 +489,416 @@ fn load_tileset_art(
         );
         image.sampler = ImageSampler::nearest();
         tile_handles.push(images.add(image));
+        let mut priority_image = Image::new(
+            Extent3d {
+                width: SOURCE_TILE_SIZE as u32,
+                height: SOURCE_TILE_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            priority_data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        priority_image.sampler = ImageSampler::nearest();
+        priority_tile_handles.push(images.add(priority_image));
     }
+    let animated_tiles = load_common_tileset_animations(
+        asset_root,
+        tileset_id,
+        palette_map,
+        palette_bank.as_ref(),
+        &tile_handles,
+        images,
+    )?;
     Ok(TilesetArt {
         metatile_layout,
         tile_handles,
+        priority_tile_handles,
+        animated_tiles,
     })
+}
+
+fn load_common_tileset_animations(
+    asset_root: &AssetRoot,
+    tileset_id: &str,
+    palette_map: &[u8],
+    palette_bank: Option<&Vec<Palette>>,
+    tile_handles: &[Handle<Image>],
+    images: &mut Assets<Image>,
+) -> Result<HashMap<usize, TilesetAnimatedTile>> {
+    const FLOWER_TILE: usize = 0x03;
+    const WATER_TILE: usize = 0x14;
+    const FLOWER_TILESETS: [&str; 5] = ["johto", "johto_modern", "kanto", "park", "forest"];
+    const WATER_TILESETS: [&str; 9] = [
+        "johto", "johto_modern", "kanto", "park", "forest", "port", "cave",
+        "dark_cave", "ice_path",
+    ];
+    let mut animated = HashMap::new();
+    let root = asset_root.runtime_assets().join("gfx/tilesets");
+    if FLOWER_TILESETS.contains(&tileset_id) {
+        let palette = tileset_animation_palette(FLOWER_TILE, palette_map, palette_bank);
+        let mut frames = Vec::with_capacity(2);
+        for name in ["cgb_1.2bpp", "cgb_2.2bpp"] {
+            frames.extend(load_2bpp_animation_frames(
+                &root.join("flower").join(name),
+                1,
+                palette,
+                images,
+            )?);
+        }
+        animated.insert(FLOWER_TILE, sequential_tileset_animation(frames, 60, 0));
+    }
+    if WATER_TILESETS.contains(&tileset_id) {
+        let palette = tileset_animation_palette(WATER_TILE, palette_map, palette_bank);
+        let frames = load_2bpp_animation_frames(
+            &root.join("water/water.2bpp"),
+            4,
+            palette,
+            images,
+        )?;
+        // ASM/TypeScript: ((wTileAnimationTimer / 11) >> 1) & 3.
+        animated.insert(WATER_TILE, sequential_tileset_animation(frames, 22, 0));
+    }
+    if tileset_id == "park" {
+        const FOUNTAIN_TILE: usize = 0x5f;
+        let palette = tileset_animation_palette(FOUNTAIN_TILE, palette_map, palette_bank);
+        let source = load_numbered_2bpp_animation_frames(
+            &root.join("fountain"), 5, palette, images,
+        )?;
+        let frames = [0_usize, 1, 2, 3, 2, 3, 4, 0]
+            .into_iter()
+            .map(|index| source[index].clone())
+            .collect();
+        animated.insert(FOUNTAIN_TILE, sequential_tileset_animation(frames, 11, 0));
+    }
+    if tileset_id == "elite_four_room" {
+        const LAVA_TILE_1: usize = 0x5b;
+        const LAVA_TILE_2: usize = 0x38;
+        let source_1 = load_numbered_2bpp_animation_frames(
+            &root.join("lava"),
+            4,
+            tileset_animation_palette(LAVA_TILE_1, palette_map, palette_bank),
+            images,
+        )?;
+        let source_2 = load_numbered_2bpp_animation_frames(
+            &root.join("lava"),
+            4,
+            tileset_animation_palette(LAVA_TILE_2, palette_map, palette_bank),
+            images,
+        )?;
+        let offset_frames = [2_usize, 3, 0, 1]
+            .into_iter()
+            .map(|index| source_1[index].clone())
+            .collect();
+        animated.insert(
+            LAVA_TILE_1,
+            sequential_tileset_animation(offset_frames, 2, 0),
+        );
+        animated.insert(
+            LAVA_TILE_2,
+            sequential_tileset_animation(source_2, 2, 0),
+        );
+    }
+    if tileset_id == "tower" {
+        const DESTINATIONS: [usize; 10] = [
+            0x2d, 0x2f, 0x3d, 0x3f, 0x3c, 0x2c, 0x4d, 0x4f, 0x5d, 0x5f,
+        ];
+        const UPDATE_SEQUENCE: [usize; 10] = [
+            0x5d, 0x5f, 0x4d, 0x4f, 0x3c, 0x2c, 0x3d, 0x3f, 0x2d, 0x2f,
+        ];
+        const FRAME_ORDER: [usize; 8] = [0, 1, 2, 3, 4, 3, 2, 1];
+        for (file_index, destination) in DESTINATIONS.into_iter().enumerate() {
+            let source = load_2bpp_animation_frames(
+                &root.join("tower-pillar").join(format!("{}.2bpp", file_index + 1)),
+                5,
+                tileset_animation_palette(destination, palette_map, palette_bank),
+                images,
+            )?;
+            let frames = FRAME_ORDER
+                .into_iter()
+                .map(|index| source[index].clone())
+                .collect();
+            let phase_offset = UPDATE_SEQUENCE
+                .iter()
+                .position(|candidate| *candidate == destination)
+                .with_context(|| {
+                    format!("tower animation destination ${destination:02x} has no command slot")
+                })? as u64;
+            animated.insert(
+                destination,
+                sequential_tileset_animation(frames, 16, phase_offset),
+            );
+        }
+    }
+    if tileset_id == "forest" {
+        const LEFT_TILE: usize = 0x0c;
+        const RIGHT_TILE: usize = 0x0f;
+        let directory = root.join("forest-tree");
+        let left_frames = load_numbered_2bpp_animation_frames(
+            &directory,
+            2,
+            tileset_animation_palette(LEFT_TILE, palette_map, palette_bank),
+            images,
+        )?;
+        let mut right_frames = Vec::with_capacity(2);
+        for index in 3..=4 {
+            right_frames.extend(load_2bpp_animation_frames(
+                &directory.join(format!("{index}.2bpp")),
+                1,
+                tileset_animation_palette(RIGHT_TILE, palette_map, palette_bank),
+                images,
+            )?);
+        }
+        animated.insert(
+            LEFT_TILE,
+            TilesetAnimatedTile {
+                frames: left_frames,
+                frame_ticks: 1,
+                phase_offset: 0,
+                requires_forest_restless: true,
+                cave_water_composite: false,
+                advance_on_phase_offset: false,
+                additional_schedule: Vec::new(),
+            },
+        );
+        animated.insert(
+            RIGHT_TILE,
+            TilesetAnimatedTile {
+                frames: right_frames,
+                frame_ticks: 1,
+                phase_offset: 0,
+                requires_forest_restless: true,
+                cave_water_composite: false,
+                advance_on_phase_offset: false,
+                additional_schedule: Vec::new(),
+            },
+        );
+    }
+    if matches!(tileset_id, "cave" | "dark_cave") {
+        const HORIZONTAL_TILE: usize = 0x14;
+        const VERTICAL_TILE: usize = 0x40;
+        let water_sources = animated
+            .get(&HORIZONTAL_TILE)
+            .map(|animation| animation.frames.clone())
+            .context("cave scroll animation requires the four water frames")?;
+        let mut composite_frames = Vec::with_capacity(32);
+        for source in &water_sources {
+            for shift in 0..8 {
+                composite_frames.push(shifted_tileset_tile_handle(
+                    source, shift, 0, images,
+                )?);
+            }
+        }
+        animated.insert(
+            HORIZONTAL_TILE,
+            TilesetAnimatedTile {
+                frames: composite_frames,
+                frame_ticks: 22,
+                phase_offset: 0,
+                requires_forest_restless: false,
+                cave_water_composite: true,
+                advance_on_phase_offset: false,
+                additional_schedule: vec![(19, 4)],
+            },
+        );
+        let vertical_source = tile_handles
+            .get(VERTICAL_TILE)
+            .context("cave waterfall animation requires tile $40")?;
+        animated.insert(
+            VERTICAL_TILE,
+            scrolled_tileset_animation(vertical_source, false, 3, 19, 16, images)?,
+        );
+    }
+    if tileset_id == "ice_path" {
+        const HORIZONTAL_VISIBLE_TILE: usize = 0xb5;
+        const VERTICAL_VISIBLE_TILE: usize = 0xb1;
+        let horizontal_source = tile_handles
+            .get(HORIZONTAL_VISIBLE_TILE)
+            .context("Ice Path water animation requires visible tile $b5")?;
+        let vertical_source = tile_handles
+            .get(VERTICAL_VISIBLE_TILE)
+            .context("Ice Path waterfall animation requires visible tile $b1")?;
+        animated.insert(
+            HORIZONTAL_VISIBLE_TILE,
+            scrolled_tileset_animation(horizontal_source, true, 1, 19, 4, images)?,
+        );
+        animated.insert(
+            VERTICAL_VISIBLE_TILE,
+            scrolled_tileset_animation(vertical_source, false, 3, 19, 16, images)?,
+        );
+    }
+    Ok(animated)
+}
+
+fn sequential_tileset_animation(
+    frames: Vec<Handle<Image>>,
+    frame_ticks: u64,
+    phase_offset: u64,
+) -> TilesetAnimatedTile {
+    TilesetAnimatedTile {
+        frames,
+        frame_ticks,
+        phase_offset,
+        requires_forest_restless: false,
+        cave_water_composite: false,
+        advance_on_phase_offset: false,
+        additional_schedule: Vec::new(),
+    }
+}
+
+fn scrolled_tileset_animation(
+    source: &Handle<Image>,
+    horizontal: bool,
+    pixels_per_step: usize,
+    frame_ticks: u64,
+    phase_offset: u64,
+    images: &mut Assets<Image>,
+) -> Result<TilesetAnimatedTile> {
+    let mut frames = Vec::with_capacity(8);
+    for stage in 0..8 {
+        let shift = (stage * pixels_per_step) % 8;
+        frames.push(shifted_tileset_tile_handle(
+            source,
+            if horizontal { shift } else { 0 },
+            if horizontal { 0 } else { shift },
+            images,
+        )?);
+    }
+    Ok(TilesetAnimatedTile {
+        frames,
+        frame_ticks,
+        phase_offset,
+        requires_forest_restless: false,
+        cave_water_composite: false,
+        advance_on_phase_offset: true,
+        additional_schedule: Vec::new(),
+    })
+}
+
+fn shifted_tileset_tile_handle(
+    source: &Handle<Image>,
+    left_pixels: usize,
+    down_pixels: usize,
+    images: &mut Assets<Image>,
+) -> Result<Handle<Image>> {
+    let source_data = images
+        .get(source)
+        .context("tileset scroll animation source image is unavailable")?
+        .data
+        .clone();
+    if source_data.len() != SOURCE_TILE_SIZE * SOURCE_TILE_SIZE * 4 {
+        anyhow::bail!(
+            "tileset scroll animation source must be one 8x8 RGBA tile, found {} bytes",
+            source_data.len()
+        );
+    }
+    let mut shifted = vec![0_u8; source_data.len()];
+    for y in 0..SOURCE_TILE_SIZE {
+        for x in 0..SOURCE_TILE_SIZE {
+            let source_x = (x + left_pixels) % SOURCE_TILE_SIZE;
+            let source_y = (y + SOURCE_TILE_SIZE - (down_pixels % SOURCE_TILE_SIZE))
+                % SOURCE_TILE_SIZE;
+            let source_offset = (source_y * SOURCE_TILE_SIZE + source_x) * 4;
+            let target_offset = (y * SOURCE_TILE_SIZE + x) * 4;
+            shifted[target_offset..target_offset + 4]
+                .copy_from_slice(&source_data[source_offset..source_offset + 4]);
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: SOURCE_TILE_SIZE as u32,
+            height: SOURCE_TILE_SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        shifted,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(images.add(image))
+}
+
+fn load_numbered_2bpp_animation_frames(
+    directory: &std::path::Path,
+    frame_count: usize,
+    palette: Option<&Palette>,
+    images: &mut Assets<Image>,
+) -> Result<Vec<Handle<Image>>> {
+    let mut frames = Vec::with_capacity(frame_count);
+    for index in 1..=frame_count {
+        frames.extend(load_2bpp_animation_frames(
+            &directory.join(format!("{index}.2bpp")),
+            1,
+            palette,
+            images,
+        )?);
+    }
+    Ok(frames)
+}
+
+fn tileset_animation_palette<'a>(
+    tile_index: usize,
+    palette_map: &[u8],
+    palette_bank: Option<&'a Vec<Palette>>,
+) -> Option<&'a Palette> {
+    let palette_index = usize::from(palette_map.get(tile_index).copied().unwrap_or(0) & 0x07);
+    palette_bank.and_then(|bank| bank.get(palette_index).or_else(|| bank.first()))
+}
+
+fn load_2bpp_animation_frames(
+    path: &std::path::Path,
+    frame_count: usize,
+    palette: Option<&Palette>,
+    images: &mut Assets<Image>,
+) -> Result<Vec<Handle<Image>>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read tileset animation {}", path.display()))?;
+    let expected = frame_count * SOURCE_TILE_SIZE * 2;
+    if bytes.len() != expected {
+        anyhow::bail!(
+            "tileset animation {} must contain {} bytes ({} frames), found {}",
+            path.display(), expected, frame_count, bytes.len()
+        );
+    }
+    let mut frames = Vec::with_capacity(frame_count);
+    for frame_index in 0..frame_count {
+        let frame = &bytes[frame_index * 16..frame_index * 16 + 16];
+        let mut rgba = vec![0_u8; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE * 4];
+        for row in 0..SOURCE_TILE_SIZE {
+            let lo = frame[row * 2];
+            let hi = frame[row * 2 + 1];
+            for col in 0..SOURCE_TILE_SIZE {
+                let bit = 1 << (7 - col);
+                let color_index = (((hi & bit != 0) as usize) << 1)
+                    | (lo & bit != 0) as usize;
+                let color = palette
+                    .map(|colors| colors[color_index])
+                    .unwrap_or_else(|| {
+                        let gray = [255_u8, 170, 85, 0][color_index];
+                        [gray, gray, gray]
+                    });
+                let offset = (row * SOURCE_TILE_SIZE + col) * 4;
+                rgba[offset..offset + 3].copy_from_slice(&color);
+                rgba[offset + 3] = 255;
+            }
+        }
+        let mut image = Image::new(
+            Extent3d {
+                width: SOURCE_TILE_SIZE as u32,
+                height: SOURCE_TILE_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            rgba,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        image.sampler = ImageSampler::nearest();
+        frames.push(images.add(image));
+    }
+    Ok(frames)
 }
 
 fn copy_source_tile_rgba(
@@ -455,6 +932,25 @@ fn copy_source_tile_rgba(
                 target[offset + 1] = source_pixel[1];
                 target[offset + 2] = source_pixel[2];
                 target[offset + 3] = alpha;
+            }
+        }
+    }
+}
+
+fn clear_source_tile_palette_zero_alpha(
+    source: &image::RgbaImage,
+    source_width: usize,
+    tile_index: usize,
+    target: &mut [u8],
+) {
+    let tiles_per_row = (source_width / SOURCE_TILE_SIZE).max(1);
+    let source_x = (tile_index % tiles_per_row) * SOURCE_TILE_SIZE;
+    let source_y = (tile_index / tiles_per_row) * SOURCE_TILE_SIZE;
+    for row in 0..SOURCE_TILE_SIZE {
+        for col in 0..SOURCE_TILE_SIZE {
+            let source_pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
+            if source_pixel[3] == 0 || palette_index_from_gray(source_pixel[0]) == 0 {
+                target[(row * SOURCE_TILE_SIZE + col) * 4 + 3] = 0;
             }
         }
     }
@@ -2725,6 +3221,84 @@ fn grass_rustle_frames_for_art(
     rendered_art.grass_rustle_cache.get(&key).cloned()
 }
 
+fn boulder_dust_frames_for_art(
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    time_of_day: &str,
+    images: &mut Assets<Image>,
+) -> Option<[SpriteFrame; 2]> {
+    let key = normalize_tileset_time_of_day(time_of_day);
+    if !rendered_art.boulder_dust_cache.contains_key(&key)
+        && !rendered_art.boulder_dust_errors.contains_key(&key)
+    {
+        let path = asset_root
+            .runtime_assets()
+            .join("gfx/overworld/boulder_dust.png");
+        let loaded = (|| -> Result<[SpriteFrame; 2]> {
+            let source = image::open(&path)
+                .with_context(|| format!("decode boulder dust PNG {}", path.display()))?
+                .to_rgba8();
+            let (width, height) = source.dimensions();
+            if width != 8 || height != 16 {
+                anyhow::bail!(
+                    "boulder dust PNG {} must be 8x16, found {width}x{height}",
+                    path.display()
+                );
+            }
+            let background = *source.get_pixel(0, 0);
+            let palette_bank = load_npc_sprite_palette_bank(asset_root, &key)?;
+            let palette = palette_bank
+                .get(5)
+                .context("boulder dust palette bank has no PAL_OW_EMOTE palette 5")?;
+            let build = |tile: u32, images: &mut Assets<Image>| -> SpriteFrame {
+                let mut pixels = vec![0; 16 * 16 * 4];
+                for y in 0..16_u32 {
+                    for x in 0..16_u32 {
+                        let pixel = source.get_pixel(x % 8, tile * 8 + y % 8);
+                        if *pixel == background {
+                            continue;
+                        }
+                        let offset = (y as usize * 16 + x as usize) * 4;
+                        let color = palette[palette_index_from_gray(pixel[0])];
+                        pixels[offset] = color[0];
+                        pixels[offset + 1] = color[1];
+                        pixels[offset + 2] = color[2];
+                        pixels[offset + 3] = 255;
+                    }
+                }
+                let mut image = Image::new(
+                    Extent3d {
+                        width: 16,
+                        height: 16,
+                        depth_or_array_layers: 1,
+                    },
+                    TextureDimension::D2,
+                    pixels,
+                    TextureFormat::Rgba8UnormSrgb,
+                    RenderAssetUsages::default(),
+                );
+                image.sampler = ImageSampler::nearest();
+                SpriteFrame {
+                    handle: images.add(image),
+                    size: Vec2::splat(64.0),
+                }
+            };
+            Ok([build(0, images), build(1, images)])
+        })();
+        match loaded {
+            Ok(frames) => {
+                rendered_art.boulder_dust_cache.insert(key.clone(), frames);
+            }
+            Err(error) => {
+                rendered_art
+                    .boulder_dust_errors
+                    .insert(key.clone(), error.to_string());
+            }
+        }
+    }
+    rendered_art.boulder_dust_cache.get(&key).cloned()
+}
+
 fn resolve_visible_object_sprite_asset_id(
     asset_root: &AssetRoot,
     sprite: &str,
@@ -3042,12 +3616,13 @@ fn static_overworld_direction(
 
 fn normalize_tileset_time_of_day(value: &str) -> String {
     let normalized = value.to_ascii_lowercase();
-    if normalized == "night" {
-        "nite".to_string()
-    } else if normalized.is_empty() {
-        "day".to_string()
-    } else {
-        normalized
+    match normalized.as_str() {
+        "morning" | "morn" => "morn".to_string(),
+        "night" | "nite" => "nite".to_string(),
+        "darkness" | "dark" => "dark".to_string(),
+        "indoors" | "indoor" => "indoor".to_string(),
+        "" => "day".to_string(),
+        _ => normalized,
     }
 }
 

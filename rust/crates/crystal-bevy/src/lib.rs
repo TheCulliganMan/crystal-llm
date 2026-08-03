@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use crystal_assets::modpack::{
     CompiledGamePack, CompiledGamePackIdentity, GameDataSet, LoadedCompiledGamePack,
-    ModpackAudioKind, ModpackAudioLoopPolicy, ModpackAudioManifest, ModpackAudioManifestEntry,
-    ModpackAudioPlaybackEntry, ModpackAudioPlaybackMode, ModpackAudioPlaybackPlan,
+    ModpackAudioKind, ModpackAudioManifest, ModpackAudioManifestEntry,
+    ModpackAudioPlaybackEntry, ModpackAudioPlaybackPlan,
     ModpackAudioSource,
 };
 use crystal_assets::{
@@ -52,7 +52,7 @@ use crystal_assets::{
     RuntimeScriptRuntimeQueueDrainResult, RuntimeScriptRuntimeRecordQueue,
     RuntimeScriptRuntimeRecordQueueDrainCommand, RuntimeScriptRuntimeRecordQueueDrainResult,
     RuntimeShopTransactionCommand, RuntimeShuckieAction, RuntimeShuckieCommand, RuntimeSpawnPoint,
-    RuntimeSpecialCryCommand, RuntimeStoryGateSpecial, RuntimeTitleScreen, RuntimeTmHmCommand,
+    RuntimeSpecialCryCommand, RuntimeStoryGateSpecial, RuntimeTmHmCommand,
     RuntimeTrainerBattleCompletionCommand, RuntimeTrainerIdentityCommand,
     RuntimeVerticalMenuOpenCommand, RuntimeVerticalMenuSelectionCommand, TilesetDefinition,
     decode_runtime_mutation_command_frame, runtime_mutation_command_frame,
@@ -72,11 +72,9 @@ use crystal_core::input::{
     B_PAD_A, B_PAD_B, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_SELECT, B_PAD_START, B_PAD_UP,
     GameButton, JoypadState,
 };
-use crystal_core::models::pokemon::StatExperience;
 use crystal_core::models::{
     Dv, FrontpicAnimProgram, ITEM_POCKET_TM_HM, Item, LearnedMove, Move, PcBox, PokegearLandmark,
     PokegearLandmarksPayload, Pokemon, PokemonSpecies, RuntimePokedexEntry, Stat, Trainer,
-    calculate_stats,
 };
 use crystal_core::multiplayer::{
     DeterministicInputJournal, DeterministicInputJournalFrame, DeterministicReplayBundle,
@@ -92,8 +90,8 @@ use crystal_core::save::{
     read_save_game_for_modpack, read_save_game_summary_for_modpack, write_save_game_for_modpack,
 };
 use crystal_core::state::{
-    Badges, BattleMemory, GameState, ItemUseRuntimeEvent, Options, OverworldFollowMemory,
-    OverworldMemory, OverworldObjectMapMemory, OverworldObjectMemory, SavedTrainerMetadata,
+    Badges, BattleMemory, GameState, ItemUseRuntimeEvent, Options,
+    OverworldMemory, SavedTrainerMetadata,
     ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState, ScriptLocation,
     ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest, ScriptMapRefreshRequest,
     ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade, ScriptReturnFrame,
@@ -101,7 +99,7 @@ use crystal_core::state::{
     ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
     ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
     ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRequest, ScriptShopRuntimeEvent,
-    ScriptTextRuntimeEvent, ScriptTextRuntimeKind, ScriptTextWait, ScriptWarpRequest,
+    ScriptTextRuntimeEvent, ScriptTextWait, ScriptWarpRequest,
     ScriptYesNoPrompt, is_engine_flag_name, saved_decoration_description_command_payload,
     saved_delay_command_payload, saved_earthquake_command_payload, saved_emote_command_payload,
     saved_map_load_command_payload, saved_map_refresh_command_payload,
@@ -109,7 +107,6 @@ use crystal_core::state::{
     saved_queued_command_args, saved_shop_event_command_payload,
     saved_shop_request_command_payload, saved_stone_table_entry_command_payload,
     saved_variable_write_command_payload,
-    validate_saved_audio_reference as core_validate_saved_audio_reference,
     validate_saved_trainer_metadata,
 };
 use crystal_core::systems::battle_escape::{BattleEscapeAttempt, BattleEscapeRules};
@@ -133,7 +130,6 @@ use crystal_core::systems::field_moves::{
 };
 use crystal_core::systems::gift_pokemon::{GiftPokemonOutcome, GiftPokemonScript};
 use crystal_core::systems::item_use::{ItemUseContext, ItemUseOutcome};
-use crystal_core::systems::learnsets::SpeciesLearnsets;
 use crystal_core::systems::map_context::{SpawnMemoryUpdate, commit_overworld_snapshot};
 use crystal_core::systems::phone::{ScriptPhoneInputs, ScriptPhoneOutcome};
 use crystal_core::systems::script_audio::ScriptAudioCue;
@@ -144,7 +140,7 @@ use crystal_core::systems::script_items::{
     ScriptItemCheckOutcome, ScriptItemGrantOutcome, ScriptItemTakeOutcome,
 };
 use crystal_core::systems::script_objects::{
-    ScriptMovementEffect, ScriptMovementOutcome, ScriptObjectMutationOutcome,
+    ScriptMovementOutcome, ScriptObjectMutationOutcome,
 };
 use crystal_core::systems::script_runtime::{
     ScriptRuntimeInputs, ScriptRuntimeOutcome, commit_interaction_script_dispatch,
@@ -163,18 +159,15 @@ use crystal_core::systems::special_routines::{
 use crystal_core::systems::step_events::StepEventResult;
 use crystal_core::systems::time::{ClockTime, GameDate};
 use crystal_core::systems::tmhm::TmHmLearnOutcome;
-use crystal_core::world::collision::{
-    PlayerTraversalState, can_enter_tile, permissions, sample_collision,
-};
 use crystal_core::world::encounters::{
-    EncounterSlotTables, EncounterSurface, FieldEncounterData, FieldEncounterKind,
+    EncounterSlotTables, EncounterSurface, FieldEncounterData,
     FieldEncounterRoll, TimeOfDay, WildEncounterData,
 };
-use crystal_core::world::fishing::{FishingSession, ROD_GOOD, ROD_OLD, ROD_SUPER};
-use crystal_core::world::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
+use crystal_core::world::fishing::FishingSession;
+use crystal_core::world::map::{Direction, TilePosition};
 use crystal_core::world::movement::{LedgeJumpOutcome, MovementMode, StepOutcome};
 use crystal_core::world::session::{
-    ConnectionTransition, CoordEventTrigger, OverworldFollowState, OverworldInteraction,
+    ConnectionTransition, CoordEventTrigger, OverworldInteraction,
     OverworldInteractionTarget, OverworldSession, OverworldSnapshot, WarpTransition,
     WildEncounterRoll,
 };
@@ -346,7 +339,9 @@ fn reject_unexpected_gift_pokemon_inputs(
 pub struct RuntimeShellSnapshot {
     pub boot: RuntimeBootSummary,
     pub overworld: OverworldSnapshot,
+    pub overworld_player_hidden: bool,
     pub visible_objects: Vec<crystal_core::map::ObjectEvent>,
+    pub visible_object_slots: Vec<usize>,
     pub visible_object_runtime_tiles: BTreeMap<String, TilePosition>,
     pub visible_object_facings: BTreeMap<String, Direction>,
     pub state_checksum: StateChecksum,
@@ -845,6 +840,8 @@ pub struct RuntimeBattleSnapshot {
     pub enemy_transformed_species: Option<String>,
     pub player_substitute_hp: u16,
     pub enemy_substitute_hp: u16,
+    pub player_semi_invulnerable: bool,
+    pub enemy_semi_invulnerable: bool,
     pub player_moves: Vec<LearnedMove>,
     pub enemy_moves: Vec<LearnedMove>,
     pub player_last_move: Option<String>,
@@ -1578,6 +1575,9 @@ pub struct RuntimeBattleCommandSnapshot {
     /// The source battle loop bypasses command selection while an existing
     /// multi-turn move or recharge state owns the player's next action.
     pub player_turn_automatic: bool,
+    /// Bide still exposes the four-command menu, but choosing FIGHT bypasses
+    /// move selection and resumes the retained Bide move immediately.
+    pub player_fight_automatic: bool,
     pub enemy_move_slots: Vec<usize>,
     pub switch_party_indices: Vec<usize>,
     pub can_use_items: bool,
@@ -3369,14 +3369,16 @@ impl RuntimeGameShell {
             }
             let day_of_week_prompt = self
                 .runtime
-                .script_runtime_command_at(
-                    &current.origin_map_name,
-                    &current.source_script,
-                    current.command_index,
-                )
+                .compiled_script_commands(&current.source_script)?
+                .get(current.command_index)
                 .is_some_and(|command| {
-                    command.command == "special"
-                        && command.args.first().is_some_and(|arg| arg == "SetDayOfWeek")
+                    command.get("command").and_then(serde_json::Value::as_str) == Some("special")
+                        && command
+                            .get("args")
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|args| args.first())
+                            .and_then(serde_json::Value::as_str)
+                            == Some("SetDayOfWeek")
                 });
             if day_of_week_prompt {
                 return Ok(RuntimeCompiledScriptRun {
@@ -3464,7 +3466,7 @@ impl RuntimeGameShell {
                     origin_map_name: next_script.origin_map_name.clone(),
                     script: next_script.script.clone(),
                 })?;
-            let RuntimeMutationResult::StandardScriptApplied(result) = mutation.result else {
+            let RuntimeMutationResult::StandardScriptApplied(_result) = mutation.result else {
                 anyhow::bail!("runtime mutation returned non-standard-script result");
             };
             return Ok(RuntimePendingCompiledScriptRun {
@@ -8335,13 +8337,23 @@ impl RuntimeGameShell {
     }
 
     pub fn current_encounter_surface(&self) -> Option<EncounterSurface> {
-        self.session.overworld.current_encounter_surface()
+        self.current_encounter_surface_checked()
+            .expect("current encounter surface requires verified map metadata and collision")
     }
 
     pub fn current_encounter_surface_checked(&self) -> Result<Option<EncounterSurface>> {
+        let environment = &self
+            .runtime
+            .data()
+            .runtime_map_metadata_for_name(&self.session.overworld.map.name)?
+            .environment;
+        let land_encounters_on_any_land = environment.eq_ignore_ascii_case("cave")
+            || environment.eq_ignore_ascii_case("dungeon");
         self.session
             .overworld
-            .current_encounter_surface_checked()
+            .current_encounter_surface_checked_with_land_encounters(
+                land_encounters_on_any_land,
+            )
             .map_err(|error| anyhow::anyhow!("current encounter surface: {error}"))
     }
 
@@ -9986,6 +9998,7 @@ impl RuntimeGameShell {
         Ok(RuntimeShellSnapshot {
             boot: self.runtime.boot_summary(),
             overworld: self.session.snapshot(),
+            overworld_player_hidden: self.session.overworld.player_hidden,
             visible_objects: self
                 .session
                 .overworld
@@ -9993,6 +10006,15 @@ impl RuntimeGameShell {
                 .iter()
                 .filter(|object| self.session.overworld.is_object_visible(object))
                 .cloned()
+                .collect(),
+            visible_object_slots: self
+                .session
+                .overworld
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| self.session.overworld.is_object_visible(object))
+                .map(|(index, _)| index)
                 .collect(),
             visible_object_runtime_tiles: self.session.overworld.object_runtime_tiles.clone(),
             visible_object_facings: self.session.overworld.object_facings.clone(),
@@ -10718,6 +10740,10 @@ impl RuntimeBattleSnapshot {
                 .map(|transform| transform.species.id.clone()),
             player_substitute_hp: combat.map_or(0, |combat| combat.player_substitute_hp),
             enemy_substitute_hp: combat.map_or(0, |combat| combat.enemy_substitute_hp),
+            player_semi_invulnerable: combat
+                .is_some_and(|combat| combat.player_airborne_move.is_some()),
+            enemy_semi_invulnerable: combat
+                .is_some_and(|combat| combat.enemy_airborne_move.is_some()),
             player_moves,
             enemy_moves,
             player_last_move: combat.and_then(|combat| combat.player_last_move.clone()),
@@ -10799,9 +10825,13 @@ impl RuntimeBattleCommandSnapshot {
                     || combat.player_airborne_move.is_some()
                     || combat.player_charging_move.is_some()
                     || combat.player.rampage_turns > 0
-                    || combat.player_bide_turns > 0
                     || combat.player_rollout_turns > 0)
             });
+        let player_fight_automatic = state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .is_some_and(|combat| combat.player.hp > 0 && combat.player_bide_turns > 0);
         let player_move_slots = state
             .battle_active_party_index
             .map(|index| {
@@ -10871,6 +10901,7 @@ impl RuntimeBattleCommandSnapshot {
             player_move_slots,
             player_forced_struggle,
             player_turn_automatic,
+            player_fight_automatic,
             enemy_move_slots,
             switch_party_indices,
             can_use_items: state.battle_active_party_index.is_some(),
@@ -17246,6 +17277,21 @@ impl RuntimeOverworldSession {
                 interaction.script, interaction.map_name
             )
         })?;
+        if let OverworldInteractionTarget::Object {
+            object_identifier: Some(object_id),
+            ..
+        } = &interaction.target
+        {
+            let facing = match interaction.facing {
+                Direction::Up => Direction::Down,
+                Direction::Down => Direction::Up,
+                Direction::Left => Direction::Right,
+                Direction::Right => Direction::Left,
+            };
+            self.overworld
+                .object_facings
+                .insert(object_id.clone(), facing);
+        }
         commit_overworld_snapshot(
             &mut self.state,
             &self.overworld.snapshot(),
@@ -19377,7 +19423,7 @@ impl RuntimeAudioCatalog {
 
     fn from_game_data_owned(
         data: &GameDataSet,
-        mut compiled_audio: BTreeMap<String, Vec<u8>>,
+        compiled_audio: BTreeMap<String, Vec<u8>>,
         manifest: ModpackAudioManifest,
         playback: ModpackAudioPlaybackPlan,
         audio_compression: Option<&str>,

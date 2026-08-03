@@ -95,6 +95,7 @@ const PLAYFIELD_HEIGHT: f32 = VIEWPORT_TILES_Y as f32 * TILE_SIZE;
 const EVENT_LOG_LIMIT: usize = 192;
 const RECENT_OVERWORLD_INPUT_LIMIT: usize = 2048;
 const WALK_FRAME_HOLD_TICKS: u8 = 8;
+const OVERWORLD_TURN_HOLD_TICKS: u8 = 4;
 // Crystal advances a walking tile over several VBlanks.  The core session
 // operates on completed tiles, so the real-time host must gate held movement
 // instead of applying a full tile at every 60 Hz input sample.
@@ -402,6 +403,115 @@ enum VisibleBlackoutPhase {
     FadeIn,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisibleWalkWarpPhase {
+    FadeOut,
+    FadeIn,
+    ScriptFadeIn,
+    MapReloadFadeIn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingOverworldStepBoundary {
+    Arrival,
+    CoordEvent,
+    TrainerSight,
+    WildBattle,
+    PoisonBlackout,
+    StepEvent(crate::core::systems::step_events::StepEventResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum VisibleScriptMovementPhase {
+    Sound { audio_id: String },
+    Move {
+        from: TilePosition,
+        to: TilePosition,
+        direction: Direction,
+        duration: u8,
+        jump: bool,
+        update_facing: bool,
+        standing_frame: bool,
+    },
+    Hold { duration: u16 },
+    TreeShake { duration: u16 },
+    Visibility { hidden: bool },
+    Stationary {
+        duration: u16,
+        effect: VisibleStationaryMovementEffect,
+    },
+    ScreenShake { parameter: u16 },
+    Turn { direction: Direction, duration: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisibleStationaryMovementEffect {
+    TeleportSpin,
+    TeleportRise,
+    TeleportWait,
+    TeleportDescent,
+    SkyfallWait,
+    SkyfallFall,
+    SkyfallTop,
+    DigSpin,
+    RockSmash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisibleFieldTravelAnimation {
+    DigOut,
+    DigReturn,
+    TeleportFrom,
+    TeleportTo,
+    Pitfall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisibleStrengthNoticePhase {
+    UseText,
+    CryPause,
+    MoveText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleScriptMovement {
+    object_id: String,
+    phases: VecDeque<VisibleScriptMovementPhase>,
+    pending_programs: VecDeque<VisibleScriptMovementProgram>,
+    hold_frames_remaining: u16,
+    active_jump_duration: Option<u8>,
+    active_uses_standing_frame: bool,
+    active_tree_shake_duration: Option<u16>,
+    active_stationary_effect: Option<VisibleStationaryMovementEffect>,
+    active_stationary_duration: u16,
+    stationary_y_offset: i16,
+    stationary_initial_facing: Direction,
+    follower_object_id: Option<String>,
+    follower_queued_step: Option<VisibleFollowerStep>,
+    follower_active_jump_duration: Option<u8>,
+    follower_active_uses_standing_frame: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VisibleFollowerStep {
+    direction: Direction,
+    stride: u8,
+    duration: u8,
+    jump: bool,
+    standing_frame: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleScriptMovementProgram {
+    object_id: String,
+    previous_tile: TilePosition,
+    previous_facing: Direction,
+    previous_hidden: bool,
+    phases: VecDeque<VisibleScriptMovementPhase>,
+    follower_object_id: Option<String>,
+    follower_queued_step: Option<VisibleFollowerStep>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleMomBank {
     phase: VisibleMomBankPhase,
@@ -415,11 +525,18 @@ struct VisibleMomBank {
 
 #[derive(Resource)]
 struct BevyRuntimeShell {
+    /// Presentation-time Game Boy frame. Unlike the semantic save checksum,
+    /// this advances while the player stands still so LCD animations continue.
+    lcd_animation_frame: u64,
+    ambient_tileset_animation_active: bool,
+    ambient_tileset_animation_schedule: Vec<(u64, u64)>,
+    battle_lcd_animation_active: bool,
     asset_root: AssetRoot,
     runtime: CrystalRuntime,
     shell: RuntimeGameShell,
     intro_screen: Option<VisibleIntroScreen>,
     title_menu: Option<TitleMenu>,
+    visible_continue_screen: Option<VisibleContinueScreen>,
     credits_screen: Option<VisibleCreditsScreen>,
     last_error: Option<String>,
     last_action_status: Option<String>,
@@ -432,22 +549,42 @@ struct BevyRuntimeShell {
     active_music: Option<String>,
     faded_music: Option<String>,
     last_battle_cry_key: Option<String>,
-    pending_battle_cry_after_message: Option<(String, String, String)>,
+    pending_battle_cries_after_messages: VecDeque<(String, String, String)>,
     battle_enemy_send_out_pending: bool,
     battle_player_send_out_pending: bool,
+    battle_enemy_hp_at_player_send_out: Option<u16>,
     pending_battle_scenes_after_message: VecDeque<(String, Box<RuntimeShellSnapshot>)>,
     pending_enemy_response_after_capture: Option<(String, String)>,
+    pending_plain_battle_map_reload: bool,
     last_overworld_input: Option<VisibleOverworldInputRecord>,
     // Authoritative movement commits at a tile boundary. Retain its previous
     // tile so presentation can cross that boundary over real LCD frames.
     player_walk_from: Option<TilePosition>,
     player_walk_frame_ticks: u8,
+    player_walk_total_ticks: u8,
     player_walk_stride: bool,
+    player_walk_mirror_stride: bool,
     object_walk_frame_ticks: u8,
+    object_walk_total_ticks: u8,
+    object_walk_frame_ticks_by_id: BTreeMap<String, u8>,
+    object_walk_total_ticks_by_id: BTreeMap<String, u8>,
     object_walk_stride: bool,
+    // Core commits autonomous object tiles atomically. Retain their prior
+    // tiles while the shell presents Crystal's eight-frame walk.
+    object_walk_from: BTreeMap<String, TilePosition>,
+    object_walk_phases: BTreeMap<String, u8>,
+    object_walk_directions: BTreeMap<String, Direction>,
     trainer_walk_from: Option<(String, TilePosition)>,
+    pending_overworld_step_boundary: Option<PendingOverworldStepBoundary>,
+    pending_overworld_warp_scene: Option<Arc<RuntimeShellSnapshot>>,
+    visible_script_movement: Option<VisibleScriptMovement>,
+    visible_script_movement_scene: Option<Arc<RuntimeShellSnapshot>>,
     overworld_direction_repeat_ticks: u8,
     overworld_held_direction: Option<GameButton>,
+    overworld_held_directions: VecDeque<GameButton>,
+    overworld_buffered_direction: Option<GameButton>,
+    ui_held_direction: Option<GameButton>,
+    ui_direction_repeat_ticks: u8,
     recent_overworld_inputs: VecDeque<VisibleOverworldInputRecord>,
     deterministic_session_start: StateChecksum,
     deterministic_session_checkpoint: Option<SessionSaveCheckpointFrame>,
@@ -459,6 +596,7 @@ struct BevyRuntimeShell {
     active_script_cursor: Option<ActiveScriptCursor>,
     pending_map_callbacks: Vec<String>,
     map_callback_return_cursor: Option<RuntimeCompiledScriptCursor>,
+    map_reload_return_cursor: Option<RuntimeCompiledScriptCursor>,
     pending_scene_script: Option<String>,
     script_command_cursor: usize,
     start_menu_cursor: Option<MenuCursor>,
@@ -486,6 +624,7 @@ struct BevyRuntimeShell {
     pending_gender_selection: Option<VisibleGenderSelection>,
     screen_fade: Option<VisibleScreenFade>,
     visible_blackout_phase: Option<VisibleBlackoutPhase>,
+    visible_walk_warp_phase: Option<VisibleWalkWarpPhase>,
     field_text_reveal: Option<VisibleFieldTextReveal>,
     selected_player_gender: Option<VisiblePlayerGender>,
     pending_name_input: Option<PendingNameInput>,
@@ -509,6 +648,9 @@ struct BevyRuntimeShell {
     visible_slot_machine: Option<VisibleSlotMachine>,
     visible_card_flip: Option<VisibleCardFlip>,
     visible_heal_machine: Option<VisibleHealMachine>,
+    visible_magnet_train: Option<VisibleMagnetTrain>,
+    visible_unown_words: Option<String>,
+    visible_diploma: Option<u8>,
     visible_battle_transition: Option<VisibleBattleTransition>,
     visible_capture_animation: Option<VisibleCaptureAnimation>,
     visible_move_animations: VecDeque<VisibleMoveAnimation>,
@@ -535,6 +677,7 @@ struct BevyRuntimeShell {
     pokegear_radio_station: Option<String>,
     pokegear_radio_segment: usize,
     pokegear_radio_index: usize,
+    active_pokegear_radio: Option<(String, String)>,
     trainer_card_open: bool,
     trainer_card_page: VisibleTrainerCardPage,
     trainer_card_colon_visible: bool,
@@ -555,6 +698,7 @@ struct BevyRuntimeShell {
     visible_earthquake: Option<VisibleEarthquake>,
     visible_ledge_jump: Option<VisibleLedgeJump>,
     visible_grass_rustle: Option<VisibleGrassRustle>,
+    visible_strength_boulder_dust: Option<VisibleStrengthBoulderDust>,
     visible_script_delay_frames: Option<u16>,
     poison_flash_frames_remaining: u8,
     field_pack_pocket: Option<FieldPackPocket>,
@@ -563,6 +707,7 @@ struct BevyRuntimeShell {
     field_pack_action_cursor: Option<MenuCursor>,
     field_pack_target_mode: Option<FieldPackTargetMode>,
     tmhm_teach_prompt_cursor: Option<MenuCursor>,
+    pending_tmhm_teach_prompt_after_boot: bool,
     tmhm_decision_prompt_cursor: Option<MenuCursor>,
     tmhm_decision: Option<VisibleTmHmDecision>,
     tmhm_forget_menu_open: bool,
@@ -572,10 +717,17 @@ struct BevyRuntimeShell {
     battle_pack_target_mode: Option<BattlePackTargetMode>,
     pack_toss: Option<VisiblePackToss>,
     battle_messages: VecDeque<String>,
+    battle_text_reveal: Option<VisibleBattleTextReveal>,
+    battle_fanfare_messages: VecDeque<String>,
+    battle_evolution_cries: VecDeque<(String, String)>,
+    battle_sounds_after_messages: VecDeque<(String, String)>,
     battle_entry_messages_remaining: usize,
     battle_message_scene: Option<Box<RuntimeShellSnapshot>>,
     battle_message_scenes: VecDeque<Box<RuntimeShellSnapshot>>,
     battle_hp_tween: Option<VisibleBattleHpTween>,
+    battle_exp_tween: Option<VisibleBattleExpTween>,
+    pending_battle_exp_tweens: VecDeque<VisibleBattleExpTween>,
+    battle_level_stats: VecDeque<VisibleBattleLevelStats>,
     bag_cursor: Option<MenuCursor>,
     key_item_cursor: Option<MenuCursor>,
     ball_cursor: Option<MenuCursor>,
@@ -587,6 +739,7 @@ struct BevyRuntimeShell {
     pc_item_quantity: Option<VisiblePcItemQuantity>,
     pc_hub_session_open: bool,
     pc_hub_cursor: Option<MenuCursor>,
+    hall_of_fame_pc_index: Option<usize>,
     player_pc_action_cursor: Option<MenuCursor>,
     mailbox_cursor: Option<MenuCursor>,
     mailbox_action_cursor: Option<MenuCursor>,
@@ -603,13 +756,18 @@ struct BevyRuntimeShell {
     pc_notice: Option<String>,
     field_notice: Option<String>,
     field_notice_queue: VecDeque<String>,
+    pending_sweet_scent_nothing_notice: bool,
     pending_item_notification: Option<String>,
     field_notice_scene: Option<Arc<RuntimeShellSnapshot>>,
     pending_field_travel_arrival: bool,
     pending_field_travel_delay_frames: Option<u16>,
+    visible_field_travel_animation: Option<VisibleFieldTravelAnimation>,
     pending_field_notice_sound: Option<String>,
+    pending_field_notice_cry: Option<String>,
+    visible_strength_notice_phase: Option<VisibleStrengthNoticePhase>,
     pending_field_battle_entry: bool,
     pending_field_notice_effect_frames: Option<u8>,
+    visible_sweet_scent_delay: bool,
     visible_rock_smash_target: Option<TilePosition>,
     visible_cut_animation: Option<VisibleCutAnimation>,
     visible_whirlpool_animation: Option<VisibleWhirlpoolAnimation>,
@@ -617,6 +775,7 @@ struct BevyRuntimeShell {
     visible_flash_animation: Option<VisibleFlashAnimation>,
     visible_fly_animation: Option<VisibleFlyAnimation>,
     visible_waterfall_animation: Option<VisibleWaterfallAnimation>,
+    pending_surf_start_from: Option<TilePosition>,
     fly_cursor: Option<MenuCursor>,
     battle_action_cursor: Option<MenuCursor>,
     battle_move_cursor: Option<MenuCursor>,
@@ -1015,6 +1174,16 @@ struct TitleMenu {
     scx: u8,
     title_timer: u16,
     clock_reset_trigger: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleContinueScreen {
+    save_path: PathBuf,
+    player_name: String,
+    badge_count: usize,
+    pokedex_count: Option<usize>,
+    hours: u16,
+    minutes: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1458,11 +1627,22 @@ struct VisibleHealMachine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VisibleMagnetTrain {
+    direction: i16,
+    hold_position: i16,
+    final_position: i16,
+    position: i16,
+    offset: i16,
+    wait_counter: u16,
+    phase: u8,
+    arrival_sfx_played: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VisibleBattleTransition {
     frame: u16,
     stronger_enemy: bool,
     cave_environment: bool,
-    darkness_palset: bool,
     trainer_battle: bool,
 }
 
@@ -1485,6 +1665,7 @@ struct VisibleMoveAnimation {
     animation_label: String,
     player_move: bool,
     started: bool,
+    waiting_for_hp: bool,
     frame: u16,
     total_frames: u16,
     sound_events: Vec<(u16, String)>,
@@ -1493,6 +1674,8 @@ struct VisibleMoveAnimation {
     next_cry_event: usize,
     object_events: Vec<VisibleMoveObjectEvent>,
     bg_events: Vec<VisibleMoveBgEvent>,
+    actor_species_override: Option<String>,
+    actor_shiny_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1591,6 +1774,10 @@ impl VisibleTrainerExitAnimation {
 }
 
 impl VisibleCaptureAnimation {
+    fn throw_active(&self) -> bool {
+        self.started && !self.complete
+    }
+
     fn shake_setup_frame(&self) -> u16 {
         // Ordinary branches enter .Shake at 68. Master Ball waits another
         // 24 frames before its 64-frame sparkle branch, entering at 140.
@@ -1682,14 +1869,50 @@ struct VisibleGrassRustle {
     age: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleStrengthBoulderDust {
+    object_id: String,
+    direction: Direction,
+    frames_remaining: u8,
+    age: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VisibleBattleHpTween {
+    player_hp: u16,
+    player_target_hp: u16,
+    player_max_hp: u16,
     player_pixels: u16,
     player_target_pixels: u16,
     player_frames_until_step: u8,
     enemy_pixels: u16,
     enemy_target_pixels: u16,
     enemy_frames_until_step: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleBattleExpTween {
+    trigger_message: String,
+    started: bool,
+    pixels: u16,
+    level: u8,
+    target_pixels: u16,
+    remaining_targets: VecDeque<u16>,
+    frames_until_step: u8,
+    steps_in_segment: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleBattleLevelStats {
+    trigger_message: String,
+    triggered: bool,
+    active: bool,
+    frames_before_input: u8,
+    attack: u16,
+    defense: u16,
+    speed: u16,
+    special_attack: u16,
+    special_defense: u16,
 }
 
 #[derive(Component)]
@@ -2080,6 +2303,7 @@ struct RenderedViewport {
     map_name: Option<String>,
     tile: Option<TilePosition>,
     map_texture: Option<Handle<Image>>,
+    map_priority_texture: Option<Handle<Image>>,
     viewport_origin: Option<(i16, i16)>,
     /// The viewport origin shown immediately before a committed walking step.
     /// Retaining it lets the renderer scroll the replacement texture over the
@@ -2119,10 +2343,16 @@ struct RenderedTilesetArt {
     ledge_shadow_error: Option<String>,
     grass_rustle_cache: HashMap<String, [SpriteFrame; 2]>,
     grass_rustle_errors: HashMap<String, String>,
+    boulder_dust_cache: HashMap<String, [SpriteFrame; 2]>,
+    boulder_dust_errors: HashMap<String, String>,
     field_move_tile_cache: HashMap<(String, String, u8), SpriteFrame>,
     heal_machine_ball_cache: Option<[SpriteFrame; 4]>,
     heal_machine_lamp_cache: Option<[SpriteFrame; 4]>,
     heal_machine_ball_error: Option<String>,
+    magnet_train_base_cache: Option<Vec<u8>>,
+    magnet_train_base_error: Option<String>,
+    diploma_base_cache: Option<Vec<u8>>,
+    diploma_base_error: Option<String>,
     map_name_sign_cache: HashMap<String, Vec<SpriteFrame>>,
     map_name_sign_errors: HashMap<String, String>,
     party_icon_cache: HashMap<String, [SpriteFrame; 2]>,
@@ -2267,6 +2497,7 @@ enum VisibleFishingPhase {
 struct VisibleFishingAnimation {
     phase: VisibleFishingPhase,
     frame: u8,
+    facing_up: bool,
     bite: bool,
     starts_battle: bool,
 }
@@ -2330,6 +2561,14 @@ struct VisibleFieldTextReveal {
     text: String,
     /// `para`/`next` split a field message into pages. The source script does
     /// not advance until the player acknowledges the fully printed page.
+    page_index: usize,
+    visible_chars: usize,
+    frames_until_next_char: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleBattleTextReveal {
+    text: String,
     page_index: usize,
     visible_chars: usize,
     frames_until_next_char: u8,
@@ -2420,6 +2659,18 @@ enum PokemonSpriteSide {
 struct TilesetArt {
     metatile_layout: Vec<u8>,
     tile_handles: Vec<Handle<Image>>,
+    priority_tile_handles: Vec<Handle<Image>>,
+    animated_tiles: HashMap<usize, TilesetAnimatedTile>,
+}
+
+struct TilesetAnimatedTile {
+    frames: Vec<Handle<Image>>,
+    frame_ticks: u64,
+    phase_offset: u64,
+    requires_forest_restless: bool,
+    cave_water_composite: bool,
+    advance_on_phase_offset: bool,
+    additional_schedule: Vec<(u64, u64)>,
 }
 
 #[derive(Clone)]
@@ -2534,6 +2785,9 @@ enum BattleHpSide {
 struct PlayfieldTile;
 
 #[derive(Component)]
+struct PlayfieldPriorityTile;
+
+#[derive(Component)]
 struct PlayerMarker;
 
 /// The player has one retained entity; walking animation swaps its texture
@@ -2542,6 +2796,7 @@ struct PlayerMarker;
 struct PlayerSpriteFrames {
     standing: Handle<Image>,
     walking: Option<Handle<Image>>,
+    mirror_walking: bool,
 }
 
 #[derive(Component)]
@@ -2552,6 +2807,9 @@ struct LedgeShadowMarker;
 
 #[derive(Component)]
 struct GrassRustleMarker;
+
+#[derive(Component)]
+struct BoulderDustMarker;
 
 #[derive(Component)]
 struct MapNameSignMarker;
@@ -2569,8 +2827,10 @@ struct VisibleObjectSprite {
     /// cannot be the renderer's identity because anonymous objects are valid.
     object_index: usize,
     object_identifier: Option<String>,
+    above_priority: bool,
     standing: Handle<Image>,
     walking: Option<Handle<Image>>,
+    mirror_walking: bool,
     animated: bool,
 }
 
@@ -2707,6 +2967,14 @@ pub fn run_bevy_shell(
         .add_systems(
             Update,
             sync_visible_ledge_jump.after(render_playfield),
+        )
+        .add_systems(
+            Update,
+            (
+                sync_visible_script_jump.after(render_playfield),
+                sync_visible_script_tree_shake.after(render_playfield),
+                sync_visible_stationary_movement_effect.after(render_playfield),
+            ),
         )
         .add_systems(
             Update,
@@ -3143,7 +3411,7 @@ pub fn smoke_visible_shell_wild_battle(
         &battle_ref.source_script,
         battle_ref.command_index,
     )?;
-    prepare_visible_battle_entry(&mut runtime_shell);
+    prepare_visible_battle_entry(&mut runtime_shell)?;
     sync_visible_battle_action_cursor(&mut runtime_shell);
     let action_snapshot = runtime_shell.shell.snapshot()?;
     let action_battle = action_snapshot
@@ -3151,7 +3419,7 @@ pub fn smoke_visible_shell_wild_battle(
         .as_ref()
         .context("visible shell battle smoke did not start a battle")?;
     let action_entries =
-        visible_battle_command_menu_entries(&action_snapshot, &runtime_shell, action_battle);
+        visible_battle_command_menu_entries(&action_snapshot, &runtime_shell, action_battle)?;
 
     let mut switch_entries = Vec::new();
     if !action_battle.commands.switch_party_indices.is_empty() {
@@ -3168,7 +3436,7 @@ pub fn smoke_visible_shell_wild_battle(
             let switch_snapshot = runtime_shell.shell.snapshot()?;
             if let Some(battle) = switch_snapshot.battle.as_ref() {
                 switch_entries =
-                    visible_battle_command_menu_entries(&switch_snapshot, &runtime_shell, battle);
+                    visible_battle_command_menu_entries(&switch_snapshot, &runtime_shell, battle)?;
             }
             press_visible_battle_b_button(&mut runtime_shell)?;
         }
@@ -3191,7 +3459,7 @@ pub fn smoke_visible_shell_wild_battle(
             let item_snapshot = runtime_shell.shell.snapshot()?;
             if let Some(battle) = item_snapshot.battle.as_ref() {
                 pack_entries =
-                    visible_battle_command_menu_entries(&item_snapshot, &runtime_shell, battle);
+                    visible_battle_command_menu_entries(&item_snapshot, &runtime_shell, battle)?;
                 if !carried_ball_item_ids(&item_snapshot).is_empty() {
                     ball_entries = pack_entries.clone();
                 }
@@ -3208,7 +3476,7 @@ pub fn smoke_visible_shell_wild_battle(
         .as_ref()
         .context("visible shell battle smoke lost battle before move selection")?;
     let move_entries =
-        visible_battle_command_menu_entries(&move_snapshot, &runtime_shell, move_battle);
+        visible_battle_command_menu_entries(&move_snapshot, &runtime_shell, move_battle)?;
     press_visible_battle_a_button(&mut runtime_shell)?;
     finish_visible_wild_battle_with_first_move(&mut runtime_shell)?;
     let final_snapshot = runtime_shell.shell.snapshot()?;
@@ -3216,6 +3484,7 @@ pub fn smoke_visible_shell_wild_battle(
         .battle
         .as_ref()
         .map(|battle| visible_battle_command_menu_entries(&final_snapshot, &runtime_shell, battle))
+        .transpose()?
         .unwrap_or_default();
     Ok(VisibleShellBattleSmoke {
         wild_species: start.species,
@@ -3263,7 +3532,7 @@ pub fn smoke_visible_shell_trainer_battle(
         &battle_ref.source_script,
         battle_ref.command_index,
     )?;
-    prepare_visible_battle_entry(&mut runtime_shell);
+    prepare_visible_battle_entry(&mut runtime_shell)?;
     sync_visible_battle_action_cursor(&mut runtime_shell);
     let initial_snapshot = runtime_shell.shell.snapshot()?;
     let initial_battle = initial_snapshot
@@ -3284,7 +3553,7 @@ pub fn smoke_visible_shell_trainer_battle(
         _ => anyhow::bail!("visible shell trainer battle smoke did not start a trainer battle"),
     };
     let initial_entries =
-        visible_battle_command_menu_entries(&initial_snapshot, &runtime_shell, initial_battle);
+        visible_battle_command_menu_entries(&initial_snapshot, &runtime_shell, initial_battle)?;
     let mut first_move_entries = Vec::new();
     let mut shift_prompt_entries = Vec::new();
     let mut shift_prompt_count = 0usize;
@@ -3304,7 +3573,7 @@ pub fn smoke_visible_shell_trainer_battle(
                 shift_prompt_count += 1;
                 if shift_prompt_entries.is_empty() {
                     shift_prompt_entries =
-                        visible_battle_command_menu_entries(&snapshot, &runtime_shell, battle);
+                        visible_battle_command_menu_entries(&snapshot, &runtime_shell, battle)?;
                 }
                 if kept_current_after_shift_prompt {
                     press_visible_battle_a_button(&mut runtime_shell)?;
@@ -3333,7 +3602,7 @@ pub fn smoke_visible_shell_trainer_battle(
             .context("visible shell trainer battle ended before move selection")?;
         if first_move_entries.is_empty() {
             first_move_entries =
-                visible_battle_command_menu_entries(&move_snapshot, &runtime_shell, move_battle);
+                visible_battle_command_menu_entries(&move_snapshot, &runtime_shell, move_battle)?;
         }
         press_visible_battle_a_button(&mut runtime_shell)?;
         turns += 1;
@@ -3353,6 +3622,7 @@ pub fn smoke_visible_shell_trainer_battle(
         .battle
         .as_ref()
         .map(|battle| visible_battle_command_menu_entries(&final_snapshot, &runtime_shell, battle))
+        .transpose()?
         .unwrap_or_default();
     Ok(VisibleShellTrainerBattleSmoke {
         trainer_class,
@@ -3453,7 +3723,7 @@ pub fn smoke_visible_shell_overworld(
             }
             if frame.wild_battle.is_some() {
                 wild_battles += 1;
-                prepare_visible_battle_entry(&mut runtime_shell);
+                prepare_visible_battle_entry(&mut runtime_shell)?;
                 settle_visible_battle_after_action(&mut runtime_shell)?;
                 sync_visible_battle_action_cursor(&mut runtime_shell);
                 if runtime_shell.shell.snapshot()?.battle.is_some() {
@@ -3603,7 +3873,17 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
             runtime_shell.pending_field_travel_delay_frames = None;
             runtime_shell.field_notice = None;
             runtime_shell.field_notice_queue.clear();
+            runtime_shell.pending_sweet_scent_nothing_notice = false;
             runtime_shell.pending_field_travel_arrival = false;
+            if runtime_shell.visible_field_travel_animation
+                == Some(VisibleFieldTravelAnimation::TeleportFrom)
+            {
+                queue_visible_shell_sound_effect(runtime_shell, "SFX_WARP_TO")?;
+                begin_visible_teleport_travel_animation(runtime_shell, false)?;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                continue;
+            }
+            runtime_shell.field_notice_scene = None;
             settle_visible_overworld_travel(runtime_shell)?;
             mark_runtime_snapshot_dirty(runtime_shell);
             continue;
@@ -3636,6 +3916,15 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
         }
         if runtime_shell.pending_name_choice.is_some() {
             return Ok(());
+        }
+        if runtime_shell.pending_day_of_week.is_some() {
+            // Smoke sessions choose the default weekday and then accept the
+            // ASM confirmation prompt, exactly as two consecutive A presses.
+            confirm_visible_day_of_week(runtime_shell)?;
+            if runtime_shell.pending_day_of_week.is_some() {
+                confirm_visible_day_of_week(runtime_shell)?;
+            }
+            continue;
         }
         if !has_visible_auto_script_action(runtime_shell, &snapshot) {
             return Ok(());
@@ -3702,8 +3991,16 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
         anyhow::bail!("visible shell smoke could not settle active runtime surface");
     }
     let snapshot = runtime_shell.shell.snapshot()?;
+    let active_cursor_command = runtime_shell.active_script_cursor.as_ref().and_then(|cursor| {
+        runtime_shell
+            .shell
+            .runtime()
+            .compiled_script_commands(&cursor.source_script)
+            .ok()
+            .and_then(|commands| commands.get(cursor.next_command_index).cloned())
+    });
     anyhow::bail!(
-        "visible shell smoke exceeded idle settle limit {MAX_IDLE_SETTLE_STEPS}: cursor={:?} special_boundary={:?} next_script={:?} command_queue={} deferred={} ended={:?} pending_text_label={:?} pending_text_wait={:?} text_window={} window={} runtime_flag={:?} non_audio_events={} recent_audio={:?}",
+        "visible shell smoke exceeded idle settle limit {MAX_IDLE_SETTLE_STEPS}: cursor={:?} cursor_command={active_cursor_command:?} special_boundary={:?} next_script={:?} command_queue={} deferred={} ended={:?} pending_text_label={:?} pending_text_wait={:?} text_window={} window={} runtime_flag={:?} non_audio_events={} recent_audio={:?}",
         runtime_shell.active_script_cursor,
         runtime_shell.special_boundary,
         snapshot.script_events.next_script,
@@ -3815,11 +4112,16 @@ fn initialize_bevy_runtime_shell(
         )?)
     };
     let mut runtime_shell = BevyRuntimeShell {
+        lcd_animation_frame: 0,
+        ambient_tileset_animation_active: false,
+        ambient_tileset_animation_schedule: Vec::new(),
+        battle_lcd_animation_active: false,
         asset_root,
         runtime,
         shell,
         intro_screen,
         title_menu,
+        visible_continue_screen: None,
         credits_screen: None,
         last_error: None,
         last_action_status: None,
@@ -3832,20 +4134,38 @@ fn initialize_bevy_runtime_shell(
         active_music: None,
         faded_music: None,
         last_battle_cry_key: None,
-        pending_battle_cry_after_message: None,
+        pending_battle_cries_after_messages: VecDeque::new(),
         battle_enemy_send_out_pending: false,
         battle_player_send_out_pending: false,
+        battle_enemy_hp_at_player_send_out: None,
         pending_battle_scenes_after_message: VecDeque::new(),
         pending_enemy_response_after_capture: None,
+        pending_plain_battle_map_reload: false,
         last_overworld_input: None,
         player_walk_from: None,
         player_walk_frame_ticks: 0,
+        player_walk_total_ticks: WALK_FRAME_HOLD_TICKS,
         player_walk_stride: false,
+        player_walk_mirror_stride: false,
         object_walk_frame_ticks: 0,
+        object_walk_total_ticks: WALK_FRAME_HOLD_TICKS,
+        object_walk_frame_ticks_by_id: BTreeMap::new(),
+        object_walk_total_ticks_by_id: BTreeMap::new(),
         object_walk_stride: false,
+        object_walk_from: BTreeMap::new(),
+        object_walk_phases: BTreeMap::new(),
+        object_walk_directions: BTreeMap::new(),
         trainer_walk_from: None,
+        pending_overworld_step_boundary: None,
+        pending_overworld_warp_scene: None,
+        visible_script_movement: None,
+        visible_script_movement_scene: None,
         overworld_direction_repeat_ticks: 0,
         overworld_held_direction: None,
+        overworld_held_directions: VecDeque::new(),
+        overworld_buffered_direction: None,
+        ui_held_direction: None,
+        ui_direction_repeat_ticks: 0,
         recent_overworld_inputs: VecDeque::new(),
         deterministic_session_start,
         deterministic_session_checkpoint,
@@ -3857,6 +4177,7 @@ fn initialize_bevy_runtime_shell(
         active_script_cursor: None,
         pending_map_callbacks: Vec::new(),
         map_callback_return_cursor: None,
+        map_reload_return_cursor: None,
         pending_scene_script: None,
         script_command_cursor: 0,
         start_menu_cursor: None,
@@ -3899,6 +4220,7 @@ fn initialize_bevy_runtime_shell(
         pending_gender_selection: None,
         screen_fade: None,
         visible_blackout_phase: None,
+        visible_walk_warp_phase: None,
         field_text_reveal: None,
         selected_player_gender: None,
         pending_name_input: None,
@@ -3922,6 +4244,9 @@ fn initialize_bevy_runtime_shell(
         visible_slot_machine: None,
         visible_card_flip: None,
         visible_heal_machine: None,
+        visible_magnet_train: None,
+        visible_unown_words: None,
+        visible_diploma: None,
         visible_battle_transition: None,
         visible_capture_animation: None,
         visible_move_animations: VecDeque::new(),
@@ -3948,6 +4273,7 @@ fn initialize_bevy_runtime_shell(
         pokegear_radio_station: None,
         pokegear_radio_segment: 0,
         pokegear_radio_index: 0,
+        active_pokegear_radio: None,
         trainer_card_open: false,
         trainer_card_page: VisibleTrainerCardPage::Info,
         trainer_card_colon_visible: false,
@@ -3968,6 +4294,7 @@ fn initialize_bevy_runtime_shell(
         visible_earthquake: None,
         visible_ledge_jump: None,
         visible_grass_rustle: None,
+        visible_strength_boulder_dust: None,
         visible_script_delay_frames: None,
         poison_flash_frames_remaining: 0,
         field_pack_pocket: None,
@@ -3976,6 +4303,7 @@ fn initialize_bevy_runtime_shell(
         field_pack_action_cursor: None,
         field_pack_target_mode: None,
         tmhm_teach_prompt_cursor: None,
+        pending_tmhm_teach_prompt_after_boot: false,
         tmhm_decision_prompt_cursor: None,
         tmhm_decision: None,
         tmhm_forget_menu_open: false,
@@ -3985,9 +4313,16 @@ fn initialize_bevy_runtime_shell(
         battle_pack_target_mode: None,
         pack_toss: None,
         battle_messages: VecDeque::new(),
+        battle_text_reveal: None,
+        battle_fanfare_messages: VecDeque::new(),
+        battle_evolution_cries: VecDeque::new(),
+        battle_sounds_after_messages: VecDeque::new(),
         battle_entry_messages_remaining: 0,
         battle_message_scene: None,
         battle_message_scenes: VecDeque::new(),
+        battle_exp_tween: None,
+        pending_battle_exp_tweens: VecDeque::new(),
+        battle_level_stats: VecDeque::new(),
         battle_hp_tween: None,
         bag_cursor: None,
         key_item_cursor: None,
@@ -4000,6 +4335,7 @@ fn initialize_bevy_runtime_shell(
         pc_item_quantity: None,
         pc_hub_session_open: false,
         pc_hub_cursor: None,
+        hall_of_fame_pc_index: None,
         player_pc_action_cursor: None,
         mailbox_cursor: None,
         mailbox_action_cursor: None,
@@ -4016,13 +4352,18 @@ fn initialize_bevy_runtime_shell(
         pc_notice: None,
         field_notice: None,
         field_notice_queue: VecDeque::new(),
+        pending_sweet_scent_nothing_notice: false,
         pending_item_notification: None,
         field_notice_scene: None,
         pending_field_travel_arrival: false,
         pending_field_travel_delay_frames: None,
+        visible_field_travel_animation: None,
         pending_field_notice_sound: None,
+        pending_field_notice_cry: None,
+        visible_strength_notice_phase: None,
         pending_field_battle_entry: false,
         pending_field_notice_effect_frames: None,
+        visible_sweet_scent_delay: false,
         visible_rock_smash_target: None,
         visible_cut_animation: None,
         visible_whirlpool_animation: None,
@@ -4030,6 +4371,7 @@ fn initialize_bevy_runtime_shell(
         visible_flash_animation: None,
         visible_fly_animation: None,
         visible_waterfall_animation: None,
+        pending_surf_start_from: None,
         fly_cursor: None,
         battle_action_cursor: None,
         battle_move_cursor: None,
@@ -4078,6 +4420,7 @@ fn initialize_bevy_runtime_shell(
 
 
 include!("bevy_shell/deterministic_session.rs");
+include!("bevy_shell/field_travel.rs");
 include!("bevy_shell/trainer_card.rs");
 include!("bevy_shell/title_menu.rs");
 include!("bevy_shell/credits.rs");

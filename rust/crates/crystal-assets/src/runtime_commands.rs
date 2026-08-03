@@ -1074,7 +1074,7 @@ fn wild_encounter_has_reachable_level(
 ) -> bool {
     encounter.species == species
         && (0..=u8::MAX)
-            .any(|roll| apply_grass_level_variance(encounter.level, surface, roll) == level)
+            .any(|roll| apply_surf_level_variance(encounter.level, surface, roll) == level)
 }
 
 fn field_encounter_data_has(encounters: &FieldEncounterData, species: &str, level: u8) -> bool {
@@ -3176,15 +3176,37 @@ fn apply_standard_script(
             "RegisteredNumber2Text",
         ),
         "HappinessCheckScript" => {
-            let happiness = state
+            let pokemon = state
                 .storage
                 .party
                 .pokemon
                 .iter()
                 .flatten()
-                .next()
-                .map(|pokemon| pokemon.happiness)
-                .unwrap_or(0);
+                .find(|pokemon| {
+                    !pokemon.is_egg
+                        && pokemon.species.id != "EGG"
+                })
+                .context("HappinessCheckScript requires at least one non-Egg party Pokémon")?;
+            let happiness = pokemon.happiness;
+            let species = pokemon.species.id.clone();
+            let nickname = if pokemon.nickname.is_empty() {
+                species.clone()
+            } else {
+                pokemon.nickname.clone()
+            };
+            state
+                .script_runtime
+                .named_buffers
+                .insert("STRING_BUFFER_3".to_string(), nickname);
+            state
+                .script_runtime
+                .variables
+                .insert("wCurPartySpecies".to_string(), species);
+            state.script_runtime.script_value = Some(happiness.to_string());
+            state
+                .script_runtime
+                .variables
+                .insert("_value".to_string(), happiness.to_string());
             let label = if happiness < 50 {
                 "HappinessText1"
             } else if happiness < 150 {

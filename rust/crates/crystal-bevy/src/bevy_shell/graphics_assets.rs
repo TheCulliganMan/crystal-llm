@@ -2175,9 +2175,6 @@ fn format_battle_overlay(
         battle.commands.can_use_items,
         carried_ball_item_ids(snapshot).len()
     ));
-    if let Some(entries) = battle_outcome_prompt_entries(battle) {
-        lines.push(format!("battle_outcome {}", entries.join(" | ")));
-    }
     append_battle_cursor_context(snapshot, runtime_shell, &mut lines);
     lines.push(
         "controls arrows=battle action/item cursor | Z/A=select | X/B=cancel/back | Run action=flee | 1-4 direct move"

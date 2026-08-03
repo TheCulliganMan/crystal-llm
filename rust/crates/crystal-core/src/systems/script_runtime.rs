@@ -955,6 +955,18 @@ fn apply_runtime_effect(
         }
         "dontrestartmapmusic" => state.script_runtime.map_music_restart_disabled = true,
         "playmapmusic" => state.script_runtime.map_music_requested = true,
+        "wildoff" => {
+            state
+                .flags
+                .engine_flags
+                .insert("STATUSFLAGS_NO_WILD_ENCOUNTERS_F".to_string(), true);
+        }
+        "wildon" => {
+            state
+                .flags
+                .engine_flags
+                .insert("STATUSFLAGS_NO_WILD_ENCOUNTERS_F".to_string(), false);
+        }
         "lock" => state.script_runtime.player_input_locked = true,
         "release" => state.script_runtime.player_input_locked = false,
         "lockall" => state.script_runtime.all_input_locked = true,
@@ -1442,6 +1454,8 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("menu_coords", 4),
         ("dontrestartmapmusic", 0),
         ("playmapmusic", 0),
+        ("wildoff", 0),
+        ("wildon", 0),
         ("lock", 0),
         ("release", 0),
         ("lockall", 0),
@@ -1513,6 +1527,30 @@ mod tests {
             source_script: "RuntimeScript".to_string(),
             command_index: 4,
         }
+    }
+
+    #[test]
+    fn wildon_and_wildoff_toggle_crystals_global_encounter_flag() {
+        let mut state = GameState::default();
+        apply_script_runtime_command(&mut state, command("wildoff", &[]), default_inputs())
+            .expect("wildoff applies");
+        assert_eq!(
+            state
+                .flags
+                .engine_flags
+                .get("STATUSFLAGS_NO_WILD_ENCOUNTERS_F"),
+            Some(&true)
+        );
+
+        apply_script_runtime_command(&mut state, command("wildon", &[]), default_inputs())
+            .expect("wildon applies");
+        assert_eq!(
+            state
+                .flags
+                .engine_flags
+                .get("STATUSFLAGS_NO_WILD_ENCOUNTERS_F"),
+            Some(&false)
+        );
     }
 
     #[test]

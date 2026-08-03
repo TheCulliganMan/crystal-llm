@@ -45,6 +45,40 @@
     }
 
     #[test]
+    fn dynamic_warp_requires_an_explicit_nonzero_backup_index() {
+        let mut state = GameState::default();
+        let missing = GameDataSet::required_dynamic_backup_warp_index(
+            &state,
+            2,
+            "GoldenrodDeptStoreElevator",
+        )
+        .expect_err("missing backup warp must not become warp one");
+        assert!(
+            format!("{missing:#}").contains("has no saved nonzero backup warp"),
+            "{missing:#}"
+        );
+
+        state.backup_warp_index = Some(0);
+        GameDataSet::required_dynamic_backup_warp_index(
+            &state,
+            2,
+            "GoldenrodDeptStoreElevator",
+        )
+        .expect_err("zero backup warp must not become warp one");
+
+        state.backup_warp_index = Some(3);
+        assert_eq!(
+            GameDataSet::required_dynamic_backup_warp_index(
+                &state,
+                2,
+                "GoldenrodDeptStoreElevator",
+            )
+            .expect("explicit backup warp"),
+            3
+        );
+    }
+
+    #[test]
     fn runtime_battle_tower_action_commands_use_exact_payloads() {
         let save_level_group = RuntimeBattleTowerActionCommand {
             action: "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
@@ -574,6 +608,47 @@
         assert_eq!(state.frame_counter, 1);
         assert_eq!(session.player.tile, TilePosition::new(0, 0));
         assert_eq!(state.joypad, before_joypad);
+    }
+
+    #[test]
+    fn empty_overworld_frame_does_not_bypass_forced_tile_movement_without_npcs() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        for metatile in &mut session.tileset.metatiles {
+            metatile.collision = [
+                crystal_core::world::collision::permissions::CURRENT_RIGHT;
+                4
+            ];
+        }
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                std::iter::empty(),
+                &BTreeSet::new(),
+            )
+            .expect("forced-current frame");
+
+        assert_eq!(session.player.tile, TilePosition::new(1, 0));
+        assert!(matches!(
+            frame.movement,
+            Some(StepOutcome::Moved {
+                from: TilePosition { x: 0, y: 0 },
+                to: TilePosition { x: 1, y: 0 },
+                speed_multiplier: 1,
+            })
+        ));
     }
 
     #[test]
@@ -4537,4 +4612,3 @@
                     .contains("non-walkable tile (0, 0) on Route29")
         }));
     }
-

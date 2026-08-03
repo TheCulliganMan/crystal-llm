@@ -87,6 +87,7 @@ pub struct GameState {
     pub battle_player_stat_drop_guard_turns: u8,
     pub battle_pay_day_money: u32,
     pub battle_amulet_coin_active: bool,
+    pub wild_encounter_cooldown: u8,
     pub repel_steps_remaining: u16,
     pub active_repel_item: Option<String>,
     pub registered_key_item: Option<String>,
@@ -170,6 +171,7 @@ impl<'de> Deserialize<'de> for GameState {
             battle_player_stat_drop_guard_turns: u8,
             battle_pay_day_money: u32,
             battle_amulet_coin_active: bool,
+            wild_encounter_cooldown: u8,
             repel_steps_remaining: u16,
             active_repel_item: Option<String>,
             registered_key_item: Option<String>,
@@ -251,6 +253,7 @@ impl<'de> Deserialize<'de> for GameState {
             battle_player_stat_drop_guard_turns: raw.battle_player_stat_drop_guard_turns,
             battle_pay_day_money: raw.battle_pay_day_money,
             battle_amulet_coin_active: raw.battle_amulet_coin_active,
+            wild_encounter_cooldown: raw.wild_encounter_cooldown,
             repel_steps_remaining: raw.repel_steps_remaining,
             active_repel_item: raw.active_repel_item,
             registered_key_item: raw.registered_key_item,
@@ -339,6 +342,7 @@ impl GameState {
             battle_player_stat_drop_guard_turns: 0,
             battle_pay_day_money: 0,
             battle_amulet_coin_active: false,
+            wild_encounter_cooldown: 0,
             repel_steps_remaining: 0,
             active_repel_item: None,
             registered_key_item: None,
@@ -7607,6 +7611,12 @@ impl GameState {
     pub fn validate_saved_state(&self) -> Result<(), String> {
         validate_saved_player_name(&self.player_name)?;
         validate_saved_player_gender(self.player_gender)?;
+        if self.wild_encounter_cooldown > 5 {
+            return Err(format!(
+                "wild_encounter_cooldown {} is outside Crystal range 0..=5",
+                self.wild_encounter_cooldown
+            ));
+        }
         self.bag
             .validate()
             .map_err(|error| format!("invalid saved bag: {error}"))?;
@@ -7922,35 +7932,41 @@ impl GameState {
             }
             _ => {}
         }
-        for (label, map_name, warp_index) in [
-            (
-                "previous_warp",
-                self.previous_warp_map_name.as_deref(),
-                self.previous_warp_index,
-            ),
-            (
-                "backup_warp",
-                self.backup_warp_map_name.as_deref(),
-                self.backup_warp_index,
-            ),
-        ] {
-            validate_optional_script_runtime_token(&format!("{label}_map_name"), map_name)?;
-            match (map_name, warp_index) {
-                (Some(map_name), None) => {
-                    return Err(format!(
-                        "{label}_map_name {map_name} cannot be saved without {label}_index"
-                    ));
-                }
-                (None, Some(index)) => {
-                    return Err(format!(
-                        "{label}_index {index} cannot be saved without {label}_map_name"
-                    ));
-                }
-                (_, Some(0)) => {
-                    return Err(format!("{label}_index cannot be zero"));
-                }
-                _ => {}
+        validate_optional_script_runtime_token(
+            "previous_warp_map_name",
+            self.previous_warp_map_name.as_deref(),
+        )?;
+        match (&self.previous_warp_map_name, self.previous_warp_index) {
+            (Some(map_name), None) => {
+                return Err(format!(
+                    "previous_warp_map_name {map_name} cannot be saved without previous_warp_index"
+                ));
             }
+            (None, Some(index)) => {
+                return Err(format!(
+                    "previous_warp_index {index} cannot be saved without previous_warp_map_name"
+                ));
+            }
+            (_, Some(0)) => return Err("previous_warp_index cannot be zero".to_string()),
+            _ => {}
+        }
+        validate_optional_script_runtime_token(
+            "backup_warp_map_name",
+            self.backup_warp_map_name.as_deref(),
+        )?;
+        match (&self.backup_warp_map_name, self.backup_warp_index) {
+            // ASM updates wBackupMapGroup/wBackupMapNumber on ordinary map
+            // transitions, but leaves wBackupWarpNumber at zero until a
+            // Pokecenter/dynamic-warp path records one. `None` is the exact
+            // Rust representation of that valid zero byte.
+            (Some(_), None) | (None, None) => {}
+            (None, Some(index)) => {
+                return Err(format!(
+                    "backup_warp_index {index} cannot be saved without backup_warp_map_name"
+                ));
+            }
+            (_, Some(0)) => return Err("backup_warp_index cannot be zero".to_string()),
+            (Some(_), Some(_)) => {}
         }
         validate_optional_script_runtime_token(
             "pending_special_battle_type",
@@ -9217,6 +9233,7 @@ mod tests {
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
         assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
+        assert_eq!(state.wild_encounter_cooldown, 0);
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
         assert_eq!(state.registered_key_item, None);

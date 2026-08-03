@@ -265,6 +265,70 @@
     }
 
     #[test]
+    fn happiness_standard_script_skips_leading_eggs_like_asm() {
+        let mut state = GameState::default();
+        let mut egg = Pokemon::new_for_tests(species(), 5, Dv::default());
+        egg.is_egg = true;
+        egg.happiness = 0;
+        let mut pokemon = Pokemon::new_for_tests(species(), 5, Dv::default());
+        pokemon.nickname = "BUDDY".to_string();
+        pokemon.happiness = 150;
+        let expected_species = pokemon.species.id.clone();
+        state.storage.party.pokemon[0] = Some(egg);
+        state.storage.party.pokemon[1] = Some(pokemon);
+
+        apply_standard_script(&mut state, &BTreeMap::new(), "HappinessCheckScript", &[])
+            .expect("happiness standard script");
+
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("150"));
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_3")
+                .map(String::as_str),
+            Some("BUDDY")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .variables
+                .get("wCurPartySpecies"),
+            Some(&expected_species)
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .text_events
+                .last()
+                .and_then(|event| event.text_label.as_deref()),
+            Some("HappinessText3")
+        );
+    }
+
+    #[test]
+    fn happiness_standard_script_does_not_treat_egg_nickname_as_species() {
+        let mut state = GameState::default();
+        let mut pokemon = Pokemon::new_for_tests(species(), 5, Dv::default());
+        pokemon.nickname = "EGG".to_string();
+        pokemon.happiness = 150;
+        state.storage.party.pokemon[0] = Some(pokemon);
+
+        apply_standard_script(&mut state, &BTreeMap::new(), "HappinessCheckScript", &[])
+            .expect("happiness standard script");
+
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("150"));
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_3")
+                .map(String::as_str),
+            Some("EGG")
+        );
+    }
+
+    #[test]
     fn game_corner_vendor_reaches_coin_case_branch_and_prompt() {
         let mut no_case = GameState::default();
         apply_standard_script(

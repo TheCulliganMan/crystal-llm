@@ -322,23 +322,6 @@ where
     }
 }
 
-fn required_item_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values = Vec::<String>::deserialize(deserializer)?;
-    if let Some(token) = values.iter().find(|token| !is_exact_item_token(token)) {
-        Err(serde::de::Error::custom(format!(
-            "item token must be exact ASCII alphanumeric/underscore, found {token:?}"
-        )))
-    } else {
-        for token in &values {
-            validate_no_reserved_item_token(token).map_err(serde::de::Error::custom)?;
-        }
-        Ok(values)
-    }
-}
-
 fn required_status_token_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -405,13 +388,6 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<u16>::deserialize(deserializer)
-}
-
-fn required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer)
 }
 
 fn required_nullable_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>

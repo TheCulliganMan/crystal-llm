@@ -432,7 +432,7 @@ fn field_move_requirement_summary(
 
 fn visible_field_move_badge_summary(
     badges: &[bool; 8],
-    rule_id: &str,
+    _rule_id: &str,
     index: usize,
 ) -> &'static str {
     badges

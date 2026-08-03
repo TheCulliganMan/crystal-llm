@@ -102,6 +102,7 @@ impl AssetRoot {
         read_json_file(&self.repository_root.join(relative_path))
     }
 
+    #[cfg(test)]
     pub(crate) fn load_base_game_data(&self) -> Result<GameDataSet> {
         let mut data = GameDataSet::load_base_json_for_compile(self)?;
         materialize_runtime_map_modules(&mut data)?;
@@ -1060,6 +1061,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+#[cfg(test)]
 fn required_crystal_byte_i16<'de, D>(deserializer: D) -> Result<i16, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1081,6 +1083,7 @@ pub struct TilesetDefinition {
     pub palette_map: Vec<u8>,
 }
 
+#[cfg(test)]
 fn is_default<T>(value: &T) -> bool
 where
     T: Default + PartialEq,

@@ -1,4 +1,15 @@
-fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) {
+fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    prepare_visible_battle_entry_with_music_reset(runtime_shell, true)
+}
+
+fn prepare_visible_battle_entry_after_visible_step(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    prepare_visible_battle_entry_with_music_reset(runtime_shell, false)
+}
+
+fn prepare_visible_battle_entry_with_music_reset(
+    runtime_shell: &mut BevyRuntimeShell,
+    reset_music: bool,
+) -> Result<()> {
     runtime_shell.visible_battle_transition = None;
     runtime_shell.visible_capture_animation = None;
     runtime_shell.visible_move_animations.clear();
@@ -8,56 +19,73 @@ fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) {
     reset_visible_selection_cursors(runtime_shell);
     reset_visible_battle_action_cursors(runtime_shell);
     runtime_shell.battle_messages.clear();
+    runtime_shell.battle_text_reveal = None;
+    runtime_shell.field_text_reveal = None;
+    runtime_shell.battle_fanfare_messages.clear();
+    runtime_shell.battle_evolution_cries.clear();
+    runtime_shell.battle_sounds_after_messages.clear();
     runtime_shell.battle_message_scenes.clear();
     runtime_shell.battle_entry_messages_remaining = 0;
     runtime_shell.battle_message_scene = None;
     runtime_shell.battle_hp_tween = None;
+    runtime_shell.battle_exp_tween = None;
+    runtime_shell.pending_battle_exp_tweens.clear();
+    runtime_shell.battle_level_stats.clear();
     runtime_shell.party_move_cursor = None;
     runtime_shell.last_battle_cry_key = None;
-    runtime_shell.pending_battle_cry_after_message = None;
+    runtime_shell.pending_battle_cries_after_messages.clear();
     runtime_shell.battle_enemy_send_out_pending = false;
     runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_enemy_hp_at_player_send_out = None;
     runtime_shell.pending_battle_scenes_after_message.clear();
     runtime_shell.pending_enemy_response_after_capture = None;
-    reset_visible_music_state(runtime_shell);
-    if let Ok(snapshot) = runtime_shell.shell.snapshot() {
-        if let Some(battle) = snapshot.battle.as_ref() {
-            let player_level = battle
+    if reset_music {
+        reset_visible_music_state(runtime_shell);
+    }
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("battle entry requires an active battle snapshot")?;
+            runtime_shell.battle_enemy_hp_at_player_send_out = Some(battle.enemy_pokemon.hp);
+            let active_player = battle
                 .active_player_party_index
                 .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-                .map(|slot| slot.pokemon.level)
-                .unwrap_or(1);
+                .context("battle entry requires its active party slot in the runtime snapshot")?;
+            let player_level = active_player.pokemon.level;
             let environment = snapshot
                 .maps
                 .iter()
                 .find(|map| map.map_name == snapshot.overworld.map_name)
-                .and_then(|map| map.attributes.environment.as_deref())
-                .unwrap_or_default();
-            let darkness_palset = snapshot
-                .maps
-                .iter()
-                .find(|map| map.map_name == snapshot.overworld.map_name)
-                .is_some_and(|map| {
-                    map.attributes.palette.as_deref() == Some("PALETTE_DARK")
-                        && map.attributes.time_of_day.as_deref() == Some("dark")
-                });
+                .with_context(|| {
+                    format!(
+                        "battle entry map {} is absent from the runtime map catalog",
+                        snapshot.overworld.map_name
+                    )
+                })?
+                .attributes
+                .environment
+                .as_deref()
+                .context("battle entry map has no source environment")?;
             runtime_shell.visible_battle_transition = Some(VisibleBattleTransition {
                 frame: 0,
                 stronger_enemy: player_level.saturating_add(3) < battle.enemy_pokemon.level,
                 cave_environment: ["CAVE", "ENVIRONMENT_5", "DUNGEON"]
                     .iter()
                     .any(|candidate| environment.eq_ignore_ascii_case(candidate)),
-                darkness_palset,
                 trainer_battle: matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. }),
             });
-            let player_pixels = battle
-                .active_player_party_index
-                .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-                .map(|slot| battle_hud_hp_pixels(slot.pokemon.hp, slot.pokemon.max_hp))
-                .unwrap_or(0);
+            let (player_hp, player_max_hp, player_pixels) = (
+                active_player.pokemon.hp,
+                active_player.pokemon.max_hp,
+                battle_hud_hp_pixels(active_player.pokemon.hp, active_player.pokemon.max_hp),
+            );
             let enemy_pixels =
                 battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp);
             runtime_shell.battle_hp_tween = Some(VisibleBattleHpTween {
+                player_hp,
+                player_target_hp: player_hp,
+                player_max_hp,
                 player_pixels,
                 player_target_pixels: player_pixels,
                 player_frames_until_step: 0,
@@ -65,37 +93,30 @@ fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) {
                 enemy_target_pixels: enemy_pixels,
                 enemy_frames_until_step: 0,
             });
-            let player_name = battle
-                .active_player_party_index
-                .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-                .map(|slot| slot.pokemon.nickname.as_str());
+            let player_name = active_player.pokemon.nickname.as_str();
             match &battle.kind {
                 crate::RuntimeBattleKind::Trainer { trainer_name, .. } => {
                     runtime_shell
                         .battle_messages
-                        .push_back(format!("{trainer_name} wants to battle!"));
+                        .push_back(format!("{trainer_name}\nwants to battle!"));
                     runtime_shell.battle_messages.push_back(format!(
-                        "{} sent out {}!",
+                        "{}\nsent out\n{}!",
                         trainer_name, battle.enemy_pokemon.nickname
                     ));
-                    if let Some(player_name) = player_name {
-                        runtime_shell
-                            .battle_messages
-                            .push_back(format!("Go! {player_name}!"));
-                    }
+                    runtime_shell
+                        .battle_messages
+                        .push_back(format!("Go! {player_name}!"));
                 }
                 crate::RuntimeBattleKind::Wild { .. }
                 | crate::RuntimeBattleKind::StaticWild { .. } => {
                     runtime_shell.battle_messages.push_back(format!(
-                        "Wild {} appeared!",
+                        "Wild {}\nappeared!",
                         battle.enemy_pokemon.nickname
                     ));
                     if battle.battle_type != "BATTLETYPE_TUTORIAL" {
-                        if let Some(player_name) = player_name {
-                            runtime_shell
-                                .battle_messages
-                                .push_back(format!("Go! {player_name}!"));
-                        }
+                        runtime_shell
+                            .battle_messages
+                            .push_back(format!("Go! {player_name}!"));
                     }
                 }
             }
@@ -113,31 +134,30 @@ fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) {
                     });
                 }
             }
-            runtime_shell.battle_entry_messages_remaining = runtime_shell.battle_messages.len();
-        }
-    }
+    runtime_shell.battle_entry_messages_remaining = runtime_shell.battle_messages.len();
+    Ok(())
 }
 
 fn advance_visible_battle_transition(runtime_shell: &mut BevyRuntimeShell) {
     let Some(transition) = runtime_shell.visible_battle_transition.as_mut() else {
         return;
     };
-    let outro_frames = match (transition.cave_environment, transition.stronger_enemy) {
-        // TypeScript increments the offset before adding it (1, 2, 3, ...)
-        // into the counter.  It therefore reaches $60 after fourteen draws;
-        // $60 is a cutoff, not a 96-frame duration.
-        (true, false) => 14,
-        (true, true) => 9,
-        (false, false) => 43,
-        (false, true) => 19,
-    };
+    let prefix_frames = if transition.trainer_battle { 4 } else { 3 };
+    let (between_frames, outro_frames, finish_frames) =
+        match (transition.cave_environment, transition.stronger_enemy) {
+            // DETERMINE/LOAD/SETUP precede all four paths. After the three
+            // flashes, ordinary paths and outdoor scatter own NEXT + SETUP;
+            // the stronger cave zoom owns NEXT only.
+            (true, false) => (2, 15, 1),
+            (true, true) => (1, 9, 2),
+            (false, false) => (2, 61, 4),
+            (false, true) => (2, 21, 1),
+        };
     transition.frame = transition.frame.saturating_add(1);
-    // TS advances each 12-entry, two-draw palette sweep with a thirteenth
-    // sentinel lookup. The sentinel is never drawn: it leaves the previous
-    // palette visible while entering sweep two/three, and exits after sweep
-    // three. That produces 25 + 25 + 24 visible frames, not 3 * 26.
-    let flash_frames = if transition.darkness_palset { 0 } else { 74 };
-    if transition.frame >= flash_frames + outro_frames {
+    let flash_frames = 75;
+    if transition.frame
+        >= prefix_frames + flash_frames + between_frames + outro_frames + finish_frames
+    {
         runtime_shell.visible_battle_transition = None;
     }
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -147,6 +167,7 @@ fn spawn_visible_battle_transition(
     commands: &mut Commands,
     transition: VisibleBattleTransition,
     viewport_texture: Option<Handle<Image>>,
+    priority_texture: Option<Handle<Image>>,
 ) {
     const POKEBALL_PATTERN: [&str; 16] = [
         "......XXXX......", "....XXXXXXXX....", "..XXXX....XXXX..", "..XX........XX..",
@@ -171,9 +192,10 @@ fn spawn_visible_battle_transition(
         0.5,
     ];
     let frame = usize::from(transition.frame);
+    let prefix_frames = if transition.trainer_battle { 4 } else { 3 };
     // Trainer transitions begin with the ASM 16x16 Poké Ball cutout on a
     // black 20x18 tilemap. Wild transitions retain the ordinary square map.
-    if transition.trainer_battle {
+    if transition.trainer_battle && frame >= 2 {
         for y in 0..18 {
             for x in 0..20 {
                 let inside_ball = (2..18).contains(&x)
@@ -185,15 +207,13 @@ fn spawn_visible_battle_transition(
             }
         }
     }
-    let flash_frames = if transition.darkness_palset { 0 } else { 74 };
-    if frame < flash_frames {
-        let sweep_frame = if frame < 25 {
-            frame
-        } else if frame < 50 {
-            frame - 25
-        } else {
-            frame - 50
-        };
+    if frame < prefix_frames {
+        return;
+    }
+    let flash_frames = 75;
+    let effect_frame = frame - prefix_frames;
+    if effect_frame < flash_frames {
+        let sweep_frame = effect_frame % 25;
         let flash_index = sweep_frame / 2;
         let alpha = FLASH_ALPHA[flash_index.min(FLASH_ALPHA.len() - 1)];
         commands.spawn((
@@ -216,14 +236,24 @@ fn spawn_visible_battle_transition(
         return;
     }
 
-    let outro = frame - flash_frames;
+    let between_frames = match (transition.cave_environment, transition.stronger_enemy) {
+        (true, true) => 1,
+        _ => 2,
+    };
+    if effect_frame < flash_frames + between_frames {
+        return;
+    }
+    let outro = effect_frame - flash_frames - between_frames;
     match (transition.cave_environment, transition.stronger_enemy) {
         (true, true) => {
             // StartTrainerBattle_ZoomToBlack writes nine centered boxes in
             // one BG-map update apiece: 4x2 through the full 20x18 LCD.
-            let step = outro.min(8);
-            let width_tiles = 4 + step * 2;
-            let height_tiles = 2 + step * 2;
+            let boxes = outro.min(9);
+            if boxes == 0 {
+                return;
+            }
+            let width_tiles = 2 + boxes * 2;
+            let height_tiles = boxes * 2;
             commands.spawn((
                 SpriteBundle {
                     sprite: Sprite {
@@ -245,7 +275,7 @@ fn spawn_visible_battle_transition(
             // each of sixteen frames, then holds for three frames. Reproduce
             // the TypeScript transition's seed-zero LCG and rejection of
             // tiles already black in the trainer Poké Ball mask.
-            let calls = (outro.min(15) + 1) * 12;
+            let calls = outro.min(16) * 12;
             let mut black = [false; 20 * 18];
             if transition.trainer_battle {
                 for y in 0..18 {
@@ -277,8 +307,9 @@ fn spawn_visible_battle_transition(
         }
         (false, false) => {
             // SpinToBlack has twenty wedge entries, each held for two LCD
-            // frames, followed by the source three-frame terminal hold.
-            let wedge_count = (outro / 2).min(19) + 1;
+            // delay frames after each write. The twentieth entry therefore
+            // remains current for the source terminal hold as well.
+            let wedge_count = ((outro + 2) / 3).min(20);
             for wedge_index in 0..wedge_count {
                 spawn_visible_battle_transition_wedge(commands, wedge_index);
             }
@@ -292,7 +323,7 @@ fn spawn_visible_battle_transition(
                 let mut counter = 0_u16;
                 let mut offset = 0_u16;
                 let mut amplitude = 0_u16;
-                for _ in 0..=outro {
+                for _ in 0..outro {
                     amplitude = counter;
                     offset = offset.wrapping_add(1);
                     counter = counter.wrapping_add(offset);
@@ -325,6 +356,34 @@ fn spawn_visible_battle_transition(
                         },
                         BattleCommandMarker,
                     ));
+                    if let Some(priority) = priority_texture.as_ref() {
+                        commands.spawn((
+                            SpriteBundle {
+                                texture: priority.clone(),
+                                sprite: Sprite {
+                                    rect: Some(Rect::new(
+                                        0.0,
+                                        source_y as f32 * (TILE_SIZE / 8.0),
+                                        PLAYFIELD_WIDTH,
+                                        (source_y as f32 + 2.0) * (TILE_SIZE / 8.0),
+                                    )),
+                                    custom_size: Some(Vec2::new(
+                                        PLAYFIELD_WIDTH,
+                                        TILE_SIZE / 4.0,
+                                    )),
+                                    ..default()
+                                },
+                                transform: Transform::from_xyz(
+                                    -TILE_SIZE * 0.5 + shift * (TILE_SIZE / 8.0),
+                                    PLAYFIELD_TOP + TILE_SIZE * 0.375
+                                        - source_y as f32 * (TILE_SIZE / 8.0),
+                                    2.66,
+                                ),
+                                ..default()
+                            },
+                            BattleCommandMarker,
+                        ));
+                    }
                 }
             }
         }
@@ -524,23 +583,89 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
     };
     if let Some(trigger_message) = finished_trigger {
         runtime_shell.visible_move_animations.pop_front();
-        runtime_shell.battle_message_scenes.pop_front();
-        if let Some(scene) = runtime_shell.battle_message_scenes.front().cloned() {
-            retarget_visible_battle_hp_tween(runtime_shell, &scene);
-            runtime_shell.battle_message_scene = Some(scene);
-        }
-        if let Some(index) = runtime_shell
-            .pending_battle_scenes_after_message
-            .iter()
-            .position(|(trigger, _)| trigger == &trigger_message)
-        {
-            let (_, scene) = runtime_shell
+        let completed_before_trigger_message = runtime_shell
+            .battle_messages
+            .front()
+            .is_some_and(|message| message == &trigger_message);
+        if completed_before_trigger_message {
+            let continues_same_command = runtime_shell
+                .visible_move_animations
+                .front()
+                .is_some_and(|animation| {
+                    !animation.started && animation.trigger_message == trigger_message
+                });
+            let mut applied_scene = false;
+            if let Some(index) = runtime_shell
                 .pending_battle_scenes_after_message
-                .remove(index)
-                .unwrap();
-            if runtime_shell.battle_message_scenes.is_empty() {
+                .iter()
+                .position(|(trigger, _)| trigger == &trigger_message)
+            {
+                let (_, scene) = runtime_shell
+                    .pending_battle_scenes_after_message
+                    .remove(index)
+                    .unwrap();
                 retarget_visible_battle_hp_tween(runtime_shell, &scene);
                 runtime_shell.battle_message_scene = Some(scene);
+                applied_scene = true;
+            }
+            if continues_same_command {
+                let next = runtime_shell.visible_move_animations.front_mut().unwrap();
+                if applied_scene {
+                    next.waiting_for_hp = true;
+                } else {
+                    next.started = true;
+                }
+            }
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
+        let continues_same_command = runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| {
+                !animation.started && animation.trigger_message == trigger_message
+            });
+        if continues_same_command {
+            let intermediate_scene = runtime_shell
+                .pending_battle_scenes_after_message
+                .iter()
+                .position(|(trigger, _)| trigger == &trigger_message)
+                .and_then(|index| {
+                    runtime_shell
+                        .pending_battle_scenes_after_message
+                        .remove(index)
+                        .map(|(_, scene)| scene)
+                });
+            if let Some(scene) = intermediate_scene {
+                retarget_visible_battle_hp_tween(runtime_shell, &scene);
+                runtime_shell.battle_message_scene = Some(scene);
+                runtime_shell
+                    .visible_move_animations
+                    .front_mut()
+                    .unwrap()
+                    .waiting_for_hp = true;
+            } else {
+                runtime_shell.visible_move_animations.front_mut().unwrap().started = true;
+            }
+        } else {
+            runtime_shell.battle_message_scenes.pop_front();
+            if let Some(scene) = runtime_shell.battle_message_scenes.front().cloned() {
+                retarget_visible_battle_hp_tween(runtime_shell, &scene);
+                runtime_shell.battle_message_scene = Some(scene);
+            }
+            if let Some(index) = runtime_shell
+                .pending_battle_scenes_after_message
+                .iter()
+                .position(|(trigger, _)| trigger == &trigger_message)
+            {
+                let (_, scene) = runtime_shell
+                    .pending_battle_scenes_after_message
+                    .remove(index)
+                    .unwrap();
+                if runtime_shell.battle_message_scenes.is_empty() {
+                    retarget_visible_battle_hp_tween(runtime_shell, &scene);
+                    runtime_shell.battle_message_scene = Some(scene);
+                }
             }
         }
     }
@@ -600,7 +725,9 @@ fn advance_visible_send_out_animation(runtime_shell: &mut BevyRuntimeShell) -> R
                 .unwrap_or(0);
             start_visible_enemy_frontpic_animation(runtime_shell, speed)?;
         }
-        if let Some((species_id, reason, _)) = runtime_shell.pending_battle_cry_after_message.take() {
+        if let Some((species_id, reason, _)) =
+            runtime_shell.pending_battle_cries_after_messages.pop_front()
+        {
             queue_visible_pokemon_cry(runtime_shell, &species_id, &reason)?;
         }
     }
@@ -736,9 +863,11 @@ fn advance_visible_fishing_animation(runtime_shell: &mut BevyRuntimeShell) {
         }
         VisibleFishingPhase::Hook => {
             // Four fish_got_bite movement commands, each held for one
-            // ordinary eight-frame overworld movement cadence.
+            // ordinary eight-frame overworld movement cadence. Facing Up's
+            // source movement adds `step_sleep 1` before `show_emote`.
             animation.frame = animation.frame.saturating_add(1);
-            if animation.frame >= 32 {
+            let hook_frames = if animation.facing_up { 33 } else { 32 };
+            if animation.frame >= hook_frames {
                 animation.frame = 0;
                 animation.phase = VisibleFishingPhase::Pause;
             }
@@ -1949,7 +2078,7 @@ fn commit_visible_pc_item_quantity(runtime_shell: &mut BevyRuntimeShell) -> Resu
             });
             runtime_shell.yes_no_cursor = Some(MenuCursor {
                 surface_id: "pc:confirmation".to_string(),
-                option_index: 1,
+                option_index: 0,
             });
             runtime_shell.pc_notice = Some(format!(
                 "Throw away {} x{}?",
@@ -1992,7 +2121,6 @@ fn request_visible_current_box_pokemon_release(runtime_shell: &mut BevyRuntimeSh
         .find(|slot| slot.index == box_slot)
         .context("selected PC release slot is missing")?;
     if pokemon.pokemon.is_egg
-        || pokemon.pokemon.nickname.trim().eq_ignore_ascii_case("EGG")
         || pokemon.pokemon.species.id.trim().eq_ignore_ascii_case("EGG")
     {
         runtime_shell.pc_notice = Some("No releasing EGGS!".to_string());
@@ -2018,7 +2146,7 @@ fn request_visible_current_box_pokemon_release(runtime_shell: &mut BevyRuntimeSh
     });
     runtime_shell.yes_no_cursor = Some(MenuCursor {
         surface_id: "pc:release-confirm".to_string(),
-        option_index: 1,
+        option_index: 0,
     });
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -2270,9 +2398,12 @@ fn resolve_visible_blackout(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     } else {
         blackout_scene.trainer.player_name.as_str()
     };
-    runtime_shell.battle_messages.push_back(format!(
-        "{player_name} is out of\nuseable POKéMON!\n\n{player_name} whited\nout!"
-    ));
+    runtime_shell
+        .battle_messages
+        .push_back(format!("{player_name} is out of\nuseable POKéMON!"));
+    runtime_shell
+        .battle_messages
+        .push_back(format!("{player_name} whited\nout!"));
     runtime_shell.battle_message_scene = Some(Box::new(blackout_scene));
     runtime_shell.visible_blackout_phase = Some(VisibleBlackoutPhase::AwaitText);
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -2290,7 +2421,12 @@ fn commit_visible_blackout_recovery(runtime_shell: &mut BevyRuntimeShell) -> Res
         recovered.healed.len(),
         recovered.state_checksum
     ));
-    settle_visible_overworld_arrival(runtime_shell, "blackout")?;
+    // Script_Whiteout commits healing, money loss, and the spawn warp after
+    // the 40-frame white hold. MAPSETUP_WARP then reveals the destination;
+    // ordinary scene scripts must not run under the still-white palette.
+    reset_visible_navigation_state(runtime_shell);
+    suppress_visible_map_name_sign_for_current_map(runtime_shell)?;
+    queue_visible_current_music(runtime_shell)?;
     runtime_shell.battle_message_scene = None;
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -2309,7 +2445,10 @@ fn present_visible_step_event(
         mark_runtime_snapshot_dirty(runtime_shell);
         set_shell_action_status(runtime_shell, "REPEL WORE OFF");
     } else if event.egg_hatched {
-        let species = event.hatched_species.as_deref().unwrap_or("POKEMON");
+        let species = event
+            .hatched_species
+            .as_deref()
+            .context("hatched step event is missing its species")?;
         record_visible_runtime_action(runtime_shell, format!("overworld:egg_hatched:{species}"))?;
         queue_visible_pokemon_cry(runtime_shell, species, "egg_hatch")?;
         runtime_shell
@@ -2505,16 +2644,20 @@ fn open_visible_day_care_for_script_command(
         let gained = pokemon.level.saturating_sub(resident.initial_level);
         let fee = 100u32.saturating_add(u32::from(gained) * 100);
         runtime_shell.pc_notice = Some(if gained == 0 {
-            format!("Your {nickname} hasn't\ngrown at all.\n\nIf you want your\n{nickname} back, it\nwill cost ¥{fee}.\n\nWill you pay?")
+            format!(
+                "Your {nickname}\nhasn't grown.\nIt will cost\n¥{fee}.\nWill you pay?"
+            )
         } else {
-            format!("Your {nickname} has\ngrown by {gained}.\n\nIf you want your\n{nickname} back, it\nwill cost ¥{fee}.\n\nWill you pay?")
+            format!(
+                "Your {nickname}\nhas grown by {gained}.\nIt will cost\n¥{fee}.\nWill you pay?"
+            )
         });
         runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::DayCareWithdraw {
             caretaker: caretaker.to_string(),
         });
         runtime_shell.yes_no_cursor = Some(MenuCursor {
             surface_id: "pc:confirmation".to_string(),
-            option_index: 1,
+            option_index: 0,
         });
         set_shell_action_status(runtime_shell, format!("DAY-CARE {owner}"));
     } else {
@@ -2529,7 +2672,7 @@ fn open_visible_day_care_for_script_command(
         runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::ScriptPartyIntro(pending));
         runtime_shell.yes_no_cursor = Some(MenuCursor {
             surface_id: "pc:confirmation".to_string(),
-            option_index: 1,
+            option_index: 0,
         });
         set_shell_action_status(runtime_shell, "DAY-CARE WHICH ONE?");
     }
@@ -2625,7 +2768,7 @@ fn open_visible_script_party_selection_for_command(
         runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::NpcTrade(pending));
         runtime_shell.yes_no_cursor = Some(MenuCursor {
             surface_id: "pc:confirmation".to_string(),
-            option_index: 1,
+            option_index: 0,
         });
         set_shell_action_status(runtime_shell, "TRADE?");
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -2638,17 +2781,17 @@ fn open_visible_script_party_selection_for_command(
     ) {
         runtime_shell.pc_notice = Some(match &pending {
             PendingScriptPartySelection::NameRater => {
-                "Hello, hello! I'm\nthe NAME RATER.\n\nI rate the names\nof POKéMON.\n\nWould you like me\nto rate names?".to_string()
+                "Hello! I'm the\nNAME RATER.\nI rate POKéMON\nnames. Rate one?".to_string()
             }
             PendingScriptPartySelection::MoveDeletion { .. } => {
-                "Um… Oh, yes, I'm\nthe MOVE DELETER.\n\nI can make POKéMON\nforget moves.\n\nShall I make a\nPOKéMON forget?".to_string()
+                "I'm the MOVE\nDELETER.\nI make POKéMON\nforget moves.\nForget one?".to_string()
             }
             _ => unreachable!("script party intro matched an unsupported routine"),
         });
         runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::ScriptPartyIntro(pending));
         runtime_shell.yes_no_cursor = Some(MenuCursor {
             surface_id: "pc:confirmation".to_string(),
-            option_index: 1,
+            option_index: 0,
         });
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(true);
@@ -3092,7 +3235,7 @@ fn resolve_visible_buena_prize_selection(
     });
     runtime_shell.yes_no_cursor = Some(MenuCursor {
         surface_id: "pc:confirmation".to_string(),
-        option_index: 1,
+        option_index: 0,
     });
     runtime_shell.pc_notice = Some(format!(
         "{}?\nIs that right?",
@@ -3580,7 +3723,7 @@ fn resolve_visible_script_party_selection(
                     resume_immediately = false;
                 } else if pokemon.moves.len() >= 4 {
                     runtime_shell.pc_notice = Some(format!(
-                        "{nickname} is trying to learn\n{}.\n\nBut {nickname} can't learn\nmore than four moves.\n\nDelete an older move\nto make room?",
+                        "{nickname} is\ntrying to learn\n{}.\nIt can't learn\nover four moves.\nDelete a move?",
                         move_id.replace('_', " ")
                     ));
                     runtime_shell.pc_confirmation = Some(
@@ -3590,7 +3733,7 @@ fn resolve_visible_script_party_selection(
                         },
                     );
                     runtime_shell.yes_no_cursor = Some(MenuCursor {
-                        surface_id: "yes-no".to_string(),
+                        surface_id: "pc:confirmation".to_string(),
                         option_index: 0,
                     });
                     set_shell_action_status(runtime_shell, "DELETE A MOVE?");
@@ -3669,7 +3812,7 @@ fn resolve_visible_script_party_selection(
             runtime_shell.special_boundary_queue.push_back(SpecialBoundaryDisplay {
                 label: "MoveForgotText".to_string(),
                 details: vec![format!(
-                    "Poof!\n\n{nickname} forgot\n{}!\n\nAnd…",
+                    "Poof!\n\n{nickname} forgot\n{}.\n\nAnd…",
                     forgotten_move.replace('_', " ")
                 )],
             });
@@ -3695,7 +3838,7 @@ fn resolve_visible_script_party_selection(
                 party_index,
             });
             runtime_shell.yes_no_cursor = Some(MenuCursor {
-                surface_id: "yes-no".to_string(),
+                surface_id: "pc:confirmation".to_string(),
                 option_index: 0,
             });
             close_party_menu = false;
@@ -3783,7 +3926,7 @@ fn resolve_visible_script_party_selection(
             });
             runtime_shell.yes_no_cursor = Some(MenuCursor {
                 surface_id: "pc:confirmation".to_string(),
-                option_index: 1,
+                option_index: 0,
             });
             runtime_shell.pc_notice = Some(format!("Oh, make it forget\n{move_name}?"));
             runtime_shell.party_move_cursor = None;
@@ -4887,6 +5030,9 @@ fn queue_runtime_title_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 fn queue_visible_current_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if visible_non_overworld_screen_active(runtime_shell)
         || runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_unown_words.is_some()
+        || runtime_shell.visible_diploma.is_some()
         || runtime_shell.heal_music_active
         || runtime_shell.field_notice.is_some()
     {
@@ -4894,6 +5040,15 @@ fn queue_visible_current_music(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     }
     if runtime_shell.shell.has_active_battle() || runtime_shell.shell.has_pending_music_fade() {
         return Ok(());
+    }
+    if let Some((origin_map, radio_music)) = runtime_shell.active_pokegear_radio.as_ref() {
+        let snapshot = runtime_shell.shell.snapshot()?;
+        if snapshot.overworld.map_name == *origin_map
+            && runtime_shell.active_music.as_deref() == Some(radio_music.as_str())
+        {
+            return Ok(());
+        }
+        runtime_shell.active_pokegear_radio = None;
     }
     if runtime_shell.active_music.as_deref() == runtime_shell.shell.current_music_id() {
         return Ok(());
@@ -4988,6 +5143,10 @@ fn visible_non_overworld_screen_active(runtime_shell: &BevyRuntimeShell) -> bool
 fn sync_runtime_battle_music(mut runtime_shell: ResMut<BevyRuntimeShell>) {
     if visible_non_overworld_screen_active(&runtime_shell)
         || runtime_shell.visible_fishing_animation.is_some()
+        || matches!(
+            runtime_shell.pending_overworld_step_boundary,
+            Some(PendingOverworldStepBoundary::WildBattle)
+        )
     {
         return;
     }
@@ -4996,8 +5155,15 @@ fn sync_runtime_battle_music(mut runtime_shell: ResMut<BevyRuntimeShell>) {
     if !runtime_shell.shell.has_active_battle() {
         return;
     }
-    let Ok(snapshot) = cached_runtime_snapshot(&mut runtime_shell) else {
-        return;
+    let snapshot = match cached_runtime_snapshot(&mut runtime_shell) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            record_visible_runtime_system_error(
+                &mut runtime_shell,
+                anyhow::anyhow!("battle music snapshot failed: {error:#}"),
+            );
+            return;
+        }
     };
     if snapshot.script_events.pending_music_fade.is_some() {
         return;
@@ -5085,8 +5251,15 @@ fn queue_battle_intro_cry(mut runtime_shell: ResMut<BevyRuntimeShell>) {
         runtime_shell.last_battle_cry_key = None;
         return;
     }
-    let Ok(snapshot) = cached_runtime_snapshot(&mut runtime_shell) else {
-        return;
+    let snapshot = match cached_runtime_snapshot(&mut runtime_shell) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            record_visible_runtime_system_error(
+                &mut runtime_shell,
+                anyhow::anyhow!("battle intro cry snapshot failed: {error:#}"),
+            );
+            return;
+        }
     };
     let Some(battle) = snapshot.battle.as_ref() else {
         runtime_shell.last_battle_cry_key = None;
@@ -5165,8 +5338,9 @@ fn defer_visible_battle_cry_after_message(
     reason: impl Into<String>,
     trigger_message: impl Into<String>,
 ) {
-    runtime_shell.pending_battle_cry_after_message =
-        Some((species_id.into(), reason.into(), trigger_message.into()));
+    runtime_shell
+        .pending_battle_cries_after_messages
+        .push_back((species_id.into(), reason.into(), trigger_message.into()));
 }
 
 fn defer_visible_party_index_cry_after_send_out(
@@ -5185,9 +5359,53 @@ fn defer_visible_party_index_cry_after_send_out(
         runtime_shell,
         slot.pokemon.species.id.clone(),
         reason,
-        format!("Go! {}!", slot.pokemon.nickname),
+        visible_player_send_out_message(&snapshot, party_index)?,
     );
+    runtime_shell.battle_enemy_hp_at_player_send_out = snapshot
+        .battle
+        .as_ref()
+        .map(|battle| battle.enemy_pokemon.hp);
     Ok(())
+}
+
+fn visible_player_send_out_message(
+    snapshot: &RuntimeShellSnapshot,
+    party_index: usize,
+) -> Result<String> {
+    let slot = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == party_index)
+        .with_context(|| format!("party index {party_index} has no Pokemon for send-out text"))?;
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("player send-out text requires an active battle")?;
+    let enemy = &battle.enemy_pokemon;
+    let percent = if enemy.hp == 0 || enemy.max_hp == 0 {
+        100
+    } else {
+        u32::from(enemy.hp).saturating_mul(100) / u32::from(enemy.max_hp)
+    };
+    let nickname = &slot.pokemon.nickname;
+    Ok(match percent {
+        70.. => format!("Go! {nickname}!"),
+        40..=69 => format!("Do it! {nickname}!"),
+        10..=39 => format!("Go for it, {nickname}!"),
+        _ => format!("Your foe's weak! Get'm, {nickname}!"),
+    })
+}
+
+fn visible_message_is_player_send_out(message: &str) -> bool {
+    message.starts_with("Go! ")
+        || message.starts_with("Do it! ")
+        || message.starts_with("Go for it, ")
+        || message.starts_with("Your foe's weak! Get'm, ")
+}
+
+fn visible_message_is_enemy_send_out(message: &str) -> bool {
+    message.contains("\nsent out\n")
 }
 
 fn queue_visible_pokemon_cry(
@@ -5418,9 +5636,14 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell
         .pending_field_travel_delay_frames
         .hash(&mut hasher);
+    runtime_shell.visible_field_travel_animation.hash(&mut hasher);
     runtime_shell.pending_field_notice_sound.hash(&mut hasher);
+    runtime_shell.pending_field_notice_cry.hash(&mut hasher);
+    runtime_shell.visible_strength_notice_phase.hash(&mut hasher);
+    runtime_shell.pending_sweet_scent_nothing_notice.hash(&mut hasher);
     runtime_shell.pending_field_battle_entry.hash(&mut hasher);
     runtime_shell.pending_field_notice_effect_frames.hash(&mut hasher);
+    runtime_shell.visible_sweet_scent_delay.hash(&mut hasher);
     runtime_shell.visible_rock_smash_target.hash(&mut hasher);
     runtime_shell.visible_cut_animation.hash(&mut hasher);
     runtime_shell.visible_whirlpool_animation.hash(&mut hasher);
@@ -5428,7 +5651,11 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_flash_animation.hash(&mut hasher);
     runtime_shell.visible_fly_animation.hash(&mut hasher);
     runtime_shell.visible_waterfall_animation.hash(&mut hasher);
+    runtime_shell.pending_surf_start_from.hash(&mut hasher);
     runtime_shell.visible_heal_machine.hash(&mut hasher);
+    runtime_shell.visible_magnet_train.hash(&mut hasher);
+    runtime_shell.visible_unown_words.hash(&mut hasher);
+    runtime_shell.visible_diploma.hash(&mut hasher);
     runtime_shell.visible_battle_transition.hash(&mut hasher);
     runtime_shell.visible_capture_animation.hash(&mut hasher);
     runtime_shell.visible_move_animations.hash(&mut hasher);
@@ -5437,7 +5664,9 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_frontpic_animation.hash(&mut hasher);
     runtime_shell.visible_fishing_animation.hash(&mut hasher);
     runtime_shell.visible_blackout_phase.hash(&mut hasher);
-    runtime_shell.pending_battle_cry_after_message.hash(&mut hasher);
+    runtime_shell.visible_walk_warp_phase.hash(&mut hasher);
+    runtime_shell.battle_text_reveal.hash(&mut hasher);
+    runtime_shell.pending_battle_cries_after_messages.hash(&mut hasher);
     runtime_shell.battle_enemy_send_out_pending.hash(&mut hasher);
     runtime_shell.battle_player_send_out_pending.hash(&mut hasher);
     runtime_shell
@@ -5473,6 +5702,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.party_hp_transfer_source.hash(&mut hasher);
     runtime_shell.party_hp_transfer_move.hash(&mut hasher);
     hash_menu_cursor(&mut hasher, &runtime_shell.tmhm_teach_prompt_cursor);
+    runtime_shell.pending_tmhm_teach_prompt_after_boot.hash(&mut hasher);
     hash_menu_cursor(&mut hasher, &runtime_shell.tmhm_decision_prompt_cursor);
     runtime_shell.tmhm_decision.hash(&mut hasher);
     runtime_shell.tmhm_forget_menu_open.hash(&mut hasher);
@@ -5514,9 +5744,17 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_overworld_emote.hash(&mut hasher);
     runtime_shell.visible_earthquake.hash(&mut hasher);
     runtime_shell.visible_ledge_jump.hash(&mut hasher);
+    runtime_shell.visible_script_movement.hash(&mut hasher);
     runtime_shell.visible_grass_rustle.hash(&mut hasher);
+    runtime_shell.visible_strength_boulder_dust.hash(&mut hasher);
     runtime_shell.battle_messages.hash(&mut hasher);
+    runtime_shell.battle_fanfare_messages.hash(&mut hasher);
+    runtime_shell.battle_evolution_cries.hash(&mut hasher);
+    runtime_shell.battle_sounds_after_messages.hash(&mut hasher);
     runtime_shell.battle_hp_tween.hash(&mut hasher);
+    runtime_shell.battle_exp_tween.hash(&mut hasher);
+    runtime_shell.pending_battle_exp_tweens.hash(&mut hasher);
+    runtime_shell.battle_level_stats.hash(&mut hasher);
     runtime_shell.bill_pc_move_open.hash(&mut hasher);
     runtime_shell.bill_pc_move_source.hash(&mut hasher);
     runtime_shell.party_summary_open.hash(&mut hasher);
@@ -5537,8 +5775,10 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pokegear_radio_index.hash(&mut hasher);
     runtime_shell.pokegear_radio_station.hash(&mut hasher);
     runtime_shell.pokegear_radio_segment.hash(&mut hasher);
+    runtime_shell.active_pokegear_radio.hash(&mut hasher);
     runtime_shell.pc_hub_session_open.hash(&mut hasher);
     hash_menu_cursor(&mut hasher, &runtime_shell.pc_hub_cursor);
+    runtime_shell.hall_of_fame_pc_index.hash(&mut hasher);
     runtime_shell.pc_item_action.hash(&mut hasher);
     runtime_shell.pc_item_quantity.hash(&mut hasher);
     hash_menu_cursor(&mut hasher, &runtime_shell.player_pc_action_cursor);
@@ -5577,6 +5817,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     } else {
         false.hash(&mut hasher);
     }
+    runtime_shell.visible_continue_screen.hash(&mut hasher);
     match &runtime_shell.intro_screen {
         Some(intro) => {
             true.hash(&mut hasher);
@@ -5600,6 +5841,36 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.last_action_status.hash(&mut hasher);
     runtime_shell.active_music.hash(&mut hasher);
     runtime_shell.faded_music.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn battle_animated_shell_render_key(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+) -> u64 {
+    let base = shell_render_key(runtime_shell);
+    if snapshot.battle.is_none() && !runtime_shell.ambient_tileset_animation_active {
+        return base;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    base.hash(&mut hasher);
+    // `visual_state_hash` intentionally removes the semantic frame counter.
+    // Battle UI still has LCD-time animation: healthy party icons change at
+    // eight frames and menu cursors alternate at sixteen. Retain the cheapest
+    // phase that can express both without rebuilding the overworld each tick.
+    if snapshot.battle.is_some() {
+        (runtime_shell.lcd_animation_frame / 8).hash(&mut hasher);
+    }
+    if runtime_shell.ambient_tileset_animation_active {
+        for (period, offset) in &runtime_shell.ambient_tileset_animation_schedule {
+            let phase = if runtime_shell.lcd_animation_frame < *offset {
+                0
+            } else {
+                1 + (runtime_shell.lcd_animation_frame - *offset) / (*period).max(1)
+            };
+            phase.hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -5656,19 +5927,41 @@ fn overworld_render_appearance_key(snapshot: &RuntimeShellSnapshot) -> u64 {
         object.pal.hash(&mut hasher);
         object.spritemovedata.hash(&mut hasher);
     }
+    // Facing selects a different source sprite frame, so it is appearance,
+    // not merely position. A walking NPC may turn and step in one core tick.
+    for (object_id, facing) in &snapshot.visible_object_facings {
+        object_id.hash(&mut hasher);
+        facing.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
 fn update_overworld_sprite_positions(
     snapshot: &RuntimeShellSnapshot,
+    visible_ledge_jump: Option<VisibleLedgeJump>,
     player_walk_from: Option<TilePosition>,
     player_walk_frame_ticks: u8,
+    player_walk_total_ticks: u8,
+    object_walk_from: &BTreeMap<String, TilePosition>,
+    object_walk_frame_ticks_by_id: &BTreeMap<String, u8>,
+    object_walk_total_ticks_by_id: &BTreeMap<String, u8>,
     trainer_walk_from: Option<&(String, TilePosition)>,
     object_walk_frame_ticks: u8,
+    object_walk_total_ticks: u8,
     camera_offset: Vec2,
     start_x: i16,
     start_y: i16,
     player_sprites: &mut Query<(&mut Transform, &Sprite), With<PlayerMarker>>,
+    ledge_shadows: &mut Query<
+        (&mut Transform, &Sprite),
+        (
+            With<LedgeShadowMarker>,
+            Without<PlayerMarker>,
+            Without<VisibleObjectSprite>,
+            Without<PlayfieldTile>,
+            Without<DialogGlyphMarker>,
+        ),
+    >,
     object_sprites: &mut Query<
         (&VisibleObjectSprite, &mut Transform, &Sprite),
         Without<PlayerMarker>,
@@ -5677,10 +5970,18 @@ fn update_overworld_sprite_positions(
     let Ok((mut player_transform, player_sprite)) = player_sprites.get_single_mut() else {
         return false;
     };
-    let Some((player_base_x, player_base_y)) = visible_player_playfield_position(
+    let (movement_from, movement_remaining, movement_total) = visible_ledge_jump
+        .map(|jump| (Some(jump.from), 16_u8.saturating_sub(jump.frame), 16))
+        .unwrap_or((
+            player_walk_from,
+            player_walk_frame_ticks,
+            player_walk_total_ticks,
+        ));
+    let Some((player_base_x, player_base_y)) = visible_player_playfield_position_for_duration(
         snapshot.overworld.tile,
-        player_walk_from,
-        player_walk_frame_ticks,
+        movement_from,
+        movement_remaining,
+        movement_total,
         start_x,
         start_y,
     ) else {
@@ -5692,14 +5993,46 @@ fn update_overworld_sprite_positions(
     let (player_x, player_y) =
         overworld_sprite_position_from_base(player_base_x, player_base_y, player_size);
     player_transform.translation.x = player_x + camera_offset.x;
-    player_transform.translation.y = player_y + camera_offset.y;
-    player_transform.translation.z = 1.0 + f32::from(snapshot.overworld.tile.y) * 0.001 + 0.0005;
+    player_transform.translation.y =
+        player_y + camera_offset.y + visible_ledge_jump_y_offset(visible_ledge_jump);
+    // Core commits a tile atomically, but TypeScript/LoadAndSortSprites keeps
+    // the player's logical origin coordinates until the visible step lands.
+    // Sorting at the committed destination here makes the player snap above
+    // or below an NPC/priority edge before the sprite has actually crossed it.
+    let player_depth_tile = visible_ledge_jump.map_or_else(
+        || {
+            player_walk_from
+                .filter(|_| player_walk_frame_ticks > 0)
+                .unwrap_or(snapshot.overworld.tile)
+        },
+        |jump| {
+            if jump.frame < WALK_FRAME_HOLD_TICKS {
+                jump.from
+            } else {
+                TilePosition {
+                    x: jump.from.x + (jump.to.x - jump.from.x) / 2,
+                    y: jump.from.y + (jump.to.y - jump.from.y) / 2,
+                }
+            }
+        },
+    );
+    player_transform.translation.z = overworld_entity_depth(player_depth_tile, None);
+    if visible_ledge_jump.is_some()
+        && let Ok((mut shadow_transform, shadow_sprite)) = ledge_shadows.get_single_mut()
+    {
+        shadow_transform.translation.x = player_x + camera_offset.x;
+        shadow_transform.translation.y =
+            player_y + camera_offset.y - player_size.y * 0.5
+                + shadow_sprite.custom_size.map_or(0.0, |size| size.y * 0.5);
+        shadow_transform.translation.z =
+            overworld_entity_depth(player_depth_tile, None) - 0.000_001;
+    }
 
     let expected_visible_object_count = snapshot
         .visible_objects
         .iter()
-        .filter_map(|object| {
-            object
+        .filter(|object| {
+            let destination = object
                 .object_identifier
                 .as_ref()
                 .and_then(|object_id| {
@@ -5708,11 +6041,19 @@ fn update_overworld_sprite_positions(
                         .get(object_id)
                         .copied()
                 })
-                .or_else(|| object_tile_position_checked(object))
-        })
-        .filter_map(|tile| runtime_event_view_tile(tile, start_x, start_y))
-        .filter(|(view_x, view_y)| {
-            (0..VIEWPORT_TILES_X).contains(view_x) && (0..VIEWPORT_TILES_Y).contains(view_y)
+                .or_else(|| object_tile_position_checked(object));
+            let origin = object.object_identifier.as_ref().and_then(|object_id| {
+                trainer_walk_from
+                    .filter(|(walking_id, _)| walking_id == object_id)
+                    .map(|(_, from)| *from)
+                    .or_else(|| object_walk_from.get(object_id).copied())
+            });
+            [destination, origin].into_iter().flatten().any(|tile| {
+                runtime_event_view_tile(tile, start_x, start_y).is_some_and(|(x, y)| {
+                    (0..VIEWPORT_TILES_X).contains(&x)
+                        && (0..VIEWPORT_TILES_Y).contains(&y)
+                })
+            })
         })
         .count();
     if object_sprites.iter().count() != expected_visible_object_count {
@@ -5735,11 +6076,32 @@ fn update_overworld_sprite_positions(
         let Some((view_x, view_y)) = runtime_event_view_tile(object_tile, start_x, start_y) else {
             return false;
         };
-        if !(0..VIEWPORT_TILES_X).contains(&view_x) || !(0..VIEWPORT_TILES_Y).contains(&view_y) {
-            // Offscreen objects have no retained entity in this viewport.
+        let walking_object_id = object.object_identifier.as_ref();
+        let trainer_is_walking = walking_object_id.is_some_and(|object_id| {
+            trainer_walk_from
+                .is_some_and(|(walking_id, _)| walking_id == object_id)
+        });
+        let walking_from = walking_object_id.and_then(|object_id| {
+            trainer_walk_from
+                .filter(|(walking_id, _)| walking_id == object_id)
+                .map(|(_, from)| *from)
+                .or_else(|| {
+                    object_walk_from
+                        .get(object_id)
+                        .copied()
+                })
+        });
+        let destination_visible = (0..VIEWPORT_TILES_X).contains(&view_x)
+            && (0..VIEWPORT_TILES_Y).contains(&view_y);
+        let origin_visible = walking_from
+            .and_then(|from| runtime_event_view_tile(from, start_x, start_y))
+            .is_some_and(|(x, y)| {
+                (0..VIEWPORT_TILES_X).contains(&x) && (0..VIEWPORT_TILES_Y).contains(&y)
+            });
+        if !destination_visible && !origin_visible {
             continue;
         }
-        let Some((_, mut transform, sprite)) = object_sprites
+        let Some((rendered_object, mut transform, sprite)) = object_sprites
             .iter_mut()
             .find(|(rendered, _, _)| rendered.object_index == object_index)
         else {
@@ -5748,18 +6110,46 @@ fn update_overworld_sprite_positions(
         let Some(size) = sprite.custom_size else {
             return false;
         };
-        let (x, y) = if let (Some(object_id), Some((walking_id, from))) =
-            (object.object_identifier.as_ref(), trainer_walk_from)
-        {
-            if object_id == walking_id && object_walk_frame_ticks > 0 {
+        let (x, y) = if let Some(from) = walking_from {
+            let remaining = if trainer_is_walking {
+                object_walk_frame_ticks
+            } else {
+                let Some(remaining) = walking_object_id
+                    .and_then(|object_id| object_walk_frame_ticks_by_id.get(object_id).copied())
+                else {
+                    return false;
+                };
+                remaining
+            };
+            let total_ticks = if trainer_is_walking {
+                object_walk_total_ticks
+            } else {
+                let Some(total) = walking_object_id
+                    .and_then(|object_id| object_walk_total_ticks_by_id.get(object_id).copied())
+                else {
+                    return false;
+                };
+                total
+            };
+            if total_ticks == 0 {
+                return false;
+            }
+            if remaining > 0 {
                 let target = (
                     PLAYFIELD_LEFT + f32::from(view_x) * TILE_SIZE,
                     PLAYFIELD_TOP - f32::from(view_y) * TILE_SIZE,
                 );
-                let from = runtime_tile_playfield_position(*from, start_x, start_y)
-                    .unwrap_or(target);
-                let total = f32::from(WALK_FRAME_HOLD_TICKS.saturating_mul(2));
-                let progress = (total - f32::from(object_walk_frame_ticks)) / total;
+                let Some((from_view_x, from_view_y)) =
+                    runtime_event_view_tile(from, start_x, start_y)
+                else {
+                    return false;
+                };
+                let from = (
+                    PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
+                    PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
+                );
+                let total = f32::from(total_ticks);
+                let progress = (total - f32::from(remaining)) / total;
                 overworld_sprite_position_from_base(
                     from.0 + (target.0 - from.0) * progress,
                     from.1 + (target.1 - from.1) * progress,
@@ -5773,9 +6163,183 @@ fn update_overworld_sprite_positions(
         };
         transform.translation.x = x + camera_offset.x;
         transform.translation.y = y + camera_offset.y;
-        transform.translation.z = 1.0 + f32::from(object_tile.y) * 0.001;
+        let Some(source_object_slot) = snapshot.visible_object_slots.get(object_index).copied()
+        else {
+            return false;
+        };
+        transform.translation.z = if rendered_object.above_priority {
+            2.41
+        } else {
+            overworld_entity_depth(object_tile, Some(source_object_slot))
+        };
     }
     true
+}
+
+/// TypeScript's render list follows ASM OBJ priority: map Y first, then X,
+/// then lower object slots on top. The player uses the sentinel largest slot,
+/// so an NPC wins an otherwise exact tie. Keep each subordinate component
+/// smaller than one unit of the preceding component.
+fn overworld_entity_depth(tile: TilePosition, object_index: Option<usize>) -> f32 {
+    const Y_UNIT: f32 = 0.01;
+    const X_UNIT: f32 = 0.000_01;
+    const OBJECT_PRIORITY_UNIT: f32 = 0.000_000_3;
+    const OBJECT_SLOT_LIMIT: usize = 16;
+
+    let object_priority = object_index
+        .map(|index| OBJECT_SLOT_LIMIT.saturating_sub(index.min(OBJECT_SLOT_LIMIT)) as f32)
+        .unwrap_or(0.0)
+        * OBJECT_PRIORITY_UNIT;
+    1.0 + f32::from(tile.y) * Y_UNIT + f32::from(tile.x) * X_UNIT + object_priority
+}
+
+fn connection_composite_viewport_origin(
+    snapshot: &RuntimeShellSnapshot,
+    map: &crate::RuntimeMapCatalogSnapshot,
+    player_x: i16,
+    player_y: i16,
+    base_width: i16,
+    base_height: i16,
+) -> Option<(i16, i16)> {
+    let mut min_x = 0_i32;
+    let mut min_y = 0_i32;
+    let mut max_x = i32::from(base_width);
+    let mut max_y = i32::from(base_height);
+    for connection in &map.attributes.connections {
+        let Some(target) = snapshot
+            .maps
+            .iter()
+            .find(|candidate| candidate.map_name == connection.target_map)
+        else {
+            continue;
+        };
+        let target_width = i32::from(target.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
+        let target_height = i32::from(target.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
+        let offset = connection.offset.saturating_mul(i32::from(RENDER_METATILE_WIDTH));
+        let (x, y) = match connection.direction.to_ascii_lowercase().as_str() {
+            "north" => (offset, -target_height),
+            "south" => (offset, i32::from(base_height)),
+            "west" => (-target_width, offset),
+            "east" => (i32::from(base_width), offset),
+            _ => continue,
+        };
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x.saturating_add(target_width));
+        max_y = max_y.max(y.saturating_add(target_height));
+    }
+    let viewport_width = i32::from(VIEWPORT_TILES_X);
+    let viewport_height = i32::from(VIEWPORT_TILES_Y);
+    let x = (i32::from(player_x) - viewport_width / 2)
+        .clamp(min_x, max_x.saturating_sub(viewport_width).max(min_x));
+    let y = (i32::from(player_y) - viewport_height / 2)
+        .clamp(min_y, max_y.saturating_sub(viewport_height).max(min_y));
+    Some((i16::try_from(x).ok()?, i16::try_from(y).ok()?))
+}
+
+fn connection_render_source<'a>(
+    snapshot: &'a RuntimeShellSnapshot,
+    base: &'a crate::RuntimeMapCatalogSnapshot,
+    x: i32,
+    y: i32,
+) -> Option<(&'a crate::RuntimeMapCatalogSnapshot, i32, i32)> {
+    let base_width = i32::from(base.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
+    let base_height = i32::from(base.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
+    if (0..base_width).contains(&x) && (0..base_height).contains(&y) {
+        return Some((base, x, y));
+    }
+    for connection in base.attributes.connections.iter().rev() {
+        let target = snapshot
+            .maps
+            .iter()
+            .find(|candidate| candidate.map_name == connection.target_map)?;
+        let target_width = i32::from(target.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
+        let target_height = i32::from(target.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
+        let offset = connection.offset.saturating_mul(i32::from(RENDER_METATILE_WIDTH));
+        let (origin_x, origin_y) = match connection.direction.to_ascii_lowercase().as_str() {
+            "north" => (offset, -target_height),
+            "south" => (offset, base_height),
+            "west" => (-target_width, offset),
+            "east" => (base_width, offset),
+            _ => continue,
+        };
+        if (origin_x..origin_x.saturating_add(target_width)).contains(&x)
+            && (origin_y..origin_y.saturating_add(target_height)).contains(&y)
+        {
+            return Some((target, x - origin_x, y - origin_y));
+        }
+    }
+    None
+}
+
+fn priority_collision_token(token: &str) -> bool {
+    matches!(
+        token,
+        "TALL_GRASS"
+            | "LONG_GRASS"
+            | "LONG_GRASS_1C"
+            | "GRASS_48"
+            | "GRASS_49"
+            | "GRASS_4A"
+            | "GRASS_4B"
+            | "GRASS_4C"
+            | "BOOKSHELF"
+            | "COUNTER"
+            | "COUNTER_98"
+            | "INCENSE_BURNER"
+            | "MART_SHELF"
+            | "PC"
+    )
+}
+
+fn grass_collision_token(token: &str) -> bool {
+    matches!(
+        token,
+        "CUT_08"
+            | "TALL_GRASS"
+            | "TALL_GRASS_10"
+            | "LONG_GRASS"
+            | "LONG_GRASS_1C"
+            | "CUT_28"
+            | "GRASS_48"
+            | "GRASS_49"
+            | "GRASS_4A"
+            | "GRASS_4B"
+            | "GRASS_4C"
+    )
+}
+
+fn visible_object_indices_above_priority(
+    snapshot: &RuntimeShellSnapshot,
+    map: &crate::RuntimeMapCatalogSnapshot,
+    tileset: &crate::RuntimeTilesetCatalogSnapshot,
+) -> BTreeSet<usize> {
+    snapshot
+        .visible_objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| object.object_type == "OBJECTTYPE_ITEMBALL")
+        .filter_map(|(index, object)| {
+            let tile = object
+                .object_identifier
+                .as_ref()
+                .and_then(|object_id| snapshot.visible_object_runtime_tiles.get(object_id).copied())
+                .or_else(|| object_tile_position_checked(object))?;
+            let stride = crate::core::world::map::METATILE_WIDTH;
+            let block_x = usize::try_from(tile.x.div_euclid(stride)).ok()?;
+            let block_y = usize::try_from(tile.y.div_euclid(stride)).ok()?;
+            let block_index = block_y
+                .checked_mul(usize::from(map.attributes.width))?
+                .checked_add(block_x)?;
+            let block = *map.blocks.get(block_index)?;
+            let collision = tileset.collision.get(&block.to_string())?;
+            let quadrant = usize::try_from(tile.y.rem_euclid(stride)).ok()?
+                .checked_mul(2)?
+                .checked_add(usize::try_from(tile.x.rem_euclid(stride)).ok()?)?;
+            let token = collision.get(quadrant)?;
+            (!grass_collision_token(token)).then_some(index)
+        })
+        .collect()
 }
 
 /// Offset the already-composed destination viewport back toward the previous
@@ -5784,6 +6348,14 @@ fn update_overworld_sprite_positions(
 fn overworld_walk_camera_offset(
     rendered: &RenderedViewport,
     frames_remaining: u8,
+) -> Vec2 {
+    overworld_walk_camera_offset_for_duration(rendered, frames_remaining, WALK_FRAME_HOLD_TICKS)
+}
+
+fn overworld_walk_camera_offset_for_duration(
+    rendered: &RenderedViewport,
+    frames_remaining: u8,
+    total_frames: u8,
 ) -> Vec2 {
     let Some((from_x, from_y)) = rendered.walk_viewport_origin else {
         return Vec2::ZERO;
@@ -5794,11 +6366,46 @@ fn overworld_walk_camera_offset(
     if frames_remaining == 0 {
         return Vec2::ZERO;
     }
-    let remaining = f32::from(frames_remaining) / f32::from(WALK_FRAME_HOLD_TICKS);
+    let remaining = f32::from(frames_remaining.min(total_frames))
+        / f32::from(total_frames.max(1));
     Vec2::new(
         f32::from(to_x - from_x) * TILE_SIZE * remaining,
         -f32::from(to_y - from_y) * TILE_SIZE * remaining,
     )
+}
+
+fn visible_overworld_camera_offset(
+    rendered: &RenderedViewport,
+    runtime_shell: &BevyRuntimeShell,
+) -> Vec2 {
+    if let Some(jump) = runtime_shell.visible_ledge_jump {
+        // Keep the camera on the same two-source-pixels-per-frame schedule as
+        // the 32-pixel ledge traversal, including its terminal landing update.
+        return overworld_walk_camera_offset_for_duration(
+            rendered,
+            16_u8.saturating_sub(jump.frame),
+            16,
+        );
+    }
+    overworld_walk_camera_offset_for_duration(
+        rendered,
+        runtime_shell.player_walk_frame_ticks,
+        runtime_shell.player_walk_total_ticks,
+    )
+}
+
+/// ASM `UpdateJumpPosition`, projected from source LCD pixels into Bevy's
+/// integer-scaled playfield. A ledge step travels two source pixels per frame
+/// while this table raises the actor independently above its ground/shadow.
+fn visible_ledge_jump_y_offset(jump: Option<VisibleLedgeJump>) -> f32 {
+    const OFFSETS: [i8; 16] = [
+        -4, -6, -8, -10, -11, -12, -12, -12, -11, -10, -9, -8, -6, -4, 0, 0,
+    ];
+    let Some(jump) = jump else {
+        return 0.0;
+    };
+    let source_offset = OFFSETS[usize::from(jump.frame.min(15))];
+    -f32::from(source_offset) * (TILE_SIZE / SOURCE_TILE_SIZE as f32)
 }
 
 fn visible_player_playfield_position(
@@ -5808,13 +6415,41 @@ fn visible_player_playfield_position(
     start_x: i16,
     start_y: i16,
 ) -> Option<(f32, f32)> {
+    visible_player_playfield_position_for_duration(
+        target,
+        from,
+        frames_remaining,
+        WALK_FRAME_HOLD_TICKS,
+        start_x,
+        start_y,
+    )
+}
+
+fn visible_player_playfield_position_for_duration(
+    target: TilePosition,
+    from: Option<TilePosition>,
+    frames_remaining: u8,
+    total_frames: u8,
+    start_x: i16,
+    start_y: i16,
+) -> Option<(f32, f32)> {
     let target = runtime_tile_playfield_position(target, start_x, start_y)?;
     let Some(from) = from.filter(|_| frames_remaining > 0) else {
         return Some(target);
     };
-    let from = runtime_tile_playfield_position(from, start_x, start_y)?;
-    let progress = f32::from(WALK_FRAME_HOLD_TICKS.saturating_sub(frames_remaining))
-        / f32::from(WALK_FRAME_HOLD_TICKS);
+    // A seamless map connection commits the authority onto the destination
+    // map before its final stride is drawn. Its reconstructed source tile is
+    // therefore legitimately one tile beyond the destination viewport. Do
+    // not apply the static-object visibility clamp to that retained origin:
+    // Crystal scrolls the player in from offscreen over the complete step.
+    let (from_view_x, from_view_y) = runtime_event_view_tile(from, start_x, start_y)?;
+    let from = (
+        PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
+        PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
+    );
+    let total_frames = total_frames.max(1);
+    let progress = f32::from(total_frames.saturating_sub(frames_remaining.min(total_frames)))
+        / f32::from(total_frames);
     Some((
         from.0 + (target.0 - from.0) * progress,
         from.1 + (target.1 - from.1) * progress,
@@ -5896,6 +6531,27 @@ fn spawn_title_screen(
     rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
+    if let Some(continue_screen) = runtime_shell.visible_continue_screen.as_ref() {
+        let frame = load_visible_continue_screen_frame(
+            runtime_shell,
+            continue_screen,
+            rendered_art,
+            images,
+        )?;
+        commands.spawn((
+            SpriteBundle {
+                texture: frame.handle,
+                sprite: Sprite {
+                    custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(0.0, 0.0, 0.9),
+                ..default()
+            },
+            TitleScreenMarker,
+        ));
+        return Ok(());
+    }
     if visible_title_main_menu_ready(title) {
         let frame = load_visible_title_main_menu_frame(runtime_shell, title, rendered_art, images)?;
         commands.spawn((

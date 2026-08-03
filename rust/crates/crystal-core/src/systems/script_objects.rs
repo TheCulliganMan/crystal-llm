@@ -5,7 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::state::{EventFlagError, GameState, ScriptRuntimeEmote};
 use crate::systems::script_runtime::script_label_parent;
 use crate::world::session::{
-    OverworldFollowState, OverworldSession, raw_event_tile_to_runtime_tile_checked,
+    FollowQueuedStep, OverworldFollowState, OverworldSession,
+    raw_event_tile_to_runtime_tile_checked,
 };
 use crate::world::{
     map::{Direction, TilePosition},
@@ -167,6 +168,9 @@ pub struct ScriptMovementOutcome {
     pub object_id: String,
     pub movement: String,
     pub previous_tile: TilePosition,
+    pub previous_facing: Direction,
+    pub previous_hidden: bool,
+    pub previous_follower: Option<ScriptMovementFollower>,
     pub tile: TilePosition,
     pub facing: Direction,
     pub executed_steps: Vec<ScriptMovementStep>,
@@ -174,6 +178,15 @@ pub struct ScriptMovementOutcome {
     pub fixed_facing: bool,
     pub sliding: bool,
     pub steps_applied: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptMovementFollower {
+    pub object_id: String,
+    pub tile: TilePosition,
+    pub facing: Direction,
+    pub queued_step: Option<FollowQueuedStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1195,6 +1208,41 @@ pub fn apply_script_movement(
     let mut tile = object_tile(session, &object_id)?;
     let previous_tile = tile;
     let mut facing = object_facing(session, &object_id)?;
+    let previous_facing = facing;
+    let previous_hidden = if object_id == "PLAYER" {
+        session.player_hidden
+    } else {
+        session.hidden_object_identifiers.contains(&object_id)
+    };
+    let previous_follower = session
+        .following
+        .as_ref()
+        .filter(|following| following.leader_object_id == object_id)
+        .map(|following| {
+            Ok(ScriptMovementFollower {
+                object_id: following.follower_object_id.clone(),
+                tile: object_tile(session, &following.follower_object_id)?,
+                facing: object_facing(session, &following.follower_object_id)?,
+                queued_step: session.following_queued_step,
+            })
+        })
+        .transpose()?;
+    let mut follower_tile = previous_follower.as_ref().map(|follower| follower.tile);
+    let mut follower_facing = previous_follower.as_ref().map(|follower| follower.facing);
+    let mut queued_follower_step = previous_follower.as_ref().and_then(|follower| follower.queued_step.map(|step| (step.direction, step.stride, step.duration, step.jump, step.standing_frame))).or_else(|| previous_follower.as_ref().and_then(|follower| {
+        let direction = if previous_tile.x > follower.tile.x {
+            Direction::Right
+        } else if previous_tile.x < follower.tile.x {
+            Direction::Left
+        } else if previous_tile.y > follower.tile.y {
+            Direction::Down
+        } else if previous_tile.y < follower.tile.y {
+            Direction::Up
+        } else {
+            return None;
+        };
+        Some((direction, 1_i16, 8_u8, false, false))
+    }));
     let mut steps_applied = 0;
     let mut fixed_facing = false;
     let mut sliding = false;
@@ -1254,6 +1302,35 @@ pub fn apply_script_movement(
                     facing = direction;
                 }
                 let stride = movement_step_stride(movement, step)?;
+                if let (Some(current_follower_tile), Some((queued_direction, queued_stride, _, _, _))) =
+                    (follower_tile, queued_follower_step)
+                {
+                    follower_tile = Some(
+                        checked_move_by_stride(
+                            current_follower_tile,
+                            queued_direction,
+                            queued_stride,
+                        )
+                        .ok_or_else(|| ScriptObjectCommandError::MovementRuntimeTileOverflow {
+                            movement: movement.label.clone(),
+                            command: step.command.clone(),
+                            index: step.index,
+                            x: current_follower_tile.x,
+                            y: current_follower_tile.y,
+                        })?,
+                    );
+                    follower_facing = Some(queued_direction);
+                }
+                if previous_follower.is_some() {
+                    queued_follower_step = Some((
+                        direction,
+                        stride,
+                        follower_step_visible_duration(step.command.as_str()),
+                        step.command.contains("jump_step"),
+                        step.command.contains("jump_step")
+                            || step.command.contains("slide_step"),
+                    ));
+                }
                 let from_tile = tile;
                 tile = checked_move_by_stride(tile, direction, stride).ok_or_else(|| {
                     ScriptObjectCommandError::MovementRuntimeTileOverflow {
@@ -1278,6 +1355,12 @@ pub fn apply_script_movement(
             }
             command if movement_step_records_effect(command) => {
                 executed_steps.push(step.clone());
+                if matches!(command, "teleport_from" | "teleport_to") {
+                    // Both teleport routines reset OBJECT_STEP_FRAME before
+                    // their counterclockwise spin. Sixteen action frames make
+                    // a complete cycle and leave OBJECT_DIRECTION at OW_DOWN.
+                    facing = Direction::Down;
+                }
                 effects.push(ScriptMovementEffect {
                     command: step.command.clone(),
                     index: step.index,
@@ -1300,7 +1383,15 @@ pub fn apply_script_movement(
 
     set_object_tile(session, &object_id, tile)?;
     set_object_facing(session, &object_id, facing)?;
-    if let Some((from, to)) = last_movement_step {
+    if let (Some(follower), Some(tile), Some(facing)) =
+        (previous_follower.as_ref(), follower_tile, follower_facing)
+    {
+        set_object_tile(session, &follower.object_id, tile)?;
+        set_object_facing(session, &follower.object_id, facing)?;
+        session.following_queued_step = queued_follower_step.map(|(direction, stride, duration, jump, standing_frame)| {
+            FollowQueuedStep { direction, stride, duration, jump, standing_frame }
+        });
+    } else if let Some((from, to)) = last_movement_step {
         session.update_follow_after_entity_move(&object_id, from, to);
     }
     for effect in &effects {
@@ -1311,6 +1402,9 @@ pub fn apply_script_movement(
         object_id,
         movement: movement.label.clone(),
         previous_tile,
+        previous_facing,
+        previous_hidden,
+        previous_follower,
         tile,
         facing,
         executed_steps,
@@ -1548,9 +1642,26 @@ fn apply_follow_command(
     let follower_object_id = required_target_object_id(session, command)?;
     validate_object_reference(session, &leader_object_id)?;
     validate_object_reference(session, &follower_object_id)?;
+    let leader_tile = object_tile(session, &leader_object_id)?;
+    let follower_tile = object_tile(session, &follower_object_id)?;
+    let initial_direction = direction_toward(follower_tile, leader_tile);
+    // Ensure an NPC follower has an explicit pre-step runtime coordinate.
+    // Bevy's visible object-diff interpolator needs this origin to retain the
+    // first eight-frame follower stride after `follow`; without it, the first
+    // authoritative mutation appeared only in the post-step map and snapped.
+    if follower_object_id != "PLAYER" {
+        set_object_tile(session, &follower_object_id, follower_tile)?;
+    }
     session.following = Some(OverworldFollowState {
         leader_object_id: leader_object_id.clone(),
         follower_object_id: follower_object_id.clone(),
+    });
+    session.following_queued_step = initial_direction.map(|direction| FollowQueuedStep {
+        direction,
+        stride: SCRIPT_MOVEMENT_EVENT_TILE_STRIDE,
+        duration: 8,
+        jump: false,
+        standing_frame: false,
     });
 
     Ok(ScriptObjectMutationOutcome {
@@ -1571,6 +1682,7 @@ fn apply_stopfollow_command(
     command: &ScriptObjectCommand,
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
     session.following = None;
+    session.following_queued_step = None;
     Ok(ScriptObjectMutationOutcome {
         command: command.command.clone(),
         object_id: "FOLLOW".to_string(),
@@ -1805,6 +1917,21 @@ pub fn script_movement_step_runtime_stride(command: &str) -> Option<i16> {
     }
 }
 
+fn follower_step_visible_duration(command: &str) -> u8 {
+    let base = if command.starts_with("slow_") {
+        16
+    } else if command.starts_with("fast_") || command == "big_step" {
+        4
+    } else {
+        8
+    };
+    if command.contains("jump_step") {
+        base * 2
+    } else {
+        base
+    }
+}
+
 fn movement_step_tick_count(
     movement: &ScriptMovement,
     step: &ScriptMovementStep,
@@ -1854,8 +1981,12 @@ fn exact_sleep_command_duration(command: &str) -> Option<usize> {
 
 fn exact_stationary_effect_duration(command: &str) -> Option<usize> {
     match command {
-        "teleport_from" => Some(24),
-        "teleport_to" => Some(64),
+        // map_objects.asm: TeleportFrom runs a 16-frame spin followed by a
+        // 16-frame spin-rise. TeleportTo has a one-frame wait initializer,
+        // then 16 wait, 16 descent, and 16 final-spin frames.
+        "teleport_from" => Some(32),
+        "teleport_to" => Some(49),
+        "skyfall" => Some(32),
         "skyfall_top" => Some(16),
         "tree_shake" => Some(24),
         _ => None,
@@ -1896,6 +2027,7 @@ fn movement_step_records_effect(command: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn movement_step_is_executable(command: &str) -> bool {
     movement_step_sleeps(command)
         || movement_step_ends_sequence(command)
@@ -4123,7 +4255,7 @@ mod tests {
         let outcome =
             apply_script_movement(&mut session, &command, &movement).expect("visuals apply");
         assert_eq!(outcome.tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.steps_applied, 236);
+        assert_eq!(outcome.steps_applied, 260);
         assert_eq!(
             outcome
                 .executed_steps

@@ -210,6 +210,7 @@ fn insert_happiness_data(target: &mut Option<HappinessData>, data: HappinessData
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_exact_vec_table<T>(target: &mut Vec<T>, entries: Vec<T>, table_name: &str) -> Result<()> {
     if !target.is_empty() {
         anyhow::bail!("duplicate {table_name} table");
@@ -1546,6 +1547,7 @@ fn validate_pokemon_cry_metadata(_species: &str, metadata: &PokemonCryMetadata) 
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_exact_keyed_map<T>(
     target: &mut BTreeMap<String, T>,
     source: BTreeMap<String, T>,
@@ -1605,6 +1607,7 @@ fn merge_special_routine_rules(
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_exact_keyed_string_vec_map(
     target: &mut BTreeMap<String, Vec<String>>,
     source: BTreeMap<String, Vec<String>>,
@@ -1710,6 +1713,7 @@ fn validate_exact_modpack_multiline_text(value: &str, description: &str) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_exact_string_vec(
     target: &mut Vec<String>,
     source: Vec<String>,
@@ -1751,6 +1755,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_exact_string_set(
     target: &mut BTreeSet<String>,
     source: Vec<String>,
@@ -2058,6 +2063,7 @@ fn merge_keyed_egg_moves_entry(
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_object_payload(
     target: &mut BTreeMap<String, Value>,
     payload: Value,
@@ -2317,6 +2323,7 @@ fn merge_keyed_pokedex_payload(target: &mut Vec<Value>, key: &str, payload: Valu
     Ok(())
 }
 
+#[cfg(test)]
 fn merge_raw_object_payload(
     target: &mut Vec<Value>,
     payload: Value,
@@ -3020,4 +3027,3 @@ fn parse_script_shop_commands(
     }
     Ok(commands)
 }
-

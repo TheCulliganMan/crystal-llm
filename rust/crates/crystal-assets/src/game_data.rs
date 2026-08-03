@@ -1604,6 +1604,11 @@ impl GameDataSet {
         session.player.mode = mode;
         clear_transient_map_object_context(state, session);
         reset_map_bike_flags(state)?;
+        // EnterMap arms wWildEncounterCooldown before running map setup.
+        // CheckWildEncounterCooldown permits the fifth completed step after
+        // decrementing 1 -> 0, so this state must be persisted outside the
+        // transient OverworldSession.
+        state.wild_encounter_cooldown = 5;
         self.complete_pending_script_warp(state, session)?;
         self.apply_saved_overworld_overrides(session, state)?;
         let mode = self.map_entry_movement_mode(state, session, mode)?;
@@ -3591,7 +3596,6 @@ impl GameDataSet {
                                             .is_some_and(|pokemon| {
                                                 !pokemon.is_egg
                                                     && pokemon.species.id != "EGG"
-                                                    && !pokemon.nickname.eq_ignore_ascii_case("EGG")
                                             })
                                     })
                                     .collect::<Vec<_>>();
@@ -5969,7 +5973,6 @@ impl GameDataSet {
                         format!("box slot {} has no Pokemon to release", command.box_slot)
                     })?;
                 if pokemon.is_egg
-                    || pokemon.nickname.trim().eq_ignore_ascii_case("EGG")
                     || pokemon.species.id.trim().eq_ignore_ascii_case("EGG")
                 {
                     anyhow::bail!("cannot release an Egg");
@@ -6676,11 +6679,9 @@ impl GameDataSet {
                     )
                 };
                 let source_is_egg = source.is_egg
-                    || source.species.id == "EGG"
-                    || source.nickname.eq_ignore_ascii_case("EGG");
+                    || source.species.id == "EGG";
                 let target_is_egg = target.is_egg
-                    || target.species.id == "EGG"
-                    || target.nickname.eq_ignore_ascii_case("EGG");
+                    || target.species.id == "EGG";
                 if source_is_egg || target_is_egg {
                     anyhow::bail!("party HP transfer cannot use an Egg");
                 }
@@ -6846,7 +6847,6 @@ impl GameDataSet {
                         .is_some_and(|pokemon| {
                             !pokemon.is_egg
                                 && pokemon.species.id != "EGG"
-                                && !pokemon.nickname.eq_ignore_ascii_case("EGG")
                         })
                     {
                         recovered.push(full_heal_party_slot(state, &self.moves, party_index)?);
@@ -6862,7 +6862,6 @@ impl GameDataSet {
                             .is_some_and(|pokemon| {
                                 !pokemon.is_egg
                                     && pokemon.species.id != "EGG"
-                                    && !pokemon.nickname.eq_ignore_ascii_case("EGG")
                             })
                     })
                     .collect::<Vec<_>>();
@@ -7538,6 +7537,21 @@ impl GameDataSet {
         session.player.mode = mode;
         clear_transient_map_object_context(state, session);
         reset_map_bike_flags(state)?;
+        state.wild_encounter_cooldown = 5;
+        let destination_environment = &self
+            .runtime_map_metadata_for_name(destination_map)?
+            .environment;
+        if destination_environment.eq_ignore_ascii_case("route")
+            || destination_environment.eq_ignore_ascii_case("town")
+        {
+            // ResetFlashIfOutOfCave clears the transient illumination only
+            // when map setup reaches an outdoor route or town.  Keeping this
+            // flag forever made every later PALETTE_DARK cave render as lit.
+            state
+                .flags
+                .set_engine_flag("STATUSFLAGS_FLASH", false)
+                .map_err(|error| anyhow::anyhow!("reset FLASH on outdoor map entry: {error}"))?;
+        }
         self.update_roam_mons_on_map_change(state, destination_map)?;
         self.apply_saved_overworld_overrides(session, state)?;
         let mode = self.map_entry_movement_mode(state, session, mode)?;
@@ -7562,6 +7576,7 @@ impl GameDataSet {
         let spawn_tile = runtime_spawn_expected_tile(spawn);
         let mut overworld = self.overworld_session(&spawn.map_name, spawn_tile, 0)?;
         let mut state = GameState::reset_wram_for_new_game();
+        state.wild_encounter_cooldown = 5;
         state.bag.tm_hm = initial_tmhm_flags(&self.items);
         apply_initialize_events(&mut state, &self.initialize_events)
             .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
@@ -7687,8 +7702,18 @@ impl GameDataSet {
             )
         });
         let input_locked = Self::game_state_blocks_overworld_input(state);
+        let forced_tile_movement_pending =
+            !input_locked && session.forced_movement_direction().is_some();
+        let downhill_movement_pending = !input_locked
+            && matches!(session.player.mode, MovementMode::Bike | MovementMode::Skate)
+            && state
+                .flags
+                .is_engine_flag_set("ENGINE_DOWNHILL")
+                .map_err(|error| anyhow::anyhow!("check downhill bike flag: {error}"))?;
         if input_candidate == 0
             && !state.bug_contest.timer_active
+            && !forced_tile_movement_pending
+            && !downhill_movement_pending
             && (input_locked || !has_autonomous_objects)
         {
             state
@@ -7809,11 +7834,30 @@ impl GameDataSet {
 
         let overworld_input_locked =
             bug_contest_timed_out || Self::game_state_blocks_overworld_input(&staged_state);
-        let forced_direction = if overworld_input_locked {
+        let downhill = !overworld_input_locked
+            && input_candidate == 0
+            && matches!(
+                staged_session.player.mode,
+                MovementMode::Bike | MovementMode::Skate
+            )
+            && staged_state
+                .flags
+                .is_engine_flag_set("ENGINE_DOWNHILL")
+                .map_err(|error| anyhow::anyhow!("check downhill bike flag: {error}"))?;
+        let tile_forced_direction = if overworld_input_locked {
             None
         } else {
             staged_session.forced_movement_direction()
         };
+        let tile_forced_permission = tile_forced_direction.and_then(|_| {
+            sample_collision(
+                &staged_session.map,
+                &staged_session.tileset,
+                staged_session.player.tile,
+            )
+            .map(|sample| sample.permission)
+        });
+        let forced_direction = tile_forced_direction.or(downhill.then_some(Direction::Down));
         let direction = if overworld_input_locked {
             None
         } else if forced_direction.is_some() {
@@ -7829,8 +7873,14 @@ impl GameDataSet {
             staged_session.frame += 1;
         } else if let Some(direction) = direction {
             let movement_mode_before = staged_session.player.mode;
-            let blocked_connection_edge =
-                self.blocked_connection_edge_target(&staged_session, direction)?;
+            let direct_forced_step = tile_forced_permission.is_some_and(|permission| {
+                matches!(permission & 0xf0, 0x30 | 0x40 | 0x50)
+            });
+            let blocked_connection_edge = if direct_forced_step {
+                None
+            } else {
+                self.blocked_connection_edge_target(&staged_session, direction)?
+            };
             let mut warp_trigger = None;
             if let Some(target) = blocked_connection_edge {
                 staged_session.player.facing = direction;
@@ -7840,13 +7890,21 @@ impl GameDataSet {
                     facing: direction,
                 });
             } else {
-                let options = StepOptions::default();
+                let options = StepOptions {
+                    // CheckTile-owned currents, walk tiles, doors and ice
+                    // continue directly. Downhill instead enters through the
+                    // joypad path and must preserve CheckTurning's four-frame
+                    // facing change before its forced downward step.
+                    force_step_after_turn: tile_forced_direction.is_some(),
+                    ..StepOptions::default()
+                };
                 let strength_active = staged_state
                     .flags
                     .is_engine_flag_set("ENGINE_STRENGTH_ACTIVE")
                     .map_err(|error| anyhow::anyhow!("check active Strength flag: {error}"))?;
-                let can_jump_ledge = staged_session.can_jump_ledge_checked(direction, options)?;
-                let pushed_boulder = (strength_active && !can_jump_ledge)
+                let can_jump_ledge = !direct_forced_step
+                    && staged_session.can_jump_ledge_checked(direction, options)?;
+                let pushed_boulder = (strength_active && !direct_forced_step && !can_jump_ledge)
                     .then(|| {
                         staged_session
                             .push_strength_boulder_checked(direction, options)
@@ -7874,7 +7932,18 @@ impl GameDataSet {
                         &object_id,
                     )?;
                 }
-                if can_jump_ledge {
+                if direct_forced_step {
+                    movement = Some(
+                        staged_session
+                            .forced_tile_step_checked(direction, options)
+                            .with_context(|| {
+                                format!(
+                                    "apply direct CheckTile movement on {}",
+                                    staged_session.map.name
+                                )
+                            })?,
+                    );
+                } else if can_jump_ledge {
                     let result = staged_session
                         .ledge_jump_and_check_warp_checked(direction, options)
                         .with_context(|| {
@@ -7922,6 +7991,54 @@ impl GameDataSet {
                         })?;
                     movement = Some(result.outcome);
                     warp_trigger = result.warp;
+                }
+                if ledge_jump.is_none()
+                    && let Some(permission) = tile_forced_permission
+                    && let Some(StepOutcome::Moved {
+                        speed_multiplier, ..
+                    }) = movement.as_mut()
+                {
+                    // CheckTile uses STEP_WALK for currents, directional walk
+                    // tiles, doors, staircases and caves regardless of the
+                    // player's bike/skate state. Ice bypasses CheckTile and
+                    // TryStep selects STEP_ICE's four-pixel slide instead.
+                    let forced_speed = if matches!(
+                        permission,
+                        permissions::ICE | permissions::ICE_2B
+                    ) {
+                        2
+                    } else {
+                        1
+                    };
+                    *speed_multiplier = forced_speed;
+                    // step_checked initially retains the origin from the
+                    // actor mode. The source-selected step function owns that
+                    // collision tile until its visible 8/4-frame landing.
+                    staged_session.player_last_tile_occupied_until_frame = staged_session
+                        .frame
+                        .saturating_add(u64::from(8 / forced_speed) - 1);
+                }
+                if tile_forced_direction.is_none()
+                    && staged_state
+                    .flags
+                    .is_engine_flag_set("ENGINE_DOWNHILL")
+                    .map_err(|error| anyhow::anyhow!("check downhill bike speed flag: {error}"))?
+                    && matches!(movement_mode_before, MovementMode::Bike | MovementMode::Skate)
+                    && direction != Direction::Down
+                    && let Some(StepOutcome::Moved {
+                        speed_multiplier, ..
+                    }) = movement.as_mut()
+                {
+                    // ASM TryStep falls back to STEP_WALK when a downhill
+                    // bike/skate actor moves in any direction except down.
+                    *speed_multiplier = 1;
+                    // `OverworldSession::step_checked` initially retained
+                    // the vacated tile using the actor mode's ordinary bike
+                    // duration. Keep OBJECT_LAST_MAP_* collision ownership
+                    // for the complete overridden eight-frame walk instead
+                    // of releasing it halfway through the visible stride.
+                    staged_session.player_last_tile_occupied_until_frame =
+                        staged_session.frame.saturating_add(7);
                 }
             }
             if staged_session.player.mode != movement_mode_before {
@@ -7976,15 +8093,15 @@ impl GameDataSet {
                     ..
                 }) = movement.as_ref()
                 {
-                    let permission = sample_collision(
+                    let grass_permission = sample_collision(
                         &staged_session.map,
                         &staged_session.tileset,
                         *to,
                     )
                     .map(|sample| sample.permission);
-                    if permission.is_some_and(|value| {
-                        matches!(value, 0x08 | 0x10 | 0x14 | 0x18 | 0x1c | 0x28)
-                    }) {
+                    if grass_permission
+                        .is_some_and(|permission| matches!(permission, 0x14 | 0x18 | 0x1c))
+                    {
                         grass_rustle = Some(OverworldGrassRustle {
                             tile: *to,
                             duration_frames: (8 / (*speed_multiplier).max(1)).max(1),
@@ -8076,19 +8193,20 @@ impl GameDataSet {
         }
 
         if !overworld_input_locked {
-            let has_random_autonomous_object = staged_session.objects.iter().any(|object| {
+            let has_autonomous_object = staged_session.objects.iter().any(|object| {
                 matches!(
                     object.spritemovedata.as_str(),
-                    "SPRITEMOVEDATA_WANDER"
+                    "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
+                        | "SPRITEMOVEDATA_WALK_UP_DOWN"
+                        | "SPRITEMOVEDATA_WANDER"
                         | "SPRITEMOVEDATA_SWIM_WANDER"
                         | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
                         | "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                        | "SPRITEMOVEDATA_SPINCLOCKWISE"
+                        | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
                 )
             });
-            if has_random_autonomous_object
-                && staged_session.frame > 0
-                && staged_session.frame % 16 == 0
-            {
+            if has_autonomous_object {
                 let mut autonomous_rng = Random::new_crystal(staged_state.rng_seed);
                 staged_session
                     .advance_autonomous_objects_with_rng(Some(&mut autonomous_rng))
@@ -10690,7 +10808,6 @@ impl GameDataSet {
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
         if preview.is_egg
             || preview.species.id == "EGG"
-            || preview.nickname.eq_ignore_ascii_case("EGG")
         {
             anyhow::bail!("use party item {item_id}: Eggs can't use that");
         }
@@ -10949,7 +11066,6 @@ impl GameDataSet {
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
         if preview.is_egg
             || preview.species.id == "EGG"
-            || preview.nickname.eq_ignore_ascii_case("EGG")
         {
             anyhow::bail!("use party item {item_id}: Eggs can't use that");
         }
@@ -10975,7 +11091,6 @@ impl GameDataSet {
             .map_err(|error| anyhow::anyhow!("use TM/HM {item_id}: {error:?}"))?;
         if preview.is_egg
             || preview.species.id == "EGG"
-            || preview.nickname.eq_ignore_ascii_case("EGG")
         {
             anyhow::bail!("use TM/HM {item_id}: Eggs can't use that");
         }
@@ -11170,6 +11285,19 @@ impl GameDataSet {
                 &mut rng,
             )?
         };
+        if !outcome.storage_full {
+            // BattleMenu_Pack returns to ParsePlayerAction for an actual ball
+            // throw, whose non-move path clears Bide before the item effect.
+            // A full Box rejects the selection before that action boundary.
+            if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
+                combat.player_bide_turns = 0;
+                combat.player_bide_damage = 0;
+                combat.player_fury_cutter_chain = 0;
+                combat.player_protect_counter = 0;
+                combat.player_rage_active = false;
+                combat.player_rage_counter = 0;
+            }
+        }
         state.commit_rng_seed(rng.seed());
         Ok(outcome)
     }
@@ -11431,6 +11559,10 @@ impl GameDataSet {
                     .with_parties(player_party, enemy_party.to_vec())
                     .with_party_indices(active_index, active_enemy_index)
                     .with_obedience(state.player_id, state.badges.johto)
+                    .with_time_context(
+                        state.time.time_of_day,
+                        state.link_session.link_mode != 0,
+                    )
                     .with_badge_boosts_enabled(badge_boosts_enabled)
             });
         combat.badge_boosts_enabled = badge_boosts_enabled;
@@ -11563,6 +11695,10 @@ impl GameDataSet {
             .clone()
             .unwrap_or_else(|| {
                 BattleCombatState::new(player, enemy.clone(), staged_state.rng_seed)
+                    .with_time_context(
+                        staged_state.time.time_of_day,
+                        staged_state.link_session.link_mode != 0,
+                    )
             });
         if combat.force_switch_blocked
             || combat.player_escape_trap.is_some()
@@ -11703,6 +11839,10 @@ impl GameDataSet {
                     .with_parties(player_party, enemy_party.to_vec())
                     .with_party_indices(active_index, active_enemy_index)
                     .with_obedience(state.player_id, state.badges.johto)
+                    .with_time_context(
+                        state.time.time_of_day,
+                        state.link_session.link_mode != 0,
+                    )
                     .with_badge_boosts_enabled(badge_boosts_enabled)
             });
         combat.badge_boosts_enabled = badge_boosts_enabled;
@@ -12541,6 +12681,22 @@ impl GameDataSet {
         state: &mut GameState,
         session: &OverworldSession,
     ) -> Result<Option<WildEncounterRoll>> {
+        // RandomEncounter calls CheckWildEncounterCooldown before checking
+        // terrain or consuming encounter RNG. Crystal allows the check which
+        // decrements 1 to 0; values remaining above zero suppress this step.
+        if state.wild_encounter_cooldown > 0 {
+            state.wild_encounter_cooldown -= 1;
+            if state.wild_encounter_cooldown > 0 {
+                return Ok(None);
+            }
+        }
+        if state
+            .flags
+            .is_engine_flag_set("STATUSFLAGS_NO_WILD_ENCOUNTERS_F")
+            .map_err(|error| anyhow::anyhow!("check NO_WILD_ENCOUNTERS flag: {error}"))?
+        {
+            return Ok(None);
+        }
         let mut rng = Random::new_crystal(state.rng_seed);
         let roaming_candidates = self.roaming_candidates_for_map(state, &session.map.name);
         let special_wild_encounters = if state.bug_contest.timer_active {
@@ -12620,6 +12776,13 @@ impl GameDataSet {
         } else {
             None
         };
+        let environment = &self
+            .runtime_map_metadata_for_name(&session.map.name)?
+            .environment;
+        let tileset_name = self.map_tileset_name(&session.map.name)?;
+        let land_encounters_on_any_land = environment.eq_ignore_ascii_case("cave")
+            || tileset_name.eq_ignore_ascii_case("cave")
+            || tileset_name.eq_ignore_ascii_case("dark_cave");
         let roll = self.check_wild_encounter(
             session,
             &mut rng,
@@ -12631,6 +12794,7 @@ impl GameDataSet {
                 lead_party_level: leading_usable_party_level(state),
                 roaming_candidates,
                 special_wild_encounters,
+                land_encounters_on_any_land,
             },
         )?;
         if let Some(encounter) = roll.as_ref().and_then(|roll| roll.resolved.as_ref())
@@ -12984,6 +13148,7 @@ impl GameDataSet {
         tileset_collision_from_definition(tileset_name, definition)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_base_json(asset_root: &AssetRoot) -> Result<Self> {
         let index = asset_root.load_content_pack_index()?;
         Self::load_from_content_pack_index(asset_root, &index)
@@ -14170,7 +14335,7 @@ impl GameDataSet {
                 .resolved
                 .as_ref()
                 .map(|resolved| resolved.level)
-                .unwrap_or(roamer.level);
+                .context("roaming wild battle start is missing its resolved encounter")?;
             let dvs = if roamer.hp > 0 {
                 Dv::from_non_hp(
                     ((roamer.dvs >> 12) & 0x0f) as u8,
@@ -14666,7 +14831,11 @@ impl GameDataSet {
                         trigger.warp.index, trigger.map_name
                     )
                 })?;
-            let destination_warp_id = state.backup_warp_index.unwrap_or(1).max(1);
+            let destination_warp_id = Self::required_dynamic_backup_warp_index(
+                state,
+                trigger.warp.index,
+                &trigger.map_name,
+            )?;
             let destination = self.resolve_warp_destination(
                 &destination_map,
                 destination_warp_id,
@@ -14690,7 +14859,6 @@ impl GameDataSet {
             trigger.warp.target_warp_id < 1 && source_constant.ends_with("_ELEVATOR");
         if !moving_between_link_room_and_center && !leaving_dynamic_elevator {
             state.backup_warp_map_name = Some(trigger.map_name.clone());
-            state.backup_warp_index = Some(state.backup_warp_index.unwrap_or(1).max(1));
         }
         if destination_constant == "POKECENTER_2F" && !source_is_link_room {
             state.backup_warp_index = Some(trigger.warp.index);
@@ -14698,6 +14866,21 @@ impl GameDataSet {
         state.previous_warp_map_name = Some(trigger.map_name.clone());
         state.previous_warp_index = Some(trigger.warp.index);
         Ok(transition)
+    }
+
+    fn required_dynamic_backup_warp_index(
+        state: &GameState,
+        warp_index: u16,
+        map_name: &str,
+    ) -> Result<u16> {
+        state
+            .backup_warp_index
+            .filter(|warp_id| *warp_id > 0)
+            .with_context(|| {
+                format!(
+                    "dynamic warp {warp_index} on {map_name} has no saved nonzero backup warp"
+                )
+            })
     }
 
     fn resolve_warp_destination(

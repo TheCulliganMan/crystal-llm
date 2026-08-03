@@ -187,8 +187,18 @@ fn use_active_battle_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     set_shell_action_status(runtime_shell, format!("USED {item_id} IN BATTLE"));
-    stage_visible_battle_item_use(runtime_shell, item_id)?;
-    stage_visible_battle_item_effect(runtime_shell, &snapshot, &used.battle_item, None);
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.item_id == item_id)
+        .with_context(|| format!("compiled item catalog missing {item_id}"))?;
+    let uses_item_text = item.battle_stat_boost_stat.is_some()
+        || item.battle_focus_energy == Some(true)
+        || (item.confusion_heal == Some(true) && item.status_heals.is_empty());
+    if uses_item_text {
+        stage_visible_battle_item_use(runtime_shell, item_id)?;
+    }
+    stage_visible_battle_item_effect(runtime_shell, &snapshot, &used.battle_item, None)?;
     resolve_visible_battle_enemy_response_after_player_item(runtime_shell, item_id)?;
     Ok(())
 }
@@ -321,7 +331,9 @@ fn execute_visible_battle_pack_action(runtime_shell: &mut BevyRuntimeShell) -> R
             let snapshot = runtime_shell.shell.snapshot()?;
             runtime_shell.battle_pack_target_mode = None;
             runtime_shell.party_move_cursor = None;
-            runtime_shell.battle_messages.push_back("It won't have any effect.".to_string());
+            runtime_shell
+                .battle_messages
+                .push_back("It won't have any\neffect.".to_string());
             runtime_shell.battle_message_scene = Some(Box::new(snapshot));
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
@@ -805,8 +817,10 @@ fn use_visible_field_bag_item_by_id(
         );
         close_visible_field_pack_without_log(runtime_shell);
         runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "UseEscapeRopeText")?);
+        retain_visible_field_notice_scene(runtime_shell, &snapshot);
         runtime_shell.pending_field_travel_arrival = true;
         runtime_shell.pending_field_travel_delay_frames = None;
+        runtime_shell.visible_field_travel_animation = Some(VisibleFieldTravelAnimation::DigOut);
         return Ok(());
     }
     if runtime_shell.shell.fishing_rod_ids().contains(&item_id) {
@@ -887,7 +901,16 @@ fn use_visible_field_bag_item_by_id(
             runtime_shell,
             format!("BICYCLE MODE {:?}", item_use.mode_after),
         );
+        if item_use.mode_after == MovementMode::Bike {
+            // BikeFunction starts MUSIC_BICYCLE before Script_GetOnBike owns
+            // the acknowledgement textbox. Field text otherwise suspends the
+            // current-music synchronizer until the player closes that text.
+            queue_visible_current_music(runtime_shell)?;
+        }
         close_visible_field_pack_without_log(runtime_shell);
+        // VAR_MOVEMENT changes before the source textbox, but the visible
+        // player sprite changes only at UpdatePlayerSprite after it closes.
+        retain_visible_field_notice_scene(runtime_shell, &snapshot);
         let display_name = item_display_name(&snapshot, &item_id);
         runtime_shell.field_notice = Some(match item_use.mode_after {
             MovementMode::Bike => format!(
@@ -1061,7 +1084,10 @@ fn use_visible_field_bag_item_by_id(
         trim_event_log(&mut runtime_shell.last_audio_events);
         set_shell_action_status(runtime_shell, format!("USED {item_id} ON PARTY"));
         close_visible_field_pack_without_log(runtime_shell);
-        runtime_shell.field_notice = Some("Your POKéMON were revived!".to_string());
+        runtime_shell.field_notice = Some(format!(
+            "{}'s <PKMN>\nwere all healed!",
+            snapshot.trainer.player_name
+        ));
         mark_runtime_snapshot_dirty(runtime_shell);
         continue_visible_script_after_prompt(runtime_shell)?;
         return Ok(());
@@ -1162,6 +1188,8 @@ fn item_targets_party_pokemon_fields(item: &crate::RuntimeItemCatalogSnapshot) -
     item.revive_hp_percent.is_some()
         || !item.status_heals.is_empty()
         || item.confusion_heal == Some(true)
+        || (item.pp_restore_scope.as_deref() == Some("ALL")
+            && item.pp_restore_points.is_some())
         || item.vitamin_stat.is_some()
         || item.rare_candy_level_gain.is_some()
         || item.party_special_effect
@@ -1489,6 +1517,18 @@ fn use_selected_battle_pack_target(
                 .iter()
                 .find(|slot| slot.index == party_index)
                 .with_context(|| format!("selected party index {party_index} is not in the party"))?;
+            if selected.pokemon.is_egg || selected.pokemon.species.id == "EGG" {
+                record_visible_runtime_action(
+                    runtime_shell,
+                    format!("battle:item:party_move:{party_index}:egg_refused"),
+                )?;
+                runtime_shell
+                    .battle_messages
+                    .push_back("That can't be used\non an EGG.".to_string());
+                runtime_shell.battle_message_scene = Some(Box::new(snapshot));
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             if selected.pokemon.moves.is_empty() {
                 runtime_shell
                     .battle_messages
@@ -1542,6 +1582,26 @@ fn use_selected_battle_party_item_on(
     party_index: usize,
 ) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
+    let target = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == party_index)
+        .with_context(|| format!("battle item target party index {party_index} is missing"))?;
+    if target.pokemon.is_egg || target.pokemon.species.id == "EGG" {
+        record_visible_runtime_action(
+            runtime_shell,
+            format!("battle:item:party:{party_index}:egg_refused"),
+        )?;
+        runtime_shell
+            .battle_messages
+            .push_back("That can't be used\non an EGG.".to_string());
+        runtime_shell.battle_message_scene = Some(Box::new(snapshot));
+        mark_runtime_snapshot_dirty(runtime_shell);
+        set_shell_action_status(runtime_shell, "THAT CAN'T BE USED ON AN EGG");
+        trim_event_log(&mut runtime_shell.last_audio_events);
+        return Ok(());
+    }
     if carried_battle_usable_item_ids(&snapshot).is_empty() {
         runtime_shell.bag_cursor = None;
         runtime_shell.battle_pack_target_mode = None;
@@ -1554,14 +1614,27 @@ fn use_selected_battle_party_item_on(
         return Ok(());
     }
     let item_id = selected_battle_bag_item_id(runtime_shell)?;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.item_id == item_id)
+        .with_context(|| format!("selected battle item {item_id} is missing from item catalog"))?;
     record_visible_runtime_action(
         runtime_shell,
         format!("battle:item:{item_id}:party:{party_index}"),
     )?;
-    let used = match runtime_shell
-        .shell
-        .use_bag_item_on_battle_party_pokemon(&item_id, party_index)
+    let use_result = if item.pp_restore_scope.as_deref() == Some("ALL")
+        && item.pp_restore_points.is_some()
     {
+        runtime_shell
+            .shell
+            .use_bag_item_on_battle_party_move(&item_id, party_index, None)
+    } else {
+        runtime_shell
+            .shell
+            .use_bag_item_on_battle_party_pokemon(&item_id, party_index)
+    };
+    let used = match use_result {
         Ok(used) => used,
         Err(error) if battle_item_error_is_play_refusal(&error) => {
             return handle_visible_battle_item_refusal(runtime_shell, &item_id, error);
@@ -1579,13 +1652,12 @@ fn use_selected_battle_party_item_on(
         runtime_shell,
         format!("USED {item_id} ON PARTY #{party_index}"),
     );
-    stage_visible_battle_item_use(runtime_shell, &item_id)?;
     stage_visible_battle_item_effect(
         runtime_shell,
         &snapshot,
         &used.battle_item,
         Some(party_index),
-    );
+    )?;
     resolve_visible_battle_enemy_response_after_player_item(runtime_shell, &item_id)?;
     Ok(())
 }
@@ -1658,13 +1730,12 @@ fn use_selected_battle_party_move_item_on(
             move_slot + 1
         ),
     );
-    stage_visible_battle_item_use(runtime_shell, &item_id)?;
     stage_visible_battle_item_effect(
         runtime_shell,
         &snapshot,
         &used.battle_item,
         Some(party_index),
-    );
+    )?;
     resolve_visible_battle_enemy_response_after_player_item(runtime_shell, &item_id)?;
     Ok(())
 }
@@ -1759,17 +1830,6 @@ fn use_guard_spec_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &str) -> 
         format!("GUARD SPEC {} TURNS", used.stat_drop_guard_turns_after),
     );
     stage_visible_battle_item_use(runtime_shell, item_id)?;
-    let active_name = snapshot
-        .battle
-        .as_ref()
-        .and_then(|battle| battle.active_player_party_index)
-        .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-        .map(|slot| slot.pokemon.nickname.as_str())
-        .unwrap_or("POKéMON");
-    runtime_shell
-        .battle_messages
-        .push_back(format!("{active_name} became shrouded in MIST!"));
-    mark_runtime_snapshot_dirty(runtime_shell);
     resolve_visible_battle_enemy_response_after_player_item(runtime_shell, item_id)?;
     Ok(())
 }
@@ -1814,7 +1874,7 @@ fn start_or_complete_visible_scripted_wild_battle(
         &key.source_script,
         key.startbattle_command_index,
     )?;
-    prepare_visible_battle_entry(runtime_shell);
+    prepare_visible_battle_entry(runtime_shell)?;
     runtime_shell.last_audio_events.push(format!(
         "scripted wild start source={} species={} level={} start={:?}",
         key.source_script, key.species, key.level, start
@@ -1864,7 +1924,7 @@ fn start_or_complete_visible_scripted_trainer_battle(
         &key.source_script,
         key.startbattle_command_index,
     )?;
-    prepare_visible_battle_entry(runtime_shell);
+    prepare_visible_battle_entry(runtime_shell)?;
     runtime_shell.last_audio_events.push(format!(
         "scripted trainer start source={} trainer={}:{} start={:?}",
         key.source_script, key.trainer_class, key.trainer_id, start
@@ -2046,7 +2106,10 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    if !battle.commands.player_forced_struggle
+    let move_selection_bypassed = battle.commands.player_forced_struggle
+        || battle.commands.player_turn_automatic
+        || battle.commands.player_fight_automatic;
+    if !move_selection_bypassed
         && !battle.commands.player_move_slots.contains(&slot)
     {
         record_visible_runtime_action(runtime_shell, format!("battle:move:{slot}:unavailable"))?;
@@ -2057,7 +2120,7 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    if !battle.commands.player_forced_struggle {
+    if !move_selection_bypassed {
         let selected_move = battle
             .player_moves
             .get(slot)
@@ -2089,18 +2152,6 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
             trim_event_log(&mut runtime_shell.last_audio_events);
             return Ok(());
         }
-    }
-    if battle.commands.player_forced_struggle && !battle.commands.player_turn_automatic {
-        let active_name = battle
-            .active_player_party_index
-            .and_then(|active| snapshot.party.slots.iter().find(|slot| slot.index == active))
-            .map(|slot| slot.pokemon.nickname.as_str())
-            .unwrap_or("POKéMON");
-        runtime_shell
-            .battle_messages
-            .push_back(format!("{active_name}\nhas no moves left!"));
-        runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
-        mark_runtime_snapshot_dirty(runtime_shell);
     }
     let (enemy_action, enemy_rng_seed_after) =
         selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
@@ -2421,6 +2472,9 @@ fn open_visible_battle_pack(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
 
 fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.battle_party_summary_open {
+        if !visible_wait_sfx_finished(runtime_shell) {
+            return Ok(());
+        }
         let snapshot = runtime_shell.shell.snapshot()?;
         let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
         if slot.pokemon.is_egg || runtime_shell.party_summary_page >= 3 {
@@ -2549,10 +2603,28 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    match selected_visible_battle_action(runtime_shell, &snapshot, &battle)? {
+    let selected_action = selected_visible_battle_action(runtime_shell, &snapshot, &battle)?;
+    if runtime_shell.battle_move_cursor.is_none()
+        && runtime_shell.battle_switch_cursor.is_none()
+    {
+        // The main 2D battle menu owns its confirmation click. Submenus own
+        // their later confirmations independently; in particular the FIGHT
+        // row must not double the post-MoveSelectionScreen click.
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+    }
+    match selected_action {
         VisibleBattleAction::Fight => {
+            // BattleMenu_Fight clears wNumFleeAttempts before returning to
+            // ParsePlayerAction. This happens on entering FIGHT, even when
+            // MoveSelectionScreen is subsequently canceled.
+            runtime_shell
+                .shell
+                .session_mut()
+                .state
+                .battle_escape_attempts = 0;
             if battle.commands.player_forced_struggle
                 || battle.commands.player_turn_automatic
+                || battle.commands.player_fight_automatic
             {
                 resolve_visible_battle_move(runtime_shell, 0)
             } else if runtime_shell.battle_move_cursor.is_some() {
@@ -2602,6 +2674,9 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
 
 fn press_visible_battle_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.battle_party_summary_open {
+        if !visible_wait_sfx_finished(runtime_shell) {
+            return Ok(());
+        }
         runtime_shell.battle_party_summary_open = false;
         runtime_shell.party_summary_open = false;
         runtime_shell.party_summary_page = 1;
@@ -2609,7 +2684,9 @@ fn press_visible_battle_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
-    if runtime_shell.battle_party_action_cursor.take().is_some() {
+    if runtime_shell.battle_party_action_cursor.is_some() {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
+        runtime_shell.battle_party_action_cursor = None;
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -2668,6 +2745,7 @@ fn press_visible_battle_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result
         return Ok(());
     }
     if runtime_shell.battle_move_cursor.is_some() || runtime_shell.battle_switch_cursor.is_some() {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
         let kept_current_pokemon = runtime_shell.battle_switch_cursor.is_some()
             && trainer_shift_switch_pending(&snapshot, battle);
         runtime_shell.battle_move_cursor = None;
@@ -2726,8 +2804,13 @@ fn execute_visible_battle_party_action(runtime_shell: &mut BevyRuntimeShell) -> 
         3,
     )
     .context("battle party action menu requires a valid cursor")?;
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     match selected {
         0 => {
+            runtime_shell.battle_party_action_cursor = None;
+            switch_visible_battle_pokemon(runtime_shell)
+        }
+        1 => {
             let snapshot = runtime_shell.shell.snapshot()?;
             let selected_party_slot = strict_readonly_cursor_index(
                 &runtime_shell.battle_switch_cursor,
@@ -2752,10 +2835,6 @@ fn execute_visible_battle_party_action(runtime_shell: &mut BevyRuntimeShell) -> 
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
-        1 => {
-            runtime_shell.battle_party_action_cursor = None;
-            switch_visible_battle_pokemon(runtime_shell)
-        }
         2 => {
             runtime_shell.battle_party_action_cursor = None;
             mark_runtime_snapshot_dirty(runtime_shell);
@@ -2774,14 +2853,16 @@ fn attempt_visible_battle_run(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         // BattleMenu_Run refuses trainer battles immediately. It does not
         // submit a turn or allow the opponent to attack.
         record_visible_runtime_action(runtime_shell, "battle:run:trainer_refused")?;
-        let refusal = "No! There's no running from a trainer battle!".to_string();
+        let refusal = "No! There's no\nrunning from a\ntrainer battle!".to_string();
         runtime_shell.last_audio_events.push(refusal.clone());
         runtime_shell.battle_messages.push_back(refusal);
         runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
         mark_runtime_snapshot_dirty(runtime_shell);
         set_shell_action_status(runtime_shell, "NO RUNNING FROM TRAINER BATTLE");
-        reset_visible_battle_action_cursors(runtime_shell);
-        sync_visible_battle_action_cursor(runtime_shell);
+        // BattleMenu_Run loops back through BattleMenu without clearing
+        // wBattleMenuCursorPosition, so RUN remains selected after refusal.
+        runtime_shell.battle_move_cursor = None;
+        reset_visible_battle_item_cursors(runtime_shell);
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
@@ -2814,6 +2895,26 @@ fn attempt_visible_battle_run(runtime_shell: &mut BevyRuntimeShell) -> Result<()
     );
     if runtime_shell.shell.snapshot()?.battle.is_some() {
         settle_visible_battle_after_action(runtime_shell)?;
+        let settled = runtime_shell.shell.snapshot()?;
+        if settled.battle.as_ref().is_some_and(|battle| {
+            battle.enemy_pokemon.hp > 0
+                && battle.active_player_party_index.is_some_and(|active| {
+                    settled
+                        .party
+                        .slots
+                        .iter()
+                        .find(|slot| slot.index == active)
+                        .is_some_and(|slot| slot.pokemon.hp > 0)
+                })
+        }) {
+            // A failed wild escape returns to BattleMenu with its retained RUN
+            // position. Do this after settlement, which rebuilds action cursors.
+            // A resulting faint instead owns the forced replacement boundary.
+            runtime_shell.battle_action_cursor = Some(MenuCursor {
+                surface_id: "battle:actions".to_string(),
+                option_index: 3,
+            });
+        }
     }
     finish_visible_inactive_battle_after_turn(
         runtime_shell,
@@ -2830,8 +2931,21 @@ fn resolve_visible_selected_battle_move(runtime_shell: &mut BevyRuntimeShell) ->
     let Some(battle) = snapshot.battle.as_ref() else {
         return handle_visible_no_active_battle(runtime_shell, "selected_move");
     };
+    // ParsePlayerAction calls PlayClickSFX immediately after
+    // MoveSelectionScreen returns, before it branches on cancellation or
+    // resolves the selected move. Keep this separate from cursor movement
+    // and from HP-palette changes, both of which are silent here.
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     if selected_battle_move_cursor_is_cancel(runtime_shell, &snapshot, battle)? {
-        return press_visible_battle_b_button(runtime_shell);
+        // The selected CANCEL row returns from MoveSelectionScreen with A;
+        // ParsePlayerAction owns the click queued above. Close directly so
+        // the physical-B path's own MenuClickSound is not played a second time.
+        runtime_shell.battle_move_cursor = None;
+        runtime_shell.battle_move_swap_origin = None;
+        runtime_shell.pending_battle_move_switch_slot = None;
+        record_visible_runtime_action(runtime_shell, "battle:move_menu:cancel_row")?;
+        trim_event_log(&mut runtime_shell.last_audio_events);
+        return Ok(());
     }
     let slot = selected_battle_move_slot(runtime_shell)?;
     if selected_battle_move_effect(&snapshot, slot)? == "BATON_PASS" {
@@ -3864,7 +3978,7 @@ fn stage_visible_battle_item_effect(
     snapshot: &RuntimeShellSnapshot,
     outcome: &BattleItemOutcome,
     party_index: Option<usize>,
-) {
+) -> Result<()> {
     let target_index = party_index.or_else(|| {
         snapshot
             .battle
@@ -3874,24 +3988,59 @@ fn stage_visible_battle_item_effect(
     let target_name = target_index
         .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
         .map(|slot| slot.pokemon.nickname.as_str())
-        .unwrap_or("POKéMON");
+        .context("battle item result requires its target party Pokemon")?;
     let notice = if outcome.hp_before == 0 && outcome.hp_after > 0 {
-        Some(format!("{target_name} was revived!"))
+        Some(format!("{target_name}\nis revitalized."))
     } else if outcome.hp_after > outcome.hp_before {
-        Some(format!("{target_name} regained health!"))
-    } else if outcome.status_before != outcome.status_after
-        || outcome.confusion_turns_after < outcome.confusion_turns_before
+        Some(format!(
+            "{target_name}\nrecovered {}HP!",
+            outcome.hp_after - outcome.hp_before
+        ))
+    } else if outcome.status_before != outcome.status_after {
+        match outcome.status_before.as_deref() {
+            Some("POISON") => Some(format!("{target_name}'s\ncured of poison.")),
+            Some("PARALYSIS") => Some(format!("{target_name}'s\nrid of paralysis.")),
+            Some("BURN") => Some(format!("{target_name}'s\nburn was healed.")),
+            Some("FREEZE") => Some(format!("{target_name}\nwas defrosted.")),
+            Some("SLEEP") => Some(format!("{target_name}\nwoke up.")),
+            _ => None,
+        }
+    } else if outcome.confusion_turns_after < outcome.confusion_turns_before {
+        let pure_confusion_heal = snapshot
+            .items
+            .iter()
+            .find(|item| item.item_id == outcome.item_id)
+            .is_some_and(|item| {
+                item.confusion_heal == Some(true) && item.status_heals.is_empty()
+            });
+        Some(if pure_confusion_heal {
+            format!("{target_name}'s\nconfused no more!")
+        } else {
+            format!("{target_name} came\nto its senses.")
+        })
+    } else if let Some(change) = outcome
+        .pp_changes
+        .iter()
+        .find(|change| change.pp_after > change.pp_before)
     {
-        Some(format!("{target_name} was cured!"))
-    } else if outcome.pp_changes.iter().any(|change| change.pp_after > change.pp_before) {
-        Some("PP was restored!".to_string())
+        let raises_pp = snapshot
+            .items
+            .iter()
+            .find(|item| item.item_id == outcome.item_id)
+            .is_some_and(|item| item.pp_up_stages.is_some());
+        Some(if raises_pp {
+            format!(
+                "{}'s PP\nincreased.",
+                battle_move_display_name(snapshot, &change.move_id)
+            )
+        } else {
+            "PP was restored.".to_string()
+        })
     } else if let Some(change) = outcome.battle_stat_stage_changes.first() {
         Some(format!(
-            "{target_name}'s {} rose!",
+            "{target_name}'s\n{} rose!",
             battle_stat_display_name(&change.stat)
         ))
-    } else if !outcome.focus_energy_before && outcome.focus_energy_after {
-        Some(format!("{target_name} is getting pumped!"))
     } else {
         None
     };
@@ -3899,6 +4048,7 @@ fn stage_visible_battle_item_effect(
         runtime_shell.battle_messages.push_back(notice);
         mark_runtime_snapshot_dirty(runtime_shell);
     }
+    Ok(())
 }
 
 fn resolve_visible_battle_enemy_response_after_player_item(
@@ -3958,6 +4108,10 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
     events
         .iter()
         .map(|event| match event {
+            crate::core::battle::turn::BattleEvent::AutomaticStruggle { side } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_automatic_struggle",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_automatic_struggle",
+            },
             crate::core::battle::turn::BattleEvent::MoveSelected { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_move_selected",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_move_selected",

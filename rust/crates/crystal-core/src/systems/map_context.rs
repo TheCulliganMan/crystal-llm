@@ -223,6 +223,10 @@ pub fn apply_state_object_overrides(
             leader_object_id: following.leader_object_id.clone(),
             follower_object_id: following.follower_object_id.clone(),
         });
+    // Saved map overrides retain the relationship, not Crystal's transient
+    // movement queue. The first leader step re-primes it from the restored
+    // geometry, exactly as a newly loaded map object set does.
+    overworld.following_queued_step = None;
     Ok(())
 }
 

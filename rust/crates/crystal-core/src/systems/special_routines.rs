@@ -3567,7 +3567,6 @@ fn heal_party(
         };
         if pokemon.is_egg
             || pokemon.species.id == "EGG"
-            || pokemon.nickname.eq_ignore_ascii_case("EGG")
         {
             continue;
         }
@@ -10248,17 +10247,6 @@ fn sample_dvs(state: &mut GameState) -> Dv {
     Dv::from_non_hp(attack, defense, speed, special)
 }
 
-fn bag_quantity_by_id(
-    state: &GameState,
-    item_catalog: &BTreeMap<String, Item>,
-    item_id: &str,
-) -> u16 {
-    let Some(item) = item_catalog.get(item_id) else {
-        return 0;
-    };
-    state.bag.quantity(item)
-}
-
 fn ensure_buenas_password<'a>(
     state: &mut GameState,
     categories: &'a BuenaPasswordCategories,
@@ -11229,17 +11217,6 @@ fn required_usize_script_variable(
 ) -> Result<usize, SpecialRoutineError> {
     let raw_value = required_string_script_variable(state, routine, variable)?;
     parse_exact_usize_token(routine, &raw_value, &raw_value)
-}
-
-fn optional_usize_script_variable(
-    state: &GameState,
-    routine: &str,
-    variable: &str,
-) -> Result<Option<usize>, SpecialRoutineError> {
-    let Some(raw_value) = state.script_runtime.variables.get(variable).cloned() else {
-        return Ok(None);
-    };
-    parse_exact_usize_token(routine, &raw_value, &raw_value).map(Some)
 }
 
 fn required_selected_party_slot(

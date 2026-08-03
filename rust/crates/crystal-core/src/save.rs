@@ -692,11 +692,6 @@ pub fn read_save_game_for_modpack(
     Ok(save)
 }
 
-fn read_save_game_summary(path: impl AsRef<Path>) -> Result<SaveGameSummary, SaveError> {
-    let save = read_save_game(path)?;
-    SaveGameSummary::from_save(&save)
-}
-
 pub fn read_save_game_summary_for_modpack(
     path: impl AsRef<Path>,
     expected: &SaveModpackIdentity,
