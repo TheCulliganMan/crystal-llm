@@ -283,13 +283,14 @@ struct BuildingPlacement {
     ground_tile_index: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TreePlacement {
     column: usize,
     row: usize,
     width: usize,
     height: usize,
     ground_tile_index: u16,
+    base_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +335,7 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
     let mut placements = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for tile in cells {
-        let (local_column, local_row, width, height, ground_tile_index) =
+        let (local_column, local_row, width, height, ground_tile_index, base_height) =
             match (tile.source.tileset_id.as_ref(), tile.source.metatile_id) {
                 ("johto" | "johto_modern", 0x05) => (
                     tile.source.subtile_column,
@@ -346,6 +347,7 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     } else {
                         0x05
                     },
+                    0.0,
                 ),
                 ("johto", 0x62) if tile.source.subtile_column >= 2 => (
                     tile.source.subtile_column - 2,
@@ -353,6 +355,7 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     2,
                     2,
                     0x05,
+                    0.0,
                 ),
                 ("johto", 0x65) if tile.source.subtile_row >= 2 => (
                     tile.source.subtile_column % 2,
@@ -360,13 +363,35 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     2,
                     2,
                     0x05,
+                    0.0,
                 ),
+                ("johto", 0x6a) if tile.source.subtile_column < 2 => (
+                    tile.source.subtile_column,
+                    tile.source.subtile_row % 2,
+                    2,
+                    2,
+                    0x3c,
+                    16.0,
+                ),
+                ("johto", 0x6c)
+                    if tile.source.subtile_column < 2 && tile.source.subtile_row < 2 =>
+                {
+                    (
+                        tile.source.subtile_column,
+                        tile.source.subtile_row,
+                        2,
+                        2,
+                        0x3c,
+                        16.0,
+                    )
+                }
                 ("kanto", _) if shape_for_source(&tile.source).solid_kind() == SolidKind::Tree => (
                     tile.source.subtile_column % 2,
                     tile.source.subtile_row % 2,
                     2,
                     2,
                     KANTO_GROUND_TILE_INDEX,
+                    0.0,
                 ),
                 _ => continue,
             };
@@ -386,7 +411,14 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     + origin_column as usize
                     + column];
                 cell.source.tileset_id == tile.source.tileset_id
-                    && shape_for_source(&cell.source).solid_kind() == SolidKind::Tree
+                    && (shape_for_source(&cell.source).solid_kind() == SolidKind::Tree
+                        || (cell.source.tileset_id.as_ref() == "johto"
+                            && cell.source.metatile_id == 0x6a
+                            && cell.source.subtile_column < 2)
+                        || (cell.source.tileset_id.as_ref() == "johto"
+                            && cell.source.metatile_id == 0x6c
+                            && cell.source.subtile_column < 2
+                            && cell.source.subtile_row < 2))
             })
         });
         if complete {
@@ -396,6 +428,7 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                 width,
                 height,
                 ground_tile_index,
+                base_height,
             });
         }
     }
@@ -601,16 +634,43 @@ fn append_grouped_tree(
     placement: TreePlacement,
     claimed: &mut [bool],
 ) -> Result<(), TerrainMeshError> {
-    let ground_index = authored_ground_cell(cells, shapes, placement.ground_tile_index).ok_or(
-        TerrainMeshError::MissingGroundSample {
-            column: placement.column as u32,
-            row: placement.row as u32,
-            tile_index: placement.ground_tile_index,
-        },
-    )?;
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        placement.ground_tile_index,
+        placement.base_height,
+        geometry.tile_height,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: placement.ground_tile_index,
+    })?;
     let pixel_width = placement.width * SOURCE_TILE_PIXELS;
     let pixel_height = placement.height * SOURCE_TILE_PIXELS;
-    let mut solid_pixels = vec![false; pixel_width * pixel_height];
+    let ground = tile_rgba(images, cells[ground_index])?;
+    let mut equals_ground = vec![false; pixel_width * pixel_height];
+
+    // Segment the complete drawing once. Flooding each 8px source tile in
+    // isolation cuts a connected canopy at every tile seam; the reference
+    // object path instead treats the whole 16/32px drawing as one silhouette.
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let index =
+                (placement.row + local_row) * geometry.width + placement.column + local_column;
+            let source = tile_rgba(images, cells[index])?;
+            for pixel_y in 0..SOURCE_TILE_PIXELS {
+                for pixel_x in 0..SOURCE_TILE_PIXELS {
+                    let x = local_column * SOURCE_TILE_PIXELS + pixel_x;
+                    let y = local_row * SOURCE_TILE_PIXELS + pixel_y;
+                    equals_ground[y * pixel_width + x] =
+                        pixels_equal(source, ground, pixel_x, pixel_y);
+                }
+            }
+        }
+    }
+    let removable_ground = boundary_connected_mask(pixel_width, pixel_height, &equals_ground);
+    let solid_pixels: Vec<_> = removable_ground.into_iter().map(|ground| !ground).collect();
 
     for local_row in 0..placement.height {
         for local_column in 0..placement.width {
@@ -622,26 +682,9 @@ fn append_grouped_tree(
             append_top(
                 &mut mesh.textured,
                 [x0, x1, z0, z1],
-                0.0,
+                placement.base_height,
                 geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
             );
-            let removable = grouped_boundary_ground_mask(
-                images,
-                cells,
-                shapes,
-                geometry,
-                column,
-                row,
-                index,
-                cells[ground_index],
-            )?;
-            for pixel_y in 0..SOURCE_TILE_PIXELS {
-                for pixel_x in 0..SOURCE_TILE_PIXELS {
-                    solid_pixels[(local_row * SOURCE_TILE_PIXELS + pixel_y) * pixel_width
-                        + local_column * SOURCE_TILE_PIXELS
-                        + pixel_x] = !removable[pixel_y * SOURCE_TILE_PIXELS + pixel_x];
-                }
-            }
         }
     }
 
@@ -649,7 +692,8 @@ fn append_grouped_tree(
     let x1 = x0 + placement.width as f32 * geometry.tile_width;
     let plane_z =
         geometry.origin_z + (placement.row + placement.height) as f32 * geometry.tile_height;
-    let crown_height = placement.height as f32 * geometry.tile_height;
+    let object_height = placement.height as f32 * geometry.tile_height;
+    let crown_height = placement.base_height + object_height;
     let max_depth = placement.width as f32 * geometry.tile_width;
     let center_z = plane_z - max_depth * 0.5;
     let mut chords = vec![None; pixel_width * pixel_height];
@@ -685,8 +729,9 @@ fn append_grouped_tree(
             };
             let world_x0 = x0 + pixel_x as f32 * (x1 - x0) / pixel_width as f32;
             let world_x1 = x0 + (pixel_x + 1) as f32 * (x1 - x0) / pixel_width as f32;
-            let world_y1 = crown_height - pixel_y as f32 * crown_height / pixel_height as f32;
-            let world_y0 = crown_height - (pixel_y + 1) as f32 * crown_height / pixel_height as f32;
+            let world_y1 = crown_height - pixel_y as f32 * object_height / pixel_height as f32;
+            let world_y0 =
+                crown_height - (pixel_y + 1) as f32 * object_height / pixel_height as f32;
             let cell_column = placement.column + pixel_x / SOURCE_TILE_PIXELS;
             let cell_row = placement.row + pixel_y / SOURCE_TILE_PIXELS;
             let (u0, u1, v0, v1) = geometry.uv(cell_column, cell_row);
@@ -1345,6 +1390,24 @@ fn authored_ground_cell(
             matches!(shape, CellShape::Flat) && cells[*index].source.tile_index == ground_tile_index
         })
         // Coordinate order, not DTO order, makes the authored source stable.
+        .min_by_key(|(index, _)| (cells[*index].row, cells[*index].column))
+        .map(|(index, _)| index)
+}
+
+fn authored_surface_cell(
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    tile_index: u16,
+    height: f32,
+    tile_height: f32,
+) -> Option<usize> {
+    shapes
+        .iter()
+        .enumerate()
+        .filter(|(index, shape)| {
+            cells[*index].source.tile_index == tile_index
+                && (shape.surface_height(tile_height) - height).abs() < f32::EPSILON
+        })
         .min_by_key(|(index, _)| (cells[*index].row, cells[*index].column))
         .map(|(index, _)| index)
 }
@@ -2887,6 +2950,7 @@ mod tests {
                 width: 4,
                 height: 4,
                 ground_tile_index: 0x05,
+                base_height: 0.0,
             }]
         );
 
@@ -2915,6 +2979,52 @@ mod tests {
         assert!(
             max_z - min_z > 24.0,
             "a 32px tree drawing must have a crown, not four shallow tile cards"
+        );
+    }
+
+    #[test]
+    fn mountain_transition_trees_are_grouped_above_the_platform() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                sources.push(source_with_tile(
+                    0x6a,
+                    column as u8,
+                    row as u8,
+                    if column < 2 { 0x20 + row as u16 } else { 0x3c },
+                ));
+            }
+        }
+        let frame = frame(4, 4, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -16.0,
+            origin_z: -16.0,
+        };
+        assert_eq!(
+            complete_tree_placements(&cells, &geometry),
+            vec![
+                TreePlacement {
+                    column: 0,
+                    row: 0,
+                    width: 2,
+                    height: 2,
+                    ground_tile_index: 0x3c,
+                    base_height: 16.0,
+                },
+                TreePlacement {
+                    column: 0,
+                    row: 2,
+                    width: 2,
+                    height: 2,
+                    ground_tile_index: 0x3c,
+                    base_height: 16.0,
+                },
+            ]
         );
     }
 

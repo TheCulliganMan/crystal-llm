@@ -295,6 +295,14 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             height: MOUNTAIN_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
         },
+        // The remaining mountain transition drawings mix plateau surface,
+        // rounded trim, and (for $6a/$6c) trees planted on that plateau.
+        // Their rock mass still participates in the same connected bank run;
+        // the tree drawings are claimed separately by the object mesher.
+        0x6a | 0x6c | 0x6e | 0x6f => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
         0x70 | 0x71 => CellShape::RaisedTop {
             height: MOUNTAIN_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
@@ -816,5 +824,18 @@ mod tests {
             }
         );
         assert_eq!(support_height(&source(0x73, 2, 3), 8.0), 0.0);
+    }
+
+    #[test]
+    fn every_blackthorn_mountain_transition_joins_the_bank_volume() {
+        for metatile_id in [0x6a, 0x6c, 0x6e, 0x6f] {
+            assert_eq!(
+                shape_for_source(&source_for_tileset(JOHTO_TILESET, metatile_id, 0, 0, 0x3c,)),
+                CellShape::RaisedTop {
+                    height: MOUNTAIN_LEDGE_HEIGHT,
+                    solid: SolidKind::Bank,
+                }
+            );
+        }
     }
 }
