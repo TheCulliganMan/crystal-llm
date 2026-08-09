@@ -85,6 +85,14 @@ pub struct VisualTile {
 pub enum VisualActorId {
     Player,
     Object(u32),
+    /// Presentation-only card emitted by the faithful world renderer. These
+    /// IDs never enter gameplay state or object-slot identity.
+    Effect(VisualEffectId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VisualEffectId {
+    GrassRustle,
 }
 
 /// Presentation state for one actor visible in the world pass.
@@ -449,6 +457,30 @@ mod tests {
         assert_eq!(
             frame.validate(),
             Err(VisualWorldFrameError::DuplicateActor(VisualActorId::Player))
+        );
+    }
+
+    #[test]
+    fn presentation_effect_identity_is_distinct_and_stable() {
+        let mut frame = active_frame();
+        let grass_rustle = VisualActor {
+            id: VisualActorId::Effect(VisualEffectId::GrassRustle),
+            texture: Handle::weak_from_u128(3),
+            center: Vec2::new(8.0, 4.0),
+            size: Vec2::splat(16.0),
+            flip_x: false,
+            above_priority: true,
+        };
+        frame.actors.push(grass_rustle.clone());
+
+        assert_eq!(frame.validate(), Ok(()));
+
+        frame.actors.push(grass_rustle);
+        assert_eq!(
+            frame.validate(),
+            Err(VisualWorldFrameError::DuplicateActor(
+                VisualActorId::Effect(VisualEffectId::GrassRustle)
+            ))
         );
     }
 

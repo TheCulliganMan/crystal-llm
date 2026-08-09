@@ -11,6 +11,10 @@ fn publish_visual_world_frame(
         (With<PlayfieldTile>, Without<PlayfieldPriorityTile>),
     >,
     players: Query<(&Handle<Image>, &Sprite, &Transform), With<PlayerMarker>>,
+    grass_rustles: Query<
+        (&Handle<Image>, &Sprite, &Transform),
+        (With<GrassRustleMarker>, Without<PlayerMarker>),
+    >,
     objects: Query<(&VisibleObjectSprite, &Handle<Image>, &Sprite, &Transform), With<ObjectMarker>>,
     battle_entities: Query<
         (),
@@ -69,7 +73,9 @@ fn publish_visual_world_frame(
         return;
     }
 
-    let mut actors = Vec::with_capacity(players.iter().count() + objects.iter().count());
+    let mut actors = Vec::with_capacity(
+        players.iter().count() + objects.iter().count() + grass_rustles.iter().count(),
+    );
     let mut player_iter = players.iter();
     if let Some((texture, sprite, transform)) = player_iter.next() {
         // A second player sprite is an incomplete deferred scene transition,
@@ -116,6 +122,25 @@ fn publish_visual_world_frame(
         actors.push(actor);
     }
 
+    let mut rustle_iter = grass_rustles.iter();
+    if let Some((texture, sprite, transform)) = rustle_iter.next() {
+        if rustle_iter.next().is_some() {
+            return;
+        }
+        let Some(effect) = visual_actor(
+            crystal_render_api::VisualActorId::Effect(
+                crystal_render_api::VisualEffectId::GrassRustle,
+            ),
+            texture,
+            sprite,
+            transform,
+            true,
+        ) else {
+            return;
+        };
+        actors.push(effect);
+    }
+
     let next = crystal_render_api::VisualWorldFrame {
         active: true,
         map_id: Arc::from(map_id),
@@ -157,7 +182,6 @@ fn voxel_spatial_effects_supported(runtime_shell: &BevyRuntimeShell) -> bool {
     runtime_shell.visible_ledge_jump.is_none()
         && !scripted_actor_displacement
         && runtime_shell.visible_fishing_animation.is_none()
-        && runtime_shell.visible_grass_rustle.is_none()
         && runtime_shell.visible_strength_boulder_dust.is_none()
         && runtime_shell.visible_overworld_emote.is_none()
 }

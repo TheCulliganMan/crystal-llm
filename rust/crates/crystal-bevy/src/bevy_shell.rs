@@ -3528,6 +3528,7 @@ fn sync_voxel_classic_world_layers(
             With<PlayerMarker>,
             With<ObjectMarker>,
             With<LedgeShadowMarker>,
+            With<GrassRustleMarker>,
         )>,
     >,
 ) {

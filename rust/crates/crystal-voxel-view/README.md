@@ -18,6 +18,8 @@ relief profile covering New Bark's Johto artwork:
   complete visual revision; stale jobs are replaced while the faithful 2D
   world remains available until authored geometry is ready;
 - player and NPC textures are vertical cards anchored at their feet;
+- tall-grass rustle is exported as a foot-anchored world card, so it follows
+  the pitched scene instead of forcing a switch back to screen-space 2D;
 - a dedicated reverse-depth material reveals a translucent player silhouette
   only through closer authored geometry, leaving visible player pixels intact;
 - the optional 3D camera casts directional terrain/actor shadows; the classic
