@@ -1926,6 +1926,15 @@ impl Direction {
             Self::East => (1, 0),
         }
     }
+
+    fn lateral_offsets(self) -> ((isize, isize), (isize, isize)) {
+        match self {
+            Self::East => ((0, 1), (0, -1)),
+            Self::West => ((0, -1), (0, 1)),
+            Self::South => ((-1, 0), (1, 0)),
+            Self::North => ((1, 0), (-1, 0)),
+        }
+    }
 }
 
 fn append_exposed_sides(
@@ -1986,6 +1995,21 @@ fn append_exposed_sides(
         }
 
         if let Some(run) = bank_runs[index] {
+            let height_at = |offset: (isize, isize)| {
+                let lateral_column = column as isize + offset.0;
+                let lateral_row = row as isize + offset.1;
+                if lateral_column < 0
+                    || lateral_row < 0
+                    || lateral_column >= geometry.width as isize
+                    || lateral_row >= geometry.height as isize
+                {
+                    0.0
+                } else {
+                    shapes[lateral_row as usize * geometry.width + lateral_column as usize]
+                        .surface_height(geometry.tile_height)
+                }
+            };
+            let (left, right) = direction.lateral_offsets();
             append_bank_run_side(
                 &mut mesh.textured,
                 geometry,
@@ -1995,6 +2019,7 @@ fn append_exposed_sides(
                 [x0, x1, z0, z1],
                 bottom,
                 top,
+                [height_at(left), height_at(right)],
             );
             continue;
         }
@@ -2066,6 +2091,7 @@ fn append_bank_run_side(
     bounds: [f32; 4],
     bottom: f32,
     top: f32,
+    lateral_heights: [f32; 2],
 ) {
     let [x0, x1, z0, z1] = bounds;
     let shade = match direction {
@@ -2074,7 +2100,6 @@ fn append_bank_run_side(
         Direction::East => 0.86,
         Direction::North => 0.68,
     };
-    let color = [shade, shade, shade, 1.0];
     let first_band = (bottom / geometry.tile_height).floor().max(0.0) as usize;
     let last_band = (top / geometry.tile_height).ceil().max(0.0) as usize;
     for band in first_band..last_band {
@@ -2093,6 +2118,20 @@ fn append_bank_run_side(
         let crop_bottom = (band_ceiling - band_bottom) / geometry.tile_height;
         let cropped_v0 = v0 + (v1 - v0) * crop_top;
         let cropped_v1 = v0 + (v1 - v0) * crop_bottom;
+        let ao = side_ao_shades(
+            lateral_heights[0],
+            lateral_heights[1],
+            band_bottom,
+            band_top,
+            band_bottom <= bottom + f32::EPSILON,
+            shade,
+        );
+        let colors = [
+            [ao[1], ao[1], ao[1], 1.0],
+            [ao[2], ao[2], ao[2], 1.0],
+            [ao[3], ao[3], ao[3], 1.0],
+            [ao[0], ao[0], ao[0], 1.0],
+        ];
         let (positions, normal, uvs) = match direction {
             Direction::South => (
                 [
@@ -2155,8 +2194,38 @@ fn append_bank_run_side(
                 ],
             ),
         };
-        append_quad(mesh, positions, normal, uvs, color);
+        append_quad_colors(mesh, positions, normal, uvs, colors);
     }
+}
+
+fn side_ao_shades(
+    left_height: f32,
+    right_height: f32,
+    bottom: f32,
+    top: f32,
+    crease: bool,
+    shade: f32,
+) -> [f32; 4] {
+    const AO_EDGE: f32 = 0.664;
+    const AO_FLOOR: f32 = 0.25;
+    let corner = (AO_EDGE * AO_EDGE).max(AO_FLOOR);
+    let base = if crease { AO_EDGE } else { 1.0 };
+    [
+        shade
+            * if left_height > bottom {
+                if crease { corner } else { AO_EDGE }
+            } else {
+                base
+            },
+        shade
+            * if right_height > bottom {
+                if crease { corner } else { AO_EDGE }
+            } else {
+                base
+            },
+        shade * if right_height > top { AO_EDGE } else { 1.0 },
+        shade * if left_height > top { AO_EDGE } else { 1.0 },
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2288,11 +2357,21 @@ fn append_quad(
     uvs: [[f32; 2]; 4],
     color: [f32; 4],
 ) {
+    append_quad_colors(mesh, positions, normal, uvs, [color; 4]);
+}
+
+fn append_quad_colors(
+    mesh: &mut SurfaceMeshData,
+    positions: [[f32; 3]; 4],
+    normal: [f32; 3],
+    uvs: [[f32; 2]; 4],
+    colors: [[f32; 4]; 4],
+) {
     let base = u32::try_from(mesh.positions.len()).expect("MVP terrain vertex count fits u32");
     mesh.positions.extend(positions);
     mesh.normals.extend([normal; 4]);
     mesh.uvs.extend(uvs);
-    mesh.colors.extend([color; 4]);
+    mesh.colors.extend(colors);
     mesh.indices
         .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 }
@@ -2558,6 +2637,49 @@ mod tests {
             .count();
         assert_eq!(textured_east_courses, 2);
         assert_eq!(solid_east_faces, 0);
+    }
+
+    #[test]
+    fn bank_run_side_sources_its_own_front_rows_in_native_bands() {
+        let sources = vec![
+            source_with_tile(0x70, 0, 0, 0x3c),
+            flat_source(),
+            source_with_tile(0x72, 0, 1, 0x4b),
+            flat_source(),
+            source_with_tile(0x72, 0, 2, 0x4c),
+            flat_source(),
+            flat_source(),
+            flat_source(),
+        ];
+        let mesh = build_terrain_mesh(&frame(2, 4, sources))
+            .expect("bank column should fold its own source courses");
+        let mut v_ranges: Vec<_> = mesh
+            .textured
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.textured.normals.chunks_exact(4))
+            .zip(mesh.textured.uvs.chunks_exact(4))
+            .filter(|((positions, normals), _)| {
+                normals[0] == [1.0, 0.0, 0.0] && positions.iter().all(|position| position[0] == 0.0)
+            })
+            .map(|(_, uvs)| {
+                let min = uvs.iter().map(|uv| uv[1]).fold(f32::INFINITY, f32::min);
+                let max = uvs.iter().map(|uv| uv[1]).fold(f32::NEG_INFINITY, f32::max);
+                ((min * 100.0).round() as i32, (max * 100.0).round() as i32)
+            })
+            .collect();
+        v_ranges.sort_unstable();
+        v_ranges.dedup();
+        assert_eq!(v_ranges, vec![(25, 50), (50, 75)]);
+    }
+
+    #[test]
+    fn bank_side_ao_darkens_the_ground_crease_and_inside_corner() {
+        let shades = side_ao_shades(16.0, 0.0, 0.0, 8.0, true, 1.0);
+        assert!(shades[0] < shades[1]);
+        assert!(shades[0] < shades[3]);
+        assert!(shades[3] < 1.0);
+        assert_eq!(shades[2], 1.0);
     }
 
     #[test]
