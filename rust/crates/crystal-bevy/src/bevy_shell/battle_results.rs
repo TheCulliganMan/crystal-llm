@@ -2362,6 +2362,36 @@ fn open_visible_script_runtime_boundary_if_needed(
             set_shell_action_status(runtime_shell, "TRADE COMPLETE");
             Ok(true)
         }
+        "describedecoration" => {
+            let descriptor = command
+                .args
+                .first()
+                .map(String::as_str)
+                .with_context(|| "describedecoration runtime command has no descriptor")?;
+            if descriptor != "DECODESC_POSTER" {
+                return Ok(false);
+            }
+
+            let active_map = runtime_shell.shell.session.overworld.map.name.clone();
+            let poster_block = runtime_shell
+                .shell
+                .session
+                .state
+                .map_block_overrides
+                .get(&active_map)
+                .and_then(|overrides| overrides.get(&(3, 0)))
+                .copied();
+            if poster_block == Some(0x1f) {
+                // ASM DescribeDecoration dispatches the default poster through
+                // TownMapScript: LookTownMapText, an input wait, then the
+                // OverworldTownMap special. Re-enter that authored standard
+                // script so the ordinary field-text and modal boundaries own
+                // progression exactly as they do for any other script.
+                start_visible_script_entry(runtime_shell, "TownMapScript")?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
         _ => Ok(false),
     }
 }

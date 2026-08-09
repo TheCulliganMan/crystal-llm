@@ -711,7 +711,11 @@ fn find_live_standard_script_approach(
 fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scripts() {
     for (script, initial_label, expected_page) in [
         ("TVScript", Some("TVText"), None),
-        ("TownMapScript", Some("LookTownMapText"), Some(PokegearPage::Map)),
+        (
+            "PlayersHousePosterScript",
+            Some("LookTownMapText"),
+            Some(PokegearPage::Map),
+        ),
         ("PlayersHouseRadioScript", Some("PlayersRadioText1"), None),
     ] {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -747,7 +751,11 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             assert_eq!(
                 runtime_shell.shell.snapshot().unwrap().ui.text.as_ref().map(|text| text.label.as_str()),
                 Some(label),
-                "{script} must expose its canonical text"
+                "{script} must expose its canonical text; cursor={:?} overrides={:?} blocks={:?} events={:?}",
+                runtime_shell.active_script_cursor,
+                runtime_shell.shell.session.state.map_block_overrides.get("PlayersHouse2F"),
+                &runtime_shell.shell.session.overworld.map.metatile_ids[..4],
+                runtime_shell.last_audio_events,
             );
             let world = app.world_mut();
             assert!(world.query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>().iter(world).next().is_some(), "{script} must render a textbox");

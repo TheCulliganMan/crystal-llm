@@ -234,7 +234,7 @@ fn build_terrain_mesh_internal(
         }
 
         for placement in complete_tree_placements(&cells, &geometry) {
-            append_grouped_tree(
+            if let Err(error) = append_grouped_tree(
                 &mut mesh,
                 images,
                 &cells,
@@ -242,7 +242,22 @@ fn build_terrain_mesh_internal(
                 &geometry,
                 placement,
                 &mut claimed_by_tree,
-            )?;
+            ) {
+                if matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    // The expanded render halo can end through an otherwise
+                    // complete tree drawing while its authored ground sample
+                    // lies just beyond the published cells. Keep that object
+                    // as faithful flat art instead of retiring the complete
+                    // optional renderer.
+                    for row in placement.row..placement.row + placement.height {
+                        for column in placement.column..placement.column + placement.width {
+                            claimed_by_tree[row * geometry.width + column] = false;
+                        }
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
         }
     }
     let bank_runs = bank_column_runs(&shapes, &geometry);
