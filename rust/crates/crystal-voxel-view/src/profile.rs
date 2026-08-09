@@ -15,6 +15,8 @@ pub const MIN_PROFILE_HEIGHT: f32 = WATER_HEIGHT;
 pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
 
 const JOHTO_TILESET: &str = "johto";
+const AUTHORED_WATER_TILESETS: [&str; 3] = ["johto_modern", "kanto", "cave"];
+const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolidKind {
@@ -72,6 +74,16 @@ pub fn supports_frame_profile(frame: &VisualWorldFrame) -> bool {
 }
 
 pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
+    // These three Crystal tilesets use tile $14 as their animated open-water
+    // cell, including inside shoreline metatiles. Matching the source cell
+    // rather than the whole metatile recesses water without lowering banks,
+    // rocks, or other artwork in that same 4x4 block.
+    if AUTHORED_WATER_TILESETS.contains(&source.tileset_id.as_ref())
+        && source.tile_index == AUTHORED_WATER_TILE_INDEX
+    {
+        return CellShape::Water;
+    }
+
     if source.tileset_id.as_ref() != JOHTO_TILESET {
         return CellShape::Flat;
     }
@@ -176,12 +188,22 @@ mod tests {
     use super::*;
 
     fn source(metatile_id: u16, column: u8, row: u8) -> VisualTileSource {
+        source_for_tileset(JOHTO_TILESET, metatile_id, column, row, 0)
+    }
+
+    fn source_for_tileset(
+        tileset_id: &str,
+        metatile_id: u16,
+        column: u8,
+        row: u8,
+        tile_index: u16,
+    ) -> VisualTileSource {
         VisualTileSource {
-            tileset_id: Arc::from(JOHTO_TILESET),
+            tileset_id: Arc::from(tileset_id),
             metatile_id,
             subtile_column: column,
             subtile_row: row,
-            tile_index: 0,
+            tile_index,
         }
     }
 
@@ -249,6 +271,24 @@ mod tests {
         let mut unknown = source(0xbeef, 0, 0);
         unknown.tile_index = 0x1e;
         assert_eq!(shape_for_source(&unknown), CellShape::Flat);
+    }
+
+    #[test]
+    fn authored_water_identity_recesses_only_the_water_cell() {
+        for tileset in AUTHORED_WATER_TILESETS {
+            assert_eq!(
+                shape_for_source(&source_for_tileset(tileset, 0x43, 1, 2, 0x14)),
+                CellShape::Water
+            );
+            assert_eq!(
+                shape_for_source(&source_for_tileset(tileset, 0x43, 1, 2, 0x15)),
+                CellShape::Flat
+            );
+        }
+        assert_eq!(
+            shape_for_source(&source_for_tileset("house", 0x14, 1, 2, 0x14)),
+            CellShape::Flat
+        );
     }
 
     #[test]

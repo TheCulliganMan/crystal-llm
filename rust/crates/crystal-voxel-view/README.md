@@ -35,10 +35,12 @@ the inspected project did not provide a project-wide reuse license. All
 geometry and Bevy integration here are independently implemented for Crystal.
 
 The initial clean-room profile covers New Bark's compact and large buildings,
-trees, signs, and shallow water. Building facade rows fold onto one shared
-front plane while their vacated cells remain walkable ground. Profile metadata
-is mod-owned presentation data; it is neither inferred from collision nor fed
-back into movement, scripts, saves, replay state, or checksums.
+trees, signs, and shallow water. Exact animated water cells are also recessed
+in the modern Johto, Kanto, and cave tilesets without lowering shoreline art.
+Building facade rows fold onto one shared front plane while their vacated cells
+remain walkable ground. Profile metadata is mod-owned presentation data; it is
+neither inferred from collision nor fed back into movement, scripts, saves,
+replay state, or checksums.
 
 ## Render-at-location tester
 
