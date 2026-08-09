@@ -15,6 +15,7 @@ pub const MIN_PROFILE_HEIGHT: f32 = WATER_HEIGHT;
 pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
 
 const JOHTO_TILESET: &str = "johto";
+const JOHTO_MODERN_TILESET: &str = "johto_modern";
 const KANTO_TILESET: &str = "kanto";
 const CAVE_TILESET: &str = "cave";
 const LIGHTHOUSE_TILESET: &str = "lighthouse";
@@ -125,6 +126,54 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             ground_tile_index: LIGHTHOUSE_FLOOR_TILE_INDEX,
             solid: SolidKind::Bank,
         };
+    }
+
+    // Johto Modern's $05 is its repeated four-row tree drawing. Rail groups
+    // use the same two-row folding mechanism but remain shallow props.
+    if source.tileset_id.as_ref() == JOHTO_MODERN_TILESET {
+        if source.metatile_id == 0x05 {
+            return CellShape::FacadeBand {
+                plane_subtile_row: 4,
+                band_from_top: source.subtile_row,
+                band_count: 4,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Tree,
+            };
+        }
+
+        let canopy = match source.metatile_id {
+            0x40..=0x42 if source.subtile_row < 2 => Some((2, source.subtile_row)),
+            0x48..=0x4a if source.subtile_row >= 2 => Some((4, source.subtile_row - 2)),
+            _ => None,
+        };
+        if let Some((plane_subtile_row, band_from_top)) = canopy {
+            return CellShape::FacadeBand {
+                plane_subtile_row,
+                band_from_top,
+                band_count: 2,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Prop,
+            };
+        }
+
+        let sign = match source.metatile_id {
+            0x45 if source.subtile_column < 2 && source.subtile_row < 2 => {
+                Some((2, source.subtile_row))
+            }
+            0x65 if source.subtile_column < 2 && source.subtile_row >= 2 => {
+                Some((4, source.subtile_row - 2))
+            }
+            _ => None,
+        };
+        if let Some((plane_subtile_row, band_from_top)) = sign {
+            return CellShape::FacadeBand {
+                plane_subtile_row,
+                band_from_top,
+                band_count: 2,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Prop,
+            };
+        }
     }
 
     // These three Crystal tilesets use tile $14 as their animated open-water
@@ -389,6 +438,74 @@ mod tests {
     }
 
     #[test]
+    fn modern_city_trees_rails_and_signs_use_their_authored_depth_classes() {
+        assert_eq!(
+            shape_for_source(&source_for_tileset(
+                JOHTO_MODERN_TILESET,
+                0x05,
+                2,
+                3,
+                0x3f,
+            )),
+            CellShape::FacadeBand {
+                plane_subtile_row: 4,
+                band_from_top: 3,
+                band_count: 4,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Tree,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(
+                JOHTO_MODERN_TILESET,
+                0x40,
+                1,
+                0,
+                0x5a,
+            )),
+            CellShape::FacadeBand {
+                plane_subtile_row: 2,
+                band_from_top: 0,
+                band_count: 2,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Prop,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(
+                JOHTO_MODERN_TILESET,
+                0x49,
+                2,
+                3,
+                0x59,
+            )),
+            CellShape::FacadeBand {
+                plane_subtile_row: 4,
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Prop,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(
+                JOHTO_MODERN_TILESET,
+                0x45,
+                0,
+                1,
+                0x5e,
+            )),
+            CellShape::FacadeBand {
+                plane_subtile_row: 2,
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: 0x06,
+                solid: SolidKind::Prop,
+            }
+        );
+    }
+
+    #[test]
     fn cave_rock_rows_fold_once_without_raising_support() {
         let top = source_for_tileset(CAVE_TILESET, 0x19, 0, 0, 0x0c);
         let bottom = source_for_tileset(CAVE_TILESET, 0x19, 0, 1, 0x1c);
@@ -416,7 +533,6 @@ mod tests {
         assert_eq!(support_height(&top, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
         assert_eq!(support_height(&bottom, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
     }
-
     #[test]
     fn lighthouse_perimeter_uses_native_wall_bands_only() {
         for metatile_id in LIGHTHOUSE_WALL_METATILES {

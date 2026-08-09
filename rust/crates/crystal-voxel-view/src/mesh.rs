@@ -196,7 +196,7 @@ fn build_terrain_mesh_internal(
     let mut mesh = TerrainMeshData::default();
     let mut claimed_by_building = vec![false; cell_count];
     if let Some(images) = images {
-        let placements = new_bark_building_placements(frame, &cells, &geometry);
+        let placements = johto_building_placements(&cells, &geometry);
         for placement in &placements {
             append_pixel_building(
                 &mut mesh,
@@ -251,43 +251,66 @@ struct BuildingPlacement {
     ground_tile_index: u16,
 }
 
-fn new_bark_building_placements(
-    frame: &VisualWorldFrame,
+fn johto_building_placements(
     cells: &[&VisualTile],
     geometry: &GridGeometry,
 ) -> Vec<BuildingPlacement> {
-    if frame.map_id.as_ref() != "NewBarkTown" {
-        return Vec::new();
-    }
     let mut metatiles = HashMap::new();
     for tile in cells {
-        if tile.source.tileset_id.as_ref() != "johto" {
+        if !matches!(tile.source.tileset_id.as_ref(), "johto" | "johto_modern") {
             continue;
         }
         let origin = (
             tile.column as isize - tile.source.subtile_column as isize,
             tile.row as isize - tile.source.subtile_row as isize,
         );
-        metatiles.entry(origin).or_insert(tile.source.metatile_id);
+        metatiles.entry(origin).or_insert((
+            tile.source.tileset_id.as_ref(),
+            tile.source.metatile_id,
+        ));
     }
 
-    const TEMPLATES: &[(&[&[u16]], usize)] = &[
-        (&[&[0x18, 0x1f, 0x19], &[0x1c, 0x77, 0x1e]], 4),
-        (&[&[0x18, 0x19], &[0x16, 0x1e]], 4),
-        (&[&[0x14, 0x15]], 2),
+    const TEMPLATES: &[(&str, &[&[u16]], usize, u16)] = &[
+        (
+            "johto",
+            &[&[0x18, 0x1f, 0x19], &[0x1c, 0x77, 0x1e]],
+            4,
+            0x06,
+        ),
+        ("johto", &[&[0x18, 0x19], &[0x16, 0x1e]], 4, 0x06),
+        ("johto", &[&[0x14, 0x15]], 2, 0x06),
+        (
+            "johto_modern",
+            &[&[0x18, 0x1f, 0x19], &[0x1c, 0x1d, 0x1e]],
+            4,
+            0x06,
+        ),
+        (
+            "johto_modern",
+            &[&[0x18, 0x19], &[0x16, 0x1e]],
+            4,
+            0x06,
+        ),
+        ("johto_modern", &[&[0x14, 0x15]], 2, 0x06),
+        ("johto_modern", &[&[0x12, 0x13]], 2, 0x06),
+        ("johto_modern", &[&[0x10, 0x17, 0x11]], 2, 0x06),
     ];
     let mut placements = Vec::new();
-    for (&(origin_x, origin_y), &metatile_id) in &metatiles {
-        for &(rows, roof_rows) in TEMPLATES {
-            if rows[0][0] != metatile_id {
+    for (&(origin_x, origin_y), &(tileset_id, metatile_id)) in &metatiles {
+        for &(template_tileset, rows, roof_rows, ground_tile_index) in TEMPLATES {
+            if template_tileset != tileset_id || rows[0][0] != metatile_id {
                 continue;
             }
             let matches = rows.iter().enumerate().all(|(template_y, row)| {
                 row.iter().enumerate().all(|(template_x, expected)| {
-                    metatiles.get(&(
-                        origin_x + (template_x * 4) as isize,
-                        origin_y + (template_y * 4) as isize,
-                    )) == Some(expected)
+                    metatiles
+                        .get(&(
+                            origin_x + (template_x * 4) as isize,
+                            origin_y + (template_y * 4) as isize,
+                        ))
+                        .is_some_and(|(candidate_tileset, candidate)| {
+                            *candidate_tileset == template_tileset && candidate == expected
+                        })
                 })
             });
             let width = rows[0].len() * 4;
@@ -304,7 +327,7 @@ fn new_bark_building_placements(
                     width,
                     height,
                     roof_rows,
-                    ground_tile_index: 0x06,
+                    ground_tile_index,
                 });
             }
         }
@@ -371,7 +394,8 @@ fn append_pixel_building(
     shades.dedup();
     let light_threshold = shades[shades.len().saturating_sub(2)];
     let light_pixels: Vec<_> = luminance
-        .into_iter()
+        .iter()
+        .copied()
         .map(|luminance| luminance >= light_threshold)
         .collect();
     let outside = boundary_connected_mask(pixel_width, pixel_height, &light_pixels);
@@ -388,13 +412,6 @@ fn append_pixel_building(
             roof_top[x] = y;
         }
     }
-    let eave_row = roof_top
-        .iter()
-        .copied()
-        .filter(|&row| row < roof_pixels)
-        .max()
-        .unwrap_or(roof_pixels);
-
     for y in roof_pixels..pixel_height {
         for x in 0..pixel_width {
             if !inside[y * pixel_width + x] {
@@ -428,79 +445,151 @@ fn append_pixel_building(
             let x1 = x0 + pixel_x_size;
             let z0 = building_z0 + y as f32 * pixel_z_size;
             let z1 = z0 + pixel_z_size;
-            let roof_height =
-                measured_roof_height(wall_height, eave_row, roof_top[x], pixel_z_size);
+            let south_height = gable_height(
+                wall_height,
+                roof_pixels as f32 * pixel_z_size,
+                (y + 1) as f32 * pixel_z_size,
+            );
+            let north_height = gable_height(
+                wall_height,
+                roof_pixels as f32 * pixel_z_size,
+                y as f32 * pixel_z_size,
+            );
             append_quad(
                 &mut mesh.textured,
                 [
-                    [x0, roof_height, z0],
-                    [x0, roof_height, z1],
-                    [x1, roof_height, z1],
-                    [x1, roof_height, z0],
+                    [x0, north_height, z0],
+                    [x0, south_height, z1],
+                    [x1, south_height, z1],
+                    [x1, north_height, z0],
                 ],
-                [0.0, 1.0, 0.0],
+                roof_normal(north_height, south_height, pixel_z_size),
                 source_pixel_uv(geometry, placement, x, y, false),
                 TEXTURED_SHADE,
             );
         }
     }
 
-    for (x, &top_row) in roof_top.iter().enumerate() {
-        if top_row >= roof_pixels {
-            continue;
+    let building_x1 = building_x0 + pixel_width as f32 * pixel_x_size;
+    let darkest = shades[0];
+    for source_y in roof_pixels..pixel_height {
+        let west_source_x = (0..pixel_width.min(4))
+            .find(|&x| {
+                inside[source_y * pixel_width + x]
+                    && luminance[source_y * pixel_width + x] > darkest
+            })
+            .unwrap_or(0);
+        let east_source_x = (pixel_width.saturating_sub(4)..pixel_width)
+            .rev()
+            .find(|&x| {
+                inside[source_y * pixel_width + x]
+                    && luminance[source_y * pixel_width + x] > darkest
+            })
+            .unwrap_or(pixel_width - 1);
+        let y_top = (pixel_height - source_y) as f32 * pixel_z_size;
+        let y_bottom = y_top - pixel_z_size;
+        for depth_pixel in 0..roof_pixels {
+            let z0 = building_z0 + depth_pixel as f32 * pixel_z_size;
+            let z1 = z0 + pixel_z_size;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [building_x0, y_bottom, z0],
+                    [building_x0, y_top, z0],
+                    [building_x0, y_top, z1],
+                    [building_x0, y_bottom, z1],
+                ],
+                [-1.0, 0.0, 0.0],
+                source_pixel_uv(geometry, placement, west_source_x, source_y, true),
+                [0.78, 0.78, 0.78, 1.0],
+            );
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [building_x1, y_bottom, z1],
+                    [building_x1, y_top, z1],
+                    [building_x1, y_top, z0],
+                    [building_x1, y_bottom, z0],
+                ],
+                [1.0, 0.0, 0.0],
+                source_pixel_uv(geometry, placement, east_source_x, source_y, true),
+                [0.86, 0.86, 0.86, 1.0],
+            );
         }
-        let roof_height = measured_roof_height(wall_height, eave_row, top_row, pixel_z_size);
-        if roof_height <= wall_height {
-            continue;
-        }
-        let x0 = building_x0 + x as f32 * pixel_x_size;
-        let x1 = x0 + pixel_x_size;
-        append_solid_quad(
-            &mut mesh.solid,
-            [
-                [x1, wall_height, facade_z],
-                [x1, roof_height, facade_z],
-                [x0, roof_height, facade_z],
-                [x0, wall_height, facade_z],
-            ],
-            [0.0, 0.0, 1.0],
-            solid_color(SolidKind::Building, Direction::South),
-        );
     }
 
-    let x1 = building_x0 + pixel_width as f32 * pixel_x_size;
-    append_solid_quad(
-        &mut mesh.solid,
-        [
-            [building_x0, 0.0, facade_z],
-            [building_x0, wall_height, facade_z],
-            [building_x0, wall_height, building_z0],
-            [building_x0, 0.0, building_z0],
-        ],
-        [-1.0, 0.0, 0.0],
-        solid_color(SolidKind::Building, Direction::West),
-    );
-    append_solid_quad(
-        &mut mesh.solid,
-        [
-            [x1, 0.0, building_z0],
-            [x1, wall_height, building_z0],
-            [x1, wall_height, facade_z],
-            [x1, 0.0, facade_z],
-        ],
-        [1.0, 0.0, 0.0],
-        solid_color(SolidKind::Building, Direction::East),
-    );
+    // Close the two gable ends with the roof's edge pixels. Each source
+    // texel covers one source-sized quad; no roof row is stretched.
+    for source_y in 0..roof_pixels {
+        let z0 = building_z0 + source_y as f32 * pixel_z_size;
+        let z1 = z0 + pixel_z_size;
+        let north_height = gable_height(
+            wall_height,
+            roof_pixels as f32 * pixel_z_size,
+            source_y as f32 * pixel_z_size,
+        );
+        let south_height = gable_height(
+            wall_height,
+            roof_pixels as f32 * pixel_z_size,
+            (source_y + 1) as f32 * pixel_z_size,
+        );
+        let west_source_x = (0..pixel_width)
+            .find(|&x| {
+                inside[source_y * pixel_width + x]
+                    && luminance[source_y * pixel_width + x] > darkest
+            })
+            .unwrap_or(0);
+        let east_source_x = (0..pixel_width)
+            .rev()
+            .find(|&x| {
+                inside[source_y * pixel_width + x]
+                    && luminance[source_y * pixel_width + x] > darkest
+            })
+            .unwrap_or(pixel_width - 1);
+        for (x, source_x, normal, shade) in [
+            (
+                building_x0,
+                west_source_x,
+                [-1.0, 0.0, 0.0],
+                0.78,
+            ),
+            (
+                building_x1,
+                east_source_x,
+                [1.0, 0.0, 0.0],
+                0.86,
+            ),
+        ] {
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x, wall_height, z0],
+                    [x, north_height, z0],
+                    [x, south_height, z1],
+                    [x, wall_height, z1],
+                ],
+                normal,
+                source_pixel_uv(geometry, placement, source_x, source_y, true),
+                [shade, shade, shade, 1.0],
+            );
+        }
+    }
     Ok(())
 }
 
-fn measured_roof_height(
-    wall_height: f32,
-    eave_row: usize,
-    silhouette_top_row: usize,
-    pixel_height: f32,
-) -> f32 {
-    wall_height + eave_row.saturating_sub(silhouette_top_row) as f32 * pixel_height
+fn gable_height(wall_height: f32, roof_depth: f32, depth_from_north: f32) -> f32 {
+    if roof_depth <= f32::EPSILON {
+        return wall_height;
+    }
+    let normalized = (depth_from_north / roof_depth).clamp(0.0, 1.0);
+    let ridge = 1.0 - (normalized * 2.0 - 1.0).abs();
+    wall_height + ridge * (roof_depth * 0.5).min(16.0)
+}
+
+fn roof_normal(north_height: f32, south_height: f32, depth: f32) -> [f32; 3] {
+    let rise = south_height - north_height;
+    let length = (depth * depth + rise * rise).sqrt().max(f32::EPSILON);
+    [0.0, depth / length, -rise / length]
 }
 
 fn source_pixel_uv(
@@ -668,6 +757,11 @@ fn append_masked_upright_hull(
     uv: [f32; 4],
     solid: SolidKind,
 ) -> Result<(), TerrainMeshError> {
+    if solid == SolidKind::Tree {
+        append_round_tree_hull(textured, solid_mesh, removable_ground, bounds, uv);
+        return Ok(());
+    }
+
     let [x0, x1, band_bottom, band_top, plane_z] = bounds;
     let [u0, u1, v0, v1] = uv;
 
@@ -811,9 +905,179 @@ fn append_masked_upright_hull(
     Ok(())
 }
 
+fn append_round_tree_hull(
+    textured: &mut SurfaceMeshData,
+    solid_mesh: &mut SurfaceMeshData,
+    removable_ground: &[bool; 64],
+    bounds: [f32; 5],
+    uv: [f32; 4],
+) {
+    let [x0, x1, band_bottom, band_top, plane_z] = bounds;
+    let [u0, u1, v0, v1] = uv;
+    let max_depth = upright_depth(SolidKind::Tree);
+    let center_z = plane_z - max_depth * 0.5;
+    let mut chords = [None; SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS];
+
+    for pixel_y in 0..SOURCE_TILE_PIXELS {
+        let solid_columns: Vec<_> = (0..SOURCE_TILE_PIXELS)
+            .filter(|&pixel_x| {
+                !removable_ground[pixel_y * SOURCE_TILE_PIXELS + pixel_x]
+            })
+            .collect();
+        let (Some(&left), Some(&right)) = (solid_columns.first(), solid_columns.last()) else {
+            continue;
+        };
+        let center_x = (left + right + 1) as f32 * 0.5;
+        let radius = (right - left + 1) as f32 * 0.5;
+        for pixel_x in solid_columns {
+            let dx = pixel_x as f32 + 0.5 - center_x;
+            let normalized = (1.0 - (dx / radius).powi(2)).max(0.0).sqrt();
+            let depth = (max_depth * normalized).max(max_depth / SOURCE_TILE_PIXELS as f32);
+            chords[pixel_y * SOURCE_TILE_PIXELS + pixel_x] =
+                Some((center_z - depth * 0.5, center_z + depth * 0.5));
+        }
+    }
+
+    let chord_at = |x: isize, y: isize| {
+        if x < 0
+            || y < 0
+            || x >= SOURCE_TILE_PIXELS as isize
+            || y >= SOURCE_TILE_PIXELS as isize
+        {
+            None
+        } else {
+            chords[y as usize * SOURCE_TILE_PIXELS + x as usize]
+        }
+    };
+
+    for pixel_y in 0..SOURCE_TILE_PIXELS {
+        for pixel_x in 0..SOURCE_TILE_PIXELS {
+            let Some((back_z, front_z)) = chord_at(pixel_x as isize, pixel_y as isize) else {
+                continue;
+            };
+            let x_start = lerp_pixel(x0, x1, pixel_x);
+            let x_end = lerp_pixel(x0, x1, pixel_x + 1);
+            let y_top = lerp_pixel(band_top, band_bottom, pixel_y);
+            let y_bottom = lerp_pixel(band_top, band_bottom, pixel_y + 1);
+            let pixel_u0 = lerp_pixel(u0, u1, pixel_x);
+            let pixel_u1 = lerp_pixel(u0, u1, pixel_x + 1);
+            let pixel_v0 = lerp_pixel(v0, v1, pixel_y);
+            let pixel_v1 = lerp_pixel(v0, v1, pixel_y + 1);
+
+            append_quad(
+                textured,
+                [
+                    [x_end, y_bottom, front_z],
+                    [x_end, y_top, front_z],
+                    [x_start, y_top, front_z],
+                    [x_start, y_bottom, front_z],
+                ],
+                [0.0, 0.0, 1.0],
+                [
+                    [pixel_u1, pixel_v1],
+                    [pixel_u1, pixel_v0],
+                    [pixel_u0, pixel_v0],
+                    [pixel_u0, pixel_v1],
+                ],
+                TEXTURED_SHADE,
+            );
+            append_quad(
+                textured,
+                [
+                    [x_start, y_bottom, back_z],
+                    [x_start, y_top, back_z],
+                    [x_end, y_top, back_z],
+                    [x_end, y_bottom, back_z],
+                ],
+                [0.0, 0.0, -1.0],
+                [
+                    [pixel_u0, pixel_v1],
+                    [pixel_u0, pixel_v0],
+                    [pixel_u1, pixel_v0],
+                    [pixel_u1, pixel_v1],
+                ],
+                [0.68, 0.68, 0.68, 1.0],
+            );
+
+            for (neighbor, x, normal) in [
+                (
+                    chord_at(pixel_x as isize - 1, pixel_y as isize),
+                    x_start,
+                    [-1.0, 0.0, 0.0],
+                ),
+                (
+                    chord_at(pixel_x as isize + 1, pixel_y as isize),
+                    x_end,
+                    [1.0, 0.0, 0.0],
+                ),
+            ] {
+                for (z0, z1) in exposed_chord_intervals(back_z, front_z, neighbor) {
+                    append_solid_quad(
+                        solid_mesh,
+                        [
+                            [x, y_bottom, z1],
+                            [x, y_top, z1],
+                            [x, y_top, z0],
+                            [x, y_bottom, z0],
+                        ],
+                        normal,
+                        solid_color(SolidKind::Tree, Direction::West),
+                    );
+                }
+            }
+
+            for (neighbor, y, normal) in [
+                (
+                    chord_at(pixel_x as isize, pixel_y as isize - 1),
+                    y_top,
+                    [0.0, 1.0, 0.0],
+                ),
+                (
+                    chord_at(pixel_x as isize, pixel_y as isize + 1),
+                    y_bottom,
+                    [0.0, -1.0, 0.0],
+                ),
+            ] {
+                for (z0, z1) in exposed_chord_intervals(back_z, front_z, neighbor) {
+                    append_solid_quad(
+                        solid_mesh,
+                        [
+                            [x_start, y, z0],
+                            [x_start, y, z1],
+                            [x_end, y, z1],
+                            [x_end, y, z0],
+                        ],
+                        normal,
+                        solid_color(SolidKind::Tree, Direction::South),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn exposed_chord_intervals(
+    start: f32,
+    end: f32,
+    neighbor: Option<(f32, f32)>,
+) -> Vec<(f32, f32)> {
+    let Some((neighbor_start, neighbor_end)) = neighbor else {
+        return vec![(start, end)];
+    };
+    let mut intervals = Vec::with_capacity(2);
+    if neighbor_start > start {
+        intervals.push((start, neighbor_start.min(end)));
+    }
+    if neighbor_end < end {
+        intervals.push((neighbor_end.max(start), end));
+    }
+    intervals.retain(|(interval_start, interval_end)| interval_end > interval_start);
+    intervals
+}
+
 fn upright_depth(solid: SolidKind) -> f32 {
     match solid {
-        SolidKind::Tree => 6.0,
+        SolidKind::Tree => 8.0,
         SolidKind::Prop => 2.0,
         _ => 1.0,
     }
@@ -1359,7 +1623,7 @@ mod tests {
         };
 
         assert_eq!(
-            new_bark_building_placements(&frame, &cells, &geometry),
+            johto_building_placements(&cells, &geometry),
             vec![BuildingPlacement {
                 column: 0,
                 row: 0,
@@ -1372,9 +1636,54 @@ mod tests {
     }
 
     #[test]
-    fn measured_roof_anchors_the_eave_to_the_wall() {
-        assert_eq!(measured_roof_height(32.0, 12, 12, 1.0), 32.0);
-        assert_eq!(measured_roof_height(32.0, 12, 4, 1.0), 40.0);
+    fn complete_modern_city_building_is_detected_outside_new_bark() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..8 {
+                let mut tile = source(
+                    if column < 4 { 0x12 } else { 0x13 },
+                    (column % 4) as u8,
+                    row as u8,
+                );
+                tile.tileset_id = Arc::from("johto_modern");
+                sources.push(tile);
+            }
+        }
+        let mut frame = frame(8, 4, sources);
+        frame.map_id = Arc::from("GoldenrodCity");
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 8,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -32.0,
+            origin_z: -16.0,
+        };
+
+        assert_eq!(
+            johto_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 8,
+                height: 4,
+                roof_rows: 2,
+                ground_tile_index: 0x06,
+            }]
+        );
+    }
+
+    #[test]
+    fn gable_roof_has_two_low_eaves_and_a_center_ridge() {
+        assert_eq!(gable_height(32.0, 32.0, 0.0), 32.0);
+        assert_eq!(gable_height(32.0, 32.0, 16.0), 48.0);
+        assert_eq!(gable_height(32.0, 32.0, 32.0), 32.0);
+        let south_slope = roof_normal(32.0, 40.0, 8.0);
+        let north_slope = roof_normal(40.0, 32.0, 8.0);
+        assert!(south_slope[2] < 0.0);
+        assert!(north_slope[2] > 0.0);
+        assert!((south_slope[1] - north_slope[1]).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1416,6 +1725,37 @@ mod tests {
             mesh.solid.quad_count() > 0,
             "the grouped tree silhouette needs a closed shallow hull"
         );
+    }
+
+    #[test]
+    fn rounded_tree_hull_has_multiple_front_depths() {
+        let mut textured = SurfaceMeshData::default();
+        let mut solid = SurfaceMeshData::default();
+        let mut background = [true; 64];
+        for y in 1..7 {
+            for x in 1..7 {
+                background[y * 8 + x] = false;
+            }
+        }
+        append_round_tree_hull(
+            &mut textured,
+            &mut solid,
+            &background,
+            [0.0, 8.0, 0.0, 8.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
+        );
+
+        let mut front_depths: Vec<_> = textured
+            .positions
+            .chunks_exact(4)
+            .zip(textured.normals.chunks_exact(4))
+            .filter(|(_, normals)| normals[0] == [0.0, 0.0, 1.0])
+            .map(|(positions, _)| (positions[0][2] * 1000.0).round() as i32)
+            .collect();
+        front_depths.sort_unstable();
+        front_depths.dedup();
+        assert!(front_depths.len() >= 3);
+        assert!(solid.quad_count() > 0);
     }
 
     #[test]
