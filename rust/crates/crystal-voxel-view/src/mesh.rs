@@ -194,10 +194,35 @@ fn build_terrain_mesh_internal(
         origin_z: -grid_height * 0.5,
     };
     let mut mesh = TerrainMeshData::default();
+    let mut claimed_by_building = vec![false; cell_count];
+    if let Some(images) = images {
+        let placements = new_bark_building_placements(frame, &cells, &geometry);
+        for placement in &placements {
+            append_pixel_building(
+                &mut mesh,
+                images,
+                &cells,
+                &geometry,
+                *placement,
+                &mut claimed_by_building,
+            )?;
+        }
+        // A partial template at the viewport edge is not enough evidence to
+        // invent half a building. Preserve the faithful flat drawing until
+        // the complete authored placement is available.
+        for (index, shape) in shapes.iter_mut().enumerate() {
+            if shape.solid_kind() == SolidKind::Building && !claimed_by_building[index] {
+                *shape = CellShape::Flat;
+            }
+        }
+    }
 
     for row in 0..height {
         for column in 0..width {
             let index = row * width + column;
+            if claimed_by_building[index] {
+                continue;
+            }
             append_textured_cell(
                 &mut mesh.textured,
                 &geometry,
@@ -213,11 +238,299 @@ fn build_terrain_mesh_internal(
 
     for row in 0..height {
         for column in 0..width {
+            if claimed_by_building[row * width + column] {
+                continue;
+            }
             append_exposed_sides(&mut mesh.solid, &geometry, &cells, &shapes, column, row);
         }
     }
 
     Ok(mesh)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BuildingPlacement {
+    column: usize,
+    row: usize,
+    width: usize,
+    height: usize,
+    roof_rows: usize,
+    ground_tile_index: u16,
+}
+
+fn new_bark_building_placements(
+    frame: &VisualWorldFrame,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<BuildingPlacement> {
+    if frame.map_id.as_ref() != "NewBarkTown" {
+        return Vec::new();
+    }
+    let mut metatiles = HashMap::new();
+    for tile in cells {
+        if tile.source.tileset_id.as_ref() != "johto" {
+            continue;
+        }
+        let origin = (
+            tile.column as isize - tile.source.subtile_column as isize,
+            tile.row as isize - tile.source.subtile_row as isize,
+        );
+        metatiles.entry(origin).or_insert(tile.source.metatile_id);
+    }
+
+    const TEMPLATES: &[(&[&[u16]], usize)] = &[
+        (&[&[0x18, 0x1f, 0x19], &[0x1c, 0x77, 0x1e]], 4),
+        (&[&[0x18, 0x19], &[0x16, 0x1e]], 4),
+        (&[&[0x14, 0x15]], 2),
+    ];
+    let mut placements = Vec::new();
+    for (&(origin_x, origin_y), &metatile_id) in &metatiles {
+        for &(rows, roof_rows) in TEMPLATES {
+            if rows[0][0] != metatile_id {
+                continue;
+            }
+            let matches = rows.iter().enumerate().all(|(template_y, row)| {
+                row.iter().enumerate().all(|(template_x, expected)| {
+                    metatiles.get(&(
+                        origin_x + (template_x * 4) as isize,
+                        origin_y + (template_y * 4) as isize,
+                    )) == Some(expected)
+                })
+            });
+            let width = rows[0].len() * 4;
+            let height = rows.len() * 4;
+            if matches
+                && origin_x >= 0
+                && origin_y >= 0
+                && origin_x as usize + width <= geometry.width
+                && origin_y as usize + height <= geometry.height
+            {
+                placements.push(BuildingPlacement {
+                    column: origin_x as usize,
+                    row: origin_y as usize,
+                    width,
+                    height,
+                    roof_rows,
+                    ground_tile_index: 0x06,
+                });
+            }
+        }
+    }
+    placements.sort_by_key(|placement| (placement.row, placement.column));
+    placements
+}
+
+fn append_pixel_building(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: BuildingPlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground_index = authored_ground_cell(
+        cells,
+        &cells
+            .iter()
+            .map(|tile| shape_for_source(&tile.source))
+            .collect::<Vec<_>>(),
+        placement.ground_tile_index,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: placement.ground_tile_index,
+    })?;
+    let pixel_width = placement.width * SOURCE_TILE_PIXELS;
+    let pixel_height = placement.height * SOURCE_TILE_PIXELS;
+    let roof_pixels = placement.roof_rows * SOURCE_TILE_PIXELS;
+    let mut luminance = vec![0_u16; pixel_width * pixel_height];
+
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let index =
+                (placement.row + local_row) * geometry.width + placement.column + local_column;
+            claimed[index] = true;
+            let source = tile_rgba(images, cells[index])?;
+            for pixel_y in 0..SOURCE_TILE_PIXELS {
+                for pixel_x in 0..SOURCE_TILE_PIXELS {
+                    let x = local_column * SOURCE_TILE_PIXELS + pixel_x;
+                    let y = local_row * SOURCE_TILE_PIXELS + pixel_y;
+                    let offset = (pixel_y * SOURCE_TILE_PIXELS + pixel_x) * 4;
+                    luminance[y * pixel_width + x] = u16::from(source[offset]) * 3
+                        + u16::from(source[offset + 1]) * 6
+                        + u16::from(source[offset + 2]);
+                }
+            }
+            let (x0, x1, z0, z1) =
+                geometry.bounds(placement.column + local_column, placement.row + local_row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                0.0,
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+            );
+        }
+    }
+
+    let mut shades = luminance.clone();
+    shades.sort_unstable();
+    shades.dedup();
+    let light_threshold = shades[shades.len().saturating_sub(2)];
+    let light_pixels: Vec<_> = luminance
+        .into_iter()
+        .map(|luminance| luminance >= light_threshold)
+        .collect();
+    let outside = boundary_connected_mask(pixel_width, pixel_height, &light_pixels);
+    let inside: Vec<_> = outside.into_iter().map(|outside| !outside).collect();
+    let pixel_x_size = geometry.tile_width / SOURCE_TILE_PIXELS as f32;
+    let pixel_z_size = geometry.tile_height / SOURCE_TILE_PIXELS as f32;
+    let wall_height = (pixel_height - roof_pixels) as f32 * pixel_z_size;
+    let (building_x0, _, building_z0, _) = geometry.bounds(placement.column, placement.row);
+    let facade_z = building_z0 + roof_pixels as f32 * pixel_z_size;
+
+    let mut roof_top = vec![roof_pixels; pixel_width];
+    for x in 0..pixel_width {
+        if let Some(y) = (0..roof_pixels).find(|&y| inside[y * pixel_width + x]) {
+            roof_top[x] = y;
+        }
+    }
+    let eave_row = roof_top
+        .iter()
+        .copied()
+        .filter(|&row| row < roof_pixels)
+        .max()
+        .unwrap_or(roof_pixels);
+
+    for y in roof_pixels..pixel_height {
+        for x in 0..pixel_width {
+            if !inside[y * pixel_width + x] {
+                continue;
+            }
+            let x0 = building_x0 + x as f32 * pixel_x_size;
+            let x1 = x0 + pixel_x_size;
+            let top = (pixel_height - y) as f32 * pixel_z_size;
+            let bottom = top - pixel_z_size;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x1, bottom, facade_z],
+                    [x1, top, facade_z],
+                    [x0, top, facade_z],
+                    [x0, bottom, facade_z],
+                ],
+                [0.0, 0.0, 1.0],
+                source_pixel_uv(geometry, placement, x, y, true),
+                TEXTURED_SHADE,
+            );
+        }
+    }
+
+    for y in 0..roof_pixels {
+        for x in 0..pixel_width {
+            if !inside[y * pixel_width + x] || roof_top[x] == roof_pixels {
+                continue;
+            }
+            let x0 = building_x0 + x as f32 * pixel_x_size;
+            let x1 = x0 + pixel_x_size;
+            let z0 = building_z0 + y as f32 * pixel_z_size;
+            let z1 = z0 + pixel_z_size;
+            let roof_height =
+                measured_roof_height(wall_height, eave_row, roof_top[x], pixel_z_size);
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x0, roof_height, z0],
+                    [x0, roof_height, z1],
+                    [x1, roof_height, z1],
+                    [x1, roof_height, z0],
+                ],
+                [0.0, 1.0, 0.0],
+                source_pixel_uv(geometry, placement, x, y, false),
+                TEXTURED_SHADE,
+            );
+        }
+    }
+
+    for (x, &top_row) in roof_top.iter().enumerate() {
+        if top_row >= roof_pixels {
+            continue;
+        }
+        let roof_height = measured_roof_height(wall_height, eave_row, top_row, pixel_z_size);
+        if roof_height <= wall_height {
+            continue;
+        }
+        let x0 = building_x0 + x as f32 * pixel_x_size;
+        let x1 = x0 + pixel_x_size;
+        append_solid_quad(
+            &mut mesh.solid,
+            [
+                [x1, wall_height, facade_z],
+                [x1, roof_height, facade_z],
+                [x0, roof_height, facade_z],
+                [x0, wall_height, facade_z],
+            ],
+            [0.0, 0.0, 1.0],
+            solid_color(SolidKind::Building, Direction::South),
+        );
+    }
+
+    let x1 = building_x0 + pixel_width as f32 * pixel_x_size;
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [building_x0, 0.0, facade_z],
+            [building_x0, wall_height, facade_z],
+            [building_x0, wall_height, building_z0],
+            [building_x0, 0.0, building_z0],
+        ],
+        [-1.0, 0.0, 0.0],
+        solid_color(SolidKind::Building, Direction::West),
+    );
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x1, 0.0, building_z0],
+            [x1, wall_height, building_z0],
+            [x1, wall_height, facade_z],
+            [x1, 0.0, facade_z],
+        ],
+        [1.0, 0.0, 0.0],
+        solid_color(SolidKind::Building, Direction::East),
+    );
+    Ok(())
+}
+
+fn measured_roof_height(
+    wall_height: f32,
+    eave_row: usize,
+    silhouette_top_row: usize,
+    pixel_height: f32,
+) -> f32 {
+    wall_height + eave_row.saturating_sub(silhouette_top_row) as f32 * pixel_height
+}
+
+fn source_pixel_uv(
+    geometry: &GridGeometry,
+    placement: BuildingPlacement,
+    pixel_x: usize,
+    pixel_y: usize,
+    upright: bool,
+) -> [[f32; 2]; 4] {
+    let column = placement.column + pixel_x / SOURCE_TILE_PIXELS;
+    let row = placement.row + pixel_y / SOURCE_TILE_PIXELS;
+    let local_x = pixel_x % SOURCE_TILE_PIXELS;
+    let local_y = pixel_y % SOURCE_TILE_PIXELS;
+    let (tile_u0, tile_u1, tile_v0, tile_v1) = geometry.uv(column, row);
+    let u0 = lerp_pixel(tile_u0, tile_u1, local_x);
+    let u1 = lerp_pixel(tile_u0, tile_u1, local_x + 1);
+    let v0 = lerp_pixel(tile_v0, tile_v1, local_y);
+    let v1 = lerp_pixel(tile_v0, tile_v1, local_y + 1);
+    if upright {
+        [[u1, v1], [u1, v0], [u0, v0], [u0, v1]]
+    } else {
+        [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -922,6 +1235,49 @@ mod tests {
         );
         assert!(mesh.solid.quad_count() > 0);
         assert!(mesh.solid.uvs.iter().all(|uv| *uv == [0.0, 0.0]));
+    }
+
+    #[test]
+    fn complete_large_house_is_detected_as_one_authored_placement() {
+        let metatiles = [[0x18, 0x19], [0x16, 0x1e]];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..8 {
+                sources.push(source(
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                ));
+            }
+        }
+        let frame = frame(8, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 8,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -32.0,
+            origin_z: -32.0,
+        };
+
+        assert_eq!(
+            new_bark_building_placements(&frame, &cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 8,
+                height: 8,
+                roof_rows: 4,
+                ground_tile_index: 0x06,
+            }]
+        );
+    }
+
+    #[test]
+    fn measured_roof_anchors_the_eave_to_the_wall() {
+        assert_eq!(measured_roof_height(32.0, 12, 12, 1.0), 32.0);
+        assert_eq!(measured_roof_height(32.0, 12, 4, 1.0), 40.0);
     }
 
     #[test]
