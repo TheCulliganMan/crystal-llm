@@ -9,7 +9,9 @@ use bevy::{
 };
 use crystal_render_api::{VisualTile, VisualWorldFrame};
 
-use crate::profile::{CellShape, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source};
+use crate::profile::{
+    CellShape, KANTO_GROUND_TILE_INDEX, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source,
+};
 
 const TEXTURED_SHADE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const SOURCE_TILE_PIXELS: usize = SOURCE_TILE_HEIGHT as usize;
@@ -195,6 +197,7 @@ fn build_terrain_mesh_internal(
     };
     let mut mesh = TerrainMeshData::default();
     let mut claimed_by_building = vec![false; cell_count];
+    let mut claimed_by_tree = vec![false; cell_count];
     if let Some(images) = images {
         let placements = johto_building_placements(&cells, &geometry);
         for placement in &placements {
@@ -215,12 +218,24 @@ fn build_terrain_mesh_internal(
                 *shape = CellShape::Flat;
             }
         }
+
+        for placement in complete_tree_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
     }
 
     for row in 0..height {
         for column in 0..width {
             let index = row * width + column;
-            if claimed_by_building[index] {
+            if claimed_by_building[index] || claimed_by_tree[index] {
                 continue;
             }
             append_textured_cell(
@@ -231,7 +246,7 @@ fn build_terrain_mesh_internal(
 
     for row in 0..height {
         for column in 0..width {
-            if claimed_by_building[row * width + column] {
+            if claimed_by_building[row * width + column] || claimed_by_tree[row * width + column] {
                 continue;
             }
             append_exposed_sides(&mut mesh.solid, &geometry, &cells, &shapes, column, row);
@@ -251,6 +266,88 @@ struct BuildingPlacement {
     ground_tile_index: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TreePlacement {
+    column: usize,
+    row: usize,
+    width: usize,
+    height: usize,
+    ground_tile_index: u16,
+}
+
+fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    let mut placements = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for tile in cells {
+        let (local_column, local_row, width, height, ground_tile_index) =
+            match (tile.source.tileset_id.as_ref(), tile.source.metatile_id) {
+                ("johto" | "johto_modern", 0x05) => (
+                    tile.source.subtile_column,
+                    tile.source.subtile_row,
+                    4,
+                    4,
+                    if tile.source.tileset_id.as_ref() == "johto_modern" {
+                        0x06
+                    } else {
+                        0x05
+                    },
+                ),
+                ("johto", 0x62) if tile.source.subtile_column >= 2 => (
+                    tile.source.subtile_column - 2,
+                    tile.source.subtile_row % 2,
+                    2,
+                    2,
+                    0x05,
+                ),
+                ("johto", 0x65) if tile.source.subtile_row >= 2 => (
+                    tile.source.subtile_column % 2,
+                    tile.source.subtile_row - 2,
+                    2,
+                    2,
+                    0x05,
+                ),
+                ("kanto", _) if shape_for_source(&tile.source).solid_kind() == SolidKind::Tree => (
+                    tile.source.subtile_column % 2,
+                    tile.source.subtile_row % 2,
+                    2,
+                    2,
+                    KANTO_GROUND_TILE_INDEX,
+                ),
+                _ => continue,
+            };
+        let origin_column = tile.column as isize - local_column as isize;
+        let origin_row = tile.row as isize - local_row as isize;
+        if origin_column < 0
+            || origin_row < 0
+            || origin_column as usize + width > geometry.width
+            || origin_row as usize + height > geometry.height
+            || !seen.insert((origin_column, origin_row, width, height))
+        {
+            continue;
+        }
+        let complete = (0..height).all(|row| {
+            (0..width).all(|column| {
+                let cell = cells[(origin_row as usize + row) * geometry.width
+                    + origin_column as usize
+                    + column];
+                cell.source.tileset_id == tile.source.tileset_id
+                    && shape_for_source(&cell.source).solid_kind() == SolidKind::Tree
+            })
+        });
+        if complete {
+            placements.push(TreePlacement {
+                column: origin_column as usize,
+                row: origin_row as usize,
+                width,
+                height,
+                ground_tile_index,
+            });
+        }
+    }
+    placements.sort_by_key(|placement| (placement.row, placement.column));
+    placements
+}
+
 fn johto_building_placements(
     cells: &[&VisualTile],
     geometry: &GridGeometry,
@@ -264,10 +361,9 @@ fn johto_building_placements(
             tile.column as isize - tile.source.subtile_column as isize,
             tile.row as isize - tile.source.subtile_row as isize,
         );
-        metatiles.entry(origin).or_insert((
-            tile.source.tileset_id.as_ref(),
-            tile.source.metatile_id,
-        ));
+        metatiles
+            .entry(origin)
+            .or_insert((tile.source.tileset_id.as_ref(), tile.source.metatile_id));
     }
 
     const TEMPLATES: &[(&str, &[&[u16]], usize, u16)] = &[
@@ -285,12 +381,7 @@ fn johto_building_placements(
             4,
             0x06,
         ),
-        (
-            "johto_modern",
-            &[&[0x18, 0x19], &[0x16, 0x1e]],
-            4,
-            0x06,
-        ),
+        ("johto_modern", &[&[0x18, 0x19], &[0x16, 0x1e]], 4, 0x06),
         ("johto_modern", &[&[0x14, 0x15]], 2, 0x06),
         ("johto_modern", &[&[0x12, 0x13]], 2, 0x06),
         ("johto_modern", &[&[0x10, 0x17, 0x11]], 2, 0x06),
@@ -334,6 +425,190 @@ fn johto_building_placements(
     }
     placements.sort_by_key(|placement| (placement.row, placement.column));
     placements
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_grouped_tree(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground_index = authored_ground_cell(cells, shapes, placement.ground_tile_index).ok_or(
+        TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: placement.ground_tile_index,
+        },
+    )?;
+    let pixel_width = placement.width * SOURCE_TILE_PIXELS;
+    let pixel_height = placement.height * SOURCE_TILE_PIXELS;
+    let mut solid_pixels = vec![false; pixel_width * pixel_height];
+
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                0.0,
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+            );
+            let removable = grouped_boundary_ground_mask(
+                images,
+                cells,
+                shapes,
+                geometry,
+                column,
+                row,
+                index,
+                cells[ground_index],
+            )?;
+            for pixel_y in 0..SOURCE_TILE_PIXELS {
+                for pixel_x in 0..SOURCE_TILE_PIXELS {
+                    solid_pixels[(local_row * SOURCE_TILE_PIXELS + pixel_y) * pixel_width
+                        + local_column * SOURCE_TILE_PIXELS
+                        + pixel_x] = !removable[pixel_y * SOURCE_TILE_PIXELS + pixel_x];
+                }
+            }
+        }
+    }
+
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + placement.width as f32 * geometry.tile_width;
+    let plane_z =
+        geometry.origin_z + (placement.row + placement.height) as f32 * geometry.tile_height;
+    let crown_height = placement.height as f32 * geometry.tile_height;
+    let max_depth = placement.width as f32 * geometry.tile_width;
+    let center_z = plane_z - max_depth * 0.5;
+    let mut chords = vec![None; pixel_width * pixel_height];
+    for pixel_y in 0..pixel_height {
+        let Some(left) = (0..pixel_width).find(|&x| solid_pixels[pixel_y * pixel_width + x]) else {
+            continue;
+        };
+        let right = (left..pixel_width)
+            .rev()
+            .find(|&x| solid_pixels[pixel_y * pixel_width + x])
+            .expect("left solid canopy pixel implies a right pixel");
+        let center_x = (left + right + 1) as f32 * 0.5;
+        let radius = (right - left + 1) as f32 * 0.5;
+        for pixel_x in left..=right {
+            if !solid_pixels[pixel_y * pixel_width + pixel_x] {
+                continue;
+            }
+            let dx = pixel_x as f32 + 0.5 - center_x;
+            let depth = max_depth * (1.0 - (dx / radius).powi(2)).max(0.0).sqrt();
+            chords[pixel_y * pixel_width + pixel_x] =
+                Some((center_z - depth * 0.5, center_z + depth * 0.5));
+        }
+    }
+    let chord_at = |x: isize, y: isize| {
+        (x >= 0 && y >= 0 && x < pixel_width as isize && y < pixel_height as isize)
+            .then(|| chords[y as usize * pixel_width + x as usize])
+            .flatten()
+    };
+    for pixel_y in 0..pixel_height {
+        for pixel_x in 0..pixel_width {
+            let Some((back_z, front_z)) = chord_at(pixel_x as isize, pixel_y as isize) else {
+                continue;
+            };
+            let world_x0 = x0 + pixel_x as f32 * (x1 - x0) / pixel_width as f32;
+            let world_x1 = x0 + (pixel_x + 1) as f32 * (x1 - x0) / pixel_width as f32;
+            let world_y1 = crown_height - pixel_y as f32 * crown_height / pixel_height as f32;
+            let world_y0 = crown_height - (pixel_y + 1) as f32 * crown_height / pixel_height as f32;
+            let cell_column = placement.column + pixel_x / SOURCE_TILE_PIXELS;
+            let cell_row = placement.row + pixel_y / SOURCE_TILE_PIXELS;
+            let (u0, u1, v0, v1) = geometry.uv(cell_column, cell_row);
+            let local_x = pixel_x % SOURCE_TILE_PIXELS;
+            let local_y = pixel_y % SOURCE_TILE_PIXELS;
+            let pu0 = lerp_pixel(u0, u1, local_x);
+            let pu1 = lerp_pixel(u0, u1, local_x + 1);
+            let pv0 = lerp_pixel(v0, v1, local_y);
+            let pv1 = lerp_pixel(v0, v1, local_y + 1);
+            for (z, normal, shade, reverse) in [
+                (front_z, [0.0, 0.0, 1.0], TEXTURED_SHADE, false),
+                (back_z, [0.0, 0.0, -1.0], [0.68, 0.68, 0.68, 1.0], true),
+            ] {
+                let (xa, xb, ua, ub) = if reverse {
+                    (world_x0, world_x1, pu0, pu1)
+                } else {
+                    (world_x1, world_x0, pu1, pu0)
+                };
+                append_quad(
+                    &mut mesh.textured,
+                    [
+                        [xa, world_y0, z],
+                        [xa, world_y1, z],
+                        [xb, world_y1, z],
+                        [xb, world_y0, z],
+                    ],
+                    normal,
+                    [[ua, pv1], [ua, pv0], [ub, pv0], [ub, pv1]],
+                    shade,
+                );
+            }
+            for (neighbor, x, normal) in [
+                (
+                    chord_at(pixel_x as isize - 1, pixel_y as isize),
+                    world_x0,
+                    [-1.0, 0.0, 0.0],
+                ),
+                (
+                    chord_at(pixel_x as isize + 1, pixel_y as isize),
+                    world_x1,
+                    [1.0, 0.0, 0.0],
+                ),
+            ] {
+                for (z0, z1) in exposed_chord_intervals(back_z, front_z, neighbor) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x, world_y0, z1],
+                            [x, world_y1, z1],
+                            [x, world_y1, z0],
+                            [x, world_y0, z0],
+                        ],
+                        normal,
+                        solid_color(SolidKind::Tree, Direction::West),
+                    );
+                }
+            }
+            for (neighbor, y, normal) in [
+                (
+                    chord_at(pixel_x as isize, pixel_y as isize - 1),
+                    world_y1,
+                    [0.0, 1.0, 0.0],
+                ),
+                (
+                    chord_at(pixel_x as isize, pixel_y as isize + 1),
+                    world_y0,
+                    [0.0, -1.0, 0.0],
+                ),
+            ] {
+                for (z0, z1) in exposed_chord_intervals(back_z, front_z, neighbor) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [world_x0, y, z0],
+                            [world_x0, y, z1],
+                            [world_x1, y, z1],
+                            [world_x1, y, z0],
+                        ],
+                        normal,
+                        solid_color(SolidKind::Tree, Direction::South),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_pixel_building(
@@ -547,18 +822,8 @@ fn append_pixel_building(
             })
             .unwrap_or(pixel_width - 1);
         for (x, source_x, normal, shade) in [
-            (
-                building_x0,
-                west_source_x,
-                [-1.0, 0.0, 0.0],
-                0.78,
-            ),
-            (
-                building_x1,
-                east_source_x,
-                [1.0, 0.0, 0.0],
-                0.86,
-            ),
+            (building_x0, west_source_x, [-1.0, 0.0, 0.0], 0.78),
+            (building_x1, east_source_x, [1.0, 0.0, 0.0], 0.86),
         ] {
             append_quad(
                 &mut mesh.textured,
@@ -920,9 +1185,7 @@ fn append_round_tree_hull(
 
     for pixel_y in 0..SOURCE_TILE_PIXELS {
         let solid_columns: Vec<_> = (0..SOURCE_TILE_PIXELS)
-            .filter(|&pixel_x| {
-                !removable_ground[pixel_y * SOURCE_TILE_PIXELS + pixel_x]
-            })
+            .filter(|&pixel_x| !removable_ground[pixel_y * SOURCE_TILE_PIXELS + pixel_x])
             .collect();
         let (Some(&left), Some(&right)) = (solid_columns.first(), solid_columns.last()) else {
             continue;
@@ -939,11 +1202,7 @@ fn append_round_tree_hull(
     }
 
     let chord_at = |x: isize, y: isize| {
-        if x < 0
-            || y < 0
-            || x >= SOURCE_TILE_PIXELS as isize
-            || y >= SOURCE_TILE_PIXELS as isize
-        {
+        if x < 0 || y < 0 || x >= SOURCE_TILE_PIXELS as isize || y >= SOURCE_TILE_PIXELS as isize {
             None
         } else {
             chords[y as usize * SOURCE_TILE_PIXELS + x as usize]
@@ -1056,11 +1315,7 @@ fn append_round_tree_hull(
     }
 }
 
-fn exposed_chord_intervals(
-    start: f32,
-    end: f32,
-    neighbor: Option<(f32, f32)>,
-) -> Vec<(f32, f32)> {
+fn exposed_chord_intervals(start: f32, end: f32, neighbor: Option<(f32, f32)>) -> Vec<(f32, f32)> {
     let Some((neighbor_start, neighbor_end)) = neighbor else {
         return vec![(start, end)];
     };
@@ -1756,6 +2011,67 @@ mod tests {
         front_depths.dedup();
         assert!(front_depths.len() >= 3);
         assert!(solid.quad_count() > 0);
+    }
+
+    #[test]
+    fn complete_tree_metatile_becomes_one_full_depth_canopy() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..5 {
+                sources.push(if column < 4 {
+                    source_with_tile(0x05, column as u8, row as u8, 0x20 + row as u16)
+                } else {
+                    source_with_tile(0x01, 0, 0, 0x05)
+                });
+            }
+        }
+        let frame = frame(5, 4, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 5,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -20.0,
+            origin_z: -16.0,
+        };
+        assert_eq!(
+            complete_tree_placements(&cells, &geometry),
+            vec![TreePlacement {
+                column: 0,
+                row: 0,
+                width: 4,
+                height: 4,
+                ground_tile_index: 0x05,
+            }]
+        );
+
+        let mut samples = TerrainImageSamples::default();
+        for tile in &frame.tiles {
+            let rgba = if tile.source.metatile_id == 0x05 {
+                [0, 80, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            samples
+                .pixels
+                .insert(tile.texture.id(), TileImageSample::Rgba(rgba.repeat(64)));
+        }
+        let mesh = build_terrain_mesh_with_samples(&frame, &samples)
+            .expect("complete tree drawing should mesh as one canopy");
+        let (min_z, max_z) = mesh
+            .textured
+            .positions
+            .iter()
+            .filter(|position| position[1] > 0.0)
+            .fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(min, max), position| (min.min(position[2]), max.max(position[2])),
+            );
+        assert!(
+            max_z - min_z > 24.0,
+            "a 32px tree drawing must have a crown, not four shallow tile cards"
+        );
     }
 
     #[test]

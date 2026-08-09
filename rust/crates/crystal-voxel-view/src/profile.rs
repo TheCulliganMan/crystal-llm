@@ -24,7 +24,7 @@ const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
 const KANTO_TREE_TILE_INDICES: [u16; 8] = [0x2d, 0x2e, 0x3d, 0x3e, 0x40, 0x41, 0x50, 0x51];
 // Tree metatiles carry $2c in their open cells; using that exact background
 // keeps the mask palette-aware and guarantees the sample travels with the art.
-const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
+pub(crate) const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
 const CAVE_GROUND_TILE_INDEX: u16 = 0x01;
 const CAVE_ROCK_TOP_TILE_INDICES: [u16; 2] = [0x0c, 0x0d];
 const CAVE_ROCK_BOTTOM_TILE_INDICES: [u16; 2] = [0x1c, 0x1d];
